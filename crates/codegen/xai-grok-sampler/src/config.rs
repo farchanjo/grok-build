@@ -53,7 +53,19 @@ pub struct SamplerConfig {
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    /// OpenRouter model fallbacks, tried in order after [`Self::model`].
+    ///
+    /// This is an OpenRouter-only request-body extension. An empty list is
+    /// omitted from the wire, preserving the standard OpenAI-compatible
+    /// request body for every other provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openrouter_fallback_models: Vec<String>,
     pub api_backend: ApiBackend,
+    /// Whether Chat Completions history may include xAI's non-standard
+    /// `messages[].model_id` metadata. OpenAI-compatible third-party
+    /// providers such as OpenRouter reject that field with HTTP 400.
+    #[serde(default = "default_include_message_model_id")]
+    pub include_message_model_id: bool,
     #[serde(default)]
     pub auth_scheme: AuthScheme,
     /// Extra request headers applied verbatim. The sampler never inspects
@@ -137,7 +149,9 @@ impl Default for SamplerConfig {
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            openrouter_fallback_models: Vec::new(),
             api_backend: ApiBackend::default(),
+            include_message_model_id: true,
             auth_scheme: AuthScheme::default(),
             extra_headers: IndexMap::new(),
             context_window: 0,
@@ -160,6 +174,10 @@ impl Default for SamplerConfig {
             header_injector: None,
         }
     }
+}
+
+const fn default_include_message_model_id() -> bool {
+    true
 }
 
 /// Cheap sync read of the current bearer for [`SamplerConfig::bearer_resolver`].
@@ -245,5 +263,17 @@ mod tests {
             round_tripped.doom_loop_recovery,
             with_policy.doom_loop_recovery
         );
+    }
+
+    #[test]
+    fn legacy_config_keeps_xai_message_metadata_behavior() {
+        let mut stripped = serde_json::to_value(SamplerConfig::default()).unwrap();
+        stripped
+            .as_object_mut()
+            .unwrap()
+            .remove("include_message_model_id");
+
+        let config: SamplerConfig = serde_json::from_value(stripped).unwrap();
+        assert!(config.include_message_model_id);
     }
 }

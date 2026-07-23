@@ -1972,6 +1972,30 @@ pub(super) fn apply_settings_outcome(
         SettingsKeyOutcome::Unchanged => InputOutcome::Unchanged,
     }
 }
+
+/// Translate the provider modal's credential-free output into app actions.
+pub(super) fn apply_providers_outcome(
+    agent: &mut AgentView,
+    outcome: crate::views::providers_modal::ProviderModalOutcome,
+) -> InputOutcome {
+    use crate::views::providers_modal::ProviderModalOutcome;
+    match outcome {
+        ProviderModalOutcome::Close => {
+            if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                agent.active_modal.as_mut()
+            {
+                state.clear_sensitive_input();
+            }
+            agent.active_modal = None;
+            InputOutcome::Changed
+        }
+        ProviderModalOutcome::Command(command) => {
+            InputOutcome::Action(Action::ProviderCommand(command))
+        }
+        ProviderModalOutcome::Changed => InputOutcome::Changed,
+        ProviderModalOutcome::Unchanged => InputOutcome::Unchanged,
+    }
+}
 /// Whether this key event represents `#` (hash).
 ///
 /// Most terminals report `KeyCode::Char('#')` directly. Under the Kitty

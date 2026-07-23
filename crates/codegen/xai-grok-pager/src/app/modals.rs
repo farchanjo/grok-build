@@ -12,7 +12,9 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use super::actions::Action;
-use super::agent_view::{AgentView, active_contexts_for_pane, apply_settings_outcome};
+use super::agent_view::{
+    AgentView, active_contexts_for_pane, apply_providers_outcome, apply_settings_outcome,
+};
 use super::app_view::InputOutcome;
 
 use crate::theme::Theme;
@@ -433,6 +435,39 @@ impl AgentView {
             }
         }
 
+        // Providers: credentials are entered only in the modal's ephemeral
+        // masked editor. The resulting action contains no secret.
+        if let ActiveModal::Providers { state } = modal {
+            // The key editor owns Esc so it cancels input without closing the
+            // provider manager (mirrors Settings' editing sub-modes).
+            if matches!(
+                &state.mode,
+                crate::views::providers_modal::ProviderModalMode::EditingKey { .. }
+            ) {
+                let outcome = crate::views::providers_modal::handle_key(state, key);
+                return apply_providers_outcome(self, outcome);
+            }
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &[],
+                sizing: mw::ModalSizing::default(),
+                fold_info: None,
+            };
+            match mw::handle_modal_key(&mut state.window, key, &chrome_cfg) {
+                ModalWindowOutcome::CloseRequested => {
+                    state.clear_sensitive_input();
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Unhandled => {
+                    let outcome = crate::views::providers_modal::handle_key(state, key);
+                    return apply_providers_outcome(self, outcome);
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+
         // ResetSettingsConfirm: y/n routing. Handled before generic
         // char-match so Esc/F2/Ctrl+, route to Cancel (not modal close).
         if let Some(ActiveModal::ResetSettingsConfirm { modal, .. }) = self.active_modal.as_ref() {
@@ -483,6 +518,7 @@ impl AgentView {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
+            | ActiveModal::Providers { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
         }
@@ -520,6 +556,10 @@ impl AgentView {
         }
         if let Some(ActiveModal::MemoryBrowser { state }) = self.active_modal.as_mut() {
             return crate::views::memory_modal::handle_memory_paste(state, text);
+        }
+        if let Some(ActiveModal::Providers { state }) = self.active_modal.as_mut() {
+            let outcome = crate::views::providers_modal::handle_paste(state, text);
+            return apply_providers_outcome(self, outcome);
         }
         let settings_outcome = match self.active_modal.as_mut() {
             Some(ActiveModal::Settings { state }) => Some(
@@ -827,6 +867,10 @@ impl AgentView {
                             PaletteCommand::OpenSettings => {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::OpenSettings)
+                            }
+                            PaletteCommand::OpenProviders => {
+                                self.active_modal = None;
+                                InputOutcome::Action(Action::OpenProviders)
                             }
                             PaletteCommand::OpenAgentsModal => {
                                 self.active_modal = None;
@@ -1593,6 +1637,18 @@ impl AgentView {
             }
         }
 
+        // Providers do not currently expose row hit targets; the shared
+        // chrome still provides a working close button.
+        if let Some(ActiveModal::Providers { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            if matches!(outcome, ModalWindowOutcome::CloseRequested) {
+                state.clear_sensitive_input();
+                self.active_modal = None;
+            }
+            return InputOutcome::Changed;
+        }
+
         // ResetSettingsConfirm: route mouse events through the
         // modal-window chrome.
         if let Some(ActiveModal::ResetSettingsConfirm { settings_state, .. }) =
@@ -2331,6 +2387,8 @@ impl AgentView {
                     compact,
                     None,
                 );
+            } else if let modal::ActiveModal::Providers { state } = active_modal {
+                crate::views::providers_modal::render_modal(buf, area, state, compact);
             } else if matches!(
                 active_modal,
                 modal::ActiveModal::ResetSettingsConfirm { .. }

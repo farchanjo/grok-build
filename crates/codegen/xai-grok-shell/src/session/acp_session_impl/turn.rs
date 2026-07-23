@@ -137,6 +137,150 @@ fn user_echo_mode(prompt_id: &str) -> UserEchoMode {
     }
 }
 impl SessionActor {
+    async fn current_codex_provider(
+        &self,
+    ) -> Option<(
+        crate::agent::model_providers::ResolvedModelProvider,
+        xai_grok_sampling_types::SamplingConfig,
+    )> {
+        let sampling = self.chat_state_handle.get_sampling_config().await?;
+        let provider_id = sampling
+            .extra_headers
+            .get(crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER)?;
+        let models = self.models_manager.models();
+        let provider = models
+            .values()
+            .filter_map(|entry| entry.model_provider.as_ref())
+            .find(|provider| {
+                provider.id == *provider_id
+                    && provider.kind == crate::agent::model_providers::ModelProviderKind::Codex
+            })?
+            .clone();
+        Some((provider, sampling))
+    }
+
+    async fn run_primary_codex_turn(
+        &self,
+        provider: crate::agent::model_providers::ResolvedModelProvider,
+        sampling: xai_grok_sampling_types::SamplingConfig,
+        prompt: String,
+        prompt_mode: PromptMode,
+        json_schema: Option<serde_json::Value>,
+        prompt_index: usize,
+    ) -> Result<TurnOutcome, acp::Error> {
+        use crate::agent::codex_app_server::{
+            CodexRunRequest, CodexSandboxMode, PrimaryCodexThreadState, load_primary_thread_state,
+            run_codex_turn, save_primary_thread_state,
+        };
+
+        let cwd = std::path::PathBuf::from(&self.session_info.cwd);
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let resume_thread_id = match load_primary_thread_state(&session_dir) {
+            Ok(Some(state)) => state
+                .matching_thread_id(&provider.id, &sampling.model, &cwd)
+                .map(str::to_owned),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::error!(
+                    session_id = %self.session_info.id.0,
+                    ?error,
+                    "failed to load primary Codex thread state"
+                );
+                return Err(acp::Error::internal_error().data(
+                    "Codex conversation state is unreadable. Remove codex_thread.json from this \
+                     session or start a new session.",
+                ));
+            }
+        };
+
+        let mut request = CodexRunRequest::new(&sampling.model, cwd.clone(), prompt);
+        request.command = provider.command.clone();
+        request.resume_thread_id = resume_thread_id;
+        request.output_schema = json_schema.clone();
+        request.idle_timeout = self.inference_idle_timeout;
+        request.reasoning_effort = sampling
+            .reasoning_effort
+            .map(|effort| format!("{effort:?}").to_ascii_lowercase());
+        request.sandbox = if self.permissions.is_yolo_mode() {
+            CodexSandboxMode::DangerFullAccess
+        } else if prompt_mode.is_read_only() {
+            CodexSandboxMode::ReadOnly
+        } else {
+            CodexSandboxMode::WorkspaceWrite
+        };
+
+        let result = run_codex_turn(request, tokio_util::sync::CancellationToken::new())
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    provider_id = %provider.id,
+                    model = %sampling.model,
+                    ?error,
+                    "primary Codex subscription turn failed"
+                );
+                let guidance = match error {
+                    crate::agent::codex_app_server::CodexAppServerError::Spawn(_) => {
+                        "Codex CLI is unavailable. Install the official Codex CLI, then open \
+                         /providers and connect Codex."
+                    }
+                    crate::agent::codex_app_server::CodexAppServerError::Cancelled => {
+                        "Codex subscription turn was cancelled."
+                    }
+                    _ => {
+                        "Codex subscription turn failed. Open /providers to verify or renew the \
+                         ChatGPT login, then retry."
+                    }
+                };
+                acp::Error::internal_error().data(guidance)
+            })?;
+
+        if result.output.trim().is_empty() {
+            return Err(acp::Error::internal_error().data(
+                "Codex completed without a text response. Retry the turn or verify the Codex \
+                 connection in /providers.",
+            ));
+        }
+
+        let state =
+            PrimaryCodexThreadState::new(&provider.id, &result.thread_id, &sampling.model, cwd);
+        if let Err(error) = save_primary_thread_state(&session_dir, &state) {
+            tracing::error!(
+                session_id = %self.session_info.id.0,
+                ?error,
+                "failed to persist primary Codex thread state"
+            );
+            return Err(acp::Error::internal_error().data(
+                "Codex completed the turn but its resume state could not be saved. The response \
+                 was not committed; inspect the workspace before retrying.",
+            ));
+        }
+
+        let structured_output = json_schema.as_ref().map(|schema| {
+            let validator = jsonschema::validator_for(schema)
+                .map_err(|error| format!("invalid output schema: {error}"));
+            validate_structured_output(&validator, &result.output)
+        });
+        let mut chunk_meta = serde_json::Map::new();
+        chunk_meta.insert("modelId".into(), serde_json::json!(sampling.model));
+        chunk_meta.insert("promptIndex".into(), serde_json::json!(prompt_index));
+        chunk_meta.insert("provider".into(), serde_json::json!("codex-subscription"));
+        self.send_slash_command_output_with_meta(&result.output, Some(chunk_meta))
+            .await;
+        self.record_assistant_response(ConversationItem::assistant_with_model(
+            result.output,
+            sampling.model,
+        ))
+        .await;
+
+        Ok(TurnOutcome::Completed {
+            snapshot: Box::new(None),
+            tools_called: Vec::new(),
+            structured_output,
+            refusal: None,
+        })
+    }
+
     /// Run the image-normalization pipeline (re-encode caps, min-side and
     /// integrity checks) and surface its outcomes: compression / re-encode
     /// fallback / dropped notices are appended to `text_out` (TEXT only —
@@ -465,6 +609,7 @@ impl SessionActor {
         };
         self.events.begin_turn();
         let model_id = self.current_model_id().await;
+        let codex_route = self.current_codex_provider().await;
         let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
         self.current_turn_number.set(turn_number);
         let yolo_mode = self.permissions.is_yolo_mode();
@@ -720,6 +865,7 @@ impl SessionActor {
                     .data(format!("failed to save user images to assets dir: {e}"))
             })?
         };
+        let codex_prompt = codex_route.as_ref().map(|_| user_message.clone());
         let attached_image_refs = if self.is_cursor_harness() {
             Vec::new()
         } else {
@@ -833,7 +979,18 @@ impl SessionActor {
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
-        let result = {
+        let result = if let (Some((provider, sampling)), Some(prompt)) = (codex_route, codex_prompt)
+        {
+            self.run_primary_codex_turn(
+                provider,
+                sampling,
+                prompt,
+                prompt_mode,
+                json_schema.clone(),
+                current_prompt_index,
+            )
+            .await
+        } else {
             let mut round_trace = trace_gcs_config;
             let mut round_artifact = artifact_tracker;
             let mut stop_continuations_this_turn: u32 = 0;
@@ -2120,6 +2277,10 @@ impl SessionActor {
                                 attempt,
                                 max_retries: AuthRetrySchedule::MAX_RETRIES,
                                 reason: "Re-authenticated after 401; retrying request".to_string(),
+                                backoff_ms: Some(delay.as_millis() as u64),
+                                is_rate_limited: false,
+                                provider_name: None,
+                                provider_code: None,
                             },
                         ))
                         .await;

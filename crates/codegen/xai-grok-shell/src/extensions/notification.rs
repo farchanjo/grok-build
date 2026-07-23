@@ -1028,6 +1028,18 @@ pub enum RetryState {
         max_retries: u32,
         /// Human-readable reason for the retry
         reason: String,
+        /// Effective delay before the next attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backoff_ms: Option<u64>,
+        /// True when the retry was caused by HTTP 429.
+        #[serde(default)]
+        is_rate_limited: bool,
+        /// OpenRouter or the selected upstream provider when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_name: Option<String>,
+        /// Provider-native error code when OpenRouter supplied one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_code: Option<String>,
     },
     /// All retries have been exhausted
     Exhausted {

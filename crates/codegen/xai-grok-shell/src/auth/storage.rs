@@ -79,14 +79,7 @@ pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
 /// so the caller can decide whether to skip the write (to avoid clobbering
 /// sibling scopes).
 ///
-/// Kept for the test-only `persist_and_swap` and as a strict reader.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used from tests only; remove expect when wired in production"
-    )
-)]
+/// Used by provider-scoped writes and the test-only `persist_and_swap`.
 pub(crate) fn read_auth_json_or_empty(auth_file: &Path) -> std::io::Result<AuthStore> {
     match read_auth_json(auth_file) {
         Ok(map) => Ok(map),
@@ -401,6 +394,84 @@ pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Provider-specific API-key scope names. These scopes intentionally share
+/// the established owner-only, atomic `auth.json` store while remaining
+/// separate from xAI's `xai::api_key` and OAuth entries.
+pub const OPENAI_API_KEY_SCOPE: &str = "openai::api_key";
+pub const OPENROUTER_API_KEY_SCOPE: &str = "openrouter::api_key";
+
+fn validate_provider_scope(scope: &str) -> std::io::Result<()> {
+    if matches!(scope, OPENAI_API_KEY_SCOPE | OPENROUTER_API_KEY_SCOPE) {
+        Ok(())
+    } else {
+        Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    }
+}
+
+/// Read an API key from an explicitly provider-scoped auth entry. Missing
+/// stores/scopes are normal; unreadable or malformed stores fail closed.
+pub fn read_provider_api_key(grok_home: &Path, scope: &str) -> std::io::Result<Option<String>> {
+    validate_provider_scope(scope)?;
+    let path = grok_home.join("auth.json");
+    match read_auth_json(&path) {
+        Ok(store) => Ok(store.get(scope).map(|auth| auth.key.clone())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Atomically store a provider API key under `scope`, while holding the same
+/// live `auth.json.lock` used by the normal authentication paths.  Lock
+/// contention and stale-lock races are errors so a UI action never clobbers a
+/// concurrent OAuth refresh.
+pub fn store_provider_api_key(grok_home: &Path, scope: &str, api_key: &str) -> std::io::Result<()> {
+    validate_provider_scope(scope)?;
+    let path = grok_home.join("auth.json");
+    let lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::WouldBlock))?;
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
+    let mut store = read_auth_json_or_empty(&path)?;
+    store.insert(
+        scope.to_owned(),
+        GrokAuth {
+            key: api_key.to_owned(),
+            auth_mode: AuthMode::ApiKey,
+            ..Default::default()
+        },
+    );
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
+    write_auth_json(&path, &store)
+}
+
+/// Remove one provider API key without affecting any xAI/OAuth scope.
+pub fn clear_provider_api_key(grok_home: &Path, scope: &str) -> std::io::Result<()> {
+    validate_provider_scope(scope)?;
+    let path = grok_home.join("auth.json");
+    let lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::WouldBlock))?;
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
+    let mut store = match read_auth_json(&path) {
+        Ok(store) => store,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if store.remove(scope).is_none() {
+        return Ok(());
+    }
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
+    // Keep an empty auth.json rather than deleting it: deletion can race a
+    // sibling reader/writer and is not needed to remove the credential.
+    write_auth_json(&path, &store)
+}
+
 #[cfg(test)]
 mod write_fallback_tests {
     use super::*;
@@ -422,6 +493,41 @@ mod write_fallback_tests {
         read_auth_json(path)
             .ok()
             .and_then(|m| m.get(API_KEY_SCOPE).map(|a| a.key.clone()))
+    }
+
+    #[test]
+    fn provider_scope_mutation_preserves_xai_api_key_and_rejects_unknown_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        store_api_key(dir.path(), "xai-key").unwrap();
+        store_provider_api_key(dir.path(), OPENAI_API_KEY_SCOPE, "openai-key").unwrap();
+        assert_eq!(read_api_key(dir.path()).as_deref(), Some("xai-key"));
+        assert_eq!(
+            read_provider_api_key(dir.path(), OPENAI_API_KEY_SCOPE)
+                .unwrap()
+                .as_deref(),
+            Some("openai-key")
+        );
+        assert!(store_provider_api_key(dir.path(), API_KEY_SCOPE, "overwrite-attempt").is_err());
+        clear_provider_api_key(dir.path(), OPENAI_API_KEY_SCOPE).unwrap();
+        assert_eq!(read_api_key(dir.path()).as_deref(), Some("xai-key"));
+    }
+
+    #[test]
+    fn provider_write_fails_closed_while_auth_writer_holds_shared_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        store_api_key(dir.path(), "xai-key").unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&auth_path)
+            .expect("test acquires auth lock");
+        let error = store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "router-key")
+            .expect_err("concurrent auth writer must not be overwritten");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        drop(lock);
+        assert_eq!(read_api_key(dir.path()).as_deref(), Some("xai-key"));
+        assert_eq!(
+            read_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE).unwrap(),
+            None
+        );
     }
 
     fn fake_storage_full(_: &Path, _: &AuthStore) -> std::io::Result<()> {

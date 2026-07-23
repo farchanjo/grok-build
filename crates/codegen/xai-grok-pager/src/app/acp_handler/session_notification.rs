@@ -1240,11 +1240,19 @@ pub(super) fn apply_retry_state(
             attempt,
             max_retries,
             reason,
+            backoff_ms,
+            is_rate_limited,
+            provider_name,
+            ..
         } => {
             session.set_retry_activity(Some(TurnActivity::Retrying {
                 attempt: *attempt,
                 max_retries: *max_retries,
                 reason: reason.clone(),
+                backoff_ms: *backoff_ms,
+                retry_started_at: std::time::Instant::now(),
+                is_rate_limited: *is_rate_limited,
+                provider_name: provider_name.clone(),
             }));
         }
         RetryState::Exhausted {

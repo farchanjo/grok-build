@@ -6,9 +6,11 @@
 //! discipline matching the hunk-tracker pattern.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use super::pacing::InferencePacer;
 use crate::config::{RetryPolicy, SamplerConfig};
 use crate::types::RequestId;
 
@@ -26,6 +28,7 @@ pub(crate) struct ActorState {
     pub(crate) active_requests: HashMap<RequestId, ActiveRequest>,
     pub(crate) config: SamplerConfig,
     pub(crate) retry_policy: RetryPolicy,
+    pub(crate) inference_pacer: Arc<InferencePacer>,
 }
 
 impl ActorState {
@@ -34,6 +37,7 @@ impl ActorState {
             active_requests: HashMap::new(),
             config,
             retry_policy,
+            inference_pacer: InferencePacer::shared(),
         }
     }
 
@@ -87,7 +91,9 @@ mod tests {
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            openrouter_fallback_models: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
+            include_message_model_id: true,
             auth_scheme: Default::default(),
             extra_headers: IndexMap::new(),
             context_window: 8192,

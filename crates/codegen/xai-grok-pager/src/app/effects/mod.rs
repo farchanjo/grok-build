@@ -66,6 +66,13 @@ pub(crate) fn execute(
                 tracing::warn!(error = %e, "project picker: failed to set_current_dir");
             }
         }
+        Effect::ProviderOperation {
+            agent_id,
+            operation,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(run_provider_operation(agent_id, operation, tx));
+        }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
                 .spawn(async move {
@@ -4627,5 +4634,168 @@ fn build_interject_params(
     }
     params
 }
+
+async fn run_provider_operation(
+    agent_id: agent::AgentId,
+    operation: actions::ProviderOperation,
+    acp_tx: AcpAgentTx,
+) -> TaskResult {
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+    use actions::ProviderOperation;
+    use xai_grok_shell::agent::providers::{
+        ProviderConnectionState, ProviderConnectionTest, ProviderCredentialSource, ProviderId,
+        ProviderManager,
+    };
+
+    fn backend_id(provider: ProviderKind) -> ProviderId {
+        match provider {
+            ProviderKind::OpenAi => ProviderId::OpenAi,
+            ProviderKind::OpenRouter => ProviderId::OpenRouter,
+            ProviderKind::Codex => ProviderId::Codex,
+        }
+    }
+
+    fn display_status(
+        status: xai_grok_shell::agent::providers::ProviderStatus,
+    ) -> ProviderStatus {
+        match status.state {
+            ProviderConnectionState::Connected => ProviderStatus::Connected {
+                detail: Some("Signed in with the official Codex CLI".to_owned()),
+            },
+            ProviderConnectionState::Configured => {
+                let detail = match status.credential_source {
+                    Some(ProviderCredentialSource::SecureStore) => {
+                        "Configured in the owner-only local credential store"
+                    }
+                    Some(ProviderCredentialSource::Environment) => {
+                        "Configured by environment variable"
+                    }
+                    None => "Configured",
+                };
+                ProviderStatus::Connected {
+                    detail: Some(detail.to_owned()),
+                }
+            }
+            ProviderConnectionState::NotConfigured => ProviderStatus::Missing,
+            ProviderConnectionState::Unavailable => {
+                ProviderStatus::Error("Official Codex CLI is unavailable".to_owned())
+            }
+            ProviderConnectionState::StoreUnavailable => {
+                ProviderStatus::Error("Credential store is unavailable".to_owned())
+            }
+        }
+    }
+
+    fn connection_test_status(
+        result: ProviderConnectionTest,
+        saved_now: bool,
+    ) -> ProviderStatus {
+        match result {
+            ProviderConnectionTest::Connected => ProviderStatus::Connected {
+                detail: Some("Connection verified without an inference charge".to_owned()),
+            },
+            ProviderConnectionTest::NotConfigured => ProviderStatus::Missing,
+            ProviderConnectionTest::Rejected => ProviderStatus::Error(if saved_now {
+                "API key was saved, but the provider rejected it".to_owned()
+            } else {
+                "The provider rejected the configured API key".to_owned()
+            }),
+            ProviderConnectionTest::Unavailable => ProviderStatus::Error(if saved_now {
+                "API key was saved, but the provider is currently unavailable".to_owned()
+            } else {
+                "The provider is currently unavailable".to_owned()
+            }),
+        }
+    }
+
+    let manager = ProviderManager::default();
+    let (provider, status) = match operation {
+        ProviderOperation::Refresh(provider) => {
+            let status = if provider == ProviderKind::Codex {
+                match manager.codex_status().await {
+                    Ok(status) => display_status(status),
+                    Err(error) => ProviderStatus::Error(error.to_string()),
+                }
+            } else if provider == ProviderKind::OpenRouter {
+                // An explicit refresh is also the user's request to refresh
+                // the discovered OpenRouter catalog. The manager verifies
+                // that a credential exists and falls back to its last valid
+                // cache before we report the regular connection status.
+                if matches!(
+                    manager.status(ProviderId::OpenRouter).state,
+                    ProviderConnectionState::Configured
+                ) {
+                    let _ = manager.refresh_openrouter_catalog().await;
+                }
+                display_status(manager.status(ProviderId::OpenRouter))
+            } else {
+                display_status(manager.status(backend_id(provider)))
+            };
+            (provider, status)
+        }
+        ProviderOperation::SaveAndTest { provider, api_key } => {
+            let result = manager.set_api_key(backend_id(provider), &api_key.into_inner());
+            let status = match result {
+                Ok(()) => match manager.test_connection(backend_id(provider)).await {
+                    Ok(test) => connection_test_status(test, true),
+                    Err(error) => ProviderStatus::Error(error.to_string()),
+                },
+                Err(error) => ProviderStatus::Error(error.to_string()),
+            };
+            (provider, status)
+        }
+        ProviderOperation::Test(provider) => {
+            let status = match manager.test_connection(backend_id(provider)).await {
+                Ok(test) => connection_test_status(test, false),
+                Err(error) => ProviderStatus::Error(error.to_string()),
+            };
+            (provider, status)
+        }
+        ProviderOperation::Disconnect(provider) => {
+            let status = match manager.remove_api_key(backend_id(provider)) {
+                Ok(()) => display_status(manager.status(backend_id(provider))),
+                Err(error) => ProviderStatus::Error(error.to_string()),
+            };
+            (provider, status)
+        }
+        ProviderOperation::LoginCodex => {
+            let status = match manager.codex_login().await {
+                Ok(()) => match manager.codex_status().await {
+                    Ok(status) => display_status(status),
+                    Err(error) => ProviderStatus::Error(error.to_string()),
+                },
+                Err(error) => ProviderStatus::Error(error.to_string()),
+            };
+            (ProviderKind::Codex, status)
+        }
+        ProviderOperation::LogoutCodex => {
+            let status = match manager.codex_logout().await {
+                Ok(()) => ProviderStatus::Missing,
+                Err(error) => ProviderStatus::Error(error.to_string()),
+            };
+            (ProviderKind::Codex, status)
+        }
+    };
+
+    // `Test` may populate an OpenRouter cache and `Refresh` may rebuild a
+    // provider catalog, so every provider operation is followed by the same
+    // shell-authoritative model reload.
+    let request = acp::ExtRequest::new(
+        "x.ai/internal/reload_models",
+        serde_json::value::to_raw_value(&serde_json::json!({}))
+            .expect("serialize provider model reload params")
+            .into(),
+    );
+    if let Err(error) = acp_send(request, &acp_tx).await {
+        tracing::warn!(?agent_id, %error, "provider model catalog reload failed");
+    }
+
+    TaskResult::ProviderOperationComplete {
+        agent_id,
+        provider,
+        status,
+    }
+}
+
 #[cfg(test)]
 mod tests;

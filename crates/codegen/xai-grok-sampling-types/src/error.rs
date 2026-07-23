@@ -76,6 +76,49 @@ pub struct ResponseModelMetadata {
     pub models_etag: Option<String>,
 }
 
+/// Safe, structured diagnostics attached to an API error response.
+///
+/// These fields contain only provider routing and rate-limit metadata. They
+/// never contain response bodies, request content, or credentials, so callers
+/// may include them in structured telemetry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiErrorDiagnostics {
+    /// Router-provided categorisation of the upstream failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    /// Upstream provider's machine-readable error code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
+    /// Upstream provider selected by a router such as OpenRouter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    /// Rate-limit ceiling reported by the server, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_limit: Option<String>,
+    /// Remaining requests/tokens reported by the server, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_remaining: Option<String>,
+    /// Server-defined rate-limit reset value. This remains a string because
+    /// providers legitimately use both delta-seconds and absolute timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset: Option<String>,
+    /// Opaque generation identifier returned by a router for support/debugging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+}
+
+impl ApiErrorDiagnostics {
+    pub fn is_empty(&self) -> bool {
+        self.error_type.is_none()
+            && self.provider_code.is_none()
+            && self.provider_name.is_none()
+            && self.rate_limit_limit.is_none()
+            && self.rate_limit_remaining.is_none()
+            && self.rate_limit_reset.is_none()
+            && self.generation_id.is_none()
+    }
+}
+
 /// Display prefix of [`SamplingError::Serialization`]. Shared with the
 /// variant's `#[error(...)]` template so [`SamplingError::serialization_from_rendered`]
 /// can never drift from what Display actually emits.
@@ -103,6 +146,8 @@ pub enum SamplingError {
         /// `Some(false)` = request-content error, don't retry.
         /// `None` = header absent (old server or non-proxy origin).
         should_retry: Option<bool>,
+        /// Router/provider and rate-limit metadata safe for diagnostics.
+        diagnostics: Option<ApiErrorDiagnostics>,
     },
     #[error("reqwest error stream: {0}")]
     EventStreamError(String),
@@ -275,6 +320,14 @@ impl SamplingError {
     pub fn should_retry_header(&self) -> Option<bool> {
         match self {
             SamplingError::Api { should_retry, .. } => *should_retry,
+            _ => None,
+        }
+    }
+
+    /// Structured router/provider diagnostics from an API error response.
+    pub fn diagnostics(&self) -> Option<&ApiErrorDiagnostics> {
+        match self {
+            SamplingError::Api { diagnostics, .. } => diagnostics.as_ref(),
             _ => None,
         }
     }
@@ -478,6 +531,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(api.is_context_length_error());
         assert!(
@@ -647,6 +701,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(
             !err.is_auth_error(),
@@ -662,6 +717,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(
             err.is_auth_error(),
@@ -683,6 +739,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(err.is_rate_limited());
         assert!(err.is_retryable(), "429 should be retryable");
@@ -698,6 +755,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(!server_error.is_rate_limited());
 
@@ -716,6 +774,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(42),
             should_retry: None,
+            diagnostics: None,
         };
         assert_eq!(err.retry_after(), Some(42));
     }
@@ -728,6 +787,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert_eq!(err.retry_after(), None);
     }
@@ -749,6 +809,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(err.is_encrypted_content_error());
         assert!(
@@ -765,6 +826,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(
             !err.is_encrypted_content_error(),
@@ -780,6 +842,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(
             !err.is_encrypted_content_error(),
@@ -795,6 +858,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(err.is_image_processing_error());
         assert!(!err.is_encrypted_content_error());
@@ -808,6 +872,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(err.is_image_processing_error());
     }
@@ -820,6 +885,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(!err.is_image_processing_error());
     }
@@ -832,6 +898,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(!err.is_image_processing_error());
     }
@@ -844,6 +911,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(
             !err.is_image_processing_error(),
@@ -859,6 +927,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(
             !err.is_retryable(),

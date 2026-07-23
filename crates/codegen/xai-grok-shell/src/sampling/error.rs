@@ -496,6 +496,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::ErrorCode::from(RATE_LIMITED_ERROR_CODE));
@@ -514,6 +515,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(60),
             should_retry: None,
+            diagnostics: None,
         };
         assert_eq!(err.retry_after(), Some(60));
         let acp_err = map_sampling_err_to_acp(err);
@@ -529,6 +531,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let server_err = SamplingError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -536,6 +539,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let rate_acp = map_sampling_err_to_acp(rate_err);
         let server_acp = map_sampling_err_to_acp(server_err);
@@ -553,6 +557,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::Error::internal_error().code);
@@ -567,6 +572,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::Error::auth_required().code);
@@ -589,6 +595,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_ne!(
@@ -645,6 +652,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                diagnostics: None,
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
@@ -670,6 +678,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                diagnostics: None,
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
@@ -691,6 +700,7 @@ mod tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                diagnostics: None,
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();

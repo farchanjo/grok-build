@@ -664,9 +664,25 @@ fn compute_activity(
             "Compacting…".to_string(),
             false,
         ),
-        (AgentState::TurnRunning, Some(TurnActivity::Retrying { attempt, .. })) => (
+        (
+            AgentState::TurnRunning,
+            Some(TurnActivity::Retrying {
+                attempt,
+                backoff_ms,
+                retry_started_at,
+                is_rate_limited,
+                provider_name,
+                ..
+            }),
+        ) => (
             Style::default().fg(theme.warning),
-            format!("Retrying (attempt {attempt})…"),
+            retry_activity_label(
+                *attempt,
+                *backoff_ms,
+                *retry_started_at,
+                *is_rate_limited,
+                provider_name.as_deref(),
+            ),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::Waiting(reason))) => (
@@ -712,6 +728,40 @@ fn compute_activity(
             false,
         ),
         (AgentState::Idle, _) => (Style::default(), String::new(), false),
+    }
+}
+
+fn retry_activity_label(
+    attempt: u32,
+    backoff_ms: Option<u64>,
+    retry_started_at: Instant,
+    is_rate_limited: bool,
+    provider_name: Option<&str>,
+) -> String {
+    let remaining_secs = backoff_ms.map(|backoff| {
+        let elapsed_ms = retry_started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        backoff.saturating_sub(elapsed_ms).div_ceil(1_000)
+    });
+
+    if is_rate_limited {
+        let provider = provider_name.unwrap_or("Provider");
+        return match remaining_secs {
+            Some(remaining) if remaining > 0 => {
+                format!("{provider} rate limited — retrying in {remaining}s (attempt {attempt})")
+            }
+            Some(_) => format!("{provider} rate limited — retrying now (attempt {attempt})"),
+            None => format!("{provider} rate limited — retrying (attempt {attempt})"),
+        };
+    }
+
+    match remaining_secs {
+        Some(remaining) if remaining > 0 => {
+            format!("Retrying in {remaining}s (attempt {attempt})…")
+        }
+        _ => format!("Retrying (attempt {attempt})…"),
     }
 }
 
@@ -863,6 +913,29 @@ mod tests {
         );
         assert!(!is_sendable_wait(&Some(TurnActivity::Thinking)));
         assert!(!is_sendable_wait(&None));
+    }
+
+    #[test]
+    fn rate_limit_retry_label_shows_provider_and_countdown() {
+        let label = retry_activity_label(
+            1,
+            Some(60_000),
+            Instant::now() - Duration::from_secs(12),
+            true,
+            Some("OpenRouter"),
+        );
+        assert_eq!(
+            label,
+            "OpenRouter rate limited — retrying in 48s (attempt 1)"
+        );
+    }
+
+    #[test]
+    fn generic_retry_label_keeps_attempt_when_backoff_is_unknown() {
+        assert_eq!(
+            retry_activity_label(2, None, Instant::now(), false, None),
+            "Retrying (attempt 2)…"
+        );
     }
 
     #[test]

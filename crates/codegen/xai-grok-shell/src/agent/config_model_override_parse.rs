@@ -674,11 +674,13 @@ mod tests {
             env_key: Some(crate::agent::config::EnvKeys::single("ENV_KEY")),
             auth_provider: Some("corp-gateway".into()),
             model_provider: Some("gateway".into()),
+            resolved_model_provider: None,
             api_base_url: Some("https://api.example.com".into()),
             max_completion_tokens: Some(1024),
             temperature: Some(0.5),
             top_p: Some(0.9),
             api_backend: Some(ApiBackend::Messages),
+            openrouter_fallback_models: Some(vec!["openai/gpt-5-mini".into()]),
             extra_headers: [("x-team".to_owned(), "codegen".to_owned())]
                 .into_iter()
                 .collect(),

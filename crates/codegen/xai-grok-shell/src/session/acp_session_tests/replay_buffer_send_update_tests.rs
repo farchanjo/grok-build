@@ -79,6 +79,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         },
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
+        openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
         attribution_callback: None,
         auth_manager: None,
         state,
@@ -798,6 +799,7 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                         is_retryable: false,
                         retry_after_secs: None,
                         model_metadata: None,
+                        diagnostics: None,
                         empty_response_context: None,
                         doom_loop_triggers: None,
                         doom_loop_aborted_at_chunk: None,
@@ -943,6 +945,8 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
                     reason: "doom loop detected: tail_repetition:8@thinking".to_string(),
                     doom_loop_triggers: Some(vec!["tail_repetition:8@thinking".to_string()]),
                     doom_loop_aborted_at_chunk: Some(421),
+                    backoff_ms: Some(250),
+                    diagnostics: None,
                 })
                 .await;
             actor
@@ -1202,6 +1206,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                 is_retryable: false,
                 retry_after_secs: None,
                 model_metadata: None,
+                diagnostics: None,
                 empty_response_context: Some(EmptyResponseContext {
                     reason: EmptyReason::ReasoningOnly,
                     had_reasoning: true,

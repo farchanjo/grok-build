@@ -4,18 +4,90 @@ use super::config::{ConfigModelOverride, EnvKeys};
 use super::config_model_override_parse::{ConfigWarning, ConfigWarningKind};
 use crate::sampling::ApiBackend;
 
+/// Internal sampler-config marker used to retain native-agent routing identity
+/// after a catalog model is reduced to `SamplerConfig`.
+pub(crate) const NATIVE_AGENT_PROVIDER_HEADER: &str = "x-grok-native-agent-provider";
+
+/// The upstream represented by a `[model_providers.<id>]` entry.
+///
+/// `custom` preserves the existing OpenAI-compatible endpoint behavior.
+/// Named kinds let the runtime apply provider-specific policy without
+/// inferring identity from a mutable URL.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProviderKind {
+    #[default]
+    Custom,
+    #[serde(rename = "xai")]
+    Xai,
+    #[serde(rename = "openai")]
+    OpenAi,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+    /// Run an official Codex agent through `codex app-server`, using the
+    /// locally cached `codex login` session (including ChatGPT subscriptions).
+    Codex,
+}
+
+/// Provider identity retained on a resolved [`super::config::ModelEntry`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ResolvedModelProvider {
+    pub id: String,
+    pub kind: ModelProviderKind,
+    /// OpenRouter model fallbacks inherited from the provider or overridden
+    /// by a single model. These are retained here rather than inferred from a
+    /// URL, so only an explicit OpenRouter provider can emit the extension.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openrouter_fallback_models: Vec<String>,
+    /// Command used by the Codex app-server provider. The first item is the
+    /// executable and the remainder are arguments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct ModelProviderConfig {
+    pub kind: ModelProviderKind,
     pub base_url: Option<String>,
     pub api_base_url: Option<String>,
     pub env_key: Option<EnvKeys>,
     pub api_key: Option<String>,
     pub api_backend: Option<ApiBackend>,
+    /// OpenRouter models to try after a model's primary `model` slug.
+    /// Ignored unless `kind = "openrouter"`.
+    #[serde(default)]
+    pub openrouter_fallback_models: Vec<String>,
     pub extra_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
     pub context_window: Option<u64>,
+    /// Optional command override for `kind = "codex"`.
+    ///
+    /// Defaults to `["codex", "app-server", "--stdio"]`.
+    pub command: Vec<String>,
+}
+
+impl ModelProviderConfig {
+    fn resolved(&self, id: &str, openrouter_fallback_models: Vec<String>) -> ResolvedModelProvider {
+        let command = if self.kind == ModelProviderKind::Codex && self.command.is_empty() {
+            vec![
+                "codex".to_string(),
+                "app-server".to_string(),
+                "--stdio".to_string(),
+            ]
+        } else {
+            self.command.clone()
+        };
+        ResolvedModelProvider {
+            id: id.to_string(),
+            kind: self.kind,
+            openrouter_fallback_models: (self.kind == ModelProviderKind::OpenRouter)
+                .then_some(openrouter_fallback_models)
+                .unwrap_or_default(),
+            command,
+        }
+    }
 }
 
 pub(crate) fn model_provider_auth_name(provider_id: &str) -> String {
@@ -169,25 +241,35 @@ impl ConfigModelOverride {
         provider_id: &str,
     ) -> Self {
         let ModelProviderConfig {
+            kind: _,
             base_url,
             api_base_url,
             env_key,
             api_key,
             api_backend,
+            openrouter_fallback_models,
             extra_headers,
             auth_provider,
             auth,
             context_window,
+            command: _,
         } = provider;
 
         let mut merged = self.clone();
-        merged.model_provider = None;
+        let effective_openrouter_fallback_models = self
+            .openrouter_fallback_models
+            .clone()
+            .unwrap_or_else(|| openrouter_fallback_models.clone());
+        merged.resolved_model_provider =
+            Some(provider.resolved(provider_id, effective_openrouter_fallback_models));
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
         merged.context_window = merged.context_window.or(*context_window);
-        if merged.extra_headers.is_empty() {
-            merged.extra_headers = extra_headers.clone();
+        if !extra_headers.is_empty() {
+            let mut headers = extra_headers.clone();
+            headers.extend(merged.extra_headers);
+            merged.extra_headers = headers;
         }
         let model_sets_own_api_key = self
             .api_key
@@ -197,6 +279,9 @@ impl ConfigModelOverride {
         let model_has_own_auth =
             model_sets_own_api_key || model_sets_own_env_key || self.auth_provider.is_some();
         if !model_has_own_auth {
+            // The provider-scoped vault is deliberately resolved per turn in
+            // `resolve_credentials`, not copied here. That way a key saved or
+            // removed by the separate TUI process takes effect immediately.
             merged.api_key = api_key.clone();
             merged.env_key = env_key.clone();
             merged.auth_provider = auth_provider
@@ -208,14 +293,16 @@ impl ConfigModelOverride {
 
     pub(crate) fn with_missing_provider(&self) -> Self {
         let mut merged = self.clone();
-        merged.model_provider = None;
+        merged.resolved_model_provider = None;
         merged
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::config::{Config, resolve_credentials, resolve_model_list};
+    use crate::agent::config::{
+        Config, resolve_credentials, resolve_model_list, sampling_config_for_model,
+    };
     #[test]
     fn model_inherits_provider_connection_defaults() {
         let raw_config: toml::Value = toml::from_str(
@@ -244,6 +331,12 @@ mod tests {
             model.info.extra_headers.get("X-Corp").map(String::as_str),
             Some("yes")
         );
+        let provider = model
+            .model_provider
+            .as_ref()
+            .expect("provider identity survives default expansion");
+        assert_eq!(provider.id, "gateway");
+        assert_eq!(provider.kind, super::ModelProviderKind::Custom);
         assert!(
             model.has_own_credentials(),
             "a custom endpoint without a credential is BYOK, not session-authed"
@@ -814,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn model_headers_shadow_provider_headers() {
+    fn model_headers_merge_over_provider_headers() {
         let raw_config: toml::Value = toml::from_str(
             r#"
             [model_providers.gateway]
@@ -842,9 +935,97 @@ mod tests {
             model.info.extra_headers.get("X-Model").map(String::as_str),
             Some("own")
         );
+        assert_eq!(
+            model.info.extra_headers.get("X-Corp").map(String::as_str),
+            Some("yes"),
+            "provider attribution/security headers survive model additions"
+        );
+    }
+
+    #[test]
+    fn named_provider_kinds_and_codex_command_survive_resolution() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openai]
+            kind = "openai"
+            base_url = "https://api.openai.com/v1"
+            env_key = "OPENAI_API_KEY"
+            api_backend = "responses"
+
+            [model.openai-sol]
+            model = "gpt-5.6-sol"
+            model_provider = "openai"
+            context_window = 1050000
+
+            [model_providers.openrouter]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+            env_key = "OPENROUTER_API_KEY"
+            api_backend = "chat_completions"
+
+            [model.openrouter-sol]
+            model = "openai/gpt-5.6-sol"
+            model_provider = "openrouter"
+            context_window = 1050000
+
+            [model_providers.codex]
+            kind = "codex"
+            api_key = "must-not-reach-an-inference-endpoint"
+
+            [model.codex-subscription]
+            model = "gpt-5.6"
+            model_provider = "codex"
+            context_window = 1050000
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        assert_eq!(
+            resolved["openai-sol"]
+                .model_provider
+                .as_ref()
+                .map(|provider| provider.kind),
+            Some(super::ModelProviderKind::OpenAi)
+        );
+        assert_eq!(
+            resolved["openrouter-sol"]
+                .model_provider
+                .as_ref()
+                .map(|provider| provider.kind),
+            Some(super::ModelProviderKind::OpenRouter)
+        );
+        let codex = &resolved["codex-subscription"];
+        let codex_provider = codex
+            .model_provider
+            .as_ref()
+            .expect("Codex provider is retained");
+        assert_eq!(codex_provider.kind, super::ModelProviderKind::Codex);
+        assert_eq!(codex_provider.command, ["codex", "app-server", "--stdio"]);
         assert!(
-            model.info.extra_headers.get("X-Corp").is_none(),
-            "a model that sets any header inherits none of the provider's"
+            !codex.info.hidden,
+            "Codex subscription is selectable as a native primary agent"
+        );
+        assert!(
+            codex.own_credential().is_none(),
+            "Codex provider credentials cannot leak into inference"
+        );
+        assert!(
+            codex
+                .auth_provider
+                .as_ref()
+                .is_some_and(|provider| provider.is_fail_closed()),
+            "direct sampling of a Codex provider must fail closed"
+        );
+        assert!(
+            crate::agent::models::task_model_error_for_catalog(
+                "codex-subscription",
+                &resolved,
+                false,
+            )
+            .is_none(),
+            "a Codex agent remains selectable by Task.model"
         );
     }
 
@@ -913,5 +1094,71 @@ mod tests {
             .expect("blank api_key must not fail-close a working gateway");
         assert_eq!(provider.name.as_str(), "model_provider:gateway");
         assert!(!provider.is_fail_closed());
+    }
+
+    #[test]
+    fn openrouter_fallback_models_inherit_and_allow_model_override() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.router]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+            openrouter_fallback_models = ["openai/gpt-5-mini", "google/gemini-2.5-flash"]
+
+            [model.inherited]
+            model = "openai/gpt-oss-120b"
+            model_provider = "router"
+
+            [model.overridden]
+            model = "openai/gpt-oss-120b"
+            model_provider = "router"
+            openrouter_fallback_models = ["meta-llama/llama-3.3-70b-instruct"]
+
+            [model.disabled]
+            model = "openai/gpt-oss-120b"
+            model_provider = "router"
+            openrouter_fallback_models = []
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let fallbacks = |id: &str| {
+            resolved[id]
+                .model_provider
+                .as_ref()
+                .expect("OpenRouter provider should be retained")
+                .openrouter_fallback_models
+                .clone()
+        };
+
+        assert_eq!(
+            fallbacks("inherited"),
+            ["openai/gpt-5-mini", "google/gemini-2.5-flash"]
+        );
+        assert_eq!(
+            fallbacks("overridden"),
+            ["meta-llama/llama-3.3-70b-instruct"]
+        );
+        assert!(
+            fallbacks("disabled").is_empty(),
+            "an explicit empty model list disables the provider default"
+        );
+
+        let model = &resolved["overridden"];
+        let sampling = sampling_config_for_model(
+            model,
+            resolve_credentials(model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            sampling.openrouter_fallback_models,
+            ["meta-llama/llama-3.3-70b-instruct"],
+            "only a resolved OpenRouter provider propagates the extension to sampling"
+        );
     }
 }

@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use xai_grok_sampling_types::{
-    ConversationResponse, EmptyResponseContext, ResponseModelMetadata, SamplingError,
+    ApiErrorDiagnostics, ConversationResponse, EmptyResponseContext, ResponseModelMetadata,
+    SamplingError,
 };
 
 use crate::metrics::InferenceLatencyStats;
@@ -77,6 +78,12 @@ pub enum SamplingEvent {
         /// at (`None` for terminal-response detections). Labels only.
         doom_loop_triggers: Option<Vec<String>>,
         doom_loop_aborted_at_chunk: Option<u64>,
+        /// Exact delay selected by retry classification before the next attempt.
+        /// `None` means the retry proceeds immediately (for example, after
+        /// stripping an image from the request).
+        backoff_ms: Option<u64>,
+        /// Safe router/provider diagnostics from the failed API request.
+        diagnostics: Option<ApiErrorDiagnostics>,
     },
 
     /// Request failed (after exhausting retries or non-retryable error).
@@ -125,6 +132,9 @@ pub struct SamplingErrorInfo {
     pub is_retryable: bool,
     pub retry_after_secs: Option<u64>,
     pub model_metadata: Option<ResponseModelMetadata>,
+    /// Safe router/provider and rate-limit metadata attached to API failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<ApiErrorDiagnostics>,
     /// Present only when `kind == EmptyResponse`. Carries the structured
     /// context from the L2 stream so downstream consumers can distinguish
     /// reasoning-only completions from transport failures.
@@ -187,15 +197,20 @@ impl From<&SamplingError> for SamplingErrorInfo {
         let is_retryable = err.is_retryable();
         let message = err.to_string();
 
-        let (kind, status_code, retry_after_secs, model_metadata) = match err {
-            SamplingError::Auth(_) => (SamplingErrorKind::Auth, None, None, None),
-            SamplingError::InvalidConfiguration(_) => (SamplingErrorKind::Api, None, None, None),
-            SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None),
-            SamplingError::Serialization(_) => (SamplingErrorKind::Serialization, None, None, None),
+        let (kind, status_code, retry_after_secs, model_metadata, diagnostics) = match err {
+            SamplingError::Auth(_) => (SamplingErrorKind::Auth, None, None, None, None),
+            SamplingError::InvalidConfiguration(_) => {
+                (SamplingErrorKind::Api, None, None, None, None)
+            }
+            SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None, None),
+            SamplingError::Serialization(_) => {
+                (SamplingErrorKind::Serialization, None, None, None, None)
+            }
             SamplingError::Api {
                 status,
                 model_metadata,
                 retry_after_secs,
+                diagnostics,
                 ..
             } => {
                 let kind = if err.is_rate_limited() {
@@ -208,19 +223,26 @@ impl From<&SamplingError> for SamplingErrorInfo {
                     Some(status.as_u16()),
                     *retry_after_secs,
                     model_metadata.clone(),
+                    diagnostics.clone(),
                 )
             }
-            SamplingError::EventStreamError(_) => (SamplingErrorKind::Http, None, None, None),
-            SamplingError::StreamError { .. } => (SamplingErrorKind::Api, None, None, None),
-            SamplingError::IdleTimeout { .. } => (SamplingErrorKind::IdleTimeout, None, None, None),
+            SamplingError::EventStreamError(_) => (SamplingErrorKind::Http, None, None, None, None),
+            SamplingError::StreamError { .. } => (SamplingErrorKind::Api, None, None, None, None),
+            SamplingError::IdleTimeout { .. } => {
+                (SamplingErrorKind::IdleTimeout, None, None, None, None)
+            }
             SamplingError::EmptyResponse { .. } => {
-                (SamplingErrorKind::EmptyResponse, None, None, None)
+                (SamplingErrorKind::EmptyResponse, None, None, None, None)
             }
-            SamplingError::MaxTokensTruncation => {
-                (SamplingErrorKind::MaxTokensTruncation, None, None, None)
-            }
+            SamplingError::MaxTokensTruncation => (
+                SamplingErrorKind::MaxTokensTruncation,
+                None,
+                None,
+                None,
+                None,
+            ),
             SamplingError::DoomLoopDetected { .. } => {
-                (SamplingErrorKind::DoomLoopDetected, None, None, None)
+                (SamplingErrorKind::DoomLoopDetected, None, None, None, None)
             }
         };
 
@@ -243,6 +265,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             is_retryable,
             retry_after_secs,
             model_metadata,
+            diagnostics,
             empty_response_context,
             doom_loop_triggers,
             doom_loop_aborted_at_chunk,
@@ -293,6 +316,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);
@@ -308,12 +332,38 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(15),
             should_retry: None,
+            diagnostics: None,
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::RateLimited);
         assert_eq!(info.status_code, Some(429));
         assert_eq!(info.retry_after_secs, Some(15));
         assert!(info.is_retryable, "429 should be retryable");
+    }
+
+    #[test]
+    fn api_error_diagnostics_are_preserved_for_event_consumers() {
+        let err = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "slow down".into(),
+            model_metadata: None,
+            retry_after_secs: Some(60),
+            should_retry: None,
+            diagnostics: Some(ApiErrorDiagnostics {
+                provider_name: Some("OpenRouter".into()),
+                provider_code: Some("rate_limit_exceeded".into()),
+                rate_limit_remaining: Some("0".into()),
+                ..Default::default()
+            }),
+        };
+        let info = SamplingErrorInfo::from(&err);
+        let diagnostics = info.diagnostics.expect("diagnostics preserved");
+        assert_eq!(diagnostics.provider_name.as_deref(), Some("OpenRouter"));
+        assert_eq!(
+            diagnostics.provider_code.as_deref(),
+            Some("rate_limit_exceeded")
+        );
+        assert_eq!(diagnostics.rate_limit_remaining.as_deref(), Some("0"));
     }
 
     #[test]
@@ -327,6 +377,7 @@ mod tests {
             }),
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::Api);

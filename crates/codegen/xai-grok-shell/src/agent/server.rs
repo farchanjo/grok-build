@@ -186,6 +186,9 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
 
                     let local_set = tokio::task::LocalSet::new();
                     local_set.block_on(&rt, async move {
+                        crate::agent::providers::ProviderManager::default()
+                            .refresh_configured_catalogs()
+                            .await;
                         run_persistent_agent(agent_config, conn_rx, prefetched_models).await
                     });
 

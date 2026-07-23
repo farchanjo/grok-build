@@ -2566,7 +2566,16 @@ impl SessionActor {
                 reason,
                 doom_loop_triggers,
                 doom_loop_aborted_at_chunk,
+                backoff_ms,
+                diagnostics,
             } => {
+                let is_rate_limited = kind == xai_grok_sampler::SamplingErrorKind::RateLimited;
+                let provider_name = diagnostics
+                    .as_ref()
+                    .and_then(|value| value.provider_name.clone());
+                let provider_code = diagnostics
+                    .as_ref()
+                    .and_then(|value| value.provider_code.clone());
                 if kind == xai_grok_sampler::SamplingErrorKind::DoomLoopDetected {
                     let triggers = doom_loop_triggers.unwrap_or_default();
                     let attempt_number = {
@@ -2595,6 +2604,14 @@ impl SessionActor {
                         "max_retries": max_retries,
                         "kind": kind.as_str(),
                         "reason": crate::util::truncate(&reason, 300),
+                        "backoff_ms": backoff_ms,
+                        "provider_name": provider_name.as_deref(),
+                        "provider_code": provider_code.as_deref(),
+                        "error_type": diagnostics.as_ref().and_then(|value| value.error_type.as_deref()),
+                        "rate_limit_limit": diagnostics.as_ref().and_then(|value| value.rate_limit_limit.as_deref()),
+                        "rate_limit_remaining": diagnostics.as_ref().and_then(|value| value.rate_limit_remaining.as_deref()),
+                        "rate_limit_reset": diagnostics.as_ref().and_then(|value| value.rate_limit_reset.as_deref()),
+                        "generation_id": diagnostics.as_ref().and_then(|value| value.generation_id.as_deref()),
                     })),
                 );
                 self.send_xai_notification(XaiSessionUpdate::RetryState(
@@ -2602,6 +2619,10 @@ impl SessionActor {
                         attempt,
                         max_retries,
                         reason,
+                        backoff_ms,
+                        is_rate_limited,
+                        provider_name,
+                        provider_code,
                     },
                 ))
                 .await;
@@ -2616,6 +2637,13 @@ impl SessionActor {
                         "status_code": error.status_code,
                         "is_retryable": error.is_retryable,
                         "message": crate::util::truncate(&error.message, 300),
+                        "provider_name": error.diagnostics.as_ref().and_then(|value| value.provider_name.as_deref()),
+                        "provider_code": error.diagnostics.as_ref().and_then(|value| value.provider_code.as_deref()),
+                        "error_type": error.diagnostics.as_ref().and_then(|value| value.error_type.as_deref()),
+                        "rate_limit_limit": error.diagnostics.as_ref().and_then(|value| value.rate_limit_limit.as_deref()),
+                        "rate_limit_remaining": error.diagnostics.as_ref().and_then(|value| value.rate_limit_remaining.as_deref()),
+                        "rate_limit_reset": error.diagnostics.as_ref().and_then(|value| value.rate_limit_reset.as_deref()),
+                        "generation_id": error.diagnostics.as_ref().and_then(|value| value.generation_id.as_deref()),
                     })),
                 );
                 self.signals_handle()

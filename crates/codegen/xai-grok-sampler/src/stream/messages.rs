@@ -430,6 +430,7 @@ pub fn stream_messages<'a>(
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
+                        diagnostics: None,
                     };
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),

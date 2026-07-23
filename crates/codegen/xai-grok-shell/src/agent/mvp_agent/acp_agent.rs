@@ -2286,12 +2286,21 @@ impl acp::Agent for MvpAgent {
         let (model_tx, model_rx) = oneshot::channel();
         let _ = handle
             .cmd_tx
-            .send(crate::session::SessionCommand::GetCurrentModel {
+            .send(crate::session::SessionCommand::GetCurrentModelRoute {
                 responds_to: model_tx,
             });
-        let model = model_rx
+        let (model, native_provider) = model_rx
             .await
-            .unwrap_or_else(|_| self.sampling_config.borrow().model.clone());
+            .unwrap_or_else(|_| (self.sampling_config.borrow().model.clone(), None));
+        if native_provider.is_none()
+            && let Some(entry) =
+                crate::agent::config::find_model_by_id(&self.models_manager.models(), &model)
+            && let Some(provider) = crate::agent::providers::missing_api_key_provider(entry)
+        {
+            return Err(
+                acp::Error::invalid_params().data(provider.missing_api_key_message()),
+            );
+        }
         let mut parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>> = None;
         let verbatim = arguments
             .meta
@@ -3323,6 +3332,13 @@ impl acp::Agent for MvpAgent {
             return Err(
                 acp::Error::invalid_params()
                     .data("This model isn't allowed by your allowed_models setting."),
+            );
+        }
+        if let Some(provider) =
+            crate::agent::providers::missing_api_key_provider(&model)
+        {
+            return Err(
+                acp::Error::invalid_params().data(provider.missing_api_key_message()),
             );
         }
         let session_id = args.session_id.clone();

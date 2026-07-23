@@ -144,12 +144,13 @@ pub struct PromptContext {
     /// stdio / generic-ACP).
     #[serde(default)]
     pub is_non_interactive: bool,
-    /// Identity in the primary grok-build system prompt (`You are <label>…`).
+    /// Legacy/custom-template identity label. The primary prompt uses a neutral,
+    /// role-based identity so model/provider switches cannot misidentify the agent.
     /// Not the UI picker name. Defaults to [`DEFAULT_SYSTEM_PROMPT_LABEL`].
     #[serde(default = "default_system_prompt_label")]
     pub system_prompt_label: String,
 }
-/// Default identity on trim-tool-descriptions (`You are Grok released by xAI`).
+/// Default legacy/custom-template identity label.
 pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "Grok";
 fn default_system_prompt_label() -> String {
     DEFAULT_SYSTEM_PROMPT_LABEL.to_string()

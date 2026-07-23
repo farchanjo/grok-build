@@ -55,6 +55,14 @@ pub async fn spawn_grok_shell(
     // cache). Never errors — the OS-protected system/MDM layers still apply.
     xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
 
+    // Provider discovery must complete before bootstrap freezes the model
+    // catalog. This is the normal in-process TUI/headless path, so refreshing
+    // only the stdio/leader entrypoints leaves the first `/model` picker with
+    // stale presets until the next process start.
+    xai_grok_shell::agent::providers::ProviderManager::default()
+        .refresh_configured_catalogs()
+        .await;
+
     // Run the full bootstrap sequence: config resolution, process-level
     // singletons, and model catalog construction.
     let (agent_config, models_manager) =

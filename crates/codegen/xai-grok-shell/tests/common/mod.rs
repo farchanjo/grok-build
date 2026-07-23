@@ -329,7 +329,9 @@ pub fn test_sampler_config(
         max_completion_tokens: Some(1000),
         temperature: Some(0.7),
         top_p: None,
+        openrouter_fallback_models: Vec::new(),
         api_backend,
+        include_message_model_id: true,
         auth_scheme: Default::default(),
         extra_headers: extra_headers
             .iter()

@@ -71,6 +71,82 @@ pub(super) fn task_model_override_error(
         is_session_auth,
     )
 }
+
+/// Load the durable native-Codex resume pointer and reject any attempt to
+/// cross a parent session, provider, model, cwd, or sandbox boundary. The
+/// thread is resumed by app-server from its own persisted rollout; Grok Build
+/// never reconstructs it by replaying text.
+fn load_codex_resume_meta(
+    ctx: &SubagentSpawnContext,
+    source_id: &str,
+    model_id: &str,
+    cwd: &str,
+    sandbox: crate::agent::codex_app_server::CodexSandboxMode,
+) -> Result<SubagentMeta, String> {
+    let parent_info = SessionInfo {
+        id: acp::SessionId::new(ctx.parent_session_id.clone()),
+        cwd: ctx.parent_cwd.to_string_lossy().to_string(),
+    };
+    let meta_path = session::persistence::session_dir(&parent_info)
+        .join("subagents")
+        .join(source_id)
+        .join("meta.json");
+    let data = std::fs::read_to_string(&meta_path).map_err(|_| {
+        format!(
+            "Cannot resume from Codex subagent '{source_id}': native resume metadata is missing."
+        )
+    })?;
+    let meta: SubagentMeta = serde_json::from_str(&data).map_err(|_| {
+        format!(
+            "Cannot resume from Codex subagent '{source_id}': native resume metadata is invalid."
+        )
+    })?;
+    if meta.parent_session_id != ctx.parent_session_id || meta.subagent_id != source_id {
+        return Err(format!(
+            "Cannot resume from Codex subagent '{source_id}': it belongs to a different parent session."
+        ));
+    }
+    if !matches!(meta.status.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(format!(
+            "Cannot resume from Codex subagent '{source_id}': it is not terminal."
+        ));
+    }
+    if meta.codex_provider.as_deref() != Some("codex") {
+        return Err(format!(
+            "Cannot resume from subagent '{source_id}': it was not created by the Codex provider."
+        ));
+    }
+    if meta.effective_model_id.as_deref() != Some(model_id) {
+        return Err(format!(
+            "Cannot resume from Codex subagent '{source_id}': source model does not match '{model_id}'."
+        ));
+    }
+    if meta.child_cwd.as_deref() != Some(cwd) {
+        return Err(format!(
+            "Cannot resume from Codex subagent '{source_id}': source cwd does not match the resumed workspace."
+        ));
+    }
+    let source_sandbox = meta
+        .codex_sandbox
+        .as_deref()
+        .and_then(crate::agent::codex_app_server::CodexSandboxMode::from_wire)
+        .ok_or_else(|| {
+            format!(
+                "Cannot resume from Codex subagent '{source_id}': source sandbox metadata is missing or invalid."
+            )
+        })?;
+    if source_sandbox != sandbox {
+        return Err(format!(
+            "Cannot resume from Codex subagent '{source_id}': source sandbox does not match the current capability policy."
+        ));
+    }
+    if meta.codex_thread_id.as_deref().is_none_or(str::is_empty) {
+        return Err(format!(
+            "Cannot resume from Codex subagent '{source_id}': persisted Codex thread id is missing."
+        ));
+    }
+    Ok(meta)
+}
 /// This is a free async function, NOT a method on MvpAgent. It receives
 /// a `SubagentSpawnContext` with everything it needs, and a mutable
 /// reference to the coordinator for tracking.
@@ -559,6 +635,216 @@ pub(crate) async fn handle_subagent_request(
         )
         .to_string_lossy()
         .into_owned();
+    let effective_provider = crate::agent::config::find_model_by_id(
+        &ctx.available_models,
+        effective_model_id.0.as_ref(),
+    )
+    .and_then(|entry| entry.model_provider.clone());
+    if let Some(provider) = effective_provider
+        && provider.kind == crate::agent::model_providers::ModelProviderKind::Codex
+    {
+        let parent_session_dir = session::persistence::session_dir(&SessionInfo {
+            id: acp::SessionId::new(ctx.parent_session_id.clone()),
+            cwd: ctx.parent_cwd.to_string_lossy().to_string(),
+        });
+        let subagent_meta_dir = parent_session_dir.join("subagents").join(&request.id);
+        let child_session_id = format!("codex:{}", request.id);
+        emit_subagent_notification(
+            gateway,
+            &ctx.parent_session_id,
+            SessionUpdate::SubagentSpawned {
+                subagent_id: request.id.clone(),
+                child_session_id: child_session_id.clone(),
+                parent_session_id: ctx.parent_session_id.clone(),
+                parent_prompt_id: request.parent_prompt_id.clone(),
+                subagent_type: request.subagent_type.clone(),
+                description: request.description.clone(),
+                effective_context_source: Some("provider".to_string()),
+                context_normalized: false,
+                capability_mode: effective_runtime
+                    .capability_mode
+                    .and_then(|mode| serde_json::to_value(mode).ok())
+                    .and_then(|value| value.as_str().map(String::from)),
+                persona: effective_runtime.persona.clone(),
+                role: effective_runtime.role_name.clone(),
+                model: Some(effective_model_id.0.to_string()),
+                resumed_from: request.resume_from.clone(),
+                workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
+            },
+            ctx.parent_cmd_tx.as_ref(),
+        );
+
+        let mut codex_request = crate::agent::codex_app_server::CodexRunRequest::new(
+            effective_sampling_config.model.clone(),
+            PathBuf::from(&effective_cwd),
+            request.prompt.clone(),
+        );
+        codex_request.command = provider.command;
+        codex_request.reasoning_effort = effective_runtime.reasoning_effort.clone();
+        codex_request.output_schema = request.runtime_overrides.output_schema.clone();
+        codex_request.idle_timeout =
+            std::time::Duration::from_secs(ctx.inference_idle_timeout_secs);
+        codex_request.sandbox = if ctx.yolo_mode {
+            crate::agent::codex_app_server::CodexSandboxMode::DangerFullAccess
+        } else if matches!(
+            effective_runtime.capability_mode,
+            Some(
+                xai_tool_types::SubagentCapabilityMode::ReadOnly
+                    | xai_tool_types::SubagentCapabilityMode::Execute
+            )
+        ) {
+            crate::agent::codex_app_server::CodexSandboxMode::ReadOnly
+        } else {
+            crate::agent::codex_app_server::CodexSandboxMode::WorkspaceWrite
+        };
+
+        let resume_meta = match request.resume_from.as_deref() {
+            Some(source_id) => match load_codex_resume_meta(
+                &ctx,
+                source_id,
+                effective_model_id.0.as_ref(),
+                &effective_cwd,
+                codex_request.sandbox,
+            ) {
+                Ok(meta) => Some(meta),
+                Err(error) => {
+                    pending_guard.set_error(error.clone());
+                    send_failure(request, &error);
+                    return;
+                }
+            },
+            None => None,
+        };
+        if let Some(meta) = resume_meta.as_ref() {
+            codex_request.resume_thread_id = meta.codex_thread_id.clone();
+        }
+        let codex_sandbox = codex_request.sandbox;
+
+        let run_result = crate::agent::codex_app_server::run_codex_turn(
+            codex_request,
+            cancel_token.clone(),
+        )
+        .await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let mut completed_codex_thread_id = None;
+        let mut result = match run_result {
+            Ok(codex) => {
+                completed_codex_thread_id = Some(codex.thread_id.clone());
+                SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(codex.output),
+                    subagent_id: request.id.clone(),
+                    child_session_id: codex.thread_id,
+                    tool_calls: 0,
+                    turns: 1,
+                    duration_ms,
+                    output_usage_incomplete: true,
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                    ..Default::default()
+                }
+            }
+            Err(crate::agent::codex_app_server::CodexAppServerError::Cancelled) => {
+                SubagentResult {
+                    success: false,
+                    cancelled: true,
+                    error: Some("Codex agent was cancelled".to_string()),
+                    subagent_id: request.id.clone(),
+                    child_session_id: child_session_id.clone(),
+                    duration_ms,
+                    output_usage_incomplete: true,
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                    ..Default::default()
+                }
+            }
+            Err(error) => SubagentResult {
+                success: false,
+                error: Some(format!("Codex agent failed: {error}")),
+                subagent_id: request.id.clone(),
+                child_session_id: child_session_id.clone(),
+                duration_ms,
+                output_usage_incomplete: true,
+                worktree_path: worktree_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        };
+        if result.output.is_empty() && result.success {
+            result.output = std::sync::Arc::from("Codex agent completed successfully.");
+        }
+        if let Some(thread_id) = completed_codex_thread_id {
+            let meta = SubagentMeta {
+                subagent_id: request.id.clone(),
+                parent_session_id: ctx.parent_session_id.clone(),
+                child_session_id: thread_id.clone(),
+                subagent_type: request.subagent_type.clone(),
+                description: request.description.clone(),
+                prompt: request.prompt.clone(),
+                status: result.status().to_string(),
+                started_at: chrono::Utc::now()
+                    - chrono::Duration::milliseconds(duration_ms.min(i64::MAX as u64) as i64),
+                completed_at: Some(chrono::Utc::now()),
+                duration_ms: Some(duration_ms),
+                tool_calls: Some(result.tool_calls),
+                turns: Some(result.turns),
+                error: result.error.clone(),
+                effective_context_source: Some(if request.resume_from.is_some() {
+                    "resumed".to_string()
+                } else {
+                    "provider".to_string()
+                }),
+                context_normalized: false,
+                fork_copy_error: None,
+                persona: effective_runtime.persona.clone(),
+                resumed_from: request.resume_from.clone(),
+                child_cwd: Some(effective_cwd.clone()),
+                worktree_path: worktree_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                snapshot_ref: None,
+                effective_model_id: Some(effective_model_id.0.to_string()),
+                codex_thread_id: Some(thread_id),
+                codex_provider: Some("codex".to_string()),
+                codex_sandbox: Some(codex_sandbox.as_wire().to_string()),
+            };
+            if !write_subagent_meta(&subagent_meta_dir, &meta) {
+                let error = "Codex subagent completed but its resume metadata could not be persisted";
+                pending_guard.set_error(error.to_string());
+                result.success = false;
+                result.error = Some(error.to_string());
+            }
+        }
+        let terminal_child_session_id = result.child_session_id.clone();
+        coordinator.borrow_mut().complete_pending_external(
+            &request.id,
+            result.clone(),
+            terminal_child_session_id.clone(),
+            effective_cwd.clone(),
+            worktree_path.clone(),
+            effective_model_id.0.to_string(),
+        );
+        emit_subagent_notification(
+            gateway,
+            &ctx.parent_session_id,
+            SessionUpdate::SubagentFinished {
+                subagent_id: request.id.clone(),
+                child_session_id: terminal_child_session_id,
+                status: result.status().to_string(),
+                error: result.error.clone(),
+                tool_calls: result.tool_calls,
+                turns: result.turns,
+                duration_ms,
+                tokens_used: 0,
+                output: Some(result.output.to_string()),
+                will_wake: false,
+            },
+            ctx.parent_cmd_tx.as_ref(),
+        );
+        let _ = request.result_tx.send(result);
+        return;
+    }
     let child_session_info = SessionInfo {
         id: child_session_id.clone(),
         cwd: effective_cwd,
@@ -647,6 +933,9 @@ pub(crate) async fn handle_subagent_request(
         worktree_path: worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
         snapshot_ref: None,
         effective_model_id: Some(effective_model_id.0.to_string()),
+        codex_thread_id: None,
+        codex_provider: None,
+        codex_sandbox: None,
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);
     if let (Some(bucket_url), Some(upload_method)) = (

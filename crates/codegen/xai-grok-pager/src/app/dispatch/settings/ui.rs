@@ -142,6 +142,83 @@ pub(in crate::app::dispatch) fn dispatch_open_howto_guides(app: &mut AppView) ->
     vec![]
 }
 
+/// Open the credential-free provider management surface. Provider bridge
+/// integration is intentionally performed after `ProviderCommand` is emitted;
+/// credentials remain in this modal's ephemeral state until that bridge takes
+/// them into the secure store.
+pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::ProviderKind;
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if let Some(ActiveModal::Providers { state }) = agent.active_modal.as_mut() {
+        state.clear_sensitive_input();
+        agent.active_modal = None;
+        return vec![];
+    }
+    agent.active_modal = Some(ActiveModal::Providers {
+        state: Box::new(crate::views::providers_modal::ProviderModalState::new()),
+    });
+    ProviderKind::ALL
+        .into_iter()
+        .map(|provider| Effect::ProviderOperation {
+            agent_id: id,
+            operation: crate::app::actions::ProviderOperation::Refresh(provider),
+        })
+        .collect()
+}
+
+/// Move a provider command from the modal into an async native-provider
+/// effect. Secrets are consumed exactly once and wrapped in a redacted type
+/// before leaving the reducer.
+pub(in crate::app::dispatch) fn dispatch_provider_command(
+    app: &mut AppView,
+    command: crate::views::providers_modal::ProviderCommand,
+) -> Vec<Effect> {
+    use crate::app::actions::{ProviderApiKey, ProviderOperation};
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{ProviderCommand, ProviderStatus};
+
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    let Some(ActiveModal::Providers { state }) = agent.active_modal.as_mut() else {
+        return vec![];
+    };
+
+    let operation = match command {
+        ProviderCommand::Connect(provider) | ProviderCommand::ReplaceKey(provider) => {
+            let Some(api_key) = state.take_submitted_secret(provider) else {
+                state.set_status(
+                    provider,
+                    ProviderStatus::Error("No API key was submitted".to_owned()),
+                );
+                return vec![];
+            };
+            ProviderOperation::SaveAndTest {
+                provider,
+                api_key: ProviderApiKey::new(api_key),
+            }
+        }
+        ProviderCommand::Test(provider) => ProviderOperation::Test(provider),
+        ProviderCommand::Disconnect(provider) => ProviderOperation::Disconnect(provider),
+        ProviderCommand::LoginCodex => ProviderOperation::LoginCodex,
+        ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
+        ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
+    };
+    vec![Effect::ProviderOperation {
+        agent_id,
+        operation,
+    }]
+}
+
 /// Open the settings modal. Reads the live `UiConfig` snapshot
 /// (sans-IO). Single-instance: `debug_assert!` catches routing bugs.
 ///

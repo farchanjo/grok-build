@@ -729,6 +729,21 @@ pub(super) async fn run_session(
                                 .unwrap_or_default();
                             let _ = responds_to.send(model);
                         }
+                        SessionCommand::GetCurrentModelRoute { responds_to } => {
+                            let (model, native_provider) = session
+                                .chat_state_handle
+                                .get_sampling_config()
+                                .await
+                                .map(|config| {
+                                    let provider = config
+                                        .extra_headers
+                                        .get(crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER)
+                                        .cloned();
+                                    (config.model, provider)
+                                })
+                                .unwrap_or_default();
+                            let _ = responds_to.send((model, native_provider));
+                        }
                         SessionCommand::GetCurrentPromptMode { responds_to } => {
                             let mode = *session.current_prompt_mode.lock();
                             let _ = responds_to.send(mode);

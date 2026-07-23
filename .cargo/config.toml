@@ -1,3 +1,7 @@
+[build]
+# Resolve through PATH so Homebrew and other sccache installations work.
+rustc-wrapper = "sccache"
+
 # link-arg
 # https://pyo3.rs/v0.17.1/building_and_distribution.html#macos
 

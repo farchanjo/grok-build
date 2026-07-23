@@ -290,6 +290,10 @@ pub enum ActiveModal {
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
     },
+    /// Provider credentials and Codex/ChatGPT account management (`/providers`).
+    Providers {
+        state: Box<crate::views::providers_modal::ProviderModalState>,
+    },
     /// Reset-settings confirmation, stacked above Settings.
     ///
     /// The underlying `SettingsModalState` is moved in/out so cancel
@@ -361,6 +365,8 @@ pub enum PaletteCommand {
     OpenExtensionsTab(crate::views::extensions_modal::ExtensionsTab),
     /// Open the settings modal.
     OpenSettings,
+    /// Open the provider management modal.
+    OpenProviders,
     /// Open the Agents modal (listing all agent definitions).
     OpenAgentsModal,
 }
@@ -539,6 +545,11 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::OpenSettings,
         },
         PaletteEntry {
+            label: "Providers".into(),
+            shortcut: String::new(),
+            command: PaletteCommand::OpenProviders,
+        },
+        PaletteEntry {
             label: "Keyboard Shortcuts".into(),
             shortcut: if crate::actions::ctrl_dot_unreliable() {
                 "Ctrl+X".into()
@@ -632,6 +643,7 @@ impl ActiveModal {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
+            | ActiveModal::Providers { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
@@ -661,6 +673,7 @@ impl ActiveModal {
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
+            ActiveModal::Providers { .. } => "Providers",
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
         }

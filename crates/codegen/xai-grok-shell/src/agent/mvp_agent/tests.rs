@@ -2150,6 +2150,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             stream_tool_calls: None,
             laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
         },
+        model_provider: None,
         api_key: None,
         env_key: None,
         auth_provider: None,

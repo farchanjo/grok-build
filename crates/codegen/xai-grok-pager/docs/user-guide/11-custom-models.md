@@ -89,6 +89,13 @@ context_window = 128000                   # Total context window in tokens
 extra_headers = { "x-api-key" = "sk-..." } # Extra request headers, sent verbatim (optional)
 ```
 
+For several models on the same upstream, define the connection once under
+`[model_providers.<name>]`, then reference it from each model with
+`model_provider`. A provider can declare its identity with
+`kind = "openai"`, `"openrouter"`, `"codex"`, `"xai"`, or `"custom"`.
+Provider headers are inherited per key; a model can add headers or override
+individual provider keys without dropping the others.
+
 ### Credential Resolution
 
 Grok resolves the API key in this order:
@@ -97,6 +104,9 @@ Grok resolves the API key in this order:
 2. The environment variable(s) named by `env_key` — a single string or an array of names. The first set, non-empty value wins (for example `env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]` for SSH `LC_*` forwarding)
 3. Your signed-in session token (from `grok login`), for a model with no `api_key`/`env_key` of its own
 4. The `XAI_API_KEY` environment variable (global fallback; Grok also accepts `GROK_CODE_XAI_API_KEY` for backward compatibility)
+
+For a third-party `model_provider`, missing provider credentials fail closed:
+Grok does not send an xAI session token or `XAI_API_KEY` to that provider.
 
 ### Context Window
 
@@ -176,30 +186,181 @@ extra_headers = { "x-api-key" = "sk-ant-...", "anthropic-version" = "2023-06-01"
 
 The `messages` backend uses the Anthropic Messages protocol. Anthropic authenticates with an `x-api-key` header rather than `Authorization: Bearer`, so pass your key through `extra_headers`, which Grok sends verbatim.
 
-### OpenAI (Chat Completions)
+### OpenAI API and OpenRouter
 
-```toml
-[model.gpt-4o]
-model = "gpt-4o"
-base_url = "https://api.openai.com/v1"
-name = "GPT-4o"
-env_key = "OPENAI_API_KEY"
+Run `/providers` to add, replace, test, or remove an OpenAI or OpenRouter API
+key. Keys are masked in the TUI and stored under separate scopes in the
+owner-only `auth.json`; they are never written to `config.toml`.
+
+With an OpenAI key, the picker includes the curated native Responses API
+entries `openai-gpt-5.6-sol`, `openai-gpt-5.6-terra`, and
+`openai-gpt-5.6-luna`. Without an OpenAI key, none of those entries is shown.
+
+With an OpenRouter key, Grok Build fetches the authenticated
+`GET /api/v1/models` catalog and exposes every returned model as
+`openrouter:<upstream-id>`, for example
+`openrouter:anthropic/claude-sonnet-4.6` or
+`openrouter:openai/gpt-5.6-sol`. Context limits and advertised tool/reasoning
+capabilities are cached in the owner-only
+`openrouter_models_cache.json`. If a refresh fails, the last valid cache is
+used; without a key, no OpenRouter entry is shown.
+
+Saving, testing, refreshing, or removing a key rebuilds the authoritative
+catalog and updates an already-open `/model` picker without restarting the
+session. The connection test uses a non-inference endpoint, so it does not
+generate model usage. Environment variables remain supported:
+
+```bash
+export OPENAI_API_KEY="..."
+export OPENROUTER_API_KEY="..."
 ```
 
-`api_backend` defaults to `"chat_completions"`, so you don't need to set it explicitly for OpenAI.
-
-### OpenAI (Responses API)
-
-If your provider supports the newer Responses API:
+The following manual configuration is optional. Use it to add other models,
+custom headers, endpoints, or provider-specific overrides:
 
 ```toml
-[model.gpt-4o-responses]
-model = "gpt-4o"
+[model_providers.openai]
+kind = "openai"
 base_url = "https://api.openai.com/v1"
-name = "GPT-4o (Responses)"
+env_key = "OPENAI_API_KEY"
 api_backend = "responses"
-env_key = "OPENAI_API_KEY"
+
+[model.openai-gpt-5-6-sol]
+model = "gpt-5.6-sol"
+model_provider = "openai"
+name = "GPT-5.6 Sol (OpenAI API)"
+context_window = 1050000
+max_completion_tokens = 128000
+
+[model_providers.openrouter]
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+api_backend = "chat_completions"
+openrouter_fallback_models = [
+  "openai/gpt-5-mini",
+  "google/gemini-2.5-flash",
+]
+
+[model_providers.openrouter.extra_headers]
+HTTP-Referer = "https://your-project.example"
+X-OpenRouter-Title = "Grok Build"
+
+[model.openrouter-gpt-5-6-sol]
+model = "openai/gpt-5.6-sol"
+model_provider = "openrouter"
+name = "GPT-5.6 Sol (OpenRouter)"
+context_window = 1050000
+max_completion_tokens = 128000
 ```
+
+Both entries can coexist in the picker and in subagent model overrides. They
+use the same native Grok Build agent/tool loop; only inference routing and
+billing differ.
+
+For OpenRouter, `openrouter_fallback_models` is sent through its native
+`models` routing field, in the configured order, while `model` remains the
+primary route. A model inherits the provider list by default and can replace
+it—or disable fallback with an explicit empty list:
+
+```toml
+[model.openrouter-no-fallback]
+model = "openai/gpt-oss-120b"
+model_provider = "openrouter"
+openrouter_fallback_models = []
+```
+
+Fallbacks may have different prices, context windows, and tool capabilities,
+so choose compatible models. After HTTP 429, Grok Build honors the server
+backoff, spaces subsequent OpenRouter requests conservatively, and shows the
+provider plus a live retry countdown in the turn status. Normal OpenRouter
+requests are spaced by two seconds by default. These process-level controls
+are optional:
+
+```bash
+export GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS=2000
+export GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS=8
+```
+
+Set the minimum interval to `0` to disable normal spacing. Structured logs
+include safe provider, rate-limit, and generation identifiers when OpenRouter
+returns them; request content and credentials are not logged.
+
+### Codex with a ChatGPT subscription
+
+ChatGPT subscription access is not a general OpenAI API credential. Install
+the official Codex CLI, then select **Codex / ChatGPT** in `/providers` and
+press Enter to start the official browser login. Grok Build never asks for or
+stores the account password or ChatGPT token. The same login can be managed
+outside the TUI:
+
+```bash
+codex login
+codex login status
+# On a remote/headless machine:
+codex login --device-auth
+```
+
+After a successful login, Grok Build asks the native app-server for its
+paginated `model/list` catalog. The server's default model is exposed through
+the stable `codex-subscription` alias; every other visible model is selectable
+as `codex:<model>`, for example `codex:gpt-5.6-terra` or
+`codex:gpt-5.6-luna`. The choices disappear after logout or an invalid login.
+Use `/model` to select any of them without an OpenAI API key. The following
+manual form is only needed to override the command or define a pinned entry:
+
+```toml
+[model_providers.codex]
+kind = "codex"
+# Optional override; this is the default:
+command = ["codex", "app-server", "--stdio"]
+
+[model.codex-subscription]
+model = "gpt-5.6-sol"
+model_provider = "codex"
+name = "Codex (ChatGPT subscription)"
+context_window = 1050000
+```
+
+Codex is a complete coding agent rather than a sampling endpoint. Primary
+turns and subagent turns therefore run through the official native app-server,
+not through the OpenAI API or Grok Build's inference sampler. The primary
+session persists its private Codex thread link in `codex_thread.json` and
+resumes it on subsequent Codex turns. API credential fields on a Codex
+provider are ignored and accidental direct inference fails closed:
+
+```text
+task(
+  prompt="Review and fix the authentication module",
+  description="Codex auth review",
+  subagent_type="general-purpose",
+  model="codex-subscription",
+  run_in_background=true
+)
+```
+
+Codex tasks use the official JSONL app-server protocol over stdio, inherit the
+local `codex login` session, run non-interactively with approval escalation
+disabled, and can execute concurrently with OpenAI/OpenRouter subagents.
+`resume_from` accepts the original Grok Build subagent ID. The runtime resolves
+the private Codex thread ID from session metadata, validates session ownership,
+provider, model, working directory, and sandbox, then continues it through
+`thread/resume`.
+
+To use all three at once, launch each task in the background:
+
+```text
+task(prompt="Analyze the API", description="OpenAI analysis",
+     model="openai-gpt-5.6-sol", run_in_background=true)
+task(prompt="Review the implementation", description="OpenRouter review",
+     model="openrouter:anthropic/claude-sonnet-4.6", run_in_background=true)
+task(prompt="Implement the selected fix", description="Codex implementation",
+     model="codex:gpt-5.6-terra", run_in_background=true)
+```
+
+Each call returns its own subagent ID immediately. OpenAI and OpenRouter use
+their native HTTP APIs; Codex uses its native app-server protocol. No ACP
+adapter is used as a provider transport.
 
 ### Ollama (Local Models)
 

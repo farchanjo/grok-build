@@ -140,6 +140,10 @@
             attempt: 1,
             max_retries: 3,
             reason: "rate limited".into(),
+            backoff_ms: Some(60_000),
+            is_rate_limited: true,
+            provider_name: Some("OpenRouter".into()),
+            provider_code: Some("rate_limited".into()),
         };
         apply_retry_state(&retry, &mut session, &mut scrollback, false);
         assert!(
@@ -883,4 +887,3 @@
             "non-encrypted_content error types must not set model_incompatible"
         );
     }
-

@@ -89,9 +89,9 @@ use super::settings::setters::{
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
-    dispatch_open_reset_confirm, dispatch_open_settings, dispatch_toggle_compact_mode,
-    dispatch_toggle_mouse_capture, dispatch_toggle_multiline, dispatch_toggle_timestamps,
-    dispatch_toggle_vim_mode,
+    dispatch_open_providers, dispatch_open_reset_confirm, dispatch_open_settings,
+    dispatch_provider_command, dispatch_toggle_compact_mode, dispatch_toggle_mouse_capture,
+    dispatch_toggle_multiline, dispatch_toggle_timestamps, dispatch_toggle_vim_mode,
 };
 use super::status::{
     dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom,
@@ -1007,6 +1007,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PreviewAutoDarkTheme(v) => preview_auto_dark_theme(app, v),
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
         Action::OpenSettings => dispatch_open_settings(app, None),
+        Action::OpenProviders => dispatch_open_providers(app),
+        Action::ProviderCommand(command) => dispatch_provider_command(app, command),
         Action::OpenSettingsFocus { key } => dispatch_open_settings(app, Some(key)),
         Action::PrivacyBannerAccept => dispatch_privacy_banner_accept(app),
         Action::PrivacyBannerCustomize => dispatch_privacy_banner_customize(app),

@@ -181,6 +181,14 @@ pub enum TurnActivity {
         max_retries: u32,
         /// Human-readable reason for the retry.
         reason: String,
+        /// Effective delay selected by the sampler.
+        backoff_ms: Option<u64>,
+        /// Local receipt time used to render a live countdown.
+        retry_started_at: std::time::Instant,
+        /// True when the retry was caused by HTTP 429.
+        is_rate_limited: bool,
+        /// OpenRouter or its selected upstream provider when known.
+        provider_name: Option<String>,
     },
     /// Turn is open but nothing is streaming; `reason` says what we're waiting
     /// on. Replaces the implicit "no activity == generic Waiting…" placeholder.

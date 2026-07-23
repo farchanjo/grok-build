@@ -22,10 +22,10 @@ use serde::Serialize;
 
 use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
 use xai_grok_sampling_types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
-    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
-    rs,
+    ApiErrorDiagnostics, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
+    ConversationRequest, ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER,
+    MessagesRequestWrapper, ResponseModelMetadata, Result, SamplingError, build_messages_request,
+    is_check_event, messages, rs,
 };
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
@@ -226,6 +226,147 @@ fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
         })
 }
 
+const MAX_DIAGNOSTIC_VALUE_CHARS: usize = 256;
+
+/// Read a response header without retaining unbounded or non-UTF-8 data.
+fn diagnostic_header(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(MAX_DIAGNOSTIC_VALUE_CHARS).collect())
+}
+
+fn diagnostic_json_string(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?.as_str()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(MAX_DIAGNOSTIC_VALUE_CHARS).collect())
+}
+
+fn diagnostic_json_scalar(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    if value.is_string() {
+        return diagnostic_json_string(Some(value));
+    }
+    if value.is_number() {
+        return Some(
+            value
+                .to_string()
+                .chars()
+                .take(MAX_DIAGNOSTIC_VALUE_CHARS)
+                .collect(),
+        );
+    }
+    None
+}
+
+fn openrouter_attempt_provider(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("attempts")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|attempts| attempts.last())
+        .and_then(|attempt| diagnostic_json_string(attempt.get("provider")))
+        .or_else(|| {
+            metadata
+                .pointer("/endpoints/available")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|endpoints| {
+                    endpoints
+                        .iter()
+                        .find(|endpoint| {
+                            endpoint
+                                .get("selected")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false)
+                        })
+                        .and_then(|endpoint| diagnostic_json_string(endpoint.get("provider")))
+                })
+        })
+}
+
+/// Extract only the documented OpenRouter routing fields. We deliberately do
+/// not retain arbitrary metadata or response-body text: error envelopes can
+/// contain provider-specific details that are not safe to propagate to logs.
+fn extract_api_error_diagnostics(
+    headers: &reqwest::header::HeaderMap,
+    bytes: &[u8],
+    openrouter_metadata_requested: bool,
+) -> Option<ApiErrorDiagnostics> {
+    let mut diagnostics = ApiErrorDiagnostics {
+        rate_limit_limit: diagnostic_header(headers, "x-ratelimit-limit"),
+        rate_limit_remaining: diagnostic_header(headers, "x-ratelimit-remaining"),
+        rate_limit_reset: diagnostic_header(headers, "x-ratelimit-reset"),
+        generation_id: diagnostic_header(headers, "x-generation-id"),
+        ..Default::default()
+    };
+
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        if openrouter_metadata_requested && diagnostics.provider_name.is_none() {
+            diagnostics.provider_name = Some("OpenRouter".to_string());
+        }
+        return (!diagnostics.is_empty()).then_some(diagnostics);
+    };
+    let error = value.get("error").unwrap_or(&value);
+    let error_metadata = error.get("metadata").or_else(|| value.get("metadata"));
+    let router_metadata = value.get("openrouter_metadata");
+    diagnostics.error_type = diagnostic_json_string(
+        error_metadata
+            .and_then(|metadata| metadata.get("error_type"))
+            .or_else(|| error.get("type")),
+    );
+    diagnostics.provider_code = diagnostic_json_scalar(
+        error_metadata
+            .and_then(|metadata| metadata.get("provider_code"))
+            .or_else(|| error.get("code")),
+    );
+    diagnostics.provider_name =
+        diagnostic_json_string(error_metadata.and_then(|metadata| metadata.get("provider_name")))
+            .or_else(|| router_metadata.and_then(openrouter_attempt_provider));
+
+    if openrouter_metadata_requested && diagnostics.provider_name.is_none() {
+        // The request definitively used OpenRouter, but it did not name the
+        // selected upstream. Surface the router, not an invented provider.
+        diagnostics.provider_name = Some("OpenRouter".to_string());
+    }
+
+    (!diagnostics.is_empty()).then_some(diagnostics)
+}
+
+fn api_error(
+    status: reqwest::StatusCode,
+    message: String,
+    model_metadata: Option<ResponseModelMetadata>,
+    retry_after_secs: Option<u64>,
+    should_retry: Option<bool>,
+    diagnostics: Option<ApiErrorDiagnostics>,
+) -> SamplingError {
+    if let Some(diagnostics) = diagnostics.as_ref() {
+        tracing::warn!(
+            target: crate::sampling_log::TARGET,
+            event = "api_error_diagnostics",
+            status_code = status.as_u16(),
+            error_type = diagnostics.error_type.as_deref().unwrap_or("unknown"),
+            provider_code = diagnostics.provider_code.as_deref().unwrap_or("unknown"),
+            provider_name = diagnostics.provider_name.as_deref().unwrap_or("unknown"),
+            rate_limit_limit = ?diagnostics.rate_limit_limit,
+            rate_limit_remaining = ?diagnostics.rate_limit_remaining,
+            rate_limit_reset = diagnostics.rate_limit_reset.as_deref().unwrap_or("unknown"),
+            generation_id = diagnostics.generation_id.as_deref().unwrap_or("unknown"),
+            "API error diagnostics"
+        );
+    }
+    SamplingError::Api {
+        status,
+        message,
+        model_metadata,
+        retry_after_secs,
+        should_retry,
+        diagnostics,
+    }
+}
+
 fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<ResponseModelMetadata> {
     let context_window = headers
         .get("x-grok-context-window")
@@ -263,13 +404,40 @@ fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<Respon
 struct StreamingChatRequest<'a> {
     #[serde(flatten)]
     inner: &'a ChatCompletionRequest,
+    /// OpenRouter extension: models to try after the request's primary
+    /// `model`. Absent for native OpenAI/xAI/Codex requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models: Option<&'a [String]>,
     stream: bool,
     stream_options: StreamOptions,
+}
+
+/// Wrapper for non-streaming chat completion requests with OpenRouter's
+/// optional `models` fallback extension.
+#[derive(Serialize)]
+struct ChatRequestWithFallbacks<'a> {
+    #[serde(flatten)]
+    inner: &'a ChatCompletionRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models: Option<&'a [String]>,
 }
 
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
+}
+
+/// Add OpenRouter's documented `models` extension to an OpenAI-compatible
+/// request body. The array contains fallback models only; `model` remains the
+/// primary. Kept as a small helper so Chat Completions and Responses share the
+/// same wire contract.
+fn add_openrouter_fallback_models(
+    request_body: &mut serde_json::Value,
+    fallback_models: Option<&[String]>,
+) {
+    if let Some(models) = fallback_models.filter(|models| !models.is_empty()) {
+        request_body["models"] = serde_json::json!(models);
+    }
 }
 
 /// HTTP client for sampling. Cheap to clone; carries an `Arc`-backed
@@ -290,6 +458,9 @@ pub struct SamplingClient {
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
     /// Per-request header injection (OTel traceparent).
     header_injector: Option<crate::config::SharedHeaderInjector>,
+    /// True only when the shell selected the native OpenRouter provider and
+    /// explicitly requested its metadata response header.
+    openrouter_metadata_requested: bool,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -302,6 +473,10 @@ impl std::fmt::Debug for SamplingClient {
                 &self.attribution_callback.is_some(),
             )
             .field("has_bearer_resolver", &self.bearer_resolver.is_some())
+            .field(
+                "openrouter_metadata_requested",
+                &self.openrouter_metadata_requested,
+            )
             .finish()
     }
 }
@@ -312,7 +487,9 @@ struct ClientDefaults {
     max_completion_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    openrouter_fallback_models: Vec<String>,
     api_backend: ApiBackend,
+    include_message_model_id: bool,
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
@@ -513,6 +690,7 @@ impl SamplingClient {
             // "unset" (not "none"): `ReasoningEffort::None` is a real wire value;
             // logging the absent Option as "none" looked like we were sending it.
             reasoning_effort = config.reasoning_effort.map_or("unset", |e| e.as_str()),
+            openrouter_fallback_count = config.openrouter_fallback_models.len(),
             has_api_key = config.api_key.is_some(),
             has_bearer_resolver = config.bearer_resolver.is_some(),
             has_authorization_header = headers.get(AUTHORIZATION).is_some(),
@@ -524,7 +702,9 @@ impl SamplingClient {
             max_completion_tokens: config.max_completion_tokens,
             temperature: config.temperature,
             top_p: config.top_p,
+            openrouter_fallback_models: config.openrouter_fallback_models,
             api_backend: config.api_backend,
+            include_message_model_id: config.include_message_model_id,
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
@@ -538,6 +718,10 @@ impl SamplingClient {
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
+            openrouter_metadata_requested: config.extra_headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("x-openrouter-metadata")
+                    && value.eq_ignore_ascii_case("enabled")
+            }),
         })
     }
 
@@ -723,15 +907,36 @@ impl SamplingClient {
             request.top_p = self.defaults.top_p;
         }
 
+        if !self.defaults.include_message_model_id {
+            for message in &mut request.messages {
+                message.model_id = None;
+            }
+        }
+
         Ok(request)
+    }
+
+    /// OpenRouter's `models` extension contains fallback models only; the
+    /// normal request `model` remains the primary. The shell only populates
+    /// this configuration for an OpenRouter provider, so other API-compatible
+    /// endpoints retain their exact existing request bodies.
+    fn openrouter_fallback_models(&self) -> Option<&[String]> {
+        (!self.defaults.openrouter_fallback_models.is_empty())
+            .then_some(self.defaults.openrouter_fallback_models.as_slice())
     }
 
     async fn handle_response(&self, response: reqwest::Response) -> Result<ChatCompletionResponse> {
         let status = response.status();
-        let model_metadata = extract_model_metadata(response.headers());
-        let retry_after_secs = extract_retry_after(response.headers());
-        let should_retry = extract_should_retry(response.headers());
+        let headers = response.headers().clone();
+        let model_metadata = extract_model_metadata(&headers);
+        let retry_after_secs = extract_retry_after(&headers);
+        let should_retry = extract_should_retry(&headers);
         let bytes = response.bytes().await?;
+        let diagnostics = extract_api_error_diagnostics(
+            &headers,
+            bytes.as_ref(),
+            self.openrouter_metadata_requested,
+        );
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -742,13 +947,14 @@ impl SamplingClient {
                 )));
             }
             let message = user_facing_api_error_message(status, bytes.as_ref());
-            return Err(SamplingError::Api {
+            return Err(api_error(
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
-            });
+                diagnostics,
+            ));
         }
 
         let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).map_err(|e| {
@@ -794,7 +1000,10 @@ impl SamplingClient {
         };
         let http_request = grok_headers
             .apply(self.post(self.endpoint("chat/completions")))
-            .json(&payload);
+            .json(&ChatRequestWithFallbacks {
+                inner: &payload,
+                models: self.openrouter_fallback_models(),
+            });
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -834,6 +1043,7 @@ impl SamplingClient {
         // (to inject `stream` and `stream_options`), then to HTTP body bytes.
         let streaming_request = StreamingChatRequest {
             inner: &payload,
+            models: self.openrouter_fallback_models(),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -874,6 +1084,7 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
+        let response_headers = response.headers().clone();
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -895,6 +1106,11 @@ impl SamplingClient {
             }
 
             let bytes = response.bytes().await?;
+            let diagnostics = extract_api_error_diagnostics(
+                &response_headers,
+                bytes.as_ref(),
+                self.openrouter_metadata_requested,
+            );
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -904,13 +1120,14 @@ impl SamplingClient {
                 model_id = %model_id,
                 "chat/completions API error"
             );
-            return Err(SamplingError::Api {
+            return Err(api_error(
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
-            });
+                diagnostics,
+            ));
         }
 
         // Strip UTF-8 BOM if present: eventsource-stream 0.2.3 incorrectly slices BOM at byte 1 instead of 3.
@@ -1058,6 +1275,7 @@ impl SamplingClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             SamplingError::Serialization(e)
         })?;
+        add_openrouter_fallback_models(&mut request_body, self.openrouter_fallback_models());
         // async-openai's ReasoningTextContent struct omits the `type`
         // discriminator that the Responses API requires on input. Patch
         // it in post-serialize. This is the last surviving piece of the
@@ -1073,10 +1291,16 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
-        let model_metadata = extract_model_metadata(response.headers());
-        let retry_after_secs = extract_retry_after(response.headers());
-        let should_retry = extract_should_retry(response.headers());
+        let response_headers = response.headers().clone();
+        let model_metadata = extract_model_metadata(&response_headers);
+        let retry_after_secs = extract_retry_after(&response_headers);
+        let should_retry = extract_should_retry(&response_headers);
         let bytes = response.bytes().await?;
+        let diagnostics = extract_api_error_diagnostics(
+            &response_headers,
+            bytes.as_ref(),
+            self.openrouter_metadata_requested,
+        );
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1096,13 +1320,14 @@ impl SamplingClient {
                 model_id = %model_id,
                 "responses API error"
             );
-            return Err(SamplingError::Api {
+            return Err(api_error(
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
-            });
+                diagnostics,
+            ));
         }
 
         let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
@@ -1189,6 +1414,7 @@ impl SamplingClient {
         if self.defaults.stream_tool_calls {
             request_body["stream_tool_calls"] = serde_json::json!(true);
         }
+        add_openrouter_fallback_models(&mut request_body, self.openrouter_fallback_models());
         // Inject xAI-specific tools (e.g., x_search) that can't be expressed
         // via async_openai's rs::Tool enum.
         if !extra_tool_entries.is_empty() {
@@ -1233,6 +1459,7 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
+        let response_headers = response.headers().clone();
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -1247,10 +1474,15 @@ impl SamplingClient {
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
-            let model_metadata = extract_model_metadata(response.headers());
-            let retry_after_secs = extract_retry_after(response.headers());
-            let should_retry = extract_should_retry(response.headers());
+            let model_metadata = extract_model_metadata(&response_headers);
+            let retry_after_secs = extract_retry_after(&response_headers);
+            let should_retry = extract_should_retry(&response_headers);
             let bytes = response.bytes().await?;
+            let diagnostics = extract_api_error_diagnostics(
+                &response_headers,
+                bytes.as_ref(),
+                self.openrouter_metadata_requested,
+            );
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -1260,13 +1492,14 @@ impl SamplingClient {
                 model_id = %model_id,
                 "responses API error"
             );
-            return Err(SamplingError::Api {
+            return Err(api_error(
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
-            });
+                diagnostics,
+            ));
         }
 
         let model_metadata = extract_model_metadata(response.headers());
@@ -1412,10 +1645,16 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
-        let model_metadata = extract_model_metadata(response.headers());
-        let retry_after_secs = extract_retry_after(response.headers());
-        let should_retry = extract_should_retry(response.headers());
+        let response_headers = response.headers().clone();
+        let model_metadata = extract_model_metadata(&response_headers);
+        let retry_after_secs = extract_retry_after(&response_headers);
+        let should_retry = extract_should_retry(&response_headers);
         let bytes = response.bytes().await?;
+        let diagnostics = extract_api_error_diagnostics(
+            &response_headers,
+            bytes.as_ref(),
+            self.openrouter_metadata_requested,
+        );
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1435,13 +1674,14 @@ impl SamplingClient {
                 model_id = %model_id,
                 "messages API error"
             );
-            return Err(SamplingError::Api {
+            return Err(api_error(
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
-            });
+                diagnostics,
+            ));
         }
 
         let response_obj =
@@ -1533,6 +1773,7 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
+        let response_headers = response.headers().clone();
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -1547,10 +1788,15 @@ impl SamplingClient {
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
-            let model_metadata = extract_model_metadata(response.headers());
-            let retry_after_secs = extract_retry_after(response.headers());
-            let should_retry = extract_should_retry(response.headers());
+            let model_metadata = extract_model_metadata(&response_headers);
+            let retry_after_secs = extract_retry_after(&response_headers);
+            let should_retry = extract_should_retry(&response_headers);
             let bytes = response.bytes().await?;
+            let diagnostics = extract_api_error_diagnostics(
+                &response_headers,
+                bytes.as_ref(),
+                self.openrouter_metadata_requested,
+            );
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -1560,13 +1806,14 @@ impl SamplingClient {
                 model_id = %model_id,
                 "messages API error"
             );
-            return Err(SamplingError::Api {
+            return Err(api_error(
                 status,
                 message,
                 model_metadata,
                 retry_after_secs,
                 should_retry,
-            });
+                diagnostics,
+            ));
         }
 
         let model_metadata = extract_model_metadata(response.headers());
@@ -1886,6 +2133,7 @@ impl SamplingClient {
                 model_metadata: info.model_metadata,
                 retry_after_secs: info.retry_after_secs,
                 should_retry: None,
+                diagnostics: info.diagnostics,
             })
     }
 }
@@ -1904,7 +2152,9 @@ mod tests {
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            openrouter_fallback_models: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
+            include_message_model_id: true,
             auth_scheme: AuthScheme::Bearer,
             extra_headers: IndexMap::new(),
             context_window: 8192,
@@ -1959,6 +2209,7 @@ mod tests {
 
         let wrapper = StreamingChatRequest {
             inner: &request,
+            models: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -1990,6 +2241,103 @@ mod tests {
 
         assert!(obj.get("max_tokens").is_none());
         assert!(obj.get("tools").is_none());
+        assert!(obj.get("models").is_none());
+    }
+
+    #[test]
+    fn chat_request_serializes_openrouter_fallback_models_only_when_configured() {
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let fallbacks = vec![
+            "openai/gpt-oss-20b".to_string(),
+            "meta-llama/llama-3.3-70b-instruct".to_string(),
+        ];
+
+        let with_fallbacks = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &request,
+            models: Some(&fallbacks),
+        })
+        .unwrap();
+        assert_eq!(
+            with_fallbacks["model"],
+            serde_json::json!("openai/gpt-oss-120b"),
+            "the ordinary model field remains the OpenRouter primary"
+        );
+        assert_eq!(with_fallbacks["models"], serde_json::json!(fallbacks));
+
+        let without_fallbacks = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &request,
+            models: None,
+        })
+        .unwrap();
+        assert!(
+            without_fallbacks.get("models").is_none(),
+            "an empty configuration must not change OpenAI-compatible bodies"
+        );
+    }
+
+    #[test]
+    fn responses_request_serializes_openrouter_fallback_models_only_when_configured() {
+        let fallbacks = vec!["openai/gpt-5-mini".to_string()];
+        let mut request_body = serde_json::json!({
+            "model": "openai/gpt-oss-120b",
+            "input": "hello"
+        });
+
+        add_openrouter_fallback_models(&mut request_body, Some(&fallbacks));
+        assert_eq!(
+            request_body["model"],
+            serde_json::json!("openai/gpt-oss-120b")
+        );
+        assert_eq!(request_body["models"], serde_json::json!(fallbacks));
+
+        let mut standard_body = serde_json::json!({ "model": "gpt-5" });
+        add_openrouter_fallback_models(&mut standard_body, None);
+        assert!(standard_body.get("models").is_none());
+    }
+
+    #[test]
+    fn openai_compatible_history_omits_internal_message_model_id() {
+        let mut config = minimal_config();
+        config.include_message_model_id = false;
+        let client = SamplingClient::new(config).unwrap();
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![
+                ChatRequestMessage::user("first"),
+                ChatRequestMessage::assistant("answer", "openai/gpt-oss-120b", None),
+                ChatRequestMessage::user("second"),
+            ],
+        );
+
+        let payload = client.apply_defaults(request).unwrap();
+        assert!(payload.messages[1].model_id.is_none());
+        let json = serde_json::to_value(payload).unwrap();
+        assert!(
+            json["messages"][1].get("model_id").is_none(),
+            "internal model metadata must not reach strict OpenAI-compatible providers"
+        );
+    }
+
+    #[test]
+    fn xai_history_preserves_message_model_id() {
+        let client = SamplingClient::new(minimal_config()).unwrap();
+        let request = ChatCompletionRequest::new(
+            "grok-test",
+            vec![ChatRequestMessage::assistant(
+                "answer",
+                "grok-previous",
+                None,
+            )],
+        );
+
+        let payload = client.apply_defaults(request).unwrap();
+        assert_eq!(
+            payload.messages[0].model_id.as_deref(),
+            Some("grok-previous")
+        );
     }
 
     #[test]
@@ -2061,6 +2409,71 @@ mod tests {
     fn extract_should_retry_absent_is_none() {
         let headers = reqwest::header::HeaderMap::new();
         assert_eq!(extract_should_retry(&headers), None);
+    }
+
+    #[test]
+    fn extracts_openrouter_error_and_rate_limit_diagnostics() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-limit", HeaderValue::from_static("60"));
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        headers.insert("x-ratelimit-reset", HeaderValue::from_static("60"));
+        headers.insert("x-generation-id", HeaderValue::from_static("gen_abc"));
+        let body = br#"{
+            "error": {
+                "metadata": {
+                    "error_type": "provider_error",
+                    "provider_code": "rate_limit_exceeded",
+                    "provider_name": "Example Upstream"
+                }
+            }
+        }"#;
+
+        let diagnostics = extract_api_error_diagnostics(&headers, body, true).unwrap();
+        assert_eq!(diagnostics.error_type.as_deref(), Some("provider_error"));
+        assert_eq!(
+            diagnostics.provider_code.as_deref(),
+            Some("rate_limit_exceeded")
+        );
+        assert_eq!(
+            diagnostics.provider_name.as_deref(),
+            Some("Example Upstream")
+        );
+        assert_eq!(diagnostics.rate_limit_limit.as_deref(), Some("60"));
+        assert_eq!(diagnostics.rate_limit_remaining.as_deref(), Some("0"));
+        assert_eq!(diagnostics.rate_limit_reset.as_deref(), Some("60"));
+        assert_eq!(diagnostics.generation_id.as_deref(), Some("gen_abc"));
+    }
+
+    #[test]
+    fn extracts_upstream_from_current_openrouter_metadata_envelope() {
+        let body = br#"{
+            "error": {
+                "code": 429,
+                "message": "Provider returned error"
+            },
+            "openrouter_metadata": {
+                "strategy": "fallback",
+                "attempt": 2,
+                "attempts": [
+                    {"provider": "First Provider", "status": 429},
+                    {"provider": "Second Provider", "status": 429}
+                ]
+            }
+        }"#;
+
+        let diagnostics = extract_api_error_diagnostics(&HeaderMap::new(), body, true).unwrap();
+        assert_eq!(
+            diagnostics.provider_name.as_deref(),
+            Some("Second Provider")
+        );
+        assert_eq!(diagnostics.provider_code.as_deref(), Some("429"));
+    }
+
+    #[test]
+    fn labels_router_when_openrouter_omits_upstream_name() {
+        let diagnostics = extract_api_error_diagnostics(&HeaderMap::new(), b"{}", true).unwrap();
+        assert_eq!(diagnostics.provider_name.as_deref(), Some("OpenRouter"));
+        assert!(diagnostics.provider_code.is_none());
     }
 
     #[test]

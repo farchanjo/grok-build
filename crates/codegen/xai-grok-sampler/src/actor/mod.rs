@@ -5,6 +5,7 @@
 //! tasks for the actual streaming work, so multiple requests can be
 //! in flight concurrently.
 
+pub(crate) mod pacing;
 pub(crate) mod request_task;
 pub(crate) mod state;
 
@@ -117,6 +118,7 @@ impl SamplerActor {
                     .unwrap_or_else(|| self.state.config.clone());
                 let event_tx = self.event_tx.clone();
                 let retry_policy = self.state.retry_policy.clone();
+                let inference_pacer = self.state.inference_pacer.clone();
                 let request_inner = *request;
                 self.tasks.spawn(request_task::run_request_task(
                     request_id,
@@ -126,6 +128,7 @@ impl SamplerActor {
                     event_tx,
                     cancel_token,
                     completion_tx,
+                    inference_pacer,
                 ));
             }
             SamplerCommand::Cancel { request_id } => {

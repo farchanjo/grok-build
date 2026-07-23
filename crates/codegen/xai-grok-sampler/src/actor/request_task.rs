@@ -33,6 +33,8 @@ use crate::stream::responses::stream_responses_tracked;
 use crate::stream::{stream_chat_completions, stream_messages};
 use crate::types::RequestId;
 
+use super::pacing::InferencePacer;
+
 /// Default per-chunk idle timeout when neither config nor caller
 /// supplies one. Matches the shell's session-level default
 /// (5 minutes -- long enough for cold-start reasoning, short enough
@@ -86,6 +88,7 @@ pub(crate) async fn run_request_task(
     event_tx: mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: CancellationToken,
     completion_tx: Option<oneshot::Sender<CompletionResult>>,
+    inference_pacer: Arc<InferencePacer>,
 ) -> RequestId {
     let mut completion_tx = completion_tx;
     let idle_timeout = Duration::from_secs(
@@ -139,6 +142,11 @@ pub(crate) async fn run_request_task(
             return request_id;
         }
 
+        if !inference_pacer.wait_for_slot(&config, &cancel_token).await {
+            handle_cancellation(&event_tx, &request_id, &mut completion_tx);
+            return request_id;
+        }
+
         // Once the resample budget is spent, the attempt runs with the abort
         // disarmed so it can complete and be accepted as-is.
         let doom_check = doom_policy.filter(|_| doom_retry_count < doom_max_retries);
@@ -167,6 +175,7 @@ pub(crate) async fn run_request_task(
                 response,
                 mut metrics,
             } => {
+                inference_pacer.note_success(&config).await;
                 metrics.attempts = retry_count + doom_retry_count + 1;
                 if let Some(policy) = doom_policy {
                     let confident = policy.confident_triggers(&response.doom_loop_signals);
@@ -225,6 +234,7 @@ pub(crate) async fn run_request_task(
                     &config,
                     &cancel_token,
                     &mut completion_tx,
+                    &inference_pacer,
                 )
                 .await
                 {
@@ -259,6 +269,7 @@ pub(crate) async fn run_request_task(
                         doom_retry_count,
                         doom_max_retries,
                         &error,
+                        Some(duration_to_millis(backoff)),
                     );
                     if sleep_or_cancel(backoff, &cancel_token).await {
                         continue;
@@ -278,6 +289,7 @@ pub(crate) async fn run_request_task(
                     &config,
                     &cancel_token,
                     &mut completion_tx,
+                    &inference_pacer,
                 )
                 .await
                 {
@@ -301,6 +313,7 @@ pub(crate) async fn run_request_task(
                     &config,
                     &cancel_token,
                     &mut completion_tx,
+                    &inference_pacer,
                 )
                 .await
                 {
@@ -329,6 +342,7 @@ async fn apply_retry_decision(
     config: &SamplerConfig,
     cancel_token: &CancellationToken,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
+    inference_pacer: &InferencePacer,
 ) -> bool {
     let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
         retry_mod::RATE_LIMIT_RETRY_THRESHOLD
@@ -354,7 +368,14 @@ async fn apply_retry_decision(
     match decision {
         RetryDecision::Retry { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                Some(duration_to_millis(backoff)),
+            );
             if sleep_or_cancel(backoff, cancel_token).await {
                 true
             } else {
@@ -362,9 +383,22 @@ async fn apply_retry_decision(
                 false
             }
         }
-        RetryDecision::RetryWithBackoff { backoff, .. } => {
+        RetryDecision::RetryWithBackoff {
+            backoff,
+            is_rate_limited,
+        } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            if is_rate_limited {
+                inference_pacer.note_rate_limit(config, backoff).await;
+            }
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                Some(duration_to_millis(backoff)),
+            );
             if sleep_or_cancel(backoff, cancel_token).await {
                 true
             } else {
@@ -381,12 +415,19 @@ async fn apply_retry_decision(
                 return false;
             }
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(event_tx, request_id, *retry_count, max_retries, err, None);
             true
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
             *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            emit_retrying(
+                event_tx,
+                request_id,
+                *retry_count,
+                max_retries,
+                err,
+                Some(duration_to_millis(backoff)),
+            );
             if !sleep_or_cancel(backoff, cancel_token).await {
                 handle_cancellation(event_tx, request_id, completion_tx);
                 return false;
@@ -459,6 +500,10 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
         _ = cancel_token.cancelled() => false,
         _ = tokio::time::sleep(duration) => true,
     }
+}
+
+fn duration_to_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Run a single attempt: build the raw stream, drive it through the
@@ -712,6 +757,7 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
                 model_metadata: info.model_metadata.clone(),
                 retry_after_secs: info.retry_after_secs,
                 should_retry: None,
+                diagnostics: info.diagnostics.clone(),
             }
         }
         SamplingErrorKind::EmptyResponse => {
@@ -795,6 +841,7 @@ fn emit_retrying(
     attempt: u32,
     max_retries: u32,
     err: &SamplingError,
+    backoff_ms: Option<u64>,
 ) {
     let info = SamplingErrorInfo::from(err);
     let _ = event_tx.send(SamplingEvent::Retrying {
@@ -805,6 +852,8 @@ fn emit_retrying(
         reason: err.to_string(),
         doom_loop_triggers: info.doom_loop_triggers,
         doom_loop_aborted_at_chunk: info.doom_loop_aborted_at_chunk,
+        backoff_ms,
+        diagnostics: info.diagnostics,
     });
 }
 
@@ -823,6 +872,7 @@ fn handle_cancellation(
         is_retryable: false,
         retry_after_secs: None,
         model_metadata: None,
+        diagnostics: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
@@ -860,6 +910,7 @@ mod tests {
             is_retryable: false,
             retry_after_secs: None,
             model_metadata: None,
+            diagnostics: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
@@ -880,6 +931,7 @@ mod tests {
             is_retryable: true,
             retry_after_secs: None,
             model_metadata: None,
+            diagnostics: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
@@ -905,6 +957,7 @@ mod tests {
             is_retryable: true,
             retry_after_secs: Some(7),
             model_metadata: None,
+            diagnostics: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
@@ -970,6 +1023,7 @@ mod tests {
         };
         let mut client = SamplingClient::new(config.clone()).expect("test client");
         let error = SamplingError::EventStreamError("retry me".into());
+        let inference_pacer = InferencePacer::default();
 
         let should_continue = apply_retry_decision(
             &error,
@@ -983,6 +1037,7 @@ mod tests {
             &config,
             &cancel_token,
             &mut completion_tx,
+            &inference_pacer,
         )
         .await;
 

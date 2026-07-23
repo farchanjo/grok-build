@@ -591,6 +591,12 @@ pub enum Action {
     /// Open the settings modal (F2, `/settings`, command palette).
     /// If already open, closes it instead of stacking.
     OpenSettings,
+    /// Open the provider manager (`/providers`, command palette).
+    OpenProviders,
+    /// Credential-free request emitted by the provider modal. The provider
+    /// bridge reads a submitted key from the ephemeral modal state instead of
+    /// carrying it through this debug-printable action.
+    ProviderCommand(crate::views::providers_modal::ProviderCommand),
     /// Open settings focused on a registry key (e.g. privacy banner Customize).
     OpenSettingsFocus {
         key: &'static str,
@@ -1362,6 +1368,42 @@ pub struct DoctorFixTarget {
     pub session_binding_epoch: u32,
     pub cwd: std::path::PathBuf,
 }
+
+/// API key crossing the reducer/effect boundary.
+///
+/// The plaintext is intentionally inaccessible to formatting so effect
+/// diagnostics cannot reveal it.
+pub struct ProviderApiKey(String);
+
+impl ProviderApiKey {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ProviderApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProviderApiKey([REDACTED])")
+    }
+}
+
+#[derive(Debug)]
+pub enum ProviderOperation {
+    Refresh(crate::views::providers_modal::ProviderKind),
+    SaveAndTest {
+        provider: crate::views::providers_modal::ProviderKind,
+        api_key: ProviderApiKey,
+    },
+    Test(crate::views::providers_modal::ProviderKind),
+    Disconnect(crate::views::providers_modal::ProviderKind),
+    LoginCodex,
+    LogoutCodex,
+}
+
 #[derive(Debug)]
 pub enum Effect {
     /// Create a new ACP session.
@@ -1382,6 +1424,12 @@ pub enum Effect {
     },
     /// Change the process working directory (project-picker selection).
     SetWorkingDir { path: std::path::PathBuf },
+    /// Manage a native OpenAI/OpenRouter/Codex provider without routing the
+    /// provider transport through ACP.
+    ProviderOperation {
+        agent_id: AgentId,
+        operation: ProviderOperation,
+    },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
     /// instead of creating a fresh one (`--resume` + `--worktree` combination).
@@ -2374,6 +2422,13 @@ pub enum TaskResult {
         /// rollback on `IncompatibleAgent`.
         prev_model_id: Option<acp::ModelId>,
     },
+    /// Safe display state returned by a native provider operation. No
+    /// credential or provider response body is carried back to the reducer.
+    ProviderOperationComplete {
+        agent_id: AgentId,
+        provider: crate::views::providers_modal::ProviderKind,
+        status: crate::views::providers_modal::ProviderStatus,
+    },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {
         markdown: Option<String>,
@@ -2917,5 +2972,13 @@ mod tests {
              updating the action_for_enum_commit + action_for_reset \
              dispatcher arms",
         );
+    }
+
+    #[test]
+    fn provider_api_key_debug_is_redacted() {
+        let key = ProviderApiKey::new("sk-never-print-this".to_owned());
+        let debug = format!("{key:?}");
+        assert!(!debug.contains("sk-never-print-this"));
+        assert!(debug.contains("REDACTED"));
     }
 }

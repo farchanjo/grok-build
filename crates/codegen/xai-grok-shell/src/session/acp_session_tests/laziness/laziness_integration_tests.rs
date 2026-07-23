@@ -36,6 +36,7 @@ fn detector_entry(
     };
     crate::agent::config::ModelEntry {
         info,
+        model_provider: None,
         api_key: None,
         env_key: None,
         auth_provider: None,

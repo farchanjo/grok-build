@@ -1052,6 +1052,10 @@ mod tests {
                 attempt: 2,
                 max_retries: 5,
                 reason: "rate limited".into(),
+                backoff_ms: None,
+                retry_started_at: std::time::Instant::now(),
+                is_rate_limited: true,
+                provider_name: Some("OpenRouter".into()),
             }),
             "Retrying (2/5)",
         );

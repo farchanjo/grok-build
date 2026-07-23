@@ -685,6 +685,10 @@ pub(crate) struct SessionActor {
     /// Resolved at construction: per-model config.toml → remote settings → 300s default.
     pub(crate) inference_idle_timeout: Duration,
     pub(crate) max_retries: u32,
+    /// OpenRouter fallback route order for the active model. Kept outside
+    /// chat-state because it is provider transport configuration, not
+    /// conversation state.
+    pub(crate) openrouter_fallback_models: std::cell::RefCell<Vec<String>>,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,
     /// Pending mid-turn interjections from the user (Ctrl+Enter).

@@ -1,6 +1,7 @@
 use crate::agent::auth_method::ModelByok;
 use crate::agent::model_providers::{
-    ModelProviderConfig, auth_config_issues, model_provider_auth_name, parse_model_providers,
+    ModelProviderConfig, ModelProviderKind, auth_config_issues, model_provider_auth_name,
+    parse_model_providers,
 };
 use crate::auth::{AuthManager, GrokComConfig, OidcAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
@@ -3436,6 +3437,16 @@ pub fn resolve_model_list(
     cfg: &Config,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
+    // Provider presets are virtual catalog entries: they never alter the
+    // parsed user config, but every shell catalog receives them. The pager and
+    // shell can therefore run in separate processes without a config.toml
+    // write or explicit cross-process refresh message.
+    let mut model_providers = cfg.model_providers.clone();
+    let mut config_models = cfg.config_models.clone();
+    crate::agent::providers::ProviderManager::install_model_presets_into(
+        &mut model_providers,
+        &mut config_models,
+    );
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
     if cfg.endpoints.has_custom_endpoint() {
         tracing::info!(
@@ -3480,7 +3491,7 @@ pub fn resolve_model_list(
         }
         resolved = prefetched;
     }
-    for (key, model_override) in &cfg.config_models {
+    for (key, model_override) in &config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
         if !had_base {
@@ -3494,14 +3505,30 @@ pub fn resolve_model_list(
                 );
             }
         }
-        let with_provider = model_override.model_provider.as_deref().map(|pid| {
-            match cfg.model_providers.get(pid) {
-                Some(provider) => model_override.with_provider_defaults(provider, pid),
-                None => model_override.with_missing_provider(),
-            }
-        });
+        let with_provider =
+            model_override
+                .model_provider
+                .as_deref()
+                .map(|pid| match model_providers.get(pid) {
+                    Some(provider) => model_override.with_provider_defaults(provider, pid),
+                    None => model_override.with_missing_provider(),
+                });
         let effective = with_provider.as_ref().unwrap_or(model_override);
         let mut entry = effective.apply(key, base, &cfg.endpoints);
+        let is_codex_agent = entry
+            .model_provider
+            .as_ref()
+            .is_some_and(|provider| provider.kind == ModelProviderKind::Codex);
+        if is_codex_agent {
+            // A Codex provider is an app-server-backed agent, never an
+            // inference endpoint. It remains visible as a primary model, while
+            // credentials fail closed if routing ever reaches the sampler.
+            entry.api_key = None;
+            entry.env_key = None;
+            entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(
+                "Codex app-server agent (not an inference endpoint)".to_string(),
+            ));
+        }
         let session_bearer_unsafe = !crate::util::is_xai_api_bearer_url(&entry.info.base_url)
             || entry
                 .api_base_url
@@ -3931,11 +3958,20 @@ pub struct ConfigModelOverride {
     /// are set.
     pub auth_provider: Option<String>,
     pub model_provider: Option<String>,
+    /// Resolved provider identity. Populated after parsing and never accepted
+    /// as user configuration.
+    #[serde(skip)]
+    pub resolved_model_provider: Option<crate::agent::model_providers::ResolvedModelProvider>,
     pub api_base_url: Option<String>,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
+    /// OpenRouter models to try after this model's primary `model` slug.
+    /// `None` inherits a linked `[model_providers.<id>]` list; `[]` explicitly
+    /// disables that provider-level fallback list for this one model.
+    #[serde(default)]
+    pub openrouter_fallback_models: Option<Vec<String>>,
     #[serde(default)]
     pub extra_headers: IndexMap<String, String>,
     pub context_window: Option<u64>,
@@ -4062,6 +4098,11 @@ impl ConfigModelOverride {
         }
         if self.api_base_url.is_some() {
             entry.api_base_url.clone_from(&self.api_base_url);
+        }
+        if self.resolved_model_provider.is_some() {
+            entry
+                .model_provider
+                .clone_from(&self.resolved_model_provider);
         }
         if self.supported_in_api.is_none()
             && (self.api_key.is_some() || self.env_key.is_some() || self.auth_provider.is_some())
@@ -4249,6 +4290,10 @@ impl ModelInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
     pub info: ModelInfo,
+    /// Provider identity survives model-provider default expansion so routing,
+    /// security policy, and agent delegation do not have to guess from URLs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<crate::agent::model_providers::ResolvedModelProvider>,
     pub api_key: Option<String>,
     pub env_key: Option<EnvKeys>,
     /// Named credential helper (`[model.<id>] auth_provider = "<name>"`),
@@ -4266,6 +4311,7 @@ impl ModelEntry {
         info.base_url = endpoints.resolve_inference_base_url();
         Self {
             info,
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -4278,6 +4324,7 @@ impl ModelEntry {
     pub fn from_config_entry(entry: &ModelEntryConfig) -> Self {
         Self {
             info: ModelInfo::from_config(entry),
+            model_provider: None,
             api_key: entry.api_key.clone(),
             env_key: entry.env_key.clone(),
             auth_provider: None,
@@ -4694,10 +4741,39 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
+    } else if let Some(key) = model
+        .model_provider
+        .as_ref()
+        .and_then(|provider| crate::agent::providers::stored_api_key(provider.kind))
+    {
+        // Deliberately re-read the provider-scoped vault for every turn. This
+        // makes a key saved/removed by the separate TUI process effective in
+        // an already-running shell without retaining a stale key in the model
+        // catalog.
+        (
+            Some(key),
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
     } else if let Some(provider) = model.auth_provider.as_ref() {
         debug_assert!(model.effective_auth_provider().is_some());
         (
             provider.cached_token(),
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
+    } else if model.model_provider.as_ref().is_some_and(|provider| {
+        matches!(
+            provider.kind,
+            crate::agent::model_providers::ModelProviderKind::OpenAi
+                | crate::agent::model_providers::ModelProviderKind::OpenRouter
+        )
+    }) {
+        // Named OpenAI/OpenRouter models are always BYOK. If no scoped API
+        // credential exists, fail closed rather than borrowing the xAI session
+        // or XAI_API_KEY for a third-party endpoint.
+        (
+            None,
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
@@ -4810,6 +4886,7 @@ pub fn try_resolve_model_credentials(
 pub struct ModelAuthFacts {
     pub byok: ModelByok,
     pub auth_scheme: AuthScheme,
+    pub include_message_model_id: bool,
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -4825,6 +4902,7 @@ pub fn resolve_model_auth_facts_and_provider(
             ModelAuthFacts {
                 byok: ModelByok::Unknown,
                 auth_scheme: AuthScheme::default(),
+                include_message_model_id: true,
             },
             None,
         );
@@ -4836,6 +4914,13 @@ pub fn resolve_model_auth_facts_and_provider(
                 ModelLookup::Loaded(Some(e)) => e.info().auth_scheme,
                 _ => AuthScheme::default(),
             },
+            include_message_model_id: !matches!(
+                lookup,
+                ModelLookup::Loaded(Some(e))
+                    if e.model_provider
+                        .as_ref()
+                        .is_some_and(|provider| provider.kind == ModelProviderKind::OpenRouter)
+            ),
         };
         let provider = match lookup {
             ModelLookup::Loaded(Some(e)) => e.effective_auth_provider().cloned(),
@@ -4950,6 +5035,7 @@ pub fn resolve_aux_model_sampling_config(
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
             },
+            model_provider: None,
             api_key: Some(bearer),
             env_key: None,
             auth_provider: None,
@@ -5050,12 +5136,40 @@ pub fn sampling_config_for_model(
     let temperature = info.temperature;
     let top_p = info.top_p;
     let mut extra_headers = info.extra_headers.clone();
+    if let Some(provider) = model
+        .model_provider
+        .as_ref()
+        .filter(|provider| provider.kind == ModelProviderKind::Codex)
+    {
+        extra_headers.insert(
+            crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER.to_string(),
+            provider.id.clone(),
+        );
+    }
+    if model
+        .model_provider
+        .as_ref()
+        .is_some_and(|provider| provider.kind == ModelProviderKind::OpenRouter)
+    {
+        // OpenRouter returns upstream provider diagnostics in error metadata
+        // only when explicitly requested. Keep this decision at the provider
+        // boundary; the sampler remains URL-agnostic.
+        extra_headers
+            .entry("X-OpenRouter-Metadata".to_string())
+            .or_insert_with(|| "enabled".to_string());
+    }
     inject_url_derived_headers(
         &mut extra_headers,
         alpha_test_key.as_deref(),
         &credentials.base_url,
     );
     let api_backend = info.api_backend.clone();
+    let openrouter_fallback_models = model
+        .model_provider
+        .as_ref()
+        .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
+        .map(|provider| provider.openrouter_fallback_models.clone())
+        .unwrap_or_default();
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5063,7 +5177,12 @@ pub fn sampling_config_for_model(
         max_completion_tokens,
         temperature,
         top_p,
+        openrouter_fallback_models,
         api_backend,
+        include_message_model_id: !model
+            .model_provider
+            .as_ref()
+            .is_some_and(|provider| provider.kind == ModelProviderKind::OpenRouter),
         auth_scheme: credentials.auth_scheme,
         extra_headers,
         context_window: info.context_window.get(),
@@ -5180,6 +5299,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
         },
+        model_provider: None,
         api_key: None,
         env_key: None,
         auth_provider: None,
@@ -6321,6 +6441,7 @@ reasoning_effort = "low"
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
             },
+            model_provider: None,
             api_key: api_key.map(|s| s.to_string()),
             env_key: env_key.map(EnvKeys::single),
             auth_provider: None,
@@ -11687,6 +11808,7 @@ default = "grok-4.5"
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
             },
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,

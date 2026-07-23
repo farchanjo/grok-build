@@ -36,6 +36,8 @@ impl SessionActor {
             .set(sampling_config.compactions_remaining);
         self.compaction_at_tokens
             .set(sampling_config.compaction_at_tokens);
+        self.openrouter_fallback_models
+            .replace(sampling_config.openrouter_fallback_models.clone());
         xai_grok_telemetry::unified_log::info(
             "backend_search: model switch",
             Some(self.session_info.id.0.as_ref()),

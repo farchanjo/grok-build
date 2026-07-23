@@ -174,17 +174,25 @@ async fn prefetch_models(agent_config: &AgentConfig) -> Option<IndexMap<String, 
     let auth = agent_config.create_auth_manager().current();
     let endpoints = agent_config.endpoints.clone();
     let fetch_auth = ModelFetchAuth::resolve(&endpoints, auth.is_some());
-
-    if auth.is_some() || endpoints.has_custom_endpoint() || fetch_auth != ModelFetchAuth::Session {
-        tokio::task::spawn_blocking(move || {
-            prefetch_models_blocking(&endpoints, auth.as_ref(), fetch_auth)
-        })
-        .await
-        .ok()
-        .flatten()
-    } else {
-        None
-    }
+    let provider_manager = crate::agent::providers::ProviderManager::default();
+    let provider_refresh = provider_manager.refresh_configured_catalogs();
+    let xai_refresh = async move {
+        if auth.is_some()
+            || endpoints.has_custom_endpoint()
+            || fetch_auth != ModelFetchAuth::Session
+        {
+            tokio::task::spawn_blocking(move || {
+                prefetch_models_blocking(&endpoints, auth.as_ref(), fetch_auth)
+            })
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        }
+    };
+    let (models, ()) = tokio::join!(xai_refresh, provider_refresh);
+    models
 }
 
 /// Spawn the agent inside a LocalSet and return a handle to the I/O future.
@@ -327,6 +335,9 @@ pub async fn run_stdio_agent(
     let _total_timer = crate::instrumentation_timer!("startup.stdio_agent_total");
     let outgoing = tokio::io::stdout().compat_write();
     let prefetched_models = if prefetched_models.is_some() {
+        crate::agent::providers::ProviderManager::default()
+            .refresh_configured_catalogs()
+            .await;
         prefetched_models
     } else {
         let _timer = crate::instrumentation_timer!("startup.stdio_prefetch_models");
@@ -517,6 +528,9 @@ async fn run_headless_inner(
 
     // Prefetch models from the models API before entering the LocalSet.
     // This must be done via spawn_blocking because reqwest::blocking creates its own runtime.
+    crate::agent::providers::ProviderManager::default()
+        .refresh_configured_catalogs()
+        .await;
     let auth_for_prefetch = auth.clone();
     let endpoints_for_prefetch = agent_config.endpoints.clone();
     // `true` — auth is always established by this point (run_auth_flow above).
@@ -1157,6 +1171,9 @@ pub async fn run_leader(
     let auth_for_prefetch: Option<GrokAuth> = auth.clone();
     let endpoints_for_prefetch = agent_config.endpoints.clone();
     let fetch_auth_for_prefetch = ModelFetchAuth::resolve(&endpoints_for_prefetch, auth.is_some());
+    crate::agent::providers::ProviderManager::default()
+        .refresh_configured_catalogs()
+        .await;
     // The shared pair helper owns the remote_fetch gate for both halves, so a
     // disabled knob cannot block leader readiness on settings retries.
     let (prefetched_models, remote_settings) = tokio::task::spawn_blocking(move || {

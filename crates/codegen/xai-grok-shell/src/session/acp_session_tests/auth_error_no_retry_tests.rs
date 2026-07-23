@@ -57,6 +57,7 @@ fn auth_error() -> xai_grok_sampler::SamplingErrorInfo {
         is_retryable: false,
         retry_after_secs: None,
         model_metadata: None,
+        diagnostics: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
@@ -457,6 +458,7 @@ fn model_not_found_error() -> xai_grok_sampler::SamplingErrorInfo {
             is_retryable: false,
             retry_after_secs: None,
             model_metadata: None,
+            diagnostics: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
@@ -524,6 +526,7 @@ fn unauthorized_401_error() -> xai_grok_sampler::SamplingErrorInfo {
             is_retryable: false,
             retry_after_secs: None,
             model_metadata: None,
+            diagnostics: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
@@ -925,6 +928,7 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
                     facts: ModelAuthFacts {
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
+                        include_message_model_id: true,
                     },
                     provider: None,
                 }));
@@ -969,6 +973,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                     facts: ModelAuthFacts {
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
+                        include_message_model_id: true,
                     },
                     provider: None,
                 }));
@@ -1017,6 +1022,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                     facts: ModelAuthFacts {
                         byok: ModelByok::NotByok,
                         auth_scheme: Default::default(),
+                        include_message_model_id: true,
                     },
                     provider: None,
                 }));
@@ -1030,7 +1036,9 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 max_completion_tokens: None,
                 temperature: None,
                 top_p: None,
+                openrouter_fallback_models: Vec::new(),
                 api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                include_message_model_id: true,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
                 context_window: 256_000,
@@ -1083,6 +1091,7 @@ async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::Au
             facts: crate::agent::config::ModelAuthFacts {
                 byok: crate::agent::auth_method::ModelByok::Byok,
                 auth_scheme: Default::default(),
+                include_message_model_id: true,
             },
             provider: Some(provider),
         }));
@@ -1121,7 +1130,9 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 max_completion_tokens: None,
                 temperature: None,
                 top_p: None,
+                openrouter_fallback_models: Vec::new(),
                 api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                include_message_model_id: true,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
                 context_window: 256_000,

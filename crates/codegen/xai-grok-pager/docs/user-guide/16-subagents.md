@@ -147,7 +147,8 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `prompt`          | The full task prompt for the subagent.                           |
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
-| `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `false`. |
+| `model`           | Optional model/provider catalog ID. Can target OpenAI, OpenRouter, or a configured Codex subscription agent. |
+| `run_in_background` | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
 | `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
@@ -182,6 +183,11 @@ The `resume_from` parameter lets a new subagent continue where a completed subag
 2. Spawn a second subagent with `resume_from` set to the first subagent's ID, so it picks up with the full research context.
 
 The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
+
+For a `codex-subscription` task, the public `resume_from` value is still the
+Grok Build subagent ID—not a Codex UUID. Grok Build resolves the private thread
+pointer from local metadata and fails closed if the session owner, provider,
+model, working directory, sandbox, or thread does not match.
 
 ---
 

@@ -72,6 +72,7 @@ async fn create_test_actor(
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
+        openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
         attribution_callback: None,
         auth_manager: None,
         state,
@@ -513,6 +514,7 @@ async fn create_test_actor_with_memory(
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
+        openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
         attribution_callback: None,
         auth_manager: None,
         state,
@@ -1149,6 +1151,7 @@ fn api_error_with_context_window(context_window: u64) -> xai_grok_sampler::Sampl
             max_completion_tokens: None,
             models_etag: None,
         }),
+        diagnostics: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
@@ -1277,6 +1280,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 auth_method_id: test_auth_method_id("cached_token"),
                 model_auth_memo: std::cell::RefCell::new(None),
+                openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
                 auth_manager: {
                     let dir = tempfile::tempdir().unwrap();
                     let mgr = std::sync::Arc::new(crate::auth::AuthManager::new(
@@ -1534,6 +1538,7 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 is_retryable: false,
                 retry_after_secs: None,
                 model_metadata: None,
+                diagnostics: None,
                 empty_response_context: None,
                 doom_loop_triggers: None,
                 doom_loop_aborted_at_chunk: None,

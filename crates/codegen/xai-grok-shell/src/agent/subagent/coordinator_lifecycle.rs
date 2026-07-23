@@ -271,6 +271,68 @@ impl SubagentCoordinator {
     pub fn move_pending_to_cancelled(&mut self, id: &str, error: &str) {
         self.move_pending_to_terminal(id, error, true);
     }
+    /// Complete a provider-backed agent that does not own an in-process
+    /// [`SubagentTracker`] (currently the Codex app-server bridge).
+    ///
+    /// It remains in `pending` while the external agent runs so the existing
+    /// query/cancellation paths work without a second coordinator.
+    pub fn complete_pending_external(
+        &mut self,
+        id: &str,
+        result: SubagentResult,
+        child_session_id: String,
+        child_cwd: String,
+        worktree_path: Option<PathBuf>,
+        effective_model_id: String,
+    ) {
+        let Some(pending) = self.pending.remove(id) else {
+            return;
+        };
+        self.loop_owned.remove(id);
+        self.sync_running_gauge();
+        let success = result.success && !result.cancelled;
+        if pending.surface_completion {
+            self.pending_completions.push(SubagentCompletionSummary {
+                subagent_id: id.to_string(),
+                owner_session_id: pending.parent_session_id.clone(),
+                subagent_type: pending.subagent_type.clone(),
+                description: pending.description.clone(),
+                success,
+                duration_ms: result.duration_ms,
+                tool_calls: result.tool_calls,
+                turns: result.turns,
+                output: result.output.clone(),
+            });
+            self.enforce_pending_completions_cap();
+        }
+        self.completed.insert(
+            id.to_string(),
+            CompletedSubagent {
+                subagent_id: id.to_string(),
+                parent_session_id: pending.parent_session_id,
+                parent_prompt_id: pending.parent_prompt_id,
+                owner: pending.owner,
+                child_session_id,
+                description: pending.description,
+                subagent_type: pending.subagent_type,
+                persona: pending.persona,
+                started_at: pending.started_at,
+                completed_at: std::time::Instant::now(),
+                result,
+                resumed_from: None,
+                child_cwd,
+                worktree_path,
+                snapshot_ref: None,
+                effective_model_id,
+                block_waited: false,
+                explicitly_killed: false,
+                completion_output_cap: None,
+                persisted_output_dir: None,
+            },
+        );
+        self.enforce_completed_cap();
+        self.completion_notify.notify_waiters();
+    }
     /// Record a synthetic failure for a subagent that never reached `pending`.
     pub fn record_pre_spawn_failure(
         &mut self,

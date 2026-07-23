@@ -52,8 +52,8 @@ pub(crate) fn subagent_template() -> Zeroizing<String> {
 }
 
 /// The compact system prompt used after conversation compaction.
-pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-     Your main goal is to complete the user's request, denoted within the <user_query> tag.";
+pub const COMPACT_SYSTEM_PROMPT: &str = "You are a software engineer and technical thought partner operating in the user's development environment.\n\n\
+     Your main goal is to complete the user's request, denoted within the <user_query> tag. Do not infer a product, company, provider, or model identity from the surrounding application.";
 
 #[cfg(test)]
 mod tests {
@@ -230,7 +230,9 @@ mod tests {
     #[test]
     fn test_base_template_renders() {
         let prompt = render_base(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
+        assert!(prompt.contains("software engineer and technical thought partner"));
+        assert!(prompt.contains("<engineering_practice>"));
+        assert!(prompt.contains("<identity>"));
         assert!(prompt.contains("user_query"));
     }
 
@@ -362,9 +364,11 @@ mod tests {
         let p = default_placeholders();
         let prompt = render_base(&default_renderer(), &p);
         assert!(
-            prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL),
-            "Must contain agent identity"
+            prompt.contains("software engineer and technical thought partner"),
+            "Must contain the role-based identity"
         );
+        assert!(!prompt.contains("released by xAI"));
+        assert!(!prompt.contains("You are Grok"));
         assert!(
             prompt.contains("user_query"),
             "Must reference user_query tag"
@@ -375,8 +379,8 @@ mod tests {
     fn test_compact_prompt_matches_expected() {
         assert_eq!(
             COMPACT_SYSTEM_PROMPT,
-            "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-             Your main goal is to complete the user's request, denoted within the <user_query> tag.",
+            "You are a software engineer and technical thought partner operating in the user's development environment.\n\n\
+             Your main goal is to complete the user's request, denoted within the <user_query> tag. Do not infer a product, company, provider, or model identity from the surrounding application.",
         );
     }
 
@@ -794,11 +798,11 @@ mod tests {
             "interactive prompt must keep the <user_guide> block"
         );
         assert!(
-            prompt.contains("interactive CLI tool"),
+            prompt.contains("Collaborate interactively with the user"),
             "interactive prompt must declare interactive mode in the header"
         );
         assert!(
-            !prompt.contains("autonomous agent"),
+            !prompt.contains("Work autonomously toward the requested outcome"),
             "interactive prompt must NOT advertise non-interactive (autonomous) mode"
         );
     }
@@ -817,15 +821,15 @@ mod tests {
             "non-interactive prompt must suppress the <user_guide> block"
         );
         assert!(
-            prompt.contains("autonomous agent"),
+            prompt.contains("Work autonomously toward the requested outcome"),
             "non-interactive prompt must declare autonomous mode in the header"
         );
         assert!(
-            !prompt.contains("interactive CLI tool"),
+            !prompt.contains("Collaborate interactively with the user"),
             "non-interactive prompt must NOT claim to be the interactive CLI"
         );
         // Sanity: rest of the template still renders.
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
+        assert!(prompt.contains("software engineer and technical thought partner"));
         assert!(prompt.contains("user_query"));
     }
 

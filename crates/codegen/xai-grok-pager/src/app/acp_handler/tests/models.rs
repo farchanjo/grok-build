@@ -75,6 +75,57 @@
     }
 
     #[test]
+    fn models_update_refreshes_open_model_picker_from_authoritative_catalog() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.prompt.textarea.insert_str("/model ");
+        agent.prompt.refresh_slash(&agent.session.models);
+
+        let connected = make_models_update_notif(
+            "grok-4.5",
+            &["grok-4.5", "openai-gpt-5.6-terra", "codex-subscription"],
+        );
+        assert!(handle_models_update(&connected, &mut app));
+        let snapshot = app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .prompt
+            .slash_snapshot();
+        let matches: Vec<_> = snapshot
+            .matches
+            .iter()
+            .map(|row| row.display.as_str())
+            .collect();
+        assert!(matches.contains(&"openai-gpt-5.6-terra"));
+        assert!(matches.contains(&"codex-subscription"));
+
+        let disconnected = make_models_update_notif("grok-4.5", &["grok-4.5"]);
+        assert!(handle_models_update(&disconnected, &mut app));
+        let snapshot = app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .prompt
+            .slash_snapshot();
+        let matches: Vec<_> = snapshot
+            .matches
+            .iter()
+            .map(|row| row.display.as_str())
+            .collect();
+        assert!(app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .session
+            .models
+            .available
+            .contains_key(&acp::ModelId::new(std::sync::Arc::from("grok-4.5"))));
+        assert!(!matches.contains(&"openai-gpt-5.6-terra"));
+        assert!(!matches.contains(&"codex-subscription"));
+    }
+
+    #[test]
     fn models_update_uses_shell_default_when_agent_model_removed() {
         let mut app = make_app_with_agent("sess-1");
 
@@ -441,4 +492,3 @@
             "unrelated-session broadcast must not touch this agent's model"
         );
     }
-

@@ -756,6 +756,7 @@ mod classify_tests {
                 model_metadata: None,
                 retry_after_secs: None,
                 should_retry: None,
+                diagnostics: None,
             }))
         };
         assert!(det(StatusCode::BAD_REQUEST));
@@ -849,6 +850,7 @@ mod classify_tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         })));
     }
     #[test]
@@ -879,6 +881,7 @@ mod classify_tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         }) else {
             panic!("expected Deterministic for 400");
         };
@@ -891,6 +894,7 @@ mod classify_tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         }) else {
             panic!("expected Transient for 500");
         };
@@ -1633,7 +1637,9 @@ mod reasoning_compaction_regression_tests {
             max_completion_tokens: Some(1000),
             temperature: Some(0.7),
             top_p: None,
+            openrouter_fallback_models: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
+            include_message_model_id: true,
             auth_scheme: Default::default(),
             extra_headers: Default::default(),
             context_window: 256_000,

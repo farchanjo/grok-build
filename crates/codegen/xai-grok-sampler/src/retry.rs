@@ -408,12 +408,14 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             model_metadata,
             retry_after_secs,
             should_retry,
+            diagnostics,
         } => SamplingError::Api {
             status: *status,
             message: message.clone(),
             model_metadata: model_metadata.clone(),
             retry_after_secs: *retry_after_secs,
             should_retry: *should_retry,
+            diagnostics: diagnostics.clone(),
         },
         SamplingError::EventStreamError(msg) => SamplingError::EventStreamError(msg.clone()),
         SamplingError::StreamError {
@@ -452,6 +454,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         }
     }
 
@@ -462,6 +465,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(retry_after),
             should_retry: None,
+            diagnostics: None,
         }
     }
 
@@ -799,6 +803,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(false),
+            diagnostics: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -816,6 +821,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -831,6 +837,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: Some(true),
+            diagnostics: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -846,6 +853,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
+            diagnostics: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -881,6 +889,7 @@ mod tests {
             model_metadata: None,
             retry_after_secs: Some(10),
             should_retry: Some(false),
+            diagnostics: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),

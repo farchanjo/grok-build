@@ -972,7 +972,9 @@ async fn read_parent_sampling_config(
                 max_completion_tokens: cfg.max_completion_tokens,
                 temperature: cfg.temperature,
                 top_p: cfg.top_p,
+                openrouter_fallback_models: ctx.sampling_config.openrouter_fallback_models.clone(),
                 api_backend: cfg.api_backend,
+                include_message_model_id: ctx.sampling_config.include_message_model_id,
                 auth_scheme,
                 extra_headers,
                 context_window: cfg.context_window.get(),
@@ -2534,6 +2536,17 @@ pub(crate) struct SubagentMeta {
     /// durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
+    /// Durable Codex app-server thread identifier. This is intentionally
+    /// distinct from `child_session_id`: native Codex subagents do not own a
+    /// Grok Build session and must reconnect with `thread/resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
+    /// Provider discriminator for native external-agent metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provider: Option<String>,
+    /// Sandbox originally selected for the Codex thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_sandbox: Option<String>,
 }
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 ///
@@ -2596,6 +2609,14 @@ pub struct SubagentSessionMetadata {
     /// ID of the source subagent this session was resumed from (`resume_from`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
+    /// Native Codex app-server resume pointer, if this external subagent used
+    /// the Codex provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_sandbox: Option<String>,
 }
 impl SubagentSessionMetadata {
     /// Current schema version.
@@ -2647,6 +2668,9 @@ impl SubagentSessionMetadata {
             error: meta.error.clone(),
             fork_copy_error: meta.fork_copy_error.clone(),
             resumed_from: meta.resumed_from.clone(),
+            codex_thread_id: meta.codex_thread_id.clone(),
+            codex_provider: meta.codex_provider.clone(),
+            codex_sandbox: meta.codex_sandbox.clone(),
         }
     }
 }

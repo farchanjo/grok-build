@@ -70,7 +70,12 @@ pub(crate) fn task_model_error_for_catalog(
     is_session_auth: bool,
 ) -> Option<String> {
     let is_available = |entry: &ModelEntry| {
-        entry.info.user_selectable && entry.info.visible_for_auth(is_session_auth)
+        let is_codex_agent = entry.model_provider.as_ref().is_some_and(|provider| {
+            provider.kind == crate::agent::model_providers::ModelProviderKind::Codex
+        });
+        entry.info.user_selectable
+            && (is_codex_agent || entry.info.visible_for_auth(is_session_auth))
+            && has_required_provider_credential(entry)
     };
     if config::find_model_by_id(available, requested).is_some_and(&is_available) {
         return None;
@@ -92,6 +97,14 @@ pub(crate) fn task_model_error_for_catalog(
         )
     };
     Some(format!("Unknown Task.model slug '{requested}'. {guidance}"))
+}
+
+/// Provider-backed API models must not be advertised until their own
+/// credential is available. This deliberately runs at projection time rather
+/// than mutating the catalog so `/providers` connect/disconnect operations can
+/// change picker visibility without rebuilding every configured model.
+fn has_required_provider_credential(entry: &ModelEntry) -> bool {
+    crate::agent::providers::missing_api_key_provider(entry).is_none()
 }
 
 /// Thread-safe model manager.
@@ -1386,6 +1399,7 @@ fn build_prefetched_map(
         let info = config::ModelInfo::from_config(&m);
         let entry = ModelEntry {
             info,
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -1679,7 +1693,11 @@ pub(crate) fn resolve_default_model(
 ) -> (String, ModelEntry, config::ConfigSource) {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
-        .filter(|(_, e)| e.info.visible_for_auth(is_session_auth) && e.info.user_selectable)
+        .filter(|(_, e)| {
+            e.info.visible_for_auth(is_session_auth)
+                && e.info.user_selectable
+                && has_required_provider_credential(e)
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -1781,7 +1799,9 @@ pub fn available_models(
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
-        .filter(|(_, e)| e.info.visible_for_auth(is_session_auth))
+        .filter(|(_, e)| {
+            e.info.visible_for_auth(is_session_auth) && has_required_provider_credential(e)
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     config::to_acp_model_info(&visible)
@@ -2014,6 +2034,7 @@ mod tests {
         // Entry with the catalog flag set → accessor returns true.
         let mut flagged = ModelEntry {
             info: config::ModelInfo::fallback("fp-model"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2027,6 +2048,7 @@ mod tests {
             "plain-model",
             ModelEntry {
                 info: config::ModelInfo::fallback("plain-model"),
+                model_provider: None,
                 api_key: None,
                 env_key: None,
                 auth_provider: None,
@@ -2038,6 +2060,7 @@ mod tests {
         // map is keyed "enterprise-key" but the model slug is "enterprise-slug".
         let mut custom = ModelEntry {
             info: config::ModelInfo::fallback("enterprise-slug"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2209,6 +2232,7 @@ mod tests {
             "test-model".to_string(),
             ModelEntry {
                 info: config::ModelInfo::fallback("test-model"),
+                model_provider: None,
                 api_key: None,
                 env_key: None,
                 auth_provider: None,
@@ -2264,6 +2288,7 @@ mod tests {
         let mut prefetched = IndexMap::new();
         let mut reasoning_entry = ModelEntry {
             info: config::ModelInfo::fallback("reasoning-model"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2287,6 +2312,7 @@ mod tests {
         let mut prefetched = IndexMap::new();
         let plain_entry = ModelEntry {
             info: config::ModelInfo::fallback("plain-model"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2315,6 +2341,7 @@ mod tests {
         // 4.5-style: supports effort, menu is high only (no none).
         let mut no_none = ModelEntry {
             info: config::ModelInfo::fallback("grok-4.5"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2334,6 +2361,7 @@ mod tests {
         // Model that explicitly offers none.
         let mut with_none = ModelEntry {
             info: config::ModelInfo::fallback("legacy-none"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2441,6 +2469,7 @@ mod tests {
         let mut prefetched = IndexMap::new();
         let mut reasoning_entry = ModelEntry {
             info: config::ModelInfo::fallback("reasoning-model"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2451,6 +2480,7 @@ mod tests {
 
         let plain_entry = ModelEntry {
             info: config::ModelInfo::fallback("plain-model"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -2494,6 +2524,7 @@ mod tests {
     fn make_model_entry(model_id: &str) -> ModelEntry {
         ModelEntry {
             info: config::ModelInfo::fallback(model_id),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -3278,6 +3309,7 @@ mod tests {
             "static-one",
             ModelEntry {
                 info: config::ModelInfo::fallback("static-one"),
+                model_provider: None,
                 api_key: None,
                 env_key: None,
                 auth_provider: None,
@@ -3306,6 +3338,7 @@ mod tests {
 
         let mut oauth_only = ModelEntry {
             info: config::ModelInfo::fallback("oauth-only"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -3316,6 +3349,7 @@ mod tests {
 
         let public = ModelEntry {
             info: config::ModelInfo::fallback("public-model"),
+            model_provider: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -3357,6 +3391,41 @@ mod tests {
         info.supported_in_api = false;
         assert!(info.visible_for_auth(true));
         assert!(!info.visible_for_auth(false));
+    }
+
+    #[test]
+    #[serial]
+    fn api_provider_models_are_projected_only_when_their_key_exists() {
+        let home = tempfile::tempdir().unwrap();
+        let _openai = EnvGuard::unset("OPENAI_API_KEY");
+        crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let mut entry = ModelEntry {
+            info: config::ModelInfo::fallback("gpt-test"),
+            model_provider: Some(crate::agent::model_providers::ResolvedModelProvider {
+                id: "openai-test".to_owned(),
+                kind: crate::agent::model_providers::ModelProviderKind::OpenAi,
+                openrouter_fallback_models: Vec::new(),
+                command: Vec::new(),
+            }),
+            api_key: None,
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        };
+        let mut catalog = IndexMap::new();
+        catalog.insert("openai-test".to_owned(), entry.clone());
+
+        assert!(
+            available_models(&catalog, false).is_empty(),
+            "an OpenAI model without its own key must not enter /model"
+        );
+        assert!(task_model_error_for_catalog("openai-test", &catalog, false).is_some());
+
+        entry.api_key = Some("configured-for-test".to_owned());
+        catalog.insert("openai-test".to_owned(), entry);
+        assert!(available_models(&catalog, false).contains_key(&acp::ModelId::new("openai-test")));
+        assert!(task_model_error_for_catalog("openai-test", &catalog, false).is_none());
+        crate::agent::providers::set_stored_key_home_for_tests(None);
     }
 
     // ── duplicate model slug re-keying (A/B experiment "auto" alias) ──

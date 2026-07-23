@@ -392,6 +392,56 @@ fn lookup_returns_initializing_for_pending_subagent() {
             "pending subagent should return Ready(Initializing)"
         );
 }
+#[test]
+fn external_provider_completion_moves_pending_to_queryable_result() {
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator
+        .insert_pending(PendingSubagent {
+            subagent_id: "sub-codex".to_string(),
+            subagent_type: "general-purpose".to_string(),
+            description: "codex task".to_string(),
+            persona: None,
+            parent_prompt_id: Some("prompt-codex".to_string()),
+            parent_session_id: "parent-session".to_string(),
+            owner: SubagentOwner::Task,
+            started_at: std::time::Instant::now(),
+            run_in_background: true,
+            surface_completion: true,
+            color: None,
+            cancel_token: CancellationToken::new(),
+        });
+    coordinator.complete_pending_external(
+        "sub-codex",
+        SubagentResult {
+            success: true,
+            output: "native Codex result".into(),
+            subagent_id: "sub-codex".into(),
+            child_session_id: "thread-codex".into(),
+            turns: 1,
+            ..Default::default()
+        },
+        "thread-codex".to_string(),
+        "/workspace".to_string(),
+        None,
+        "codex-subscription".to_string(),
+    );
+
+    match coordinator.lookup("sub-codex") {
+        Some(SnapshotLookup::Ready(snap)) => match snap.status {
+            SubagentSnapshotStatus::Completed { output, turns, .. } => {
+                assert_eq!(output, "native Codex result");
+                assert_eq!(turns, 1);
+            }
+            other => panic!("expected completed external provider result, got {other:?}"),
+        },
+        _ => panic!("expected queryable external provider result"),
+    }
+    assert!(!coordinator.background_live_for_prompt("prompt-codex"));
+    let summaries = coordinator.drain_pending_completions_for("parent-session");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].output.as_ref(), "native Codex result");
+    assert!(summaries[0].success);
+}
 /// The running gauge must track `pending.len() + active.len()` through the
 /// full lifecycle: it feeds `AgentActivity::is_busy`, which gates the
 /// leader auto-update shutdown.
@@ -3570,6 +3620,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             stream_tool_calls: None,
             laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
         },
+        model_provider: None,
         api_key: None,
         env_key: None,
         auth_provider: None,

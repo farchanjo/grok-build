@@ -326,6 +326,10 @@ mod notification_hook_filter_tests {
             attempt: 1,
             max_retries: 3,
             reason: "timeout".into(),
+            backoff_ms: None,
+            is_rate_limited: false,
+            provider_name: None,
+            provider_code: None,
         });
         assert!(notification_hook_for_update(&update).is_none());
     }

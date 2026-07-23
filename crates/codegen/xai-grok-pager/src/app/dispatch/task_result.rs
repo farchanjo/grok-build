@@ -1298,5 +1298,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             vec![]
         }
+        TaskResult::ProviderOperationComplete {
+            agent_id,
+            provider,
+            status,
+        } => {
+            let fallback_error = match &status {
+                crate::views::providers_modal::ProviderStatus::Error(error) => Some(error.clone()),
+                _ => None,
+            };
+            let applied = app.agents.get_mut(&agent_id).is_some_and(|agent| {
+                let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                    agent.active_modal.as_mut()
+                else {
+                    return false;
+                };
+                state.set_status(provider, status);
+                true
+            });
+            if !applied && let Some(error) = fallback_error {
+                app.show_toast(&format!("Provider action failed: {error}"));
+            }
+            vec![]
+        }
     }
 }
