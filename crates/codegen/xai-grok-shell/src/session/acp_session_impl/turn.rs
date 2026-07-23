@@ -169,8 +169,8 @@ impl SessionActor {
         prompt_index: usize,
     ) -> Result<TurnOutcome, acp::Error> {
         use crate::agent::codex_app_server::{
-            CodexRunRequest, CodexSandboxMode, PrimaryCodexThreadState, load_primary_thread_state,
-            run_codex_turn, save_primary_thread_state,
+            CodexHostTaskTools, CodexRunRequest, CodexSandboxMode, PrimaryCodexThreadState,
+            load_primary_thread_state, run_codex_turn, save_primary_thread_state,
         };
 
         let cwd = std::path::PathBuf::from(&self.session_info.cwd);
@@ -208,6 +208,41 @@ impl SessionActor {
         } else {
             CodexSandboxMode::WorkspaceWrite
         };
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        request.disable_native_multi_agent = true;
+        let orchestration_instructions = if bridge
+            .tool_for_kind(xai_grok_tools::types::tool::ToolKind::Task)
+            .await
+            .is_some()
+        {
+            let (tools, handler) =
+                CodexHostTaskTools::from_bridge(bridge)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(
+                            session_id = %self.session_info.id.0,
+                            ?error,
+                            "failed to prepare Codex host task tools"
+                        );
+                        acp::Error::internal_error().data(
+                            "The active agent's task toolset is incomplete, so Codex subagents \
+                         cannot be enabled safely.",
+                        )
+                    })?;
+            request.dynamic_tools = tools;
+            request.dynamic_tool_handler = Some(handler);
+            "Subagents are coordinated by the host. Use `task` to delegate bounded work to any \
+             connected model, `get_task_output` to inspect a background task, and `kill_task` to \
+             cancel one. Do not look for or use native Codex collaboration tools in this thread."
+        } else {
+            "Subagents are disabled for this session. Do not look for or use native Codex \
+             collaboration tools in this thread."
+        };
+        request.developer_instructions = Some(format!(
+            "{}\n\n{}",
+            xai_grok_agent::prompt::PROVIDER_NEUTRAL_ENGINEERING_INSTRUCTIONS.trim(),
+            orchestration_instructions,
+        ));
 
         let result = run_codex_turn(request, tokio_util::sync::CancellationToken::new())
             .await
@@ -234,6 +269,35 @@ impl SessionActor {
                 };
                 acp::Error::internal_error().data(guidance)
             })?;
+
+        if result.usage.total_tokens > 0 {
+            let clamp = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
+            let usage = xai_grok_sampling_types::TokenUsage {
+                prompt_tokens: clamp(result.usage.input_tokens),
+                completion_tokens: clamp(
+                    result
+                        .usage
+                        .output_tokens
+                        .saturating_add(result.usage.reasoning_output_tokens),
+                ),
+                total_tokens: clamp(result.usage.total_tokens),
+                reasoning_tokens: clamp(result.usage.reasoning_output_tokens),
+                cached_prompt_tokens: clamp(result.usage.cached_input_tokens),
+            };
+            self.tool_context
+                .record_task_model_output(result.usage.output_tokens);
+            self.chat_state_handle
+                .record_token_usage(result.usage.total_tokens);
+            self.chat_state_handle.record_last_turn_usage(usage.clone());
+            self.chat_state_handle.record_model_call_usage(
+                Some(sampling.model.clone()),
+                usage.clone(),
+                None,
+                None,
+            );
+            self.signals_handle()
+                .record_token_usage(usage.completion_tokens, usage.reasoning_tokens);
+        }
 
         if result.output.trim().is_empty() {
             return Err(acp::Error::internal_error().data(
@@ -265,6 +329,17 @@ impl SessionActor {
         chunk_meta.insert("modelId".into(), serde_json::json!(sampling.model));
         chunk_meta.insert("promptIndex".into(), serde_json::json!(prompt_index));
         chunk_meta.insert("provider".into(), serde_json::json!("codex-subscription"));
+        chunk_meta.insert("toolCalls".into(), serde_json::json!(result.tools.total()));
+        chunk_meta.insert(
+            "tokenUsage".into(),
+            serde_json::json!({
+                "inputTokens": result.usage.input_tokens,
+                "cachedInputTokens": result.usage.cached_input_tokens,
+                "outputTokens": result.usage.output_tokens,
+                "reasoningOutputTokens": result.usage.reasoning_output_tokens,
+                "totalTokens": result.usage.total_tokens,
+            }),
+        );
         self.send_slash_command_output_with_meta(&result.output, Some(chunk_meta))
             .await;
         self.record_assistant_response(ConversationItem::assistant_with_model(

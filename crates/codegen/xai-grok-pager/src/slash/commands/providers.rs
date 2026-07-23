@@ -1,4 +1,4 @@
-//! `/providers` — configure OpenAI, OpenRouter, and Codex/ChatGPT access.
+//! `/providers` — configure xAI, OpenAI, OpenRouter, and Codex/ChatGPT access.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -15,7 +15,7 @@ impl SlashCommand for ProvidersCommand {
     }
 
     fn description(&self) -> &str {
-        "Manage OpenAI, OpenRouter, and Codex providers"
+        "Manage xAI, OpenAI, OpenRouter, and Codex providers"
     }
 
     fn usage(&self) -> &str {

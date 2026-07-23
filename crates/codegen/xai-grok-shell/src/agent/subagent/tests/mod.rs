@@ -1,6 +1,9 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
-use super::handle_request::{canonical_total_tokens, usage_is_incomplete};
+use super::handle_request::{
+    canonical_total_tokens, codex_subagent_developer_instructions, codex_subagent_sandbox,
+    usage_is_incomplete,
+};
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
 };
@@ -424,6 +427,7 @@ fn external_provider_completion_moves_pending_to_queryable_result() {
         "/workspace".to_string(),
         None,
         "codex-subscription".to_string(),
+        None,
     );
 
     match coordinator.lookup("sub-codex") {

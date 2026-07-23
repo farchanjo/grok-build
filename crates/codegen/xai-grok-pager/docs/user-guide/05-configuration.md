@@ -225,7 +225,7 @@ context_window = 128000               # context window size (for auto-compact)
 
 Credential resolution: `api_key` > `env_key` > signed-in session token > `XAI_API_KEY`.
 
-Use `/providers` for the built-in OpenAI, OpenRouter, and Codex/ChatGPT
+Use `/providers` for the built-in xAI, OpenAI, OpenRouter, and Codex/ChatGPT
 connections; no TOML is required. For custom models and reusable provider
 blocks, see [Custom Models](11-custom-models.md#openai-api-and-openrouter).
 Third-party provider blocks fail closed when their own credential is

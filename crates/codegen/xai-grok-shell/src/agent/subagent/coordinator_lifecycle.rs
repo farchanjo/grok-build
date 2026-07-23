@@ -284,6 +284,7 @@ impl SubagentCoordinator {
         child_cwd: String,
         worktree_path: Option<PathBuf>,
         effective_model_id: String,
+        persisted_output_dir: Option<PathBuf>,
     ) {
         let Some(pending) = self.pending.remove(id) else {
             return;
@@ -327,7 +328,7 @@ impl SubagentCoordinator {
                 block_waited: false,
                 explicitly_killed: false,
                 completion_output_cap: None,
-                persisted_output_dir: None,
+                persisted_output_dir,
             },
         );
         self.enforce_completed_cap();

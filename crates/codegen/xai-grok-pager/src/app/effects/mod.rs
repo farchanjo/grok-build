@@ -4643,12 +4643,13 @@ async fn run_provider_operation(
     use crate::views::providers_modal::{ProviderKind, ProviderStatus};
     use actions::ProviderOperation;
     use xai_grok_shell::agent::providers::{
-        ProviderConnectionState, ProviderConnectionTest, ProviderCredentialSource, ProviderId,
-        ProviderManager,
+        ProviderAuthenticationKind, ProviderConnectionState, ProviderConnectionTest,
+        ProviderCredentialSource, ProviderId, ProviderManager,
     };
 
     fn backend_id(provider: ProviderKind) -> ProviderId {
         match provider {
+            ProviderKind::Xai => ProviderId::Xai,
             ProviderKind::OpenAi => ProviderId::OpenAi,
             ProviderKind::OpenRouter => ProviderId::OpenRouter,
             ProviderKind::Codex => ProviderId::Codex,
@@ -4658,6 +4659,41 @@ async fn run_provider_operation(
     fn display_status(
         status: xai_grok_shell::agent::providers::ProviderStatus,
     ) -> ProviderStatus {
+        if status.provider == ProviderId::Xai {
+            let state_label = |kind| {
+                status
+                    .authentication
+                    .iter()
+                    .find(|entry| entry.kind == kind)
+                    .is_some_and(|entry| {
+                        matches!(
+                            entry.state,
+                            ProviderConnectionState::Connected
+                                | ProviderConnectionState::Configured
+                        )
+                    })
+            };
+            let oauth = if state_label(ProviderAuthenticationKind::OAuth) {
+                "connected"
+            } else {
+                "missing"
+            };
+            let api_key = if state_label(ProviderAuthenticationKind::ApiKey) {
+                "configured"
+            } else {
+                "missing"
+            };
+            return if matches!(
+                status.state,
+                ProviderConnectionState::Connected | ProviderConnectionState::Configured
+            ) {
+                ProviderStatus::Connected {
+                    detail: Some(format!("OAuth: {oauth} · API key: {api_key}")),
+                }
+            } else {
+                ProviderStatus::Missing
+            };
+        }
         match status.state {
             ProviderConnectionState::Connected => ProviderStatus::Connected {
                 detail: Some("Signed in with the official Codex CLI".to_owned()),
@@ -4716,18 +4752,27 @@ async fn run_provider_operation(
                     Ok(status) => display_status(status),
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
-            } else if provider == ProviderKind::OpenRouter {
+            } else if matches!(provider, ProviderKind::OpenAi | ProviderKind::OpenRouter) {
                 // An explicit refresh is also the user's request to refresh
-                // the discovered OpenRouter catalog. The manager verifies
+                // the discovered API-provider catalog. The manager verifies
                 // that a credential exists and falls back to its last valid
                 // cache before we report the regular connection status.
+                let backend = backend_id(provider);
                 if matches!(
-                    manager.status(ProviderId::OpenRouter).state,
+                    manager.status(backend).state,
                     ProviderConnectionState::Configured
                 ) {
-                    let _ = manager.refresh_openrouter_catalog().await;
+                    match provider {
+                        ProviderKind::OpenAi => {
+                            let _ = manager.refresh_openai_catalog().await;
+                        }
+                        ProviderKind::OpenRouter => {
+                            let _ = manager.refresh_openrouter_catalog().await;
+                        }
+                        ProviderKind::Xai | ProviderKind::Codex => unreachable!(),
+                    }
                 }
-                display_status(manager.status(ProviderId::OpenRouter))
+                display_status(manager.status(backend))
             } else {
                 display_status(manager.status(backend_id(provider)))
             };
@@ -4777,7 +4822,7 @@ async fn run_provider_operation(
         }
     };
 
-    // `Test` may populate an OpenRouter cache and `Refresh` may rebuild a
+    // `Test` may populate an API-provider cache and `Refresh` may rebuild a
     // provider catalog, so every provider operation is followed by the same
     // shell-authoritative model reload.
     let request = acp::ExtRequest::new(

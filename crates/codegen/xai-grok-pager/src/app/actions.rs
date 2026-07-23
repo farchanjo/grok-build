@@ -1424,7 +1424,7 @@ pub enum Effect {
     },
     /// Change the process working directory (project-picker selection).
     SetWorkingDir { path: std::path::PathBuf },
-    /// Manage a native OpenAI/OpenRouter/Codex provider without routing the
+    /// Manage a native xAI/OpenAI/OpenRouter/Codex provider without routing the
     /// provider transport through ACP.
     ProviderOperation {
         agent_id: AgentId,

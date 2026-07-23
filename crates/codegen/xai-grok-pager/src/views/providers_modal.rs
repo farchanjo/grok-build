@@ -23,16 +23,18 @@ use crate::views::modal_window::{
 /// Provider displayed by the management surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
+    Xai,
     OpenAi,
     OpenRouter,
     Codex,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 3] = [Self::OpenAi, Self::OpenRouter, Self::Codex];
+    pub const ALL: [Self; 4] = [Self::Xai, Self::OpenAi, Self::OpenRouter, Self::Codex];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Xai => "xAI",
             Self::OpenAi => "OpenAI API",
             Self::OpenRouter => "OpenRouter",
             Self::Codex => "Codex / ChatGPT",
@@ -41,6 +43,7 @@ impl ProviderKind {
 
     pub const fn detail(self) -> &'static str {
         match self {
+            Self::Xai => "Grok/xAI account (OAuth) or xAI API key",
             Self::OpenAi => "Responses API · key stored securely",
             Self::OpenRouter => "Chat Completions · key stored securely",
             Self::Codex => "ChatGPT subscription · official Codex login",
@@ -48,7 +51,7 @@ impl ProviderKind {
     }
 
     pub const fn needs_api_key(self) -> bool {
-        !matches!(self, Self::Codex)
+        matches!(self, Self::OpenAi | Self::OpenRouter)
     }
 }
 
@@ -81,12 +84,24 @@ pub enum ProviderCommand {
     Disconnect(ProviderKind),
     LoginCodex,
     LogoutCodex,
+    LoginXai,
+    LogoutXai,
     RefreshStatus(ProviderKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum XaiChoiceAction {
+    Connect,
+    Disconnect,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ProviderModalMode {
     Browse,
+    ChoosingXai {
+        action: XaiChoiceAction,
+        selected: usize,
+    },
     EditingKey {
         provider: ProviderKind,
         editor: LineEditor,
@@ -97,6 +112,11 @@ impl std::fmt::Debug for ProviderModalMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Browse => f.write_str("Browse"),
+            Self::ChoosingXai { action, selected } => f
+                .debug_struct("ChoosingXai")
+                .field("action", action)
+                .field("selected", selected)
+                .finish(),
             Self::EditingKey { provider, .. } => f
                 .debug_struct("EditingKey")
                 .field("provider", provider)
@@ -111,7 +131,7 @@ impl std::fmt::Debug for ProviderModalMode {
 pub struct ProviderModalState {
     pub window: ModalWindowState,
     pub selected: usize,
-    pub statuses: [ProviderStatus; 3],
+    pub statuses: Vec<ProviderStatus>,
     pub(crate) mode: ProviderModalMode,
     /// A key submitted by the UI but not yet picked up by the integration.
     /// It is cleared on close and never rendered or logged.
@@ -130,6 +150,7 @@ impl std::fmt::Debug for ProviderModalState {
                 "mode",
                 &match &self.mode {
                     ProviderModalMode::Browse => "browse",
+                    ProviderModalMode::ChoosingXai { .. } => "choosing_xai_auth",
                     ProviderModalMode::EditingKey { .. } => "editing_key_redacted",
                 },
             )
@@ -149,11 +170,7 @@ impl ProviderModalState {
         Self {
             window: ModalWindowState::new(),
             selected: 0,
-            statuses: [
-                ProviderStatus::Missing,
-                ProviderStatus::Missing,
-                ProviderStatus::Missing,
-            ],
+            statuses: vec![ProviderStatus::Missing; ProviderKind::ALL.len()],
             mode: ProviderModalMode::Browse,
             submitted_secret: None,
         }
@@ -188,7 +205,7 @@ impl ProviderModalState {
 
     pub fn clear_sensitive_input(&mut self) {
         self.submitted_secret = None;
-        if matches!(&self.mode, ProviderModalMode::EditingKey { .. }) {
+        if !matches!(&self.mode, ProviderModalMode::Browse) {
             self.mode = ProviderModalMode::Browse;
         }
     }
@@ -196,9 +213,10 @@ impl ProviderModalState {
 
 fn provider_index(provider: ProviderKind) -> usize {
     match provider {
-        ProviderKind::OpenAi => 0,
-        ProviderKind::OpenRouter => 1,
-        ProviderKind::Codex => 2,
+        ProviderKind::Xai => 0,
+        ProviderKind::OpenAi => 1,
+        ProviderKind::OpenRouter => 2,
+        ProviderKind::Codex => 3,
     }
 }
 
@@ -210,7 +228,52 @@ pub enum ProviderModalOutcome {
     Command(ProviderCommand),
 }
 
+fn handle_xai_choice(
+    state: &mut ProviderModalState,
+    key: &KeyEvent,
+) -> Option<ProviderModalOutcome> {
+    let ProviderModalMode::ChoosingXai { action, selected } = &mut state.mode else {
+        return None;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            state.mode = ProviderModalMode::Browse;
+            Some(ProviderModalOutcome::Changed)
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            *selected = selected.saturating_sub(1);
+            Some(ProviderModalOutcome::Changed)
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            *selected = (*selected + 1).min(1);
+            Some(ProviderModalOutcome::Changed)
+        }
+        KeyCode::Enter => {
+            let action = *action;
+            let selected = *selected;
+            if selected == 1 && action == XaiChoiceAction::Connect {
+                state.mode = ProviderModalMode::EditingKey {
+                    provider: ProviderKind::Xai,
+                    editor: LineEditor::default(),
+                };
+                return Some(ProviderModalOutcome::Changed);
+            }
+            state.mode = ProviderModalMode::Browse;
+            Some(ProviderModalOutcome::Command(match (action, selected) {
+                (XaiChoiceAction::Connect, 0) => ProviderCommand::LoginXai,
+                (XaiChoiceAction::Disconnect, 0) => ProviderCommand::LogoutXai,
+                (XaiChoiceAction::Disconnect, 1) => ProviderCommand::Disconnect(ProviderKind::Xai),
+                _ => unreachable!("xAI chooser has exactly two options"),
+            }))
+        }
+        _ => Some(ProviderModalOutcome::Unchanged),
+    }
+}
+
 pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderModalOutcome {
+    if let Some(outcome) = handle_xai_choice(state, key) {
+        return outcome;
+    }
     if matches!(&state.mode, ProviderModalMode::EditingKey { .. }) {
         match key.code {
             KeyCode::Esc => {
@@ -266,6 +329,13 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
         }
         KeyCode::Char('d') if key.modifiers.is_empty() => {
             let provider = state.selected_provider();
+            if provider == ProviderKind::Xai {
+                state.mode = ProviderModalMode::ChoosingXai {
+                    action: XaiChoiceAction::Disconnect,
+                    selected: 0,
+                };
+                return ProviderModalOutcome::Changed;
+            }
             state.set_status(provider, ProviderStatus::Missing);
             ProviderModalOutcome::Command(if provider == ProviderKind::Codex {
                 ProviderCommand::LogoutCodex
@@ -282,7 +352,13 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
 
 fn start_connect(state: &mut ProviderModalState) -> ProviderModalOutcome {
     let provider = state.selected_provider();
-    if provider.needs_api_key() {
+    if provider == ProviderKind::Xai {
+        state.mode = ProviderModalMode::ChoosingXai {
+            action: XaiChoiceAction::Connect,
+            selected: 0,
+        };
+        ProviderModalOutcome::Changed
+    } else if provider.needs_api_key() {
         state.mode = ProviderModalMode::EditingKey {
             provider,
             editor: LineEditor::default(),
@@ -442,12 +518,43 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             "Enter saves securely and connects · Esc cancels",
             Style::default().fg(theme.gray_dim),
         );
+    } else if let ProviderModalMode::ChoosingXai { action, selected } = &state.mode {
+        y = y.saturating_add(1);
+        let verb = if *action == XaiChoiceAction::Connect {
+            "Connect"
+        } else {
+            "Disconnect"
+        };
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            &format!("{verb} xAI credential:"),
+            Style::default().fg(theme.text_primary),
+        );
+        for (idx, label) in ["Grok/xAI account (OAuth)", "xAI API key"]
+            .iter()
+            .enumerate()
+        {
+            let prefix = if *selected == idx { "› " } else { "  " };
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                &format!("{prefix}{label}"),
+                Style::default().fg(if *selected == idx {
+                    theme.accent_user
+                } else {
+                    theme.gray
+                }),
+            );
+        }
     } else {
         put_line(
             buf,
             content.content,
             &mut y,
-            "OpenAI/OpenRouter: Enter or c adds/replaces a key. Codex: Enter starts official login.",
+            "xAI: choose OAuth or API key. OpenAI/OpenRouter: add a key. Codex: official login.",
             Style::default().fg(theme.gray_dim),
         );
     }
@@ -473,6 +580,7 @@ mod tests {
     #[test]
     fn api_key_is_masked_and_submit_intent_has_no_secret() {
         let mut state = ProviderModalState::new();
+        state.selected = 1;
         assert_eq!(
             handle_key(&mut state, &key(KeyCode::Enter)),
             ProviderModalOutcome::Changed
@@ -500,6 +608,7 @@ mod tests {
     #[test]
     fn diagnostics_never_render_typed_or_submitted_api_key() {
         let mut state = ProviderModalState::new();
+        state.selected = 1;
         handle_key(&mut state, &key(KeyCode::Enter));
         handle_paste(&mut state, "sk-super-secret");
         let editing_debug = format!("{state:?}");
@@ -516,7 +625,7 @@ mod tests {
     #[test]
     fn codex_uses_login_not_key_entry() {
         let mut state = ProviderModalState::new();
-        state.selected = 2;
+        state.selected = 3;
         assert_eq!(
             handle_key(&mut state, &key(KeyCode::Enter)),
             ProviderModalOutcome::Command(ProviderCommand::LoginCodex)
@@ -533,7 +642,7 @@ mod tests {
                 detail: Some("ok".into()),
             },
         );
-        state.selected = 1;
+        state.selected = 2;
         assert_eq!(
             handle_key(&mut state, &key(KeyCode::Char('d'))),
             ProviderModalOutcome::Command(ProviderCommand::Disconnect(ProviderKind::OpenRouter))
@@ -550,5 +659,39 @@ mod tests {
             state.status(ProviderKind::OpenRouter).label(),
             "Connection error"
         );
+    }
+
+    #[test]
+    fn xai_chooses_oauth_or_api_key_without_exposing_a_secret() {
+        let mut state = ProviderModalState::new();
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChoosingXai {
+                action: XaiChoiceAction::Connect,
+                selected: 0
+            }
+        ));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::LoginXai)
+        );
+
+        handle_key(&mut state, &key(KeyCode::Enter));
+        handle_key(&mut state, &key(KeyCode::Down));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::EditingKey {
+                provider: ProviderKind::Xai,
+                ..
+            }
+        ));
     }
 }

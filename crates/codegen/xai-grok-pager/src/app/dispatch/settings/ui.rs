@@ -183,6 +183,13 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
     use crate::views::modal::ActiveModal;
     use crate::views::providers_modal::{ProviderCommand, ProviderStatus};
 
+    if command == ProviderCommand::LoginXai {
+        return crate::app::dispatch::auth::dispatch_login(app);
+    }
+    if command == ProviderCommand::LogoutXai {
+        return crate::app::dispatch::auth::dispatch_logout(app);
+    }
+
     let ActiveView::Agent(agent_id) = app.active_view else {
         return vec![];
     };
@@ -211,6 +218,7 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
         ProviderCommand::Disconnect(provider) => ProviderOperation::Disconnect(provider),
         ProviderCommand::LoginCodex => ProviderOperation::LoginCodex,
         ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
+        ProviderCommand::LoginXai | ProviderCommand::LogoutXai => unreachable!(),
         ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
     };
     vec![Effect::ProviderOperation {

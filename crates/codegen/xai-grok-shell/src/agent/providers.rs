@@ -16,8 +16,11 @@ const MAX_API_KEY_BYTES: usize = 16 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
+const MIN_CODEX_VERSION: (u64, u64, u64) = (0, 145, 0);
 const CODEX_CACHE_FILE: &str = "codex_models_cache.json";
 const CODEX_CACHE_VERSION: u8 = 1;
+const OPENAI_CACHE_FILE: &str = "openai_models_cache.json";
+const OPENAI_CACHE_VERSION: u8 = 1;
 const OPENROUTER_CACHE_FILE: &str = "openrouter_models_cache.json";
 const OPENROUTER_CACHE_VERSION: u8 = 1;
 
@@ -25,16 +28,18 @@ const OPENROUTER_CACHE_VERSION: u8 = 1;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderId {
+    Xai,
     OpenAi,
     OpenRouter,
     Codex,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 3] = [Self::OpenAi, Self::OpenRouter, Self::Codex];
+    pub const ALL: [Self; 4] = [Self::Xai, Self::OpenAi, Self::OpenRouter, Self::Codex];
 
     pub const fn display_name(self) -> &'static str {
         match self {
+            Self::Xai => "xAI",
             Self::OpenAi => "OpenAI API",
             Self::OpenRouter => "OpenRouter",
             Self::Codex => "Codex / ChatGPT",
@@ -43,6 +48,7 @@ impl ProviderId {
 
     fn auth_scope(self) -> Result<&'static str, ProviderError> {
         match self {
+            Self::Xai => Err(ProviderError::ApiKeyUnsupported),
             Self::OpenAi => Ok(crate::auth::OPENAI_API_KEY_SCOPE),
             Self::OpenRouter => Ok(crate::auth::OPENROUTER_API_KEY_SCOPE),
             Self::Codex => Err(ProviderError::ApiKeyUnsupported),
@@ -51,6 +57,9 @@ impl ProviderId {
 
     fn environment_key(self) -> Option<&'static str> {
         match self {
+            // xAI accepts both the canonical and legacy compatibility names;
+            // its lookup is handled by read_xai_api_key_env().
+            Self::Xai => None,
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
             Self::Codex => None,
@@ -59,6 +68,7 @@ impl ProviderId {
 
     pub const fn model_provider_kind(self) -> Option<ModelProviderKind> {
         match self {
+            Self::Xai => Some(ModelProviderKind::Xai),
             Self::OpenAi => Some(ModelProviderKind::OpenAi),
             Self::OpenRouter => Some(ModelProviderKind::OpenRouter),
             Self::Codex => Some(ModelProviderKind::Codex),
@@ -67,6 +77,10 @@ impl ProviderId {
 
     pub const fn missing_api_key_message(self) -> &'static str {
         match self {
+            Self::Xai => {
+                "xAI is not configured. Open /providers and connect a Grok/xAI account or add an \
+                 xAI API key."
+            }
             Self::OpenAi => {
                 "OpenAI API key is not configured. Open /providers and connect OpenAI, or \
                  select a GPT model via OpenRouter. A ChatGPT subscription is available \
@@ -91,6 +105,21 @@ pub enum ProviderCredentialSource {
     Environment,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthenticationKind {
+    OAuth,
+    ApiKey,
+    ChatGpt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderAuthenticationStatus {
+    pub kind: ProviderAuthenticationKind,
+    pub state: ProviderConnectionState,
+    pub credential_source: Option<ProviderCredentialSource>,
+}
+
 /// Safe, displayable provider state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +139,8 @@ pub struct ProviderStatus {
     pub state: ProviderConnectionState,
     pub credential_source: Option<ProviderCredentialSource>,
     pub can_test_connection: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authentication: Vec<ProviderAuthenticationStatus>,
     pub presets: Vec<ProviderModelPreset>,
 }
 
@@ -147,6 +178,19 @@ pub enum OpenRouterCatalogSource {
     Cache,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiCatalogSource {
+    Live,
+    Cache,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OpenAiCatalog {
+    pub source: OpenAiCatalogSource,
+    pub models: Vec<ProviderModelPreset>,
+}
+
 /// Models discovered from the authenticated OpenRouter catalog. This contains
 /// capabilities and metadata only—never credentials or response bodies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -177,6 +221,8 @@ pub enum ProviderError {
     CredentialStore,
     #[error("official Codex executable is unavailable")]
     CodexUnavailable,
+    #[error("Codex CLI 0.145.0 or newer is required")]
+    CodexTooOld,
     #[error("official Codex command timed out")]
     CodexTimedOut,
     #[error("official Codex command failed")]
@@ -185,6 +231,8 @@ pub enum ProviderError {
     CodexCatalogUnavailable,
     #[error("OpenRouter catalog is unavailable")]
     OpenRouterCatalogUnavailable,
+    #[error("OpenAI catalog is unavailable")]
+    OpenAiCatalogUnavailable,
 }
 
 /// Provider service used by the TUI. The default constructor stores secrets in
@@ -193,6 +241,7 @@ pub enum ProviderError {
 #[derive(Clone, Debug)]
 pub struct ProviderManager {
     grok_home: PathBuf,
+    xai_models_url: String,
     openai_models_url: String,
     openrouter_models_url: String,
     openrouter_catalog_url: String,
@@ -209,6 +258,7 @@ impl ProviderManager {
     pub fn new(grok_home: impl Into<PathBuf>) -> Self {
         Self {
             grok_home: grok_home.into(),
+            xai_models_url: "https://api.x.ai/v1/models".to_owned(),
             openai_models_url: "https://api.openai.com/v1/models".to_owned(),
             // `/models` is public on OpenRouter and therefore cannot validate
             // a credential. This endpoint verifies the supplied key without
@@ -395,7 +445,18 @@ impl ProviderManager {
             .ok()
             .flatten()
             .is_some();
+        let openai_configured = credential_lookup_manager()
+            .api_key(ProviderId::OpenAi)
+            .ok()
+            .flatten()
+            .is_some();
         let mut presets = Self::presets();
+        if openai_configured
+            && let Ok(cached) = load_openai_catalog_cache(&credential_lookup_manager().grok_home)
+        {
+            presets.retain(|preset| preset.provider != ProviderId::OpenAi);
+            presets.extend(cached.models);
+        }
         // Static OpenRouter choices remain useful in the providers modal, but
         // are not admitted to the model picker without a BYOK credential.
         if openrouter_configured {
@@ -416,6 +477,7 @@ impl ProviderManager {
                 continue;
             }
             let provider = match preset.provider {
+                ProviderId::Xai => continue,
                 ProviderId::OpenAi => "grok_build_openai",
                 ProviderId::OpenRouter => "grok_build_openrouter",
                 ProviderId::Codex => "grok_build_codex",
@@ -478,18 +540,65 @@ impl ProviderManager {
         {
             presets = cached.models;
         }
+        if provider == ProviderId::OpenAi
+            && self.api_key(provider).ok().flatten().is_some()
+            && let Ok(cached) = load_openai_catalog_cache(&self.grok_home)
+        {
+            presets = cached.models;
+        }
         if provider == ProviderId::Codex
             && let Ok(cached) = load_codex_catalog_cache(&self.grok_home)
         {
             presets = cached;
         }
         match provider {
+            ProviderId::Xai => {
+                let oauth_connected = self.xai_oauth_configured().unwrap_or(false);
+                let api_key_source = self.credential_source(provider).ok().flatten();
+                let api_key_configured = api_key_source.is_some();
+                ProviderStatus {
+                    provider,
+                    display_name: provider.display_name().to_owned(),
+                    state: if oauth_connected {
+                        ProviderConnectionState::Connected
+                    } else if api_key_configured {
+                        ProviderConnectionState::Configured
+                    } else {
+                        ProviderConnectionState::NotConfigured
+                    },
+                    credential_source: api_key_source,
+                    can_test_connection: oauth_connected || api_key_configured,
+                    authentication: vec![
+                        ProviderAuthenticationStatus {
+                            kind: ProviderAuthenticationKind::OAuth,
+                            state: if oauth_connected {
+                                ProviderConnectionState::Connected
+                            } else {
+                                ProviderConnectionState::NotConfigured
+                            },
+                            credential_source: oauth_connected
+                                .then_some(ProviderCredentialSource::SecureStore),
+                        },
+                        ProviderAuthenticationStatus {
+                            kind: ProviderAuthenticationKind::ApiKey,
+                            state: if api_key_configured {
+                                ProviderConnectionState::Configured
+                            } else {
+                                ProviderConnectionState::NotConfigured
+                            },
+                            credential_source: api_key_source,
+                        },
+                    ],
+                    presets,
+                }
+            }
             ProviderId::Codex => ProviderStatus {
                 provider,
                 display_name: provider.display_name().to_owned(),
                 state: ProviderConnectionState::Unavailable,
                 credential_source: None,
                 can_test_connection: false,
+                authentication: Vec::new(),
                 presets,
             },
             _ => match self.credential_source(provider) {
@@ -499,6 +608,11 @@ impl ProviderManager {
                     state: ProviderConnectionState::Configured,
                     credential_source: Some(source),
                     can_test_connection: true,
+                    authentication: vec![ProviderAuthenticationStatus {
+                        kind: ProviderAuthenticationKind::ApiKey,
+                        state: ProviderConnectionState::Configured,
+                        credential_source: Some(source),
+                    }],
                     presets,
                 },
                 Ok(None) => ProviderStatus {
@@ -507,6 +621,11 @@ impl ProviderManager {
                     state: ProviderConnectionState::NotConfigured,
                     credential_source: None,
                     can_test_connection: true,
+                    authentication: vec![ProviderAuthenticationStatus {
+                        kind: ProviderAuthenticationKind::ApiKey,
+                        state: ProviderConnectionState::NotConfigured,
+                        credential_source: None,
+                    }],
                     presets,
                 },
                 Err(_) => ProviderStatus {
@@ -515,6 +634,7 @@ impl ProviderManager {
                     state: ProviderConnectionState::StoreUnavailable,
                     credential_source: None,
                     can_test_connection: false,
+                    authentication: Vec::new(),
                     presets,
                 },
             },
@@ -524,6 +644,9 @@ impl ProviderManager {
     /// The real Codex login state, queried from the official executable. No
     /// output is captured because it could contain account information.
     pub async fn codex_status(&self) -> Result<ProviderStatus, ProviderError> {
+        if !self.codex_version_supported().await? {
+            return Err(ProviderError::CodexTooOld);
+        }
         let connected = self
             .run_codex_quiet(["login", "status"], CODEX_STATUS_TIMEOUT)
             .await?;
@@ -549,6 +672,15 @@ impl ProviderManager {
             },
             credential_source: None,
             can_test_connection: false,
+            authentication: vec![ProviderAuthenticationStatus {
+                kind: ProviderAuthenticationKind::ChatGpt,
+                state: if connected {
+                    ProviderConnectionState::Connected
+                } else {
+                    ProviderConnectionState::NotConfigured
+                },
+                credential_source: None,
+            }],
             presets,
         })
     }
@@ -557,6 +689,9 @@ impl ProviderManager {
     /// the pager's raw-mode terminal. The CLI owns the browser flow; Grok
     /// Build never sees a password, device code, or auth token.
     pub async fn codex_login(&self) -> Result<(), ProviderError> {
+        if !self.codex_version_supported().await? {
+            return Err(ProviderError::CodexTooOld);
+        }
         if self.run_codex_quiet(["login"], CODEX_LOGIN_TIMEOUT).await? {
             let _ = self.refresh_codex_catalog().await;
             Ok(())
@@ -587,6 +722,10 @@ impl ProviderManager {
         if api_key.is_empty() || api_key.len() > MAX_API_KEY_BYTES {
             return Err(ProviderError::InvalidApiKey);
         }
+        if provider == ProviderId::Xai {
+            return crate::auth::store_api_key(&self.grok_home, api_key)
+                .map_err(|_| ProviderError::CredentialStore);
+        }
         crate::auth::store_provider_api_key(&self.grok_home, provider.auth_scope()?, api_key)
             .map_err(|_| ProviderError::CredentialStore)
     }
@@ -595,8 +734,22 @@ impl ProviderManager {
         if provider == ProviderId::Codex {
             return Err(ProviderError::ApiKeyUnsupported);
         }
-        crate::auth::clear_provider_api_key(&self.grok_home, provider.auth_scope()?)
-            .map_err(|_| ProviderError::CredentialStore)
+        let result = if provider == ProviderId::Xai {
+            crate::auth::clear_api_key(&self.grok_home)
+        } else {
+            crate::auth::clear_provider_api_key(&self.grok_home, provider.auth_scope()?)
+        };
+        result.map_err(|_| ProviderError::CredentialStore)?;
+        match provider {
+            ProviderId::OpenAi => {
+                let _ = clear_openai_catalog_cache(&self.grok_home);
+            }
+            ProviderId::OpenRouter => {
+                let _ = clear_openrouter_catalog_cache(&self.grok_home);
+            }
+            ProviderId::Xai | ProviderId::Codex => {}
+        }
+        Ok(())
     }
 
     /// Test the native provider endpoint using the resolved credential. Only a
@@ -608,10 +761,16 @@ impl ProviderManager {
         if provider == ProviderId::Codex {
             return Err(ProviderError::ApiKeyUnsupported);
         }
-        let Some(key) = self.api_key(provider)? else {
+        let key = if provider == ProviderId::Xai {
+            self.xai_oauth_bearer()?.or(self.api_key(provider)?)
+        } else {
+            self.api_key(provider)?
+        };
+        let Some(key) = key else {
             return Ok(ProviderConnectionTest::NotConfigured);
         };
         let url = match provider {
+            ProviderId::Xai => &self.xai_models_url,
             ProviderId::OpenAi => &self.openai_models_url,
             ProviderId::OpenRouter => &self.openrouter_models_url,
             ProviderId::Codex => unreachable!(),
@@ -630,8 +789,14 @@ impl ProviderManager {
                 // cache opportunistically. Catalog failure does not make a
                 // verified key look invalid; the next explicit refresh can
                 // retry and a prior cache remains usable.
-                if provider == ProviderId::OpenRouter {
-                    let _ = self.refresh_openrouter_catalog().await;
+                match provider {
+                    ProviderId::OpenAi => {
+                        let _ = self.refresh_openai_catalog().await;
+                    }
+                    ProviderId::OpenRouter => {
+                        let _ = self.refresh_openrouter_catalog().await;
+                    }
+                    ProviderId::Xai | ProviderId::Codex => {}
                 }
                 Ok(ProviderConnectionTest::Connected)
             }
@@ -681,6 +846,48 @@ impl ProviderManager {
             .map_err(|_| ProviderError::OpenRouterCatalogUnavailable)
     }
 
+    /// Fetch the authenticated OpenAI model list, merge it with the curated
+    /// agent-safe presets, and persist a credential-free owner-only cache.
+    pub async fn refresh_openai_catalog(&self) -> Result<OpenAiCatalog, ProviderError> {
+        let Some(key) = self.api_key(ProviderId::OpenAi)? else {
+            return Err(ProviderError::OpenAiCatalogUnavailable);
+        };
+        let response = reqwest::Client::builder()
+            .timeout(CONNECTION_TIMEOUT)
+            .build()
+            .map_err(|_| ProviderError::OpenAiCatalogUnavailable)?
+            .get(&self.openai_models_url)
+            .bearer_auth(key)
+            .send()
+            .await;
+        let live = match response {
+            Ok(response) if response.status().is_success() => response
+                .bytes()
+                .await
+                .ok()
+                .and_then(|body| parse_openai_catalog(&body).ok()),
+            _ => None,
+        };
+        if let Some(models) = live {
+            let catalog = OpenAiCatalog {
+                source: OpenAiCatalogSource::Live,
+                models,
+            };
+            let _ = save_openai_catalog_cache(&self.grok_home, &catalog);
+            return Ok(catalog);
+        }
+        load_openai_catalog_cache(&self.grok_home)
+            .map_err(|_| ProviderError::OpenAiCatalogUnavailable)
+    }
+
+    pub fn cached_openai_catalog(&self) -> Result<OpenAiCatalog, ProviderError> {
+        if self.api_key(ProviderId::OpenAi)?.is_none() {
+            return Err(ProviderError::OpenAiCatalogUnavailable);
+        }
+        load_openai_catalog_cache(&self.grok_home)
+            .map_err(|_| ProviderError::OpenAiCatalogUnavailable)
+    }
+
     /// Return cached discovered models only when an OpenRouter credential is
     /// configured. This keeps catalog visibility aligned with BYOK state.
     pub fn cached_openrouter_catalog(&self) -> Result<OpenRouterCatalog, ProviderError> {
@@ -695,6 +902,22 @@ impl ProviderManager {
     /// startup so the synchronous config resolver sees the latest cached
     /// projection without delaying one provider behind another.
     pub async fn refresh_configured_catalogs(&self) {
+        let refresh_openai = async {
+            if self.api_key(ProviderId::OpenAi).ok().flatten().is_some() {
+                match self.refresh_openai_catalog().await {
+                    Ok(catalog) => {
+                        tracing::info!(
+                            model_count = catalog.models.len(),
+                            source = ?catalog.source,
+                            "OpenAI model catalog refreshed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "OpenAI model catalog refresh failed");
+                    }
+                }
+            }
+        };
         let refresh_openrouter = async {
             if self
                 .api_key(ProviderId::OpenRouter)
@@ -717,6 +940,11 @@ impl ProviderManager {
             }
         };
         let refresh_codex = async {
+            let supported = self.codex_version_supported().await.unwrap_or(false);
+            if !supported {
+                let _ = clear_codex_catalog_cache(&self.grok_home);
+                return;
+            }
             let connected = self
                 .run_codex_quiet(["login", "status"], CODEX_STATUS_TIMEOUT)
                 .await
@@ -741,12 +969,15 @@ impl ProviderManager {
                 let _ = clear_codex_catalog_cache(&self.grok_home);
             }
         };
-        tokio::join!(refresh_openrouter, refresh_codex);
+        tokio::join!(refresh_openai, refresh_openrouter, refresh_codex);
     }
 
     /// Query the authenticated Codex app-server catalog and persist a
     /// credential-free local projection for synchronous model resolution.
     pub async fn refresh_codex_catalog(&self) -> Result<Vec<ProviderModelPreset>, ProviderError> {
+        if !self.codex_version_supported().await? {
+            return Err(ProviderError::CodexTooOld);
+        }
         let mut request = super::codex_app_server::CodexModelListRequest::default();
         request.command[0] = self.codex_program.to_string_lossy().into_owned();
         let models = super::codex_app_server::list_codex_models(
@@ -768,11 +999,21 @@ impl ProviderManager {
         &self,
         provider: ProviderId,
     ) -> Result<Option<ProviderCredentialSource>, ProviderError> {
-        if crate::auth::read_provider_api_key(&self.grok_home, provider.auth_scope()?)
-            .map_err(|_| ProviderError::CredentialStore)?
-            .is_some_and(|key| !key.trim().is_empty())
-        {
+        let stored = if provider == ProviderId::Xai {
+            crate::auth::read_api_key(&self.grok_home)
+        } else {
+            crate::auth::read_provider_api_key(&self.grok_home, provider.auth_scope()?)
+                .map_err(|_| ProviderError::CredentialStore)?
+        };
+        if stored.is_some_and(|key| !key.trim().is_empty()) {
             return Ok(Some(ProviderCredentialSource::SecureStore));
+        }
+        if provider == ProviderId::Xai
+            && crate::agent::auth_method::read_xai_api_key_env()
+                .ok()
+                .is_some_and(|key| !key.trim().is_empty())
+        {
+            return Ok(Some(ProviderCredentialSource::Environment));
         }
         Ok(provider
             .environment_key()
@@ -785,17 +1026,47 @@ impl ProviderManager {
     }
 
     fn api_key(&self, provider: ProviderId) -> Result<Option<String>, ProviderError> {
-        if let Some(key) =
+        let stored = if provider == ProviderId::Xai {
+            crate::auth::read_api_key(&self.grok_home)
+        } else {
             crate::auth::read_provider_api_key(&self.grok_home, provider.auth_scope()?)
                 .map_err(|_| ProviderError::CredentialStore)?
-                .filter(|key| !key.trim().is_empty())
-        {
+        };
+        if let Some(key) = stored.filter(|key| !key.trim().is_empty()) {
             return Ok(Some(key));
+        }
+        if provider == ProviderId::Xai {
+            return Ok(crate::agent::auth_method::read_xai_api_key_env()
+                .ok()
+                .filter(|key| !key.trim().is_empty()));
         }
         Ok(provider
             .environment_key()
             .and_then(|name| std::env::var(name).ok())
             .filter(|key| !key.trim().is_empty()))
+    }
+
+    fn xai_oauth_configured(&self) -> Result<bool, ProviderError> {
+        Ok(self.xai_oauth_bearer()?.is_some())
+    }
+
+    fn xai_oauth_bearer(&self) -> Result<Option<String>, ProviderError> {
+        let path = self.grok_home.join("auth.json");
+        let store = match crate::auth::read_auth_json(&path) {
+            Ok(store) => store,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ProviderError::CredentialStore),
+        };
+        Ok(store
+            .values()
+            .find(|auth| {
+                !auth.key.trim().is_empty()
+                    && matches!(
+                        auth.auth_mode,
+                        crate::auth::AuthMode::Oidc | crate::auth::AuthMode::External
+                    )
+            })
+            .map(|auth| auth.key.clone()))
     }
 
     async fn run_codex_quiet<const N: usize>(
@@ -815,6 +1086,43 @@ impl ProviderManager {
             .map_err(|_| ProviderError::CodexUnavailable)?;
         Ok(status.success())
     }
+
+    async fn codex_version_supported(&self) -> Result<bool, ProviderError> {
+        let output = tokio::time::timeout(
+            CODEX_STATUS_TIMEOUT,
+            Command::new(&self.codex_program)
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        .map_err(|_| ProviderError::CodexTimedOut)?
+        .map_err(|_| ProviderError::CodexUnavailable)?;
+        if !output.status.success() {
+            return Err(ProviderError::CodexFailed);
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let version = text
+            .split_whitespace()
+            .find_map(parse_version_triplet)
+            .ok_or(ProviderError::CodexFailed)?;
+        Ok(version >= MIN_CODEX_VERSION)
+    }
+}
+
+fn parse_version_triplet(value: &str) -> Option<(u64, u64, u64)> {
+    let value = value.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '.');
+    let mut segments = value.split('.');
+    let major = segments.next()?.parse().ok()?;
+    let minor = segments.next()?.parse().ok()?;
+    let patch = segments
+        .next()?
+        .split(|ch: char| !ch.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor, patch))
 }
 
 fn codex_models_to_presets(
@@ -875,6 +1183,7 @@ fn static_codex_presets() -> Vec<ProviderModelPreset> {
 /// keys out of all UI DTOs.
 pub(crate) fn stored_api_key(kind: ModelProviderKind) -> Option<String> {
     let provider = match kind {
+        ModelProviderKind::Xai => ProviderId::Xai,
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
         _ => return None,
@@ -909,6 +1218,108 @@ fn credential_lookup_manager() -> ProviderManager {
         return ProviderManager::new(home);
     }
     ProviderManager::default()
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OpenAiCatalogCache {
+    version: u8,
+    models: Vec<ProviderModelPreset>,
+}
+
+fn parse_openai_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
+    let response: OpenAiModelsResponse = serde_json::from_slice(body).map_err(|_| ())?;
+    let mut curated = ProviderManager::presets()
+        .into_iter()
+        .filter(|preset| preset.provider == ProviderId::OpenAi)
+        .collect::<Vec<_>>();
+    let curated_models = curated
+        .iter()
+        .map(|preset| preset.model.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut experimental = response
+        .data
+        .into_iter()
+        .filter_map(|model| {
+            let id = model.id.trim();
+            if id.is_empty() || curated_models.contains(id) {
+                return None;
+            }
+            Some(ProviderModelPreset {
+                id: format!("openai:{id}"),
+                provider: ProviderId::OpenAi,
+                label: format!("{id} (experimental)"),
+                model: id.to_owned(),
+                base_url: Some("https://api.openai.com/v1".to_owned()),
+                is_agent: false,
+                description: Some(
+                    "Discovered from the OpenAI account; agent/tool capabilities are unverified."
+                        .to_owned(),
+                ),
+                context_window: None,
+                max_completion_tokens: None,
+                supports_tools: false,
+                supports_reasoning_effort: false,
+                reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    experimental.sort_by(|left, right| left.id.cmp(&right.id));
+    experimental.dedup_by(|left, right| left.id == right.id);
+    curated.extend(experimental);
+    if curated.is_empty() {
+        return Err(());
+    }
+    Ok(curated)
+}
+
+fn openai_cache_path(grok_home: &Path) -> PathBuf {
+    grok_home.join(OPENAI_CACHE_FILE)
+}
+
+fn load_openai_catalog_cache(grok_home: &Path) -> Result<OpenAiCatalog, ()> {
+    let path = openai_cache_path(grok_home);
+    let bytes = std::fs::read(&path).map_err(|_| ())?;
+    xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(&path).map_err(|_| ())?;
+    let cache: OpenAiCatalogCache = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    if cache.version != OPENAI_CACHE_VERSION || cache.models.is_empty() {
+        return Err(());
+    }
+    Ok(OpenAiCatalog {
+        source: OpenAiCatalogSource::Cache,
+        models: cache.models,
+    })
+}
+
+fn save_openai_catalog_cache(grok_home: &Path, catalog: &OpenAiCatalog) -> std::io::Result<()> {
+    let path = openai_cache_path(grok_home);
+    let cache = OpenAiCatalogCache {
+        version: OPENAI_CACHE_VERSION,
+        models: catalog.models.clone(),
+    };
+    let bytes = serde_json::to_vec(&cache).map_err(std::io::Error::other)?;
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    xai_grok_shell_base::util::secure_file::write_secure_file(&temporary, &bytes)?;
+    #[cfg(windows)]
+    {
+        let _ = std::fs::remove_file(&path);
+    }
+    std::fs::rename(&temporary, &path)?;
+    xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(&path)
+}
+
+fn clear_openai_catalog_cache(grok_home: &Path) -> std::io::Result<()> {
+    remove_cache_file(&openai_cache_path(grok_home))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1043,6 +1454,10 @@ fn save_openrouter_catalog_cache(
     xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(&path)
 }
 
+fn clear_openrouter_catalog_cache(grok_home: &Path) -> std::io::Result<()> {
+    remove_cache_file(&openrouter_cache_path(grok_home))
+}
+
 fn reasoning_effort_options(
     efforts: &[String],
     default: Option<&str>,
@@ -1113,7 +1528,11 @@ fn save_codex_catalog_cache(
 }
 
 fn clear_codex_catalog_cache(grok_home: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(codex_cache_path(grok_home)) {
+    remove_cache_file(&codex_cache_path(grok_home))
+}
+
+fn remove_cache_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -1174,6 +1593,76 @@ mod tests {
         assert_eq!(
             manager.status(ProviderId::OpenRouter).state,
             ProviderConnectionState::Configured
+        );
+    }
+
+    #[test]
+    fn xai_oauth_and_api_key_are_reported_and_removed_independently() {
+        let home = tempfile::tempdir().unwrap();
+        let manager = ProviderManager::new(home.path());
+        manager.set_api_key(ProviderId::Xai, "xai-api-key").unwrap();
+        manager
+            .set_api_key(ProviderId::OpenAi, "openai-key")
+            .unwrap();
+
+        let mut store = crate::auth::read_auth_json(&home.path().join("auth.json")).unwrap();
+        store.insert(
+            "https://auth.x.ai".to_owned(),
+            crate::auth::GrokAuth {
+                key: "oauth-token".to_owned(),
+                auth_mode: crate::auth::AuthMode::Oidc,
+                ..Default::default()
+            },
+        );
+        let bytes = serde_json::to_vec(&store).unwrap();
+        xai_grok_shell_base::util::secure_file::write_secure_file(
+            &home.path().join("auth.json"),
+            &bytes,
+        )
+        .unwrap();
+
+        let status = manager.status(ProviderId::Xai);
+        assert_eq!(status.state, ProviderConnectionState::Connected);
+        assert!(status.authentication.iter().any(|entry| {
+            entry.kind == ProviderAuthenticationKind::OAuth
+                && entry.state == ProviderConnectionState::Connected
+        }));
+        assert!(status.authentication.iter().any(|entry| {
+            entry.kind == ProviderAuthenticationKind::ApiKey
+                && entry.state == ProviderConnectionState::Configured
+        }));
+
+        manager.remove_api_key(ProviderId::Xai).unwrap();
+        let status = manager.status(ProviderId::Xai);
+        assert_eq!(status.state, ProviderConnectionState::Connected);
+        assert!(crate::auth::read_api_key(home.path()).is_none());
+        assert!(
+            crate::auth::read_provider_api_key(home.path(), crate::auth::OPENAI_API_KEY_SCOPE)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn xai_provider_status_honors_the_legacy_environment_key() {
+        let home = tempfile::tempdir().unwrap();
+        let _canonical = EnvGuard::unset(crate::agent::auth_method::XAI_API_KEY_ENV_VAR);
+        let _legacy = EnvGuard::set(
+            crate::agent::auth_method::LEGACY_XAI_API_KEY_ENV_VAR,
+            "legacy-xai-key",
+        );
+        let manager = ProviderManager::new(home.path());
+
+        let status = manager.status(ProviderId::Xai);
+        assert_eq!(status.state, ProviderConnectionState::Configured);
+        assert_eq!(
+            status.credential_source,
+            Some(ProviderCredentialSource::Environment)
+        );
+        assert_eq!(
+            manager.api_key(ProviderId::Xai).unwrap().as_deref(),
+            Some("legacy-xai-key")
         );
     }
 
@@ -1266,16 +1755,143 @@ mod tests {
     }
 
     #[test]
-    fn presets_are_credential_free_and_cover_every_provider() {
+    fn presets_are_credential_free_and_cover_every_model_provider() {
         let presets = ProviderManager::presets();
-        for provider in ProviderId::ALL {
+        for provider in [
+            ProviderId::OpenAi,
+            ProviderId::OpenRouter,
+            ProviderId::Codex,
+        ] {
             assert!(presets.iter().any(|preset| preset.provider == provider));
         }
+        assert!(manager_status_is_credential_free(
+            &ProviderManager::new(tempfile::tempdir().unwrap().path()).status(ProviderId::Xai)
+        ));
         assert!(
             serde_json::to_string(&presets)
                 .unwrap()
                 .contains("openai-gpt-5.6-sol")
         );
+    }
+
+    fn manager_status_is_credential_free(status: &ProviderStatus) -> bool {
+        let rendered = serde_json::to_string(status).unwrap();
+        !rendered.contains("api_key\":\"")
+            && !rendered.contains("oauth-token")
+            && !rendered.contains("xai-api-key")
+    }
+
+    #[test]
+    fn openai_catalog_keeps_curated_models_first_and_marks_discovery_experimental() {
+        let models = parse_openai_catalog(
+            br#"{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-custom-preview"},{"id":"gpt-custom-preview"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(models[0].id, "openai-gpt-5.6-sol");
+        let experimental = models
+            .iter()
+            .find(|model| model.id == "openai:gpt-custom-preview")
+            .unwrap();
+        assert!(experimental.label.contains("experimental"));
+        assert!(!experimental.supports_tools);
+        assert!(!experimental.supports_reasoning_effort);
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| model.id == "openai:gpt-custom-preview")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn authenticated_openai_fetch_caches_falls_back_and_disconnect_clears_catalog() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let home = tempfile::tempdir().unwrap();
+        let _openai = EnvGuard::unset("OPENAI_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..read]).unwrap();
+            assert!(request.contains("GET /models HTTP/1.1"));
+            assert!(
+                request.contains("authorization: Bearer openai-test-key")
+                    || request.contains("Authorization: Bearer openai-test-key")
+            );
+            let body = r#"{"data":[{"id":"gpt-5.6-sol"},{"id":"gpt-private-preview"}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let manager = ProviderManager::with_endpoints(
+            home.path(),
+            format!("http://{address}/models"),
+            "http://127.0.0.1:1/key",
+        );
+        manager
+            .set_api_key(ProviderId::OpenAi, "openai-test-key")
+            .unwrap();
+
+        let live = manager.refresh_openai_catalog().await.unwrap();
+        assert_eq!(live.source, OpenAiCatalogSource::Live);
+        assert!(
+            live.models
+                .iter()
+                .any(|model| model.id == "openai:gpt-private-preview")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(home.path().join(OPENAI_CACHE_FILE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        server.join().unwrap();
+
+        let cached = ProviderManager::with_endpoints(
+            home.path(),
+            "http://127.0.0.1:1/models",
+            "http://127.0.0.1:1/key",
+        )
+        .refresh_openai_catalog()
+        .await
+        .unwrap();
+        assert_eq!(cached.source, OpenAiCatalogSource::Cache);
+        assert_eq!(cached.models, live.models);
+        assert!(
+            super::super::config::resolve_model_list(
+                &super::super::config::Config::default(),
+                None,
+            )
+            .contains_key("openai:gpt-private-preview")
+        );
+
+        manager.remove_api_key(ProviderId::OpenAi).unwrap();
+        assert!(!home.path().join(OPENAI_CACHE_FILE).exists());
+        assert!(
+            !super::super::config::resolve_model_list(
+                &super::super::config::Config::default(),
+                None,
+            )
+            .contains_key("openai:gpt-private-preview")
+        );
+        set_stored_key_home_for_tests(None);
     }
 
     #[test]
@@ -1585,7 +2201,7 @@ mod tests {
         let script = home.path().join("fake-codex");
         std::fs::write(
             &script,
-            "#!/bin/sh\ncase \"$1:$2\" in login:status|login:|logout:) exit 0 ;; *) exit 1 ;; esac\n",
+            "#!/bin/sh\ncase \"$1:$2\" in --version:) echo 'codex-cli 0.145.0'; exit 0 ;; login:status|login:|logout:) exit 0 ;; *) exit 1 ;; esac\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&script).unwrap().permissions();
@@ -1599,5 +2215,31 @@ mod tests {
         );
         manager.codex_login().await.unwrap();
         manager.codex_logout().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsupported_codex_version_cannot_leave_models_in_the_picker_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let script = home.path().join("old-codex");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.144.0'; exit 0; fi\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        save_codex_catalog_cache(home.path(), &static_codex_presets()).unwrap();
+        let manager = ProviderManager::new(home.path()).with_codex_program(&script);
+
+        assert!(matches!(
+            manager.codex_status().await,
+            Err(ProviderError::CodexTooOld)
+        ));
+        manager.refresh_configured_catalogs().await;
+        assert!(!home.path().join(CODEX_CACHE_FILE).exists());
     }
 }

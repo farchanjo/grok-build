@@ -5,9 +5,10 @@
 //! app-server is already a complete coding agent and owns its tool loop. The
 //! bridge uses JSONL over stdio and the credentials cached by `codex login`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -21,6 +22,7 @@ const TURN_START_ID: u64 = 3;
 const STDERR_LIMIT: usize = 64 * 1024;
 const MODEL_LIST_INITIAL_ID: u64 = 2;
 const MAX_MODEL_LIST_PAGES: usize = 100;
+const TURN_INTERRUPT_ID: u64 = 4;
 pub(crate) const PRIMARY_THREAD_STATE_FILE: &str = "codex_thread.json";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,6 +52,111 @@ impl CodexSandboxMode {
     }
 }
 
+/// A host function advertised to Codex through `thread/start.dynamicTools`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodexDynamicToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// Sanitized result returned to Codex for one host dynamic-tool call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexDynamicToolResult {
+    pub success: bool,
+    pub text: String,
+}
+
+#[async_trait::async_trait]
+pub trait CodexDynamicToolHandler: Send + Sync + std::fmt::Debug + 'static {
+    async fn call(&self, tool: &str, call_id: &str, arguments: Value) -> CodexDynamicToolResult;
+}
+
+/// Dynamic-tool adapter backed by the session's finalized tool registry.
+///
+/// Codex sees stable task-lifecycle names while the adapter resolves whatever
+/// client-facing aliases the active agent registered. Validation, depth
+/// limits, model routing, polling, and cancellation therefore stay in the
+/// existing tool implementations instead of being duplicated in this bridge.
+pub struct CodexHostTaskTools {
+    bridge: Arc<xai_grok_tools::bridge::ToolBridge>,
+    routes: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for CodexHostTaskTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexHostTaskTools")
+            .field("routes", &self.routes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CodexHostTaskTools {
+    pub async fn from_bridge(
+        bridge: Arc<xai_grok_tools::bridge::ToolBridge>,
+    ) -> Result<(Vec<CodexDynamicToolSpec>, Arc<Self>), CodexAppServerError> {
+        use xai_grok_tools::types::tool::ToolKind;
+
+        let definitions = bridge.tool_definitions().await;
+        let requested = [
+            ("task", ToolKind::Task),
+            ("get_task_output", ToolKind::BackgroundTaskAction),
+            ("kill_task", ToolKind::KillTaskAction),
+        ];
+        let mut routes = HashMap::new();
+        let mut specs = Vec::with_capacity(requested.len());
+        for (external_name, kind) in requested {
+            let registered_name = bridge.tool_for_kind(kind).await.ok_or_else(|| {
+                CodexAppServerError::Protocol(format!(
+                    "active agent does not provide the required '{external_name}' task tool"
+                ))
+            })?;
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.function.name == registered_name)
+                .ok_or_else(|| {
+                    CodexAppServerError::Protocol(format!(
+                        "active agent did not advertise a schema for '{registered_name}'"
+                    ))
+                })?;
+            routes.insert(external_name.to_owned(), registered_name);
+            specs.push(CodexDynamicToolSpec {
+                name: external_name.to_owned(),
+                description: definition
+                    .function
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("Host-managed {external_name} operation.")),
+                input_schema: definition.function.parameters.clone(),
+            });
+        }
+        let handler = Arc::new(Self { bridge, routes });
+        Ok((specs, handler))
+    }
+}
+
+#[async_trait::async_trait]
+impl CodexDynamicToolHandler for CodexHostTaskTools {
+    async fn call(&self, tool: &str, call_id: &str, arguments: Value) -> CodexDynamicToolResult {
+        let Some(registered_name) = self.routes.get(tool) else {
+            return CodexDynamicToolResult {
+                success: false,
+                text: format!("Unknown host dynamic tool '{tool}'."),
+            };
+        };
+        match self.bridge.call(registered_name, arguments, call_id).await {
+            Ok(result) => CodexDynamicToolResult {
+                success: true,
+                text: result.prompt_text,
+            },
+            Err(error) => CodexDynamicToolResult {
+                success: false,
+                text: format!("{error}"),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CodexRunRequest {
     /// Executable followed by arguments, normally
@@ -58,12 +165,21 @@ pub struct CodexRunRequest {
     pub model: String,
     pub cwd: PathBuf,
     pub prompt: String,
+    /// Provider-neutral engineering and role instructions. These augment the
+    /// native Codex base instructions; they never replace its safety contract.
+    pub developer_instructions: Option<String>,
     pub reasoning_effort: Option<String>,
     pub output_schema: Option<Value>,
     pub sandbox: CodexSandboxMode,
     /// When present, reconnect to this persisted Codex thread instead of
     /// creating a text-replayed replacement thread.
     pub resume_thread_id: Option<String>,
+    /// Host-owned functions exposed to a primary Codex thread.
+    pub dynamic_tools: Vec<CodexDynamicToolSpec>,
+    pub dynamic_tool_handler: Option<Arc<dyn CodexDynamicToolHandler>>,
+    /// Disable Codex's own collaboration tools for this managed thread. The
+    /// host coordinator remains the sole owner of subagent depth and routing.
+    pub disable_native_multi_agent: bool,
     /// Per-message deadline. It resets whenever app-server emits a frame.
     pub idle_timeout: Duration,
 }
@@ -79,12 +195,46 @@ impl CodexRunRequest {
             model: model.into(),
             cwd,
             prompt: prompt.into(),
+            developer_instructions: None,
             reasoning_effort: None,
             output_schema: None,
             sandbox: CodexSandboxMode::WorkspaceWrite,
             resume_thread_id: None,
+            dynamic_tools: Vec::new(),
+            dynamic_tool_handler: None,
+            disable_native_multi_agent: false,
             idle_timeout: Duration::from_secs(300),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodexTokenUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodexToolUsage {
+    pub command_executions: u32,
+    pub file_changes: u32,
+    pub mcp_calls: u32,
+    pub dynamic_tool_calls: u32,
+    pub collaboration_calls: u32,
+    pub other_calls: u32,
+}
+
+impl CodexToolUsage {
+    pub fn total(&self) -> u32 {
+        self.command_executions
+            .saturating_add(self.file_changes)
+            .saturating_add(self.mcp_calls)
+            .saturating_add(self.dynamic_tool_calls)
+            .saturating_add(self.collaboration_calls)
+            .saturating_add(self.other_calls)
     }
 }
 
@@ -93,6 +243,8 @@ pub struct CodexRunResult {
     pub thread_id: String,
     pub turn_id: String,
     pub output: String,
+    pub usage: CodexTokenUsage,
+    pub tools: CodexToolUsage,
 }
 
 /// Request for the authenticated Codex app-server model catalogue.
@@ -151,7 +303,9 @@ pub(crate) struct PrimaryCodexThreadState {
 }
 
 impl PrimaryCodexThreadState {
-    const VERSION: u8 = 1;
+    // Version 2 starts a fresh persisted Codex thread so the dynamic host-task
+    // declarations introduced by this bridge are stored on thread/start.
+    const VERSION: u8 = 2;
 
     pub(crate) fn new(
         provider_id: impl Into<String>,
@@ -498,6 +652,9 @@ async fn run_protocol(
                     "name": "grok_build",
                     "title": "Grok Build",
                     "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true
                 }
             }
         }),
@@ -513,30 +670,52 @@ async fn run_protocol(
     .await?;
     send(stdin, &json!({"method": "initialized", "params": {}})).await?;
 
-    let (thread_method, thread_params) = match request.resume_thread_id.as_deref() {
-        Some(thread_id) => (
-            "thread/resume",
+    let dynamic_tools = request
+        .dynamic_tools
+        .iter()
+        .map(|tool| {
             json!({
-                "threadId": thread_id,
-                "model": request.model,
-                "cwd": request.cwd,
-                "approvalPolicy": "never",
-                "sandbox": request.sandbox.as_wire()
-            }),
-        ),
-        None => (
-            "thread/start",
-            json!({
-                "model": request.model,
-                "cwd": request.cwd,
-                "approvalPolicy": "never",
-                "sandbox": request.sandbox.as_wire(),
-                // The app-server owns durable rollout persistence. An
-                // ephemeral thread cannot be resumed after this process exits.
-                "ephemeral": false
-            }),
-        ),
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut common_thread_params = json!({
+        "model": request.model,
+        "cwd": request.cwd,
+        "approvalPolicy": "never",
+        "sandbox": request.sandbox.as_wire()
+    });
+    if let Some(instructions) = request.developer_instructions.as_deref() {
+        common_thread_params["developerInstructions"] = Value::String(instructions.to_owned());
+    }
+    // App-server accepts dynamicTools only on thread/start. They are persisted
+    // with the thread and remain available when a later process resumes it.
+    if request.resume_thread_id.is_none() && !dynamic_tools.is_empty() {
+        common_thread_params["dynamicTools"] = Value::Array(dynamic_tools);
+    }
+    if request.disable_native_multi_agent {
+        common_thread_params["config"] = json!({
+            "features": {
+                "multi_agent": false,
+                "multi_agent_v2": false
+            }
+        });
+    }
+
+    let (thread_method, mut thread_params) = match request.resume_thread_id.as_deref() {
+        Some(thread_id) => ("thread/resume", common_thread_params),
+        None => ("thread/start", common_thread_params),
     };
+    if let Some(thread_id) = request.resume_thread_id.as_deref() {
+        thread_params["threadId"] = Value::String(thread_id.to_owned());
+    } else {
+        // The app-server owns durable rollout persistence. An ephemeral
+        // thread cannot be resumed after this process exits.
+        thread_params["ephemeral"] = Value::Bool(false);
+    }
     send(
         stdin,
         &json!({
@@ -596,9 +775,33 @@ async fn run_protocol(
 
     let mut accumulator = TurnAccumulator::default();
     loop {
-        let message = read_message(reader, request.idle_timeout, cancellation).await?;
+        let message = match read_message(reader, request.idle_timeout, cancellation).await {
+            Ok(message) => message,
+            Err(CodexAppServerError::Cancelled) => {
+                let _ = send(
+                    stdin,
+                    &json!({
+                        "method": "turn/interrupt",
+                        "id": TURN_INTERRUPT_ID,
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": accumulator.turn_id
+                        }
+                    }),
+                )
+                .await;
+                return Err(CodexAppServerError::Cancelled);
+            }
+            Err(error) => return Err(error),
+        };
         if message.get("method").is_some() && message.get("id").is_some() {
-            reject_server_request(stdin, &message).await?;
+            handle_server_request(
+                stdin,
+                &message,
+                request.dynamic_tool_handler.as_deref(),
+                &mut accumulator,
+            )
+            .await?;
             continue;
         }
         if message.get("id").and_then(Value::as_u64) == Some(TURN_START_ID) {
@@ -619,6 +822,8 @@ async fn run_protocol(
         thread_id,
         turn_id,
         output,
+        usage: accumulator.usage,
+        tools: accumulator.tools,
     })
 }
 
@@ -691,6 +896,82 @@ async fn reject_server_request(
     .await
 }
 
+async fn handle_server_request(
+    stdin: &mut ChildStdin,
+    message: &Value,
+    handler: Option<&dyn CodexDynamicToolHandler>,
+    accumulator: &mut TurnAccumulator,
+) -> Result<(), CodexAppServerError> {
+    let method = message.get("method").and_then(Value::as_str);
+    if method != Some("item/tool/call") {
+        return reject_server_request(stdin, message).await;
+    }
+    let Some(id) = message.get("id").cloned() else {
+        return Ok(());
+    };
+    let Some(handler) = handler else {
+        return send(
+            stdin,
+            &json!({
+                "id": id,
+                "result": {
+                    "success": false,
+                    "contentItems": [{
+                        "type": "inputText",
+                        "text": "Host dynamic tools are unavailable for this Codex thread."
+                    }]
+                }
+            }),
+        )
+        .await;
+    };
+    let tool = message
+        .pointer("/params/tool")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let call_id = message
+        .pointer("/params/callId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let arguments = message
+        .pointer("/params/arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if tool.is_empty() || call_id.is_empty() {
+        return send(
+            stdin,
+            &json!({
+                "id": id,
+                "result": {
+                    "success": false,
+                    "contentItems": [{
+                        "type": "inputText",
+                        "text": "Codex sent an invalid dynamic-tool request."
+                    }]
+                }
+            }),
+        )
+        .await;
+    }
+
+    let result = handler.call(tool, call_id, arguments).await;
+    accumulator.tools.dynamic_tool_calls = accumulator.tools.dynamic_tool_calls.saturating_add(1);
+    send(
+        stdin,
+        &json!({
+            "id": id,
+            "result": {
+                "success": result.success,
+                "contentItems": [{
+                    "type": "inputText",
+                    "text": result.text
+                }]
+            }
+        }),
+    )
+    .await
+}
+
 fn ensure_response_ok(message: &Value) -> Result<(), CodexAppServerError> {
     if let Some(error) = message.get("error") {
         let rendered = error
@@ -708,6 +989,9 @@ struct TurnAccumulator {
     turn_id: Option<String>,
     deltas: String,
     completed_text: Option<String>,
+    usage: CodexTokenUsage,
+    tools: CodexToolUsage,
+    counted_items: HashSet<String>,
 }
 
 impl TurnAccumulator {
@@ -721,6 +1005,7 @@ impl TurnAccumulator {
             }
             Some("item/completed") => {
                 let item = message.pointer("/params/item");
+                self.count_tool_item(item);
                 if item
                     .and_then(|item| item.get("type"))
                     .and_then(Value::as_str)
@@ -730,6 +1015,14 @@ impl TurnAccumulator {
                         .and_then(Value::as_str)
                 {
                     self.completed_text = Some(text.to_string());
+                }
+            }
+            Some("thread/tokenUsage/updated") => {
+                if let Some(usage) = message
+                    .pointer("/params/tokenUsage/last")
+                    .or_else(|| message.pointer("/params/tokenUsage/total"))
+                {
+                    self.usage = parse_token_usage(usage);
                 }
             }
             Some("turn/completed") => {
@@ -765,12 +1058,76 @@ impl TurnAccumulator {
         Ok(false)
     }
 
-    fn output(self) -> String {
-        if self.deltas.is_empty() {
-            self.completed_text.unwrap_or_default()
-        } else {
-            self.deltas
+    fn count_tool_item(&mut self, item: Option<&Value>) {
+        let Some(item) = item else {
+            return;
+        };
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if item_type == "agentMessage" {
+            return;
         }
+        let item_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{item_type}:{}", self.counted_items.len()));
+        if !self.counted_items.insert(item_id) {
+            return;
+        }
+        match item_type {
+            "commandExecution" => {
+                self.tools.command_executions = self.tools.command_executions.saturating_add(1);
+            }
+            "fileChange" => {
+                self.tools.file_changes = self.tools.file_changes.saturating_add(1);
+            }
+            "mcpToolCall" => {
+                self.tools.mcp_calls = self.tools.mcp_calls.saturating_add(1);
+            }
+            "dynamicToolCall" => {
+                // Counted when the corresponding server request is handled so
+                // app-server versions that omit a completed item still report
+                // the host call exactly once.
+            }
+            "collabAgentToolCall" | "collabToolCall" => {
+                self.tools.collaboration_calls = self.tools.collaboration_calls.saturating_add(1);
+            }
+            "" => {}
+            _ => {
+                self.tools.other_calls = self.tools.other_calls.saturating_add(1);
+            }
+        }
+    }
+
+    fn output(&self) -> String {
+        if self.deltas.is_empty() {
+            self.completed_text.clone().unwrap_or_default()
+        } else {
+            self.deltas.clone()
+        }
+    }
+}
+
+fn parse_token_usage(value: &Value) -> CodexTokenUsage {
+    let token = |field: &str| value.get(field).and_then(Value::as_u64).unwrap_or(0);
+    let input_tokens = token("inputTokens");
+    let cached_input_tokens = token("cachedInputTokens");
+    let output_tokens = token("outputTokens");
+    let reasoning_output_tokens = token("reasoningOutputTokens");
+    let total_tokens = value
+        .get("totalTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            input_tokens
+                .saturating_add(output_tokens)
+                .saturating_add(reasoning_output_tokens)
+        });
+    CodexTokenUsage {
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        total_tokens,
     }
 }
 
@@ -792,6 +1149,30 @@ fn attach_stderr(error: CodexAppServerError, stderr: &str) -> CodexAppServerErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct RecordingDynamicTool {
+        calls: Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CodexDynamicToolHandler for RecordingDynamicTool {
+        async fn call(
+            &self,
+            tool: &str,
+            call_id: &str,
+            arguments: Value,
+        ) -> CodexDynamicToolResult {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tool.to_owned(), call_id.to_owned(), arguments));
+            CodexDynamicToolResult {
+                success: true,
+                text: "task accepted".to_owned(),
+            }
+        }
+    }
 
     #[test]
     fn accumulates_streamed_agent_message() {
@@ -878,6 +1259,70 @@ done
         assert_eq!(result.thread_id, "thread-test");
         assert_eq!(result.turn_id, "turn-test");
         assert_eq!(result.output, "native result");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn advertises_and_dispatches_host_tools_with_usage() {
+        let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":1'*'"experimentalApi":true'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"error":{"message":"experimental API capability missing"}}'; break ;;
+    *'"id":2'*'"developerInstructions":"neutral engineer"'*'"dynamicTools"'*'"multi_agent":false'*)
+      printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-tools"}}}'
+      ;;
+    *'"id":2'*) printf '%s\n' '{"id":2,"error":{"message":"managed thread contract missing"}}'; break ;;
+    *'"id":3'*)
+      printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-tools"}}}'
+      printf '%s\n' '{"method":"item/tool/call","id":99,"params":{"threadId":"thread-tools","turnId":"turn-tools","callId":"call-1","tool":"task","arguments":{"prompt":"inspect"}}}'
+      ;;
+    *'"id":99'*'"success":true'*'"task accepted"'*)
+      printf '%s\n' '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-tools","tokenUsage":{"last":{"inputTokens":100,"cachedInputTokens":20,"outputTokens":30,"reasoningOutputTokens":5,"totalTokens":135}}}}'
+      printf '%s\n' '{"method":"item/completed","params":{"item":{"id":"cmd-1","type":"commandExecution"}}}'
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"coordinated"}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"turn":{"id":"turn-tools","status":"completed"}}}'
+      break
+      ;;
+  esac
+done
+"#;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler = Arc::new(RecordingDynamicTool {
+            calls: Arc::clone(&calls),
+        });
+        let mut request =
+            CodexRunRequest::new("gpt-test", std::env::current_dir().unwrap(), "delegate");
+        request.command = vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()];
+        request.developer_instructions = Some("neutral engineer".to_owned());
+        request.dynamic_tools = vec![CodexDynamicToolSpec {
+            name: "task".to_owned(),
+            description: "delegate".to_owned(),
+            input_schema: json!({"type": "object"}),
+        }];
+        request.dynamic_tool_handler = Some(handler);
+        request.disable_native_multi_agent = true;
+        request.idle_timeout = Duration::from_secs(2);
+
+        let result = run_codex_turn(request, CancellationToken::new())
+            .await
+            .expect("managed dynamic tool turn should complete");
+        assert_eq!(result.output, "coordinated");
+        assert_eq!(result.usage.input_tokens, 100);
+        assert_eq!(result.usage.cached_input_tokens, 20);
+        assert_eq!(result.usage.output_tokens, 30);
+        assert_eq!(result.usage.reasoning_output_tokens, 5);
+        assert_eq!(result.usage.total_tokens, 135);
+        assert_eq!(result.tools.dynamic_tool_calls, 1);
+        assert_eq!(result.tools.command_executions, 1);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(
+                "task".to_owned(),
+                "call-1".to_owned(),
+                json!({"prompt": "inspect"})
+            )]
+        );
     }
 
     #[cfg(unix)]

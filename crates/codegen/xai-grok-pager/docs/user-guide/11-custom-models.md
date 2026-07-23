@@ -186,15 +186,25 @@ extra_headers = { "x-api-key" = "sk-ant-...", "anthropic-version" = "2023-06-01"
 
 The `messages` backend uses the Anthropic Messages protocol. Anthropic authenticates with an `x-api-key` header rather than `Authorization: Bearer`, so pass your key through `extra_headers`, which Grok sends verbatim.
 
-### OpenAI API and OpenRouter
+### xAI, OpenAI API, and OpenRouter
 
-Run `/providers` to add, replace, test, or remove an OpenAI or OpenRouter API
-key. Keys are masked in the TUI and stored under separate scopes in the
-owner-only `auth.json`; they are never written to `config.toml`.
+Run `/providers` to manage xAI OAuth, xAI API-key, OpenAI API-key, OpenRouter
+API-key, and Codex/ChatGPT login independently. Keys are masked in the TUI and
+stored under separate scopes in the owner-only `auth.json`; they are never
+written to `config.toml`. Removing one API key preserves every other provider
+credential. For xAI, removing the API key also preserves the OAuth session.
 
 With an OpenAI key, the picker includes the curated native Responses API
 entries `openai-gpt-5.6-sol`, `openai-gpt-5.6-terra`, and
-`openai-gpt-5.6-luna`. Without an OpenAI key, none of those entries is shown.
+`openai-gpt-5.6-luna`. Grok Build also fetches the authenticated OpenAI
+`GET /v1/models` catalog. Additional account-visible models appear as
+`openai:<upstream-id>` and are explicitly labeled experimental because the
+model-list response does not prove coding-agent tool support. These discovered
+entries can be selected for primary conversations, but subagents reject them;
+use a curated OpenAI entry for tool-using delegated work. The merged catalog is
+cached in the owner-only `openai_models_cache.json`, with curated entries first.
+On refresh failure, the last valid cache is used. Disconnecting OpenAI removes
+that cache.
 
 With an OpenRouter key, Grok Build fetches the authenticated
 `GET /api/v1/models` catalog and exposes every returned model as
@@ -301,7 +311,7 @@ codex login status
 codex login --device-auth
 ```
 
-After a successful login, Grok Build asks the native app-server for its
+Codex CLI version 0.145.0 or newer is required. After a successful login, Grok Build asks the native app-server for its
 paginated `model/list` catalog. The server's default model is exposed through
 the stable `codex-subscription` alias; every other visible model is selectable
 as `codex:<model>`, for example `codex:gpt-5.6-terra` or
@@ -347,7 +357,15 @@ the private Codex thread ID from session metadata, validates session ownership,
 provider, model, working directory, and sandbox, then continues it through
 `thread/resume`.
 
-To use all three at once, launch each task in the background:
+For a primary Codex conversation, Grok Build exposes its own `task`,
+`get_task_output`, and `kill_task` lifecycle tools to the app-server as dynamic
+tools. Native Codex multi-agent is disabled in this route so Grok Build remains
+the single owner of depth limits, permissions, provider selection, task state,
+and metrics. Codex subagents retain their resolved role, persona, memory, cwd,
+and sandbox ceiling, but cannot create another level of children.
+
+To use OpenAI, OpenRouter, and Codex concurrently, launch each task in the
+background:
 
 ```text
 task(prompt="Analyze the API", description="OpenAI analysis",
@@ -360,7 +378,13 @@ task(prompt="Implement the selected fix", description="Codex implementation",
 
 Each call returns its own subagent ID immediately. OpenAI and OpenRouter use
 their native HTTP APIs; Codex uses its native app-server protocol. No ACP
-adapter is used as a provider transport.
+adapter is used as a provider transport. xAI remains available to the primary
+session and to any subagent that inherits or explicitly selects an xAI model.
+
+All provider routes receive the same neutral software-engineering and
+architecture role. A backend is not told to identify as Grok merely because
+the host executable or repository uses that name. When asked about its
+underlying model/provider, it reports only explicit runtime metadata.
 
 ### Ollama (Local Models)
 

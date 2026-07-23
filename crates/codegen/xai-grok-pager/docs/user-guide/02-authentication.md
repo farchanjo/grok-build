@@ -52,6 +52,27 @@ grok
 
 Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `grok logout` or delete `~/.grok/auth.json`.
 
+### Multiple provider accounts
+
+Open `/providers` to manage four independent credential realms:
+
+- **xAI**: browser OAuth and an xAI API key are separate choices. OAuth takes
+  precedence for xAI requests when both are present, and disconnecting the API
+  key does not sign out the OAuth account.
+- **OpenAI API**: an API key used only with the OpenAI API provider.
+- **OpenRouter**: an API key used only with the OpenRouter provider.
+- **Codex / ChatGPT**: the official Codex CLI login. A ChatGPT subscription is
+  not treated as an OpenAI API key.
+
+Stored API keys occupy distinct scopes in the owner-only `auth.json` vault.
+Disconnecting one API-key provider preserves the other providers and the xAI
+OAuth session. Environment variables (`XAI_API_KEY`, `OPENAI_API_KEY`, and
+`OPENROUTER_API_KEY`) remain supported but cannot be removed by the TUI.
+
+When `GROK_HOME` is set, all Grok-owned credentials and provider catalog caches
+resolve under that directory. The `grok-custom` wrapper sets it to
+`~/.grok-prod`; it never copies credentials from another home.
+
 ---
 
 ## OIDC (Customer SSO)

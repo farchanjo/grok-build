@@ -69,6 +69,13 @@ pub(crate) fn task_model_error_for_catalog(
     available: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
 ) -> Option<String> {
+    if requested.starts_with("openai:") {
+        return Some(format!(
+            "Task.model slug '{requested}' is an experimental OpenAI catalog entry with \
+             unverified tool support. Select a curated OpenAI model or omit `model` to inherit \
+             the parent model."
+        ));
+    }
     let is_available = |entry: &ModelEntry| {
         let is_codex_agent = entry.model_provider.as_ref().is_some_and(|provider| {
             provider.kind == crate::agent::model_providers::ModelProviderKind::Codex
@@ -3425,6 +3432,11 @@ mod tests {
         catalog.insert("openai-test".to_owned(), entry);
         assert!(available_models(&catalog, false).contains_key(&acp::ModelId::new("openai-test")));
         assert!(task_model_error_for_catalog("openai-test", &catalog, false).is_none());
+        assert!(
+            task_model_error_for_catalog("openai:gpt-unverified-preview", &catalog, false)
+                .unwrap()
+                .contains("unverified tool support")
+        );
         crate::agent::providers::set_stored_key_home_for_tests(None);
     }
 

@@ -51,6 +51,13 @@ When the main agent identifies work to delegate, it calls the `spawn_subagent` t
 
 The parent receives the child's output -- usually a summary -- when the child finishes.
 
+Provider choice does not replace the role contract. xAI, OpenAI, OpenRouter,
+and Codex children all receive the same provider-neutral software-engineering
+and architecture baseline, followed by the resolved agent role, persona, and
+memory. A child therefore does not infer that it is "Grok" from the executable
+name, and a Codex child does not lose the restrictions of an `explore`,
+`plan`, read-only, or execute-only role.
+
 ---
 
 ## Built-in Agent Types
@@ -147,7 +154,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `prompt`          | The full task prompt for the subagent.                           |
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
-| `model`           | Optional model/provider catalog ID. Can target OpenAI, OpenRouter, or a configured Codex subscription agent. |
+| `model`           | Optional model/provider catalog ID. Can target xAI, curated OpenAI, OpenRouter, or a configured Codex subscription agent. OpenAI entries prefixed with `openai:` are discovery-only and rejected for subagents because their tool support is unverified. |
 | `run_in_background` | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
@@ -293,6 +300,15 @@ Use `q`, `Esc`, or click the close button to pop back to the parent view. The pa
 ## Depth Limits
 
 Only the top-level session spawns subagents. A subagent cannot spawn its own subagents: the maximum nesting depth is one. If a subagent calls `spawn_subagent`, the call fails with a depth-limit error. This keeps the agent tree flat and prevents runaway spawning.
+
+The same limit applies when the primary model is Codex. Grok Build supplies
+its host-owned task lifecycle to the primary Codex app-server and disables
+Codex's independent multi-agent feature, so there is one authoritative task
+tree rather than two competing orchestrators.
+
+In headless mode, child prose is not mixed into stdout. Plain and JSON output
+contain only the primary session's final stream; child sessions are tracked
+through lifecycle events and summarized by the parent.
 
 ---
 

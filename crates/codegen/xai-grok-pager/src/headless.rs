@@ -1114,6 +1114,7 @@ pub async fn run_single_turn(
             while let Ok(msg) = acp_rx.try_recv() {
                 handle_headless_acp_message(
                     msg.boxed(),
+                    &session_id,
                     &mut emitter,
                     t_prompt,
                     &mut ttf_logged,
@@ -1171,6 +1172,7 @@ pub async fn run_single_turn(
                 };
                 handle_headless_acp_message(
                     msg.boxed(),
+                    &session_id,
                     &mut emitter,
                     t_prompt,
                     &mut ttf_logged,
@@ -1187,6 +1189,7 @@ pub async fn run_single_turn(
                     drain_acp_with_grace(
                         &mut acp_rx,
                         Duration::from_millis(750),
+                        &session_id,
                         &mut emitter,
                         t_prompt,
                         &mut ttf_logged,
@@ -1214,6 +1217,7 @@ pub async fn run_single_turn(
     while let Ok(msg) = acp_rx.try_recv() {
         handle_headless_acp_message(
             msg.boxed(),
+            &session_id,
             &mut emitter,
             t_prompt,
             &mut ttf_logged,
@@ -1423,6 +1427,7 @@ fn track_background_lifecycle(
 async fn drain_acp_with_grace(
     acp_rx: &mut AcpClientRx,
     grace: Duration,
+    primary_session_id: &acp::SessionId,
     emitter: &mut HeadlessEmitter,
     t_prompt: Instant,
     ttf_logged: &mut bool,
@@ -1436,6 +1441,7 @@ async fn drain_acp_with_grace(
         while let Ok(msg) = acp_rx.try_recv() {
             handle_headless_acp_message(
                 msg.boxed(),
+                primary_session_id,
                 emitter,
                 t_prompt,
                 ttf_logged,
@@ -1455,6 +1461,7 @@ async fn drain_acp_with_grace(
                 let Some(msg) = msg else { break; };
                 handle_headless_acp_message(
                     msg.boxed(),
+                    primary_session_id,
                     emitter,
                     t_prompt,
                     ttf_logged,
@@ -1477,6 +1484,7 @@ async fn drain_acp_with_grace(
 #[allow(clippy::too_many_arguments)]
 fn handle_headless_acp_message(
     msg: AcpClientMessageBox,
+    primary_session_id: &acp::SessionId,
     emitter: &mut HeadlessEmitter,
     t_prompt: Instant,
     ttf_logged: &mut bool,
@@ -1487,34 +1495,40 @@ fn handle_headless_acp_message(
 ) {
     match msg {
         AcpClientMessageBox::SessionNotification(boxed) => {
-            match &boxed.request.update {
-                acp::SessionUpdate::AgentMessageChunk(chunk) => {
-                    if let acp::ContentBlock::Text(text) = &chunk.content
-                        && !text.text.is_empty()
-                    {
-                        if !*ttf_logged {
-                            *ttf_logged = true;
-                            tracing::debug!(
-                                elapsed_ms = t_prompt.elapsed().as_millis() as u64,
-                                "headless: time-to-first-chunk"
-                            );
+            // Child sessions share the ACP client connection with their parent.
+            // Their progress is represented by x.ai lifecycle notifications,
+            // but their streamed prose must never be mixed into the primary
+            // headless result.
+            if boxed.request.session_id == *primary_session_id {
+                match &boxed.request.update {
+                    acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let acp::ContentBlock::Text(text) = &chunk.content
+                            && !text.text.is_empty()
+                        {
+                            if !*ttf_logged {
+                                *ttf_logged = true;
+                                tracing::debug!(
+                                    elapsed_ms = t_prompt.elapsed().as_millis() as u64,
+                                    "headless: time-to-first-chunk"
+                                );
+                            }
+                            emitter.on_text_chunk(&text.text);
                         }
-                        emitter.on_text_chunk(&text.text);
                     }
-                }
-                acp::SessionUpdate::AgentThoughtChunk(chunk) => {
-                    if let acp::ContentBlock::Text(text) = &chunk.content {
-                        if !*ttf_logged {
-                            *ttf_logged = true;
-                            tracing::debug!(
-                                elapsed_ms = t_prompt.elapsed().as_millis() as u64,
-                                "headless: time-to-first-thought"
-                            );
+                    acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                        if let acp::ContentBlock::Text(text) = &chunk.content {
+                            if !*ttf_logged {
+                                *ttf_logged = true;
+                                tracing::debug!(
+                                    elapsed_ms = t_prompt.elapsed().as_millis() as u64,
+                                    "headless: time-to-first-thought"
+                                );
+                            }
+                            emitter.on_thought_chunk(&text.text);
                         }
-                        emitter.on_thought_chunk(&text.text);
                     }
+                    _ => {}
                 }
-                _ => {}
             }
             let _ = boxed.response_tx.send(Ok(()));
         }
@@ -1979,6 +1993,54 @@ mod tests {
             result["structuredOutputError"],
             "output does not match the required schema"
         );
+    }
+
+    #[test]
+    fn headless_result_ignores_child_session_prose() {
+        fn message(session_id: &str, text: &str) -> xai_acp_lib::AcpClientMessageBox {
+            let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+            xai_acp_lib::AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp::SessionNotification::new(
+                    acp::SessionId::new(session_id),
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(text)),
+                    )),
+                ),
+                response_tx,
+            })
+            .boxed()
+        }
+
+        let primary_session_id = acp::SessionId::new("parent");
+        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, false);
+        let mut ttf_logged = false;
+        let mut pending_bg = HashSet::new();
+        let mut completed_before_bg = HashSet::new();
+
+        handle_headless_acp_message(
+            message("child", "child answer"),
+            &primary_session_id,
+            &mut emitter,
+            Instant::now(),
+            &mut ttf_logged,
+            false,
+            OutputFormat::Json,
+            &mut pending_bg,
+            &mut completed_before_bg,
+        );
+        handle_headless_acp_message(
+            message("parent", "parent answer"),
+            &primary_session_id,
+            &mut emitter,
+            Instant::now(),
+            &mut ttf_logged,
+            false,
+            OutputFormat::Json,
+            &mut pending_bg,
+            &mut completed_before_bg,
+        );
+
+        assert_eq!(emitter.text_buffer, "parent answer");
     }
 
     #[test]

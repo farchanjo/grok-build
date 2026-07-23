@@ -72,6 +72,75 @@ pub(super) fn task_model_override_error(
     )
 }
 
+pub(super) fn codex_subagent_sandbox(
+    yolo_mode: bool,
+    capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+    permission_mode: &xai_grok_agent::config::PermissionMode,
+) -> crate::agent::codex_app_server::CodexSandboxMode {
+    use crate::agent::codex_app_server::CodexSandboxMode;
+    use xai_grok_agent::config::PermissionMode;
+    use xai_tool_types::SubagentCapabilityMode;
+
+    if matches!(
+        capability_mode,
+        Some(SubagentCapabilityMode::ReadOnly | SubagentCapabilityMode::Execute)
+    ) || *permission_mode == PermissionMode::Plan
+    {
+        CodexSandboxMode::ReadOnly
+    } else if yolo_mode || *permission_mode == PermissionMode::BypassPermissions {
+        CodexSandboxMode::DangerFullAccess
+    } else {
+        CodexSandboxMode::WorkspaceWrite
+    }
+}
+
+pub(super) fn codex_subagent_developer_instructions(
+    definition: &xai_grok_agent::config::AgentDefinition,
+    runtime: &xai_grok_subagent_resolution::EffectiveRuntimeConfig,
+) -> String {
+    let mut sections = vec![
+        xai_grok_agent::prompt::PROVIDER_NEUTRAL_ENGINEERING_INSTRUCTIONS
+            .trim()
+            .to_owned(),
+        format!(
+            "You are running as the '{}' subagent. {}",
+            definition.name, definition.description
+        ),
+    ];
+    if let Some(body) = definition
+        .prompt_body
+        .as_deref()
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+    {
+        sections.push(body.to_owned());
+    }
+    if let Some(role) = runtime
+        .role_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+    {
+        sections.push(format!("<role-instructions>\n{role}\n</role-instructions>"));
+    }
+    if let Some(persona) = runtime
+        .persona_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|persona| !persona.is_empty())
+    {
+        sections.push(format!(
+            "<persona-instructions>\n{persona}\n</persona-instructions>"
+        ));
+    }
+    sections.push(
+        "Complete only the delegated task supplied as user input. You are a depth-one child: do \
+         not spawn or delegate to additional agents."
+            .to_owned(),
+    );
+    sections.join("\n\n")
+}
+
 /// Load the durable native-Codex resume pointer and reject any attempt to
 /// cross a parent session, provider, model, cwd, or sandbox boundary. The
 /// thread is resumed by app-server from its own persisted rollout; Grok Build
@@ -550,6 +619,69 @@ pub(crate) async fn handle_subagent_request(
             )
             });
     }
+    let is_plugin_agent = definition.plugin_name.is_some();
+    let yolo_policy_block = xai_grok_workspace::permission::resolution::yolo_disabled_by_policy();
+    let agent_permission_mode = resolve_subagent_permission_mode(
+        definition.permission_mode.clone(),
+        is_plugin_agent,
+        yolo_policy_block,
+    );
+    if agent_permission_mode != definition.permission_mode {
+        if is_plugin_agent {
+            tracing::warn!(
+                agent = %definition.name,
+                plugin = ?definition.plugin_name,
+                "ignoring permissionMode on plugin agent (not supported for security)"
+            );
+        } else {
+            tracing::warn!(
+                agent = %definition.name,
+                "ignoring subagent permissionMode=bypassPermissions: always-approve disabled by managed policy"
+            );
+        }
+    }
+    let agent_memory_scope = definition.memory;
+    let agent_name_for_memory = definition.name.clone();
+    if let Some(scope) = agent_memory_scope {
+        use xai_grok_tools::implementations::grok_build;
+        use xai_grok_tools::implementations::opencode;
+        let memory_tools: Vec<xai_grok_tools::registry::types::ToolConfig> = vec![
+            (&grok_build::ReadFileTool).into(),
+            (&grok_build::SearchReplaceTool).into(),
+            (&opencode::OpenCodeWriteTool).into(),
+        ];
+        for tc in memory_tools {
+            if !definition.tool_config.tools.iter().any(|t| t.id == tc.id) {
+                definition.tool_config.tools.push(tc);
+            }
+        }
+        let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
+        let memory_dir = &resolved_mem.path;
+        let memory_md = memory_dir.join("MEMORY.md");
+        if memory_md.is_file() && let Ok(content) = std::fs::read_to_string(&memory_md) {
+            const MAX_LINES: usize = 200;
+            const MAX_BYTES: usize = 25 * 1024;
+            let truncated: String = content
+                .lines()
+                .take(MAX_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let truncated = xai_grok_tools::util::truncate::truncate_str(
+                    &truncated,
+                    MAX_BYTES,
+                )
+                .to_string();
+            if !truncated.is_empty() {
+                let injection = format!(
+                    "\n\n<agent-memory>\nMemory directory: {}\n\n{truncated}\n</agent-memory>",
+                    memory_dir.display()
+                );
+                definition.prompt_body = Some(
+                    definition.prompt_body.unwrap_or_default() + injection.as_str(),
+                );
+            }
+        }
+    }
     if request.fork_context {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
@@ -680,23 +812,21 @@ pub(crate) async fn handle_subagent_request(
             request.prompt.clone(),
         );
         codex_request.command = provider.command;
+        codex_request.developer_instructions = Some(
+            codex_subagent_developer_instructions(&definition, &effective_runtime),
+        );
         codex_request.reasoning_effort = effective_runtime.reasoning_effort.clone();
         codex_request.output_schema = request.runtime_overrides.output_schema.clone();
         codex_request.idle_timeout =
             std::time::Duration::from_secs(ctx.inference_idle_timeout_secs);
-        codex_request.sandbox = if ctx.yolo_mode {
-            crate::agent::codex_app_server::CodexSandboxMode::DangerFullAccess
-        } else if matches!(
+        codex_request.sandbox = codex_subagent_sandbox(
+            ctx.yolo_mode,
             effective_runtime.capability_mode,
-            Some(
-                xai_tool_types::SubagentCapabilityMode::ReadOnly
-                    | xai_tool_types::SubagentCapabilityMode::Execute
-            )
-        ) {
-            crate::agent::codex_app_server::CodexSandboxMode::ReadOnly
-        } else {
-            crate::agent::codex_app_server::CodexSandboxMode::WorkspaceWrite
-        };
+            &agent_permission_mode,
+        );
+        // A Codex child is already at MAX_SUBAGENT_DEPTH. Native Codex
+        // collaboration is disabled and no host task tools are advertised.
+        codex_request.disable_native_multi_agent = true;
 
         let resume_meta = match request.resume_from.as_deref() {
             Some(source_id) => match load_codex_resume_meta(
@@ -727,18 +857,28 @@ pub(crate) async fn handle_subagent_request(
         .await;
         let duration_ms = start.elapsed().as_millis() as u64;
         let mut completed_codex_thread_id = None;
+        let mut codex_cached_input_tokens = 0;
+        let mut codex_reasoning_tokens = 0;
         let mut result = match run_result {
             Ok(codex) => {
                 completed_codex_thread_id = Some(codex.thread_id.clone());
+                codex_cached_input_tokens = codex.usage.cached_input_tokens;
+                codex_reasoning_tokens = codex.usage.reasoning_output_tokens;
                 SubagentResult {
                     success: true,
                     output: std::sync::Arc::from(codex.output),
                     subagent_id: request.id.clone(),
                     child_session_id: codex.thread_id,
-                    tool_calls: 0,
+                    tool_calls: codex.tools.total(),
                     turns: 1,
                     duration_ms,
-                    output_usage_incomplete: true,
+                    tokens_used: codex.usage.input_tokens,
+                    output_tokens_used: codex
+                        .usage
+                        .output_tokens
+                        .saturating_add(codex.usage.reasoning_output_tokens),
+                    total_tokens_used: codex.usage.total_tokens,
+                    output_usage_incomplete: codex.usage.total_tokens == 0,
                     worktree_path: worktree_path
                         .as_ref()
                         .map(|path| path.to_string_lossy().to_string()),
@@ -816,7 +956,88 @@ pub(crate) async fn handle_subagent_request(
                 result.error = Some(error.to_string());
             }
         }
+        let persisted_output_dir = persist_subagent_output(&subagent_meta_dir, &result);
+        let usage_incomplete = result.output_usage_incomplete;
+        let by_model = if result.total_tokens_used == 0 {
+            Vec::new()
+        } else {
+            vec![(
+                effective_model_id.0.to_string(),
+                xai_chat_state::UsageTotals {
+                    input_tokens: result.tokens_used,
+                    output_tokens: result.output_tokens_used,
+                    cached_read_tokens: codex_cached_input_tokens,
+                    reasoning_tokens: codex_reasoning_tokens,
+                    model_calls: 1,
+                    api_duration_ms: duration_ms,
+                    cost_usd_ticks: None,
+                    cost_missing_calls: 1,
+                },
+            )]
+        };
+        let fold_acked = if let Some(cmd_tx) = ctx.parent_cmd_tx.as_ref() {
+            let (respond_to, ack) = tokio::sync::oneshot::channel();
+            cmd_tx
+                .send(crate::session::commands::SessionCommand::RecordSubagentUsage {
+                    by_model,
+                    parent_prompt_id: request.parent_prompt_id.clone(),
+                    incomplete: usage_incomplete,
+                    respond_to,
+                })
+                .is_ok()
+                && ack.await.is_ok()
+        } else {
+            false
+        };
+        if !fold_acked {
+            tracing::warn!(
+                subagent_id = %request.id,
+                parent_prompt_id = ?request.parent_prompt_id,
+                "Codex subagent usage not applied; parent bill marked incomplete"
+            );
+            let sticky_prompt = request
+                .parent_prompt_id
+                .clone()
+                .or_else(|| coordinator.borrow().parent_prompt_id_for(&request.id));
+            if let Some(cmd_tx) = ctx.parent_cmd_tx.as_ref() {
+                let (respond_to, ack) = tokio::sync::oneshot::channel();
+                if cmd_tx
+                    .send(
+                        crate::session::commands::SessionCommand::MarkSubagentUsageNotApplied {
+                            parent_prompt_id: sticky_prompt,
+                            respond_to,
+                        },
+                    )
+                    .is_ok()
+                {
+                    let _ = ack.await;
+                }
+            } else if let Some(ref prompt_id) = sticky_prompt {
+                coordinator
+                    .borrow_mut()
+                    .mark_subagent_usage_not_applied(prompt_id);
+            }
+        }
+        let outcome = if result.success {
+            xai_grok_telemetry::events::Outcome::Completed
+        } else if result.cancelled {
+            xai_grok_telemetry::events::Outcome::Cancelled
+        } else {
+            xai_grok_telemetry::events::Outcome::Error
+        };
+        xai_grok_telemetry::session_ctx::log_event(
+            xai_grok_telemetry::events::SubagentCompleted {
+                subagent_id: request.id.clone(),
+                parent_session_id: request.parent_session_id.clone(),
+                outcome,
+                duration_ms,
+                tool_calls: result.tool_calls,
+                tokens_used: (result.total_tokens_used > 0)
+                    .then_some(result.total_tokens_used),
+            },
+        );
         let terminal_child_session_id = result.child_session_id.clone();
+        pending_guard.defuse();
         coordinator.borrow_mut().complete_pending_external(
             &request.id,
             result.clone(),
@@ -824,6 +1045,7 @@ pub(crate) async fn handle_subagent_request(
             effective_cwd.clone(),
             worktree_path.clone(),
             effective_model_id.0.to_string(),
+            persisted_output_dir,
         );
         emit_subagent_notification(
             gateway,
@@ -836,7 +1058,7 @@ pub(crate) async fn handle_subagent_request(
                 tool_calls: result.tool_calls,
                 turns: result.turns,
                 duration_ms,
-                tokens_used: 0,
+                tokens_used: result.total_tokens_used,
                 output: Some(result.output.to_string()),
                 will_wake: false,
             },
@@ -1137,12 +1359,12 @@ pub(crate) async fn handle_subagent_request(
             "effective_model": effective_model_id.0.as_ref(),
             "effective_model_raw": &effective_sampling_config.model,
             "base_url": &effective_sampling_config.base_url,
-            "key_prefix": key_prefix(&effective_sampling_config.api_key),
+            "has_api_key": effective_sampling_config.api_key.is_some(),
             "auth_type": format!("{:?}", inherited_auth_type),
             "model_has_own_creds": model_has_own_creds,
             "auth_method_id": ctx.auth_method_id.0.as_ref(),
             "parent_model": ctx.model_id.0.as_ref(),
-            "parent_key_prefix": key_prefix(&ctx.sampling_config.api_key),
+            "parent_has_api_key": ctx.sampling_config.api_key.is_some(),
             "context_window": effective_sampling_config.context_window,
         }),
         ),
@@ -1151,69 +1373,6 @@ pub(crate) async fn handle_subagent_request(
         .attribution_callback
         .clone();
     let tracker_color = definition.color;
-    let agent_memory_scope = definition.memory;
-    let agent_name_for_memory = definition.name.clone();
-    let is_plugin_agent = definition.plugin_name.is_some();
-    let yolo_policy_block = xai_grok_workspace::permission::resolution::yolo_disabled_by_policy();
-    let agent_permission_mode = resolve_subagent_permission_mode(
-        definition.permission_mode.clone(),
-        is_plugin_agent,
-        yolo_policy_block,
-    );
-    if agent_permission_mode != definition.permission_mode {
-        if is_plugin_agent {
-            tracing::warn!(
-                agent = %definition.name,
-                plugin = ?definition.plugin_name,
-                "ignoring permissionMode on plugin agent (not supported for security)"
-            );
-        } else {
-            tracing::warn!(
-                agent = %definition.name,
-                "ignoring subagent permissionMode=bypassPermissions: always-approve disabled by managed policy"
-            );
-        }
-    }
-    if let Some(scope) = agent_memory_scope {
-        use xai_grok_tools::implementations::grok_build;
-        use xai_grok_tools::implementations::opencode;
-        let memory_tools: Vec<xai_grok_tools::registry::types::ToolConfig> = vec![
-            (&grok_build::ReadFileTool).into(),
-            (&grok_build::SearchReplaceTool).into(),
-            (&opencode::OpenCodeWriteTool).into(),
-        ];
-        for tc in memory_tools {
-            if !definition.tool_config.tools.iter().any(|t| t.id == tc.id) {
-                definition.tool_config.tools.push(tc);
-            }
-        }
-        let resolved_mem = scope.resolve_dir(&agent_name_for_memory, &ctx.parent_cwd);
-        let memory_dir = &resolved_mem.path;
-        let memory_md = memory_dir.join("MEMORY.md");
-        if memory_md.is_file() && let Ok(content) = std::fs::read_to_string(&memory_md) {
-            const MAX_LINES: usize = 200;
-            const MAX_BYTES: usize = 25 * 1024;
-            let truncated: String = content
-                .lines()
-                .take(MAX_LINES)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let truncated = xai_grok_tools::util::truncate::truncate_str(
-                    &truncated,
-                    MAX_BYTES,
-                )
-                .to_string();
-            if !truncated.is_empty() {
-                let injection = format!(
-                    "\n\n<agent-memory>\nMemory directory: {}\n\n{truncated}\n</agent-memory>",
-                    memory_dir.display()
-                );
-                definition.prompt_body = Some(
-                    definition.prompt_body.unwrap_or_default() + injection.as_str(),
-                );
-            }
-        }
-    }
     let is_plugin_agent = definition.plugin_name.is_some();
     if let Some(ref hooks_config) = definition.hooks {
         if is_plugin_agent {
