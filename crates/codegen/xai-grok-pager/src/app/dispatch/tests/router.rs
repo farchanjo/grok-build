@@ -388,6 +388,16 @@ fn quit_returns_quit_effect() {
     assert!(matches!(effects.as_slice(), [Effect::Quit]));
 }
 #[test]
+fn quit_for_update_is_inert_when_automatic_updates_are_disabled() {
+    let mut app = test_app();
+    app.pending_update_version = Some("9.9.9".to_string());
+    assert!(!xai_grok_update::auto_update::automatic_updates_enabled());
+    let effects = dispatch(Action::QuitForUpdate, &mut app);
+    assert!(effects.is_empty());
+    assert!(!app.quit_for_update);
+    assert!(app.pending_update_version.is_none());
+}
+#[test]
 fn resume_foreign_session_consumes_hint_and_uses_each_tools_prompt() {
     use xai_grok_workspace::foreign_sessions::ForeignSessionTool;
     for (tool, prompt) in [

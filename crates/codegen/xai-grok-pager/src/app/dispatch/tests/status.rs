@@ -1068,14 +1068,12 @@ fn show_usage_with_redirect_url_fetches_session_only() {
 // ── Minimal update-notice tests ──────────────────────────────────────
 
 #[test]
-fn minimal_update_notice_commits_a_system_block() {
+fn minimal_update_notice_is_inert_when_automatic_updates_are_disabled() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
+    assert!(!xai_grok_update::auto_update::automatic_updates_enabled());
     commit_minimal_update_notice(&mut app, "9.9.9");
-    assert_eq!(agent_scrollback_len(&app), before + 1);
-    let text = last_system_text(&app, AgentId(0));
-    assert!(text.contains("Update available: v9.9.9"), "got: {text:?}");
-    assert!(text.contains("restart to apply"), "got: {text:?}");
+    assert_eq!(agent_scrollback_len(&app), before);
 }
 
 #[test]

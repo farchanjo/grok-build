@@ -1,13 +1,14 @@
 //! Minimum-version enforcement.
 //!
 //! When `cli.minimum_version` is set in any config layer, Grok refuses to
-//! start below that floor. With auto-update on, we install
-//! `max(latest, minimum)`; otherwise the user is asked to run `grok update`.
+//! start below that floor. When automatic updates are allowed by build policy
+//! and configuration, we install `max(latest, minimum)`; otherwise the user is
+//! asked to run `grok update`.
 //!
 //! Set `GROK_TEST_VERSION` to manually exercise either path without producing
 //! a real out-of-date build.
 
-use crate::auto_update::{get_installer, run_install_script};
+use crate::auto_update::{automatic_updates_enabled, get_installer, run_install_script};
 use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_grok_version, write_version_cache,
 };
@@ -200,6 +201,11 @@ async fn enforce_minimum_version(
         return Ok(EnforcementOutcome::Allowed);
     };
 
+    if !automatic_updates_enabled() {
+        warn!(%current, %minimum, "minimum_version: auto-update disabled by build policy");
+        return Err(MinimumVersionError::AutoUpdateDisabled { current, minimum });
+    }
+
     info!(%current, %minimum, "minimum_version: below floor; attempting auto-update");
 
     // `None` is "default on"; only explicit `false` opts out.
@@ -294,6 +300,33 @@ pub async fn enforce_minimum_version_or_exit(update_config: &UpdateConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn build_policy_blocks_floor_driven_auto_update() {
+        let saved = std::env::var("GROK_TEST_VERSION").ok();
+        // SAFETY: #[serial] excludes other env-touching tests.
+        unsafe { std::env::set_var("GROK_TEST_VERSION", "0.1.0") };
+        let update_config = UpdateConfig {
+            proxy_base_url: "https://unused.invalid".to_string(),
+            auth_scope: "unused".to_string(),
+            deployment_key: None,
+            alpha_test_key: None,
+            channel: "stable".to_string(),
+            npm_registry: None,
+        };
+
+        let result = enforce_minimum_version(Some("999.0.0"), &update_config).await;
+        assert!(matches!(
+            result,
+            Err(MinimumVersionError::AutoUpdateDisabled { .. })
+        ));
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var("GROK_TEST_VERSION", v) },
+            None => unsafe { std::env::remove_var("GROK_TEST_VERSION") },
+        }
+    }
 
     #[test]
     fn evaluate_minimum_version_decisions() {

@@ -2407,7 +2407,8 @@ impl AppView {
                     welcome_doc_viewer: &mut self.welcome_doc_viewer,
                     changelog_markdown: &self.changelog_markdown,
                     show_changelog_action: self.welcome_show_changelog_action,
-                    has_pending_update: self.pending_update_version.is_some(),
+                    has_pending_update: xai_grok_update::auto_update::automatic_updates_enabled()
+                        && self.pending_update_version.is_some(),
                     has_foreign_resume,
                     cwd_has_git_ancestor: self.cwd_has_git_ancestor,
                     session_picker_grouped: self.session_picker_grouped,
@@ -3388,7 +3389,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if key!('s', CONTROL).matches(key) {
                 return InputOutcome::Action(Action::FetchSessionList);
             }
-            if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
+            if xai_grok_update::auto_update::automatic_updates_enabled()
+                && ctx.has_pending_update
+                && key!('u', CONTROL).matches(key)
+            {
                 return InputOutcome::Action(Action::QuitForUpdate);
             }
             if ctx.has_foreign_resume && key!('u', CONTROL).matches(key) {
@@ -4196,7 +4200,10 @@ impl AppView {
                             compact,
                             pending_hint,
                             startup_warnings: &self.startup_warnings,
-                            pending_update_version: self.pending_update_version.as_deref(),
+                            pending_update_version:
+                                xai_grok_update::auto_update::automatic_updates_enabled()
+                                    .then_some(self.pending_update_version.as_deref())
+                                    .flatten(),
                             foreign_resume_hint: foreign_resume_hint.as_ref(),
                             session_picker_content_results: self
                                 .session_picker_content_results
@@ -6992,7 +6999,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn welcome_ctrl_u_update_keeps_priority_over_foreign_resume() {
+    fn welcome_ctrl_u_ignores_disabled_update_and_resumes_foreign_session() {
         let mut app = test_app();
         app.foreign_session_compat =
             xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources {
@@ -7022,14 +7029,11 @@ pub(crate) mod tests {
             }),
         );
         let key = key_event(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        app.pending_update_version = Some("9.9.9".into());
+        assert!(!xai_grok_update::auto_update::automatic_updates_enabled());
         assert!(matches!(
             app.handle_input(&key),
             InputOutcome::Action(Action::ResumeForeignSession)
-        ));
-        app.pending_update_version = Some("9.9.9".into());
-        assert!(matches!(
-            app.handle_input(&key),
-            InputOutcome::Action(Action::QuitForUpdate)
         ));
     }
     #[test]

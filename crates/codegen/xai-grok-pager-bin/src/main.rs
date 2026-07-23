@@ -2160,6 +2160,9 @@ fn build_update_config() -> UpdateConfig {
 /// Central gate for auto-update checks; add new suppression rules here,
 /// not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
+    if !auto_update::automatic_updates_enabled() {
+        return false;
+    }
     if cfg!(debug_assertions) {
         return false;
     }
@@ -2544,6 +2547,12 @@ mod tests {
             !stdio_auto_update_enabled(true, false, true, false),
             "pinned binary"
         );
+    }
+    #[test]
+    fn automatic_update_checks_are_disabled_by_build_policy() {
+        assert!(!auto_update::automatic_updates_enabled());
+        assert!(!should_check_for_updates(false));
+        assert!(!should_check_for_updates(true));
     }
     use clap::Parser as _;
     /// `grok dashboard` flags the startup hook without forcing leader mode —

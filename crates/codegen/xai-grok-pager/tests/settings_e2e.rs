@@ -2030,6 +2030,11 @@ fn settings_value_payload_matches_kind() {
         if is_group_child(&reg, meta.key) {
             continue;
         }
+        // The metadata and typed setter remain versioned, but the build
+        // policy removes auto-update from the interactive TUI.
+        if meta.key == "auto_update" && !xai_grok_update::auto_update::automatic_updates_enabled() {
+            continue;
+        }
         let mut state = make_state();
         navigate_to(&mut state, meta.key);
         let outcome = handle_settings_key(&mut state, &press(KeyCode::Char(' ')));
@@ -6315,8 +6320,19 @@ fn pr13_space_on_show_tips_dispatches_typed_setter() {
 }
 
 #[test]
-fn pr13_space_on_auto_update_dispatches_typed_setter() {
+fn pr13_space_on_auto_update_respects_build_policy() {
+    let reg = SettingsRegistry::defaults();
+    assert!(reg.find("auto_update").is_some());
     let mut s = make_state();
+    if !xai_grok_update::auto_update::automatic_updates_enabled() {
+        assert!(
+            !s.rows
+                .iter()
+                .any(|row| matches!(row, RowEntry::Setting { key, .. } if *key == "auto_update")),
+            "auto-update must not be exposed in the TUI while the build policy is off"
+        );
+        return;
+    }
     navigate_to(&mut s, "auto_update");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     assert_set_bool_action(outcome, "auto_update", false);
@@ -6337,10 +6353,19 @@ fn pr13_mouse_click_on_show_tips_indicator_toggles_in_one_click() {
     assert_set_bool_action(outcome, "show_tips", false);
 }
 
-/// Two-stage select-then-toggle on `auto_update`.
+/// Two-stage select-then-toggle remains covered for builds that enable
+/// automatic updates; disabled builds assert that the row is absent.
 #[test]
-fn pr13_mouse_click_on_auto_update_two_stage_select_then_toggle() {
+fn pr13_mouse_click_on_auto_update_respects_build_policy() {
     let mut s = make_state();
+    if !xai_grok_update::auto_update::automatic_updates_enabled() {
+        assert!(
+            !s.rows
+                .iter()
+                .any(|row| matches!(row, RowEntry::Setting { key, .. } if *key == "auto_update"))
+        );
+        return;
+    }
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "auto_update") as u16;
 

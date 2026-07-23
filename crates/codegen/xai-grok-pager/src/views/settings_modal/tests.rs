@@ -205,6 +205,16 @@ fn setting_row_visible_hides_voice_rows_when_voice_mode_off() {
 }
 
 #[test]
+fn auto_update_row_and_action_are_disabled_by_build_policy() {
+    let reg = SettingsRegistry::defaults();
+    let auto_update = meta_for(&reg, "auto_update");
+    assert!(!xai_grok_update::auto_update::automatic_updates_enabled());
+    assert!(!setting_row_visible(auto_update, true, false, true));
+    assert!(action_for_bool("auto_update", true).is_none());
+    assert!(action_for_bool("auto_update", false).is_none());
+}
+
+#[test]
 fn rebuild_rows_drops_voice_settings_when_gate_turns_off() {
     let prev = crate::app::voice_mode_enabled();
     crate::app::set_voice_mode_enabled_for_test(true);
@@ -272,6 +282,11 @@ fn every_setting_has_action_for_bool_arm() {
     let reg = SettingsRegistry::defaults();
     for meta in reg.all() {
         if !matches!(meta.kind, SettingKind::Bool { .. }) {
+            continue;
+        }
+        if meta.key == "auto_update" && !xai_grok_update::auto_update::automatic_updates_enabled() {
+            assert!(action_for_bool(meta.key, true).is_none());
+            assert!(action_for_bool(meta.key, false).is_none());
             continue;
         }
         assert!(
@@ -688,7 +703,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // (`contextual_hints.{undo,plan_mode,image_input}`) are hidden
             // from the top-level list and reached via the sub-sheet.
             "contextual_hints",
-            "auto_update",
+            // auto_update remains registered but is hidden by build policy.
             // SHELL-owned hunk_tracker_mode (Advanced; `off` disables it).
             "hunk_tracker_mode",
         ]

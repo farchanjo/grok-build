@@ -35,7 +35,8 @@ impl AppView {
             && self.next_agent_id == 0
             && !self.chat_mode
             && !self.is_zdr_blocked()
-            && self.pending_update_version.is_none()
+            && (!xai_grok_update::auto_update::automatic_updates_enabled()
+                || self.pending_update_version.is_none())
     }
 
     fn pristine_foreign_resume_welcome(&self) -> bool {

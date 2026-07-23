@@ -1373,7 +1373,11 @@ pub(crate) async fn run(
     );
     let config_session_bools = load_initial_config_session_bools();
     app.show_tips = config_session_bools.show_tips;
-    app.auto_update = config_session_bools.auto_update;
+    app.auto_update = if xai_grok_update::auto_update::automatic_updates_enabled() {
+        config_session_bools.auto_update
+    } else {
+        Some(false)
+    };
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
     // Prime thread-local caches so first render doesn't hit disk.
     crate::appearance::cache::prime(&app.current_ui);
@@ -1767,7 +1771,11 @@ pub(crate) async fn run(
 
     // Background update check: resolves when the spawned update task
     // determines whether a newer version is available.
-    let mut bg_update_rx = bg_update_rx;
+    let mut bg_update_rx = if xai_grok_update::auto_update::automatic_updates_enabled() {
+        bg_update_rx
+    } else {
+        None
+    };
 
     // `app::run` publishes the resolved theme into `theme_cache::CURRENT`
     // before `init_terminal` so `apply_cursor_color()` sees it. Pin the

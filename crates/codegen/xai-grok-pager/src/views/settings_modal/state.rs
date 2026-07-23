@@ -788,6 +788,9 @@ pub(super) fn setting_row_visible(
     minimal: bool,
     voice_mode: bool,
 ) -> bool {
+    if meta.key == "auto_update" && !xai_grok_update::auto_update::automatic_updates_enabled() {
+        return false;
+    }
     if !voice_mode && matches!(meta.key, "voice_capture_mode" | "voice_stt_language") {
         return false;
     }
@@ -871,7 +874,10 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
         "invert_scroll" => Some(Action::SetInvertScroll(new)),
         "show_tips" => Some(Action::SetShowTips(new)),
-        "auto_update" => Some(Action::SetAutoUpdate(new)),
+        "auto_update" if xai_grok_update::auto_update::automatic_updates_enabled() => {
+            Some(Action::SetAutoUpdate(new))
+        }
+        "auto_update" => None,
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
         _ => None,
     }

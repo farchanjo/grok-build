@@ -337,6 +337,9 @@ pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
 /// surface), so the background update check's result is shown here instead
 /// No-op when there is no active agent.
 pub(crate) fn commit_minimal_update_notice(app: &mut AppView, latest_version: &str) {
+    if !xai_grok_update::auto_update::automatic_updates_enabled() {
+        return;
+    }
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {

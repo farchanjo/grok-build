@@ -17,6 +17,19 @@ use crate::version::{
 use xai_grok_shell::util::config;
 use xai_grok_shell::util::grok_home::{grok_application, grok_home};
 
+/// Build policy for automatic binary updates.
+///
+/// Keep the updater implementation and the explicit `grok update` command
+/// available, but make every automatic entry point inert. Re-enabling the
+/// feature is intentionally a one-line policy change rather than a code
+/// restoration.
+pub const AUTOMATIC_UPDATES_ENABLED: bool = false;
+
+#[inline]
+pub const fn automatic_updates_enabled() -> bool {
+    AUTOMATIC_UPDATES_ENABLED
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum UpdateRunMode {
     Blocking,
@@ -103,7 +116,11 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     let installer = get_installer().await.map(|value| value.to_string());
     let current_version = get_installed_grok_version();
     let current_config = config::load_config().await;
-    let auto_update = current_config.cli.auto_update;
+    let auto_update = if automatic_updates_enabled() {
+        current_config.cli.auto_update
+    } else {
+        Some(false)
+    };
     let channel = update_config.channel.clone();
 
     let Some(ref inst) = installer else {
@@ -387,6 +404,11 @@ impl BackgroundUpdateCheck {
 /// TUI, the leader's hourly checker) already put the target version on disk,
 /// no download is started — only the restart hint is surfaced.
 pub async fn check_update_background(update_config: &UpdateConfig) -> BackgroundUpdateCheck {
+    if !automatic_updates_enabled() {
+        tracing::debug!("Background update check skipped by build policy");
+        return BackgroundUpdateCheck::none();
+    }
+
     let Some(installer) = get_installer().await else {
         return BackgroundUpdateCheck::none();
     };
@@ -469,6 +491,11 @@ pub async fn run_update_if_available(
     interactive: bool,
     update_config: &UpdateConfig,
 ) -> Result<bool> {
+    if !automatic_updates_enabled() {
+        tracing::debug!("Automatic update skipped by build policy");
+        return Ok(false);
+    }
+
     let Some(inst) = get_installer().await else {
         // Skip update check if no known installer.
         return Ok(false);
@@ -2458,6 +2485,35 @@ async fn refresh_deployment_config() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_update_config() -> UpdateConfig {
+        UpdateConfig {
+            proxy_base_url: "https://unused.invalid".to_string(),
+            auth_scope: "unused".to_string(),
+            deployment_key: None,
+            alpha_test_key: None,
+            channel: "stable".to_string(),
+            npm_registry: None,
+        }
+    }
+
+    #[test]
+    fn automatic_updates_are_disabled_by_build_policy() {
+        assert!(!automatic_updates_enabled());
+    }
+
+    #[tokio::test]
+    async fn automatic_update_entry_points_are_inert() {
+        let config = test_update_config();
+        let background = check_update_background(&config).await;
+        assert!(background.update.is_none());
+        assert!(background.download.is_none());
+        assert!(
+            !run_update_if_available(UpdateRunMode::NonBlocking, false, &config)
+                .await
+                .unwrap()
+        );
+    }
 
     #[test]
     fn test_tmp_download_path_is_unique_per_version_and_per_attempt() {
