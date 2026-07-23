@@ -24,6 +24,7 @@ pub use btw::BtwBlock;
 pub use context_info::ContextInfoBlock;
 pub use credit_limit::{CreditLimitBlock, CreditLimitCardAction};
 pub use session_event::{SessionEvent, SessionEventBlock};
+pub(crate) use session_event::{is_image_input_unsupported_error, user_facing_error_detail};
 pub use subagent::{SubagentBlock, SubagentBlockKind};
 pub use system::SystemMessageBlock;
 pub use thinking::ThinkingBlock;

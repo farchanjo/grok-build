@@ -75,6 +75,32 @@ pub(super) fn collect_live_doctor_report(
     Some(report)
 }
 
+/// True when the retry notification already presented the terminal request
+/// failure for this turn. `PromptResponse` arrives after that notification;
+/// rendering its error again produces the duplicate RetryFailed + TurnFailed
+/// stack and can expose a nested JSON-RPC payload.
+fn scrollback_has_recent_request_failure(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> bool {
+    for idx in (0..scrollback.len()).rev() {
+        match scrollback.entry(idx).map(|entry| &entry.block) {
+            Some(RenderBlock::SessionEvent(event))
+                if matches!(
+                    event.event,
+                    SessionEvent::RetryFailed { .. } | SessionEvent::ImageInputUnsupported
+                ) =>
+            {
+                return true;
+            }
+            // Retry and prompt completion notifications can have an
+            // informational system line interleaved between them.
+            Some(RenderBlock::SessionEvent(_) | RenderBlock::System(_)) => {}
+            _ => break,
+        }
+    }
+    false
+}
+
 fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
     DoctorFixTarget {
         agent_id: agent.session.id,
@@ -1222,6 +1248,10 @@ pub(super) fn handle_prompt_response(
         // block, so the generic TurnFailed + error toast are redundant. Derived
         // from the scrollback (mirrors reauth), not a session flag.
         let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
+        // RetryState is delivered before PromptResponse. When it already
+        // surfaced a request failure, keep that single integrated UI block
+        // and suppress the duplicate terminal marker/toast.
+        let request_failure_present = scrollback_has_recent_request_failure(&agent.scrollback);
         // Fallback: if the retry notification didn't set the flag,
         // detect credit-limit denials (legacy 403 or pool 402) from
         // the PromptResponse error + HTTP status. Covers races where
@@ -1324,7 +1354,8 @@ pub(super) fn handle_prompt_response(
                     || model_incompatible
                     || credit_limit_blocked
                     || reauth_prompted
-                    || context_overflow =>
+                    || context_overflow
+                    || request_failure_present =>
             {
                 // Skip TurnFailed when a dedicated prompt/modal shows instead
                 // (rate limit, free-usage paywall, model incompatibility,
@@ -1359,9 +1390,16 @@ pub(super) fn handle_prompt_response(
                     && !model_incompatible
                     && !credit_limit_blocked
                     && !reauth_prompted
-                    && !context_overflow =>
+                    && !context_overflow
+                    && !request_failure_present =>
             {
-                Some((NotificationEventKind::AgentError, format!("Error: {err}")))
+                Some((
+                    NotificationEventKind::AgentError,
+                    format!(
+                        "Error: {}",
+                        crate::scrollback::blocks::user_facing_error_detail(err)
+                    ),
+                ))
             }
             _ => None,
         };

@@ -1749,6 +1749,63 @@ fn prompt_response_context_overflow_suppresses_turn_failed_and_toast() {
     assert!(!toast, "context overflow must suppress the error toast");
 }
 
+/// RetryState arrives before PromptResponse. Once it has rendered the
+/// actionable image error, PromptResponse must not add the raw JSON payload
+/// as a second TurnFailed block or desktop notification.
+#[test]
+fn prompt_response_unsupported_image_suppresses_duplicate_error_ui() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ImageInputUnsupported,
+        ));
+    }
+    let raw = r#"Internal error: {
+        "message": "API error (status 404 Not Found): No endpoints found that support image input",
+        "http_status": 404
+    }"#;
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(raw.to_string()),
+            http_status: Some(404),
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    let events = (0..agent.scrollback.len())
+        .filter_map(
+            |idx| match agent.scrollback.entry(idx).map(|entry| &entry.block) {
+                Some(RenderBlock::SessionEvent(event)) => Some(&event.event),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::ImageInputUnsupported))
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnFailed { .. })),
+        "PromptResponse must not append a duplicate TurnFailed"
+    );
+    assert!(
+        app.deferred_notification.is_none(),
+        "the dedicated scrollback prompt replaces the raw error notification"
+    );
+}
+
 #[test]
 fn prompt_response_routes_idle_title_through_frame_pipeline() {
     let mut app = test_app_with_agent();

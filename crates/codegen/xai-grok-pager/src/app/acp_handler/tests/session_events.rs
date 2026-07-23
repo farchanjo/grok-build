@@ -550,6 +550,32 @@
         ));
     }
 
+    #[test]
+    fn apply_retry_state_unsupported_image_shows_actionable_prompt() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api_404".into(),
+                message: "API error (status 404 Not Found): \
+                          No endpoints found that support image input"
+                    .into(),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        let event = last_session_event(&scrollback);
+        assert!(
+            matches!(event, Some(SessionEvent::ImageInputUnsupported)),
+            "unsupported image input must use the dedicated UI event, got {event:?}"
+        );
+        let message = event.expect("dedicated event").message();
+        assert!(message.contains("/model"));
+        assert!(!message.contains("404"));
+        assert!(!message.contains("endpoint"));
+    }
+
     /// A context overflow surfaces the actionable `ContextTooLarge` prompt (not the
     /// raw `RetryFailed`); `PromptResponse` then suppresses the redundant `TurnFailed`.
     #[test]

@@ -1314,6 +1314,10 @@ pub(super) fn apply_retry_state(
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+            } else if crate::scrollback::blocks::is_image_input_unsupported_error(message) {
+                scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::ImageInputUnsupported,
+                ));
             } else if error_type == "context_length" {
                 if !scrollback_has_recent_compaction_failed(scrollback) {
                     scrollback

@@ -95,6 +95,10 @@ pub enum SessionEvent {
     /// vs the server's max_prompt_length, or compaction suppressed/failed). One actionable
     /// prompt, replacing the CompactionFailed + RetryFailed + TurnFailed stack.
     ContextTooLarge,
+    /// The selected model/provider route cannot accept an attached image.
+    /// Render one actionable prompt instead of the provider's raw 404 payload
+    /// followed by a duplicate `TurnFailed` block.
+    ImageInputUnsupported,
     /// Manual `/compact` command completed.
     CompactCompleted {
         /// Wall-clock elapsed time for the command.
@@ -162,13 +166,20 @@ impl SessionEvent {
                 error,
                 elapsed: Some(elapsed),
             } => {
-                format!("Turn failed in {}: {error}", format_duration(*elapsed))
+                format!(
+                    "Request failed in {} \u{2014} {}",
+                    format_duration(*elapsed),
+                    user_facing_error_detail(error)
+                )
             }
             SessionEvent::TurnFailed {
                 error,
                 elapsed: None,
             } => {
-                format!("Turn failed: {error}")
+                format!(
+                    "Request failed \u{2014} {}",
+                    user_facing_error_detail(error)
+                )
             }
             SessionEvent::CompactionStarted { percentage } => {
                 format!("Context {percentage}% full. Compacting…")
@@ -210,7 +221,10 @@ impl SessionEvent {
                      current model. Please start a new session."
                         .to_string()
                 } else {
-                    format!("Retry failed: {error}")
+                    format!(
+                        "Request failed \u{2014} {}",
+                        user_facing_error_detail(error)
+                    )
                 }
             }
             SessionEvent::ReAuthRequired => {
@@ -222,6 +236,11 @@ impl SessionEvent {
             SessionEvent::ContextTooLarge => {
                 "This conversation is too large for the model's context window. \
                  Use /new to start a new session."
+                    .to_string()
+            }
+            SessionEvent::ImageInputUnsupported => {
+                "Image input isn\u{2019}t available for this model. Remove the image or \
+                 choose an image-capable model with /model, then try again."
                     .to_string()
             }
             SessionEvent::CompactCompleted { elapsed } => {
@@ -284,6 +303,98 @@ impl SessionEvent {
                 | SessionEvent::TurnFailed { .. }
         )
     }
+}
+
+/// Whether a provider error says that no selected route can accept image
+/// input. Providers do not expose one stable error code for this condition,
+/// so match the small set of phrases used by OpenRouter and OpenAI-compatible
+/// endpoints. This is intentionally narrower than a general "image" match:
+/// invalid image data and unsupported file formats need different guidance.
+pub(crate) fn is_image_input_unsupported_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("no endpoints found that support image input")
+        || normalized.contains("does not support image input")
+        || normalized.contains("doesn't support image input")
+        || normalized.contains("image input is not supported")
+        || normalized.contains("unsupported image input")
+}
+
+/// Convert a transport/provider error into concise scrollback copy.
+///
+/// Raw ACP failures can be nested (`Internal error: {"message":"API error
+/// (status …): …"}`). The complete payload remains in tracing logs; the UI
+/// extracts the provider's useful message, removes transport prefixes and
+/// bounds the result so one failure cannot take over the transcript.
+pub(crate) fn user_facing_error_detail(error: &str) -> String {
+    const FALLBACK: &str = "An unexpected provider error occurred. Try again.";
+    const MAX_CHARS: usize = 500;
+
+    if is_image_input_unsupported_error(error) {
+        return "Image input isn\u{2019}t available for this model. Remove the image or \
+                choose an image-capable model with /model, then try again."
+            .to_string();
+    }
+
+    let mut detail = error.trim().to_string();
+    for _ in 0..4 {
+        let previous = detail.clone();
+        detail = extract_nested_error_message(&detail).unwrap_or(detail);
+        detail = strip_error_prefix(&detail).trim().to_string();
+        if detail == previous {
+            break;
+        }
+    }
+
+    let detail = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if detail.is_empty() {
+        return FALLBACK.to_string();
+    }
+    if detail.chars().count() <= MAX_CHARS {
+        return detail;
+    }
+    let mut truncated = detail.chars().take(MAX_CHARS - 1).collect::<String>();
+    truncated.push('\u{2026}');
+    truncated
+}
+
+fn extract_nested_error_message(error: &str) -> Option<String> {
+    let start = error.find('{')?;
+    let end = error.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&error[start..=end]).ok()?;
+    json_error_message(&value).map(str::to_owned)
+}
+
+fn json_error_message(value: &serde_json::Value) -> Option<&str> {
+    if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+        return Some(message);
+    }
+    if let Some(detail) = value.get("detail").and_then(serde_json::Value::as_str) {
+        return Some(detail);
+    }
+    let nested = value.get("error")?;
+    nested
+        .as_str()
+        .or_else(|| nested.get("message").and_then(serde_json::Value::as_str))
+}
+
+fn strip_error_prefix(error: &str) -> &str {
+    let trimmed = error.trim();
+    for prefix in ["Error: ", "Internal error: ", "Retry failed: "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim();
+        }
+    }
+    for prefix in ["API error (status ", "API error (HTTP "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix)
+            && let Some(separator) = rest.find("):")
+        {
+            return rest[separator + 2..].trim();
+        }
+    }
+    trimmed
 }
 
 /// Format a token count with "k" suffix for thousands.
@@ -540,6 +651,9 @@ impl BlockContent for SessionEventBlock {
             self.event,
             SessionEvent::ReAuthRequired
                 | SessionEvent::ContextTooLarge
+                | SessionEvent::ImageInputUnsupported
+                | SessionEvent::RetryFailed { .. }
+                | SessionEvent::TurnFailed { .. }
                 | SessionEvent::CompactionFailed { .. }
         ) {
             ratatui::style::Style::default().fg(theme.warning)
@@ -588,6 +702,9 @@ impl BlockContent for SessionEventBlock {
             self.event,
             SessionEvent::ReAuthRequired
                 | SessionEvent::ContextTooLarge
+                | SessionEvent::ImageInputUnsupported
+                | SessionEvent::RetryFailed { .. }
+                | SessionEvent::TurnFailed { .. }
                 | SessionEvent::CompactionFailed { .. }
         ) {
             Some(AccentStyle::static_color(theme.warning))
@@ -705,7 +822,10 @@ mod tests {
             error: "connection reset".into(),
             elapsed: Some(Duration::from_secs(3)),
         };
-        assert_eq!(event.message(), "Turn failed in 3.0s: connection reset");
+        assert_eq!(
+            event.message(),
+            "Request failed in 3.0s \u{2014} connection reset"
+        );
     }
 
     #[test]
@@ -714,7 +834,7 @@ mod tests {
             error: "auth error".into(),
             elapsed: None,
         };
-        assert_eq!(event.message(), "Turn failed: auth error");
+        assert_eq!(event.message(), "Request failed \u{2014} auth error");
     }
 
     #[test]
@@ -750,7 +870,10 @@ mod tests {
             error: "connection timeout".into(),
             error_type: None,
         };
-        assert_eq!(event.message(), "Retry failed: connection timeout");
+        assert_eq!(
+            event.message(),
+            "Request failed \u{2014} connection timeout"
+        );
     }
 
     #[test]
@@ -767,12 +890,74 @@ mod tests {
     }
 
     #[test]
-    fn retry_failed_other_error_type_shows_raw() {
+    fn retry_failed_other_error_type_shows_clean_detail() {
         let event = SessionEvent::RetryFailed {
             error: "bad request".into(),
             error_type: Some("api_400".into()),
         };
-        assert_eq!(event.message(), "Retry failed: bad request");
+        assert_eq!(event.message(), "Request failed \u{2014} bad request");
+    }
+
+    #[test]
+    fn nested_api_error_is_flattened_for_scrollback() {
+        let raw = r#"Internal error: {
+            "message": "API error (status 404 Not Found): Model route was not found",
+            "http_status": 404
+        }"#;
+        assert_eq!(user_facing_error_detail(raw), "Model route was not found");
+        let event = SessionEvent::TurnFailed {
+            error: raw.into(),
+            elapsed: Some(Duration::from_millis(1100)),
+        };
+        assert_eq!(
+            event.message(),
+            "Request failed in 1.1s \u{2014} Model route was not found"
+        );
+    }
+
+    #[test]
+    fn unsupported_image_error_has_actionable_copy() {
+        let raw = "API error (status 404 Not Found): No endpoints found that support image input";
+        assert!(is_image_input_unsupported_error(raw));
+        assert_eq!(
+            user_facing_error_detail(raw),
+            SessionEvent::ImageInputUnsupported.message()
+        );
+        let message = SessionEvent::ImageInputUnsupported.message();
+        assert!(message.contains("/model"));
+        assert!(!message.contains("404"));
+        assert!(!message.contains("endpoint"));
+    }
+
+    #[test]
+    fn unsupported_image_and_generic_failures_have_warning_accent() {
+        let theme = Theme::current();
+        for event in [
+            SessionEvent::ImageInputUnsupported,
+            SessionEvent::RetryFailed {
+                error: "provider unavailable".into(),
+                error_type: None,
+            },
+            SessionEvent::TurnFailed {
+                error: "provider unavailable".into(),
+                elapsed: None,
+            },
+        ] {
+            let accent = SessionEventBlock::new(event).accent(&ctx());
+            assert_eq!(
+                accent.map(|style| style.color),
+                Some(theme.warning),
+                "request failures must use the system warning treatment"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_error_detail_is_bounded() {
+        let raw = "x".repeat(800);
+        let rendered = user_facing_error_detail(&raw);
+        assert_eq!(rendered.chars().count(), 500);
+        assert!(rendered.ends_with('\u{2026}'));
     }
 
     #[test]
