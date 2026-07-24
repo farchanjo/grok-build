@@ -557,6 +557,7 @@ impl ProviderManager {
                     // valid primary conversation route. Runtime routing keeps
                     // it away from the inference sampler.
                     hidden: None,
+                    supports_tools: Some(preset.supports_tools),
                     ..Default::default()
                 });
         }
@@ -3114,5 +3115,65 @@ mod tests {
         assert_eq!(openrouter_credits_bucket(Some(50.0)), "10_to_100");
         assert_eq!(openrouter_credits_bucket(Some(100.0)), "gte_100");
         assert_eq!(openrouter_credits_bucket(Some(999.0)), "gte_100");
+    }
+
+    /// Phase 1 capability plumbing: the catalog `supports_tools` flag must
+    /// survive `install_model_presets` into the resolved `ModelInfo` entries.
+    /// A cached OpenRouter catalog with a tools-capable and a tools-incapable
+    /// model must preserve both values (`Some(true)` / `Some(false)`) so
+    /// later phases can gate agent-safe OpenRouter models.
+    #[test]
+    #[serial_test::serial]
+    fn install_presets_preserves_openrouter_supports_tools_flag() {
+        let home = tempfile::tempdir().unwrap();
+        let _openrouter = EnvGuard::unset("OPENROUTER_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        reset_openrouter_refresh_guard_for_tests();
+
+        // One catalog model advertises tool calling (`tools`), one does not.
+        let cached_models = parse_openrouter_catalog(
+            br#"{"data":[
+                {"id":"acme/tools","context_length":128000,"supported_parameters":["tools"]},
+                {"id":"acme/notools","context_length":32000,"supported_parameters":["reasoning"]}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(
+            cached_models.iter().any(|m| m.supports_tools),
+            "fixture must include a tools-capable model"
+        );
+        assert!(
+            cached_models.iter().any(|m| !m.supports_tools),
+            "fixture must include a tools-incapable model"
+        );
+        write_openrouter_cache(
+            home.path(),
+            &cached_models,
+            Some(current_epoch_secs().unwrap()),
+        );
+
+        // Storing an OpenRouter key makes the catalog visible to install.
+        ProviderManager::new(home.path())
+            .set_api_key(ProviderId::OpenRouter, "router-key")
+            .unwrap();
+
+        let mut config = super::super::config::Config::default();
+        ProviderManager::install_model_presets(&mut config);
+        let models = super::super::config::resolve_model_list(&config, None);
+
+        let tools_model = &models["openrouter:acme/tools"].info;
+        assert_eq!(
+            tools_model.supports_tools,
+            Some(true),
+            "tools-capable catalog entry must preserve supports_tools = Some(true)"
+        );
+        let notools_model = &models["openrouter:acme/notools"].info;
+        assert_eq!(
+            notools_model.supports_tools,
+            Some(false),
+            "tools-incapable catalog entry must preserve supports_tools = Some(false)"
+        );
+
+        set_stored_key_home_for_tests(None);
     }
 }

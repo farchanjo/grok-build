@@ -4011,6 +4011,10 @@ pub struct ConfigModelOverride {
     pub compaction_at_tokens: Option<CompactionAtTokens>,
     pub show_model_fingerprint: Option<bool>,
     pub stream_tool_calls: Option<bool>,
+    /// Tool/function-calling capability override. Presets propagate the
+    /// catalog's `supports_tools` flag here so it survives into `ModelInfo`
+    /// via [`ConfigModelOverride::apply`].
+    pub supports_tools: Option<bool>,
 }
 impl ConfigModelOverride {
     pub(crate) fn apply(
@@ -4098,6 +4102,9 @@ impl ConfigModelOverride {
         }
         if self.stream_tool_calls.is_some() {
             entry.info.stream_tool_calls = self.stream_tool_calls;
+        }
+        if let Some(v) = self.supports_tools {
+            entry.info.supports_tools = Some(v);
         }
         if self.api_key.is_some() {
             entry.api_key.clone_from(&self.api_key);
@@ -4210,6 +4217,12 @@ pub struct ModelInfo {
     /// injecting nudges. See [`LazinessDetectorPerModelConfig`].
     #[serde(default)]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+    /// Whether the upstream model advertises tool/function-calling support.
+    /// Carried through from provider catalogs (OpenRouter `supported_parameters`,
+    /// OpenAI curated presets) so later phases can gate agent-safe models.
+    /// `None` means unknown (e.g. a hand-written TOML `[model.X]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
 }
 impl ModelInfo {
     /// Minimal fallback descriptor for an unknown model slug.
@@ -4246,6 +4259,7 @@ impl ModelInfo {
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            supports_tools: None,
         }
     }
     /// Extract shared model metadata from a flat config entry.
@@ -4281,6 +4295,10 @@ impl ModelInfo {
             show_model_fingerprint: entry.show_model_fingerprint,
             stream_tool_calls: entry.stream_tool_calls,
             laziness_detector: entry.laziness_detector.clone(),
+            // `ModelEntryConfig` has no tools-capability field; user TOML
+            // models default to unknown (`None`) until a catalog/override
+            // install supplies it.
+            supports_tools: None,
         }
     }
     /// Derive the legacy effort gate/default from `reasoning_efforts` so the
@@ -5072,6 +5090,7 @@ pub fn resolve_aux_model_sampling_config(
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                supports_tools: None,
             },
             model_provider: None,
             api_key: Some(bearer),
@@ -5389,6 +5408,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            supports_tools: None,
         },
         model_provider: None,
         api_key: None,
@@ -6531,6 +6551,7 @@ reasoning_effort = "low"
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                supports_tools: None,
             },
             model_provider: None,
             api_key: api_key.map(|s| s.to_string()),
@@ -11975,6 +11996,7 @@ default = "grok-4.5"
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                supports_tools: None,
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
             },
