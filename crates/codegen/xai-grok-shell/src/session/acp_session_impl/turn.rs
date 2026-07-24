@@ -36,7 +36,6 @@ fn validate_structured_output(
     }
 }
 
-
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
 /// **Ledger marks** only when [`Self::fail_closed`]. Sticky and background

@@ -578,8 +578,7 @@ async fn list_models_protocol(
         )
         .await?;
         let response =
-            wait_for_response_stdin(id, request.idle_timeout, cancellation, stdin, reader)
-                .await?;
+            wait_for_response_stdin(id, request.idle_timeout, cancellation, stdin, reader).await?;
         let data = response
             .pointer("/result/data")
             .and_then(Value::as_array)
@@ -1087,10 +1086,7 @@ fn handle_server_request_async(
     Ok(())
 }
 
-async fn emit_stream_events(
-    stream_tx: &Option<mpsc::Sender<CodexStreamEvent>>,
-    message: &Value,
-) {
+async fn emit_stream_events(stream_tx: &Option<mpsc::Sender<CodexStreamEvent>>, message: &Value) {
     let Some(tx) = stream_tx else {
         return;
     };
@@ -1246,8 +1242,7 @@ impl TurnAccumulator {
                 // the host call exactly once.
             }
             CodexItemKind::CollabToolCall => {
-                self.tools.collaboration_calls =
-                    self.tools.collaboration_calls.saturating_add(1);
+                self.tools.collaboration_calls = self.tools.collaboration_calls.saturating_add(1);
             }
             // All remaining tool-like kinds (WebSearch, ImageView, Sleep,
             // ContextCompaction, Review) are bucketed as other_calls.

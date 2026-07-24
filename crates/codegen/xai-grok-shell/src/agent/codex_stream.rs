@@ -22,18 +22,24 @@ pub enum CodexStreamEvent {
     /// `turn/started`
     TurnStarted { turn_id: Option<String> },
     /// Streamed assistant text (`item/agentMessage/delta`).
-    AgentMessageDelta { item_id: Option<String>, text: String },
+    AgentMessageDelta {
+        item_id: Option<String>,
+        text: String,
+    },
     /// Streamed reasoning summary or raw reasoning text.
-    ReasoningDelta { item_id: Option<String>, text: String },
+    ReasoningDelta {
+        item_id: Option<String>,
+        text: String,
+    },
     /// Streamed plan-mode body (`item/plan/delta`).
-    PlanDelta { item_id: Option<String>, text: String },
+    PlanDelta {
+        item_id: Option<String>,
+        text: String,
+    },
     /// A new item began (`item/started`).
     ItemStarted(CodexItemSnapshot),
     /// Incremental tool output (`item/commandExecution/outputDelta`, MCP progress).
-    ItemOutputDelta {
-        item_id: String,
-        text: String,
-    },
+    ItemOutputDelta { item_id: String, text: String },
     /// File-change patch snapshot (`item/fileChange/patchUpdated`).
     FileChangePatch {
         item_id: Option<String>,
@@ -262,8 +268,8 @@ pub fn classify_notification(message: &Value) -> Vec<CodexStreamEvent> {
                         .iter()
                         .filter_map(|entry| {
                             let step = string_field(entry, &["step", "content", "text"])?;
-                            let status =
-                                string_field(entry, &["status"]).unwrap_or_else(|| "pending".into());
+                            let status = string_field(entry, &["status"])
+                                .unwrap_or_else(|| "pending".into());
                             Some(CodexPlanStep { step, status })
                         })
                         .collect::<Vec<_>>()
@@ -311,7 +317,9 @@ fn parse_item(item: &Value) -> Option<CodexItemSnapshot> {
                 if let Some(arr) = s.as_array() {
                     let joined = arr
                         .iter()
-                        .filter_map(|v| v.as_str().or_else(|| v.get("text").and_then(Value::as_str)))
+                        .filter_map(|v| {
+                            v.as_str().or_else(|| v.get("text").and_then(Value::as_str))
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     if joined.is_empty() {
@@ -324,8 +332,8 @@ fn parse_item(item: &Value) -> Option<CodexItemSnapshot> {
                 }
             })
         });
-    let output = string_field(item, &["aggregatedOutput", "aggregated_output", "output"])
-        .or_else(|| {
+    let output =
+        string_field(item, &["aggregatedOutput", "aggregated_output", "output"]).or_else(|| {
             item.get("result")
                 .and_then(|r| serde_json::to_string_pretty(r).ok())
         });
@@ -434,11 +442,7 @@ fn extract_user_message_text(item: &CodexItemSnapshot) -> Option<String> {
         })
         .collect::<Vec<_>>()
         .join("");
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn parse_file_changes(value: &Value) -> Vec<CodexFileChange> {
@@ -622,8 +626,7 @@ pub fn stream_event_to_acp(
         CodexStreamEvent::ItemOutputDelta { item_id, text } => {
             let accumulated = ui.tool_outputs.entry(item_id.clone()).or_default();
             accumulated.push_str(&text);
-            let tool_call_id =
-                acp::ToolCallId::new(Arc::<str>::from(format!("codex:{item_id}")));
+            let tool_call_id = acp::ToolCallId::new(Arc::<str>::from(format!("codex:{item_id}")));
             vec![CodexAcpChunk {
                 update: acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                     tool_call_id,
@@ -644,8 +647,7 @@ pub fn stream_event_to_acp(
             let Some(item_id) = item_id else {
                 return Vec::new();
             };
-            let tool_call_id =
-                acp::ToolCallId::new(Arc::<str>::from(format!("codex:{item_id}")));
+            let tool_call_id = acp::ToolCallId::new(Arc::<str>::from(format!("codex:{item_id}")));
             let content = file_change_content(&changes);
             let locations = changes
                 .iter()
@@ -754,10 +756,7 @@ pub fn stream_event_to_acp(
             _ => Vec::new(),
         },
         CodexStreamEvent::TurnDiffUpdated { .. } => Vec::new(),
-        CodexStreamEvent::TurnPlanUpdated {
-            explanation,
-            steps,
-        } => {
+        CodexStreamEvent::TurnPlanUpdated { explanation, steps } => {
             let mut out = Vec::new();
             if let Some(explanation) = explanation.filter(|e| !e.is_empty()) {
                 let chunk_index = ui.next_chunk_index();
