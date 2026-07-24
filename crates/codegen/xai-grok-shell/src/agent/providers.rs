@@ -36,18 +36,16 @@ pub enum ProviderId {
     Xai,
     OpenAi,
     OpenRouter,
-    Codex,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 4] = [Self::Xai, Self::OpenAi, Self::OpenRouter, Self::Codex];
+    pub const ALL: [Self; 3] = [Self::Xai, Self::OpenAi, Self::OpenRouter];
 
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Xai => "xAI",
-            Self::OpenAi => "OpenAI API",
+            Self::OpenAi => "OpenAI",
             Self::OpenRouter => "OpenRouter",
-            Self::Codex => "Codex / ChatGPT",
         }
     }
 
@@ -56,7 +54,6 @@ impl ProviderId {
             Self::Xai => Err(ProviderError::ApiKeyUnsupported),
             Self::OpenAi => Ok(crate::auth::OPENAI_API_KEY_SCOPE),
             Self::OpenRouter => Ok(crate::auth::OPENROUTER_API_KEY_SCOPE),
-            Self::Codex => Err(ProviderError::ApiKeyUnsupported),
         }
     }
 
@@ -67,7 +64,6 @@ impl ProviderId {
             Self::Xai => None,
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
-            Self::Codex => None,
         }
     }
 
@@ -76,7 +72,6 @@ impl ProviderId {
             Self::Xai => Some(ModelProviderKind::Xai),
             Self::OpenAi => Some(ModelProviderKind::OpenAi),
             Self::OpenRouter => Some(ModelProviderKind::OpenRouter),
-            Self::Codex => Some(ModelProviderKind::Codex),
         }
     }
 
@@ -87,15 +82,11 @@ impl ProviderId {
                  xAI API key."
             }
             Self::OpenAi => {
-                "OpenAI API key is not configured. Open /providers and connect OpenAI, or \
-                 select a GPT model via OpenRouter. A ChatGPT subscription is available \
-                 through the codex-subscription agent, not as an OpenAI API key."
+                "OpenAI is not configured. Open /providers and connect with a ChatGPT login \
+                 (subscription) or an OpenAI API key."
             }
             Self::OpenRouter => {
                 "OpenRouter API key is not configured. Open /providers and connect OpenRouter."
-            }
-            Self::Codex => {
-                "Codex uses the official ChatGPT login. Open /providers and connect Codex."
             }
         }
     }
@@ -268,7 +259,6 @@ pub struct ProviderManager {
     openai_models_url: String,
     openrouter_models_url: String,
     openrouter_catalog_url: String,
-    codex_program: PathBuf,
 }
 
 impl Default for ProviderManager {
@@ -288,7 +278,6 @@ impl ProviderManager {
             // sending an inference request or incurring model charges.
             openrouter_models_url: "https://openrouter.ai/api/v1/key".to_owned(),
             openrouter_catalog_url: "https://openrouter.ai/api/v1/models".to_owned(),
-            codex_program: PathBuf::from("codex"),
         }
     }
 
@@ -313,12 +302,6 @@ impl ProviderManager {
         self
     }
 
-    /// Override the official executable for tests or an explicitly managed
-    /// install. The command is never interpreted by a shell.
-    pub fn with_codex_program(mut self, program: impl Into<PathBuf>) -> Self {
-        self.codex_program = program.into();
-        self
-    }
 
     pub fn presets() -> Vec<ProviderModelPreset> {
         vec![
@@ -397,24 +380,6 @@ impl ProviderManager {
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
             },
-            ProviderModelPreset {
-                id: "codex-subscription".to_owned(),
-                provider: ProviderId::Codex,
-                label: "Codex (ChatGPT subscription)".to_owned(),
-                model: "gpt-5.6-sol".to_owned(),
-                base_url: None,
-                is_agent: true,
-                description: Some(
-                    "Latest frontier agentic coding model via your ChatGPT subscription."
-                        .to_owned(),
-                ),
-                context_window: Some(1_050_000),
-                max_completion_tokens: Some(128_000),
-                supports_tools: true,
-                supports_reasoning_effort: true,
-                reasoning_efforts: Vec::new(),
-                default_reasoning_effort: Some("low".to_owned()),
-            },
         ]
     }
 
@@ -469,25 +434,23 @@ impl ProviderManager {
                     ..Default::default()
                 }
             });
-        model_providers
-            .entry("grok_build_codex".to_owned())
-            .or_insert_with(|| ModelProviderConfig {
-                kind: ModelProviderKind::Codex,
-                ..Default::default()
-            });
-
         let openrouter_configured = credential_lookup_manager()
             .api_key(ProviderId::OpenRouter)
             .ok()
             .flatten()
             .is_some();
-        let openai_configured = credential_lookup_manager()
+        let openai_api_key = credential_lookup_manager()
             .api_key(ProviderId::OpenAi)
             .ok()
             .flatten()
             .is_some();
+        let openai_oauth = crate::auth::chatgpt_oauth::status(&credential_lookup_manager().grok_home)
+            == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected;
+        let openai_configured = openai_api_key || openai_oauth;
         let mut presets = Self::presets();
-        if openai_configured
+        // API-key catalog only when OAuth is not the active method.
+        if openai_api_key
+            && !openai_oauth
             && let Ok(cached) = load_openai_catalog_cache(&credential_lookup_manager().grok_home)
         {
             presets.retain(|preset| preset.provider != ProviderId::OpenAi);
@@ -509,20 +472,23 @@ impl ProviderManager {
             // auto-refresh entry point; the TTL check is the only trigger.
             maybe_spawn_openrouter_background_refresh(&credential_lookup_manager().grok_home);
         }
-        presets.retain(|preset| preset.provider != ProviderId::Codex);
-        if let Ok(cached) = load_codex_catalog_cache(&credential_lookup_manager().grok_home) {
-            presets.extend(cached);
+        if openai_oauth {
+            // OAuth mode: use ChatGPT subscription allowlist with real API slugs.
+            presets.retain(|preset| preset.provider != ProviderId::OpenAi);
+            presets.extend(static_chatgpt_oauth_presets());
         }
 
         for preset in presets {
             if preset.provider == ProviderId::OpenRouter && !openrouter_configured {
                 continue;
             }
+            if preset.provider == ProviderId::OpenAi && !openai_configured {
+                continue;
+            }
             let provider = match preset.provider {
                 ProviderId::Xai => continue,
                 ProviderId::OpenAi => "grok_build_openai",
                 ProviderId::OpenRouter => "grok_build_openrouter",
-                ProviderId::Codex => "grok_build_codex",
             };
             config_models
                 .entry(preset.id)
@@ -553,9 +519,6 @@ impl ProviderManager {
                         &preset.reasoning_efforts,
                         preset.default_reasoning_effort.as_deref(),
                     ),
-                    // Codex is a native app-server agent, but it is also a
-                    // valid primary conversation route. Runtime routing keeps
-                    // it away from the inference sampler.
                     hidden: None,
                     supports_tools: Some(preset.supports_tools),
                     ..Default::default()
@@ -563,8 +526,7 @@ impl ProviderManager {
         }
     }
 
-    /// List statuses without a network request. Codex status is deliberately
-    /// queried separately because it starts an external process.
+    /// List statuses without a network request.
     pub fn list(&self) -> Vec<ProviderStatus> {
         ProviderId::ALL
             .into_iter()
@@ -589,7 +551,7 @@ impl ProviderManager {
         {
             presets = cached.models;
         }
-        if provider == ProviderId::Codex
+        if provider == ProviderId::OpenAi
             && let Ok(cached) = load_codex_catalog_cache(&self.grok_home)
         {
             presets = cached;
@@ -635,15 +597,60 @@ impl ProviderManager {
                     presets,
                 }
             }
-            ProviderId::Codex => ProviderStatus {
-                provider,
-                display_name: provider.display_name().to_owned(),
-                state: ProviderConnectionState::Unavailable,
-                credential_source: None,
-                can_test_connection: false,
-                authentication: Vec::new(),
-                presets,
-            },
+            ProviderId::OpenAi => {
+                use crate::auth::chatgpt_oauth::{self, ChatGptOAuthStatus};
+                let oauth = chatgpt_oauth::status(&self.grok_home);
+                let oauth_connected = matches!(oauth, ChatGptOAuthStatus::Connected);
+                let oauth_expired = matches!(oauth, ChatGptOAuthStatus::Expired);
+                let api_key_source = self.credential_source(provider).ok().flatten();
+                // Mutual exclusion: OAuth wins when present.
+                let api_key_configured = !oauth_connected && !oauth_expired && api_key_source.is_some();
+                let mut openai_presets = presets;
+                if oauth_connected {
+                    openai_presets = static_chatgpt_oauth_presets();
+                }
+                ProviderStatus {
+                    provider,
+                    display_name: provider.display_name().to_owned(),
+                    state: if oauth_connected {
+                        ProviderConnectionState::Connected
+                    } else if oauth_expired || api_key_configured {
+                        ProviderConnectionState::Configured
+                    } else {
+                        ProviderConnectionState::NotConfigured
+                    },
+                    credential_source: if oauth_connected {
+                        Some(ProviderCredentialSource::SecureStore)
+                    } else {
+                        api_key_source
+                    },
+                    can_test_connection: api_key_configured,
+                    authentication: vec![
+                        ProviderAuthenticationStatus {
+                            kind: ProviderAuthenticationKind::ChatGpt,
+                            state: if oauth_connected {
+                                ProviderConnectionState::Connected
+                            } else if oauth_expired {
+                                ProviderConnectionState::Configured
+                            } else {
+                                ProviderConnectionState::NotConfigured
+                            },
+                            credential_source: oauth_connected
+                                .then_some(ProviderCredentialSource::SecureStore),
+                        },
+                        ProviderAuthenticationStatus {
+                            kind: ProviderAuthenticationKind::ApiKey,
+                            state: if api_key_configured {
+                                ProviderConnectionState::Configured
+                            } else {
+                                ProviderConnectionState::NotConfigured
+                            },
+                            credential_source: api_key_source,
+                        },
+                    ],
+                    presets: openai_presets,
+                }
+            }
             _ => match self.credential_source(provider) {
                 Ok(Some(source)) => ProviderStatus {
                     provider,
@@ -684,83 +691,77 @@ impl ProviderManager {
         }
     }
 
-    /// The real Codex login state, queried from the official executable. No
-    /// output is captured because it could contain account information.
-    pub async fn codex_status(&self) -> Result<ProviderStatus, ProviderError> {
-        if !self.codex_version_supported().await? {
-            return Err(ProviderError::CodexTooOld);
-        }
-        let connected = self
-            .run_codex_quiet(["login", "status"], CODEX_STATUS_TIMEOUT)
-            .await?;
+    /// Native ChatGPT OAuth status for the unified OpenAI provider.
+    pub async fn chatgpt_oauth_status(&self) -> Result<ProviderStatus, ProviderError> {
+        use crate::auth::chatgpt_oauth::{self, ChatGptOAuthStatus};
+        let oauth = chatgpt_oauth::status(&self.grok_home);
+        let connected = matches!(oauth, ChatGptOAuthStatus::Connected);
         let presets = if connected {
-            self.refresh_codex_catalog().await.unwrap_or_else(|_| {
-                load_codex_catalog_cache(&self.grok_home).unwrap_or_else(|_| {
-                    let fallback = static_codex_presets();
-                    let _ = save_codex_catalog_cache(&self.grok_home, &fallback);
-                    fallback
-                })
-            })
+            static_chatgpt_oauth_presets()
         } else {
-            let _ = clear_codex_catalog_cache(&self.grok_home);
             Vec::new()
         };
+        let state = match oauth {
+            ChatGptOAuthStatus::Connected => ProviderConnectionState::Connected,
+            ChatGptOAuthStatus::Expired => ProviderConnectionState::Configured,
+            ChatGptOAuthStatus::NotConfigured => ProviderConnectionState::NotConfigured,
+        };
         Ok(ProviderStatus {
-            provider: ProviderId::Codex,
-            display_name: ProviderId::Codex.display_name().to_owned(),
-            state: if connected {
-                ProviderConnectionState::Connected
-            } else {
-                ProviderConnectionState::NotConfigured
-            },
-            credential_source: None,
+            provider: ProviderId::OpenAi,
+            display_name: ProviderId::OpenAi.display_name().to_owned(),
+            state: state.clone(),
+            credential_source: connected.then_some(ProviderCredentialSource::SecureStore),
             can_test_connection: false,
             authentication: vec![ProviderAuthenticationStatus {
                 kind: ProviderAuthenticationKind::ChatGpt,
-                state: if connected {
-                    ProviderConnectionState::Connected
-                } else {
-                    ProviderConnectionState::NotConfigured
-                },
-                credential_source: None,
+                state,
+                credential_source: connected.then_some(ProviderCredentialSource::SecureStore),
             }],
             presets,
         })
     }
 
-    /// Delegate browser login to the official Codex CLI without attaching to
-    /// the pager's raw-mode terminal. The CLI owns the browser flow; Grok
-    /// Build never sees a password, device code, or auth token.
-    pub async fn codex_login(&self) -> Result<(), ProviderError> {
-        if !self.codex_version_supported().await? {
-            return Err(ProviderError::CodexTooOld);
-        }
-        if self.run_codex_quiet(["login"], CODEX_LOGIN_TIMEOUT).await? {
-            let _ = self.refresh_codex_catalog().await;
-            Ok(())
+    /// Browser (or device) ChatGPT OAuth login for OpenAI. Clears any API key.
+    ///
+    /// Prefer browser PKCE by default. Device-code is used only when
+    /// `GROK_CHATGPT_DEVICE_AUTH` is set, or on Linux without a graphical
+    /// display (true headless). macOS/Windows never have `DISPLAY`, so the old
+    /// "no DISPLAY" heuristic incorrectly forced device auth and hid the code.
+    pub async fn chatgpt_oauth_login(&self) -> Result<(), ProviderError> {
+        use crate::auth::chatgpt_oauth;
+        let result = if prefer_chatgpt_device_auth() {
+            chatgpt_oauth::login_device(&self.grok_home).await
         } else {
-            Err(ProviderError::CodexFailed)
-        }
+            chatgpt_oauth::login_browser(&self.grok_home).await
+        };
+        result.map_err(|e| {
+            tracing::warn!(error = %e, "ChatGPT OAuth login failed");
+            ProviderError::CodexFailed
+        })?;
+        let _ = save_codex_catalog_cache(&self.grok_home, &static_chatgpt_oauth_presets());
+        Ok(())
     }
 
-    /// Delegate logout to the official Codex CLI without inspecting its state.
+    /// Clear ChatGPT OAuth credentials for OpenAI.
+    pub async fn chatgpt_oauth_logout(&self) -> Result<(), ProviderError> {
+        crate::auth::chatgpt_oauth::clear_tokens(&self.grok_home)
+            .map_err(|_| ProviderError::CredentialStore)?;
+        let _ = clear_codex_catalog_cache(&self.grok_home);
+        Ok(())
+    }
+
+    // Backward-compatible names used by existing TUI effects.
+    pub async fn codex_status(&self) -> Result<ProviderStatus, ProviderError> {
+        self.chatgpt_oauth_status().await
+    }
+    pub async fn codex_login(&self) -> Result<(), ProviderError> {
+        self.chatgpt_oauth_login().await
+    }
     pub async fn codex_logout(&self) -> Result<(), ProviderError> {
-        if self
-            .run_codex_quiet(["logout"], CODEX_STATUS_TIMEOUT)
-            .await?
-        {
-            clear_codex_catalog_cache(&self.grok_home)
-                .map_err(|_| ProviderError::CredentialStore)?;
-            Ok(())
-        } else {
-            Err(ProviderError::CodexFailed)
-        }
+        self.chatgpt_oauth_logout().await
     }
 
     pub fn set_api_key(&self, provider: ProviderId, api_key: &str) -> Result<(), ProviderError> {
-        if provider == ProviderId::Codex {
-            return Err(ProviderError::ApiKeyUnsupported);
-        }
         let api_key = api_key.trim();
         if api_key.is_empty() || api_key.len() > MAX_API_KEY_BYTES {
             return Err(ProviderError::InvalidApiKey);
@@ -769,14 +770,16 @@ impl ProviderManager {
             return crate::auth::store_api_key(&self.grok_home, api_key)
                 .map_err(|_| ProviderError::CredentialStore);
         }
+        if provider == ProviderId::OpenAi {
+            // Mutual exclusion: API key clears ChatGPT OAuth.
+            return crate::auth::chatgpt_oauth::store_api_key_exclusive(&self.grok_home, api_key)
+                .map_err(|_| ProviderError::CredentialStore);
+        }
         crate::auth::store_provider_api_key(&self.grok_home, provider.auth_scope()?, api_key)
             .map_err(|_| ProviderError::CredentialStore)
     }
 
     pub fn remove_api_key(&self, provider: ProviderId) -> Result<(), ProviderError> {
-        if provider == ProviderId::Codex {
-            return Err(ProviderError::ApiKeyUnsupported);
-        }
         let result = if provider == ProviderId::Xai {
             crate::auth::clear_api_key(&self.grok_home)
         } else {
@@ -785,12 +788,14 @@ impl ProviderManager {
         result.map_err(|_| ProviderError::CredentialStore)?;
         match provider {
             ProviderId::OpenAi => {
+                let _ = crate::auth::chatgpt_oauth::clear_tokens(&self.grok_home);
                 let _ = clear_openai_catalog_cache(&self.grok_home);
+                let _ = clear_codex_catalog_cache(&self.grok_home);
             }
             ProviderId::OpenRouter => {
                 let _ = clear_openrouter_catalog_cache(&self.grok_home);
             }
-            ProviderId::Xai | ProviderId::Codex => {}
+            ProviderId::Xai => {}
         }
         Ok(())
     }
@@ -801,9 +806,6 @@ impl ProviderManager {
         &self,
         provider: ProviderId,
     ) -> Result<ProviderConnectionTest, ProviderError> {
-        if provider == ProviderId::Codex {
-            return Err(ProviderError::ApiKeyUnsupported);
-        }
         let key = if provider == ProviderId::Xai {
             self.xai_oauth_bearer()?.or(self.api_key(provider)?)
         } else {
@@ -816,8 +818,7 @@ impl ProviderManager {
             ProviderId::Xai => &self.xai_models_url,
             ProviderId::OpenAi => &self.openai_models_url,
             ProviderId::OpenRouter => &self.openrouter_models_url,
-            ProviderId::Codex => unreachable!(),
-        };
+                    };
         let response = reqwest::Client::builder()
             .timeout(CONNECTION_TIMEOUT)
             .build()
@@ -874,7 +875,7 @@ impl ProviderManager {
                     ProviderId::OpenRouter => {
                         let _ = self.refresh_openrouter_catalog().await;
                     }
-                    ProviderId::Xai | ProviderId::Codex => {}
+                    ProviderId::Xai => {}
                 }
                 Ok(ProviderConnectionTest::Connected { credits })
             }
@@ -1019,56 +1020,31 @@ impl ProviderManager {
             }
         };
         let refresh_codex = async {
-            let supported = self.codex_version_supported().await.unwrap_or(false);
-            if !supported {
-                let _ = clear_codex_catalog_cache(&self.grok_home);
-                return;
-            }
-            let connected = self
-                .run_codex_quiet(["login", "status"], CODEX_STATUS_TIMEOUT)
-                .await
-                .unwrap_or(false);
-            if connected {
-                match self.refresh_codex_catalog().await {
-                    Ok(models) => {
-                        tracing::info!(
-                            model_count = models.len(),
-                            "Codex subscription model catalog refreshed"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "Codex subscription model catalog refresh failed");
-                        if load_codex_catalog_cache(&self.grok_home).is_err() {
-                            let _ =
-                                save_codex_catalog_cache(&self.grok_home, &static_codex_presets());
-                        }
-                    }
+            match self.refresh_codex_catalog().await {
+                Ok(models) if !models.is_empty() => {
+                    tracing::info!(
+                        model_count = models.len(),
+                        "ChatGPT OAuth model catalog refreshed"
+                    );
                 }
-            } else {
-                let _ = clear_codex_catalog_cache(&self.grok_home);
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "ChatGPT OAuth model catalog refresh failed");
+                }
             }
         };
         tokio::join!(refresh_openai, refresh_openrouter, refresh_codex);
     }
 
-    /// Query the authenticated Codex app-server catalog and persist a
-    /// credential-free local projection for synchronous model resolution.
+    /// Persist the ChatGPT OAuth model allowlist when subscription auth is active.
     pub async fn refresh_codex_catalog(&self) -> Result<Vec<ProviderModelPreset>, ProviderError> {
-        if !self.codex_version_supported().await? {
-            return Err(ProviderError::CodexTooOld);
+        if crate::auth::chatgpt_oauth::status(&self.grok_home)
+            != crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected
+        {
+            let _ = clear_codex_catalog_cache(&self.grok_home);
+            return Ok(Vec::new());
         }
-        let mut request = super::codex_app_server::CodexModelListRequest::default();
-        request.command[0] = self.codex_program.to_string_lossy().into_owned();
-        let models = super::codex_app_server::list_codex_models(
-            request,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .map_err(|_| ProviderError::CodexCatalogUnavailable)?;
-        let presets = codex_models_to_presets(models);
-        if presets.is_empty() {
-            return Err(ProviderError::CodexCatalogUnavailable);
-        }
+        let presets = static_chatgpt_oauth_presets();
         save_codex_catalog_cache(&self.grok_home, &presets)
             .map_err(|_| ProviderError::CodexCatalogUnavailable)?;
         Ok(presets)
@@ -1147,47 +1123,6 @@ impl ProviderManager {
             })
             .map(|auth| auth.key.clone()))
     }
-
-    async fn run_codex_quiet<const N: usize>(
-        &self,
-        args: [&str; N],
-        timeout: Duration,
-    ) -> Result<bool, ProviderError> {
-        let mut command = Command::new(&self.codex_program);
-        command
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let status = tokio::time::timeout(timeout, command.status())
-            .await
-            .map_err(|_| ProviderError::CodexTimedOut)?
-            .map_err(|_| ProviderError::CodexUnavailable)?;
-        Ok(status.success())
-    }
-
-    async fn codex_version_supported(&self) -> Result<bool, ProviderError> {
-        let output = tokio::time::timeout(
-            CODEX_STATUS_TIMEOUT,
-            Command::new(&self.codex_program)
-                .arg("--version")
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output(),
-        )
-        .await
-        .map_err(|_| ProviderError::CodexTimedOut)?
-        .map_err(|_| ProviderError::CodexUnavailable)?;
-        if !output.status.success() {
-            return Err(ProviderError::CodexFailed);
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let version = text
-            .split_whitespace()
-            .find_map(parse_version_triplet)
-            .ok_or(ProviderError::CodexFailed)?;
-        Ok(version >= MIN_CODEX_VERSION)
-    }
 }
 
 fn parse_version_triplet(value: &str) -> Option<(u64, u64, u64)> {
@@ -1204,58 +1139,78 @@ fn parse_version_triplet(value: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-fn codex_models_to_presets(
-    models: Vec<super::codex_app_server::CodexCatalogModel>,
-) -> Vec<ProviderModelPreset> {
-    let mut presets = models
-        .into_iter()
-        .map(|model| {
-            let id = if model.is_default {
-                "codex-subscription".to_owned()
-            } else {
-                format!("codex:{}", model.model)
-            };
-            let context_window =
-                if model.model.contains("5.6-sol") || model.model.contains("5.6-terra") {
-                    1_050_000
-                } else if model.model.contains("5.6-luna") {
-                    400_000
-                } else {
-                    272_000
-                };
-            ProviderModelPreset {
-                id,
-                provider: ProviderId::Codex,
-                label: format!("{} (Codex / ChatGPT)", model.display_name),
-                model: model.model,
-                base_url: None,
-                is_agent: true,
-                description: Some(model.description),
-                context_window: Some(context_window),
-                max_completion_tokens: Some(128_000),
-                supports_tools: true,
-                supports_reasoning_effort: !model.supported_reasoning_efforts.is_empty(),
-                reasoning_efforts: model.supported_reasoning_efforts,
-                default_reasoning_effort: Some(model.default_reasoning_effort),
-            }
-        })
-        .collect::<Vec<_>>();
-    presets.sort_by(|left, right| {
-        let left_default = left.id == "codex-subscription";
-        let right_default = right.id == "codex-subscription";
-        right_default
-            .cmp(&left_default)
-            .then_with(|| left.label.cmp(&right.label))
-    });
-    presets
+fn codex_models_to_presets(_models: Vec<()>) -> Vec<ProviderModelPreset> { static_chatgpt_oauth_presets() }
+
+/// Whether ChatGPT OAuth should use the headless device-code path.
+///
+/// Device auth when:
+/// - `GROK_CHATGPT_DEVICE_AUTH` is set (any value), or
+/// - running on Linux with neither `DISPLAY` nor `WAYLAND_DISPLAY`.
+///
+/// Do **not** treat "no DISPLAY" as headless on macOS/Windows — those
+/// platforms never set X11 display vars, and browser PKCE is the default.
+pub(crate) fn prefer_chatgpt_device_auth() -> bool {
+    if std::env::var_os("GROK_CHATGPT_DEVICE_AUTH").is_some() {
+        return true;
+    }
+    cfg!(target_os = "linux")
+        && std::env::var_os("DISPLAY").is_none()
+        && std::env::var_os("WAYLAND_DISPLAY").is_none()
 }
 
-fn static_codex_presets() -> Vec<ProviderModelPreset> {
-    ProviderManager::presets()
-        .into_iter()
-        .filter(|preset| preset.provider == ProviderId::Codex)
+fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
+    use crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL;
+    // Allowlisted ChatGPT subscription models (Codex OAuth backend).
+    //
+    // Context windows here are the **product** caps on
+    // `chatgpt.com/backend-api/codex`, not the OpenAI Platform API specs.
+    // API models advertise ~1.05M for GPT-5.6 Sol, but the subscription
+    // catalog currently caps Sol/Terra at 372k raw (≈353.4k at 95%
+    // effective) — see openai/codex#31860. OpenCode mirrors that with
+    // limit.input=372_000 / limit.context=500_000 for 5.6 and
+    // limit.input=272_000 / limit.context=400_000 for 5.5.
+    //
+    // Grok only has a single `context_window` (drives compaction). Use the
+    // Codex raw catalog window so auto-compact fires before the product
+    // truncates mid-turn.
+    //
+    // Tuple: (api_slug, label, context_window, max_completion_tokens)
+    const MODELS: &[(&str, &str, u64, u32)] = &[
+        // Codex catalog: context_window / max_context_window = 372_000
+        ("gpt-5.6-sol", "GPT-5.6 Sol", 372_000, 128_000),
+        ("gpt-5.6-terra", "GPT-5.6 Terra", 372_000, 128_000),
+        ("gpt-5.6-luna", "GPT-5.6 Luna", 372_000, 128_000),
+        // Codex / OpenCode: 400k product context, ~272k typical input budget
+        ("gpt-5.5", "GPT-5.5", 400_000, 128_000),
+        ("gpt-5.4", "GPT-5.4", 400_000, 128_000),
+        ("gpt-5.4-mini", "GPT-5.4 Mini", 400_000, 128_000),
+    ];
+    MODELS
+        .iter()
+        .map(|(model, label, ctx, max_out)| ProviderModelPreset {
+            id: format!("openai-{model}"),
+            provider: ProviderId::OpenAi,
+            label: (*label).to_owned(),
+            model: (*model).to_owned(),
+            base_url: Some(CODEX_RESPONSES_BASE_URL.to_owned()),
+            is_agent: false,
+            description: Some("ChatGPT subscription (OAuth)".to_owned()),
+            context_window: Some(*ctx),
+            max_completion_tokens: Some(*max_out),
+            supports_tools: true,
+            supports_reasoning_effort: true,
+            reasoning_efforts: vec![
+                "low".to_owned(),
+                "medium".to_owned(),
+                "high".to_owned(),
+                "xhigh".to_owned(),
+            ],
+            default_reasoning_effort: Some("medium".to_owned()),
+        })
         .collect()
 }
+
+fn static_codex_presets() -> Vec<ProviderModelPreset> { static_chatgpt_oauth_presets() }
 
 /// Resolve a key saved by [`ProviderManager`] for the model resolver. This is
 /// intentionally crate-private: callers should use the manager, which keeps
@@ -1271,6 +1226,42 @@ pub(crate) fn stored_api_key(kind: ModelProviderKind) -> Option<String> {
     manager.api_key(provider).ok().flatten()
 }
 
+/// Resolved OpenAI credential: ChatGPT OAuth (preferred) or API key.
+pub(crate) struct StoredOpenAiCredentials {
+    pub bearer: String,
+    pub base_url: Option<String>,
+    pub account_id: Option<String>,
+}
+
+pub(crate) fn stored_openai_credentials(kind: ModelProviderKind) -> Option<StoredOpenAiCredentials> {
+    if kind != ModelProviderKind::OpenAi {
+        return None;
+    }
+    let home = credential_lookup_manager().grok_home.clone();
+    // Sync path: prefer non-expired access token; refresh is done pre-turn.
+    if let Ok(Some(tokens)) = crate::auth::chatgpt_oauth::read_tokens(&home) {
+        return Some(StoredOpenAiCredentials {
+            bearer: tokens.access_token,
+            base_url: Some(crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL.to_owned()),
+            account_id: tokens.account_id,
+        });
+    }
+    let key = stored_api_key(ModelProviderKind::OpenAi)?;
+    Some(StoredOpenAiCredentials {
+        bearer: key,
+        base_url: None,
+        account_id: None,
+    })
+}
+
+pub(crate) fn stored_openai_oauth_account_id() -> Option<String> {
+    let home = credential_lookup_manager().grok_home.clone();
+    crate::auth::chatgpt_oauth::read_tokens(&home)
+        .ok()
+        .flatten()
+        .and_then(|t| t.account_id)
+}
+
 /// Return the named API provider whose credential is missing for this model.
 ///
 /// This is used at model-selection and prompt boundaries so a missing BYOK
@@ -1280,7 +1271,7 @@ pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Opt
     let provider = match model.model_provider.as_ref()?.kind {
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
-        ModelProviderKind::Custom | ModelProviderKind::Xai | ModelProviderKind::Codex => {
+        ModelProviderKind::Custom | ModelProviderKind::Xai => {
             return None;
         }
     };
@@ -1928,6 +1919,39 @@ mod tests {
     use xai_grok_test_support::EnvGuard;
 
     #[test]
+    #[serial_test::serial]
+    fn prefer_chatgpt_device_auth_only_when_forced_or_headless_linux() {
+        // Clear both vars so the platform default is observable.
+        let _device = EnvGuard::unset("GROK_CHATGPT_DEVICE_AUTH");
+        let _display = EnvGuard::unset("DISPLAY");
+        let _wayland = EnvGuard::unset("WAYLAND_DISPLAY");
+
+        // Without the force env var: device only on headless Linux.
+        if cfg!(target_os = "linux") {
+            assert!(
+                prefer_chatgpt_device_auth(),
+                "Linux with no display must prefer device auth"
+            );
+            let _d = EnvGuard::set("DISPLAY", ":0");
+            assert!(
+                !prefer_chatgpt_device_auth(),
+                "Linux with DISPLAY must prefer browser PKCE"
+            );
+        } else {
+            assert!(
+                !prefer_chatgpt_device_auth(),
+                "non-Linux must prefer browser PKCE when force env is unset"
+            );
+        }
+
+        let _force = EnvGuard::set("GROK_CHATGPT_DEVICE_AUTH", "1");
+        assert!(
+            prefer_chatgpt_device_auth(),
+            "GROK_CHATGPT_DEVICE_AUTH must force device auth"
+        );
+    }
+
+    #[test]
     fn stores_provider_keys_without_exposing_them_in_status_or_debug() {
         let home = tempfile::tempdir().unwrap();
         let manager = ProviderManager::new(home.path());
@@ -2060,7 +2084,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let manager = ProviderManager::new(home.path());
         assert!(matches!(
-            manager.set_api_key(ProviderId::Codex, "x"),
+            manager.set_api_key(ProviderId::OpenAi, "x"),
             Err(ProviderError::ApiKeyUnsupported)
         ));
         assert!(matches!(
@@ -2132,7 +2156,7 @@ mod tests {
         for provider in [
             ProviderId::OpenAi,
             ProviderId::OpenRouter,
-            ProviderId::Codex,
+            ProviderId::OpenAi,
         ] {
             assert!(presets.iter().any(|preset| preset.provider == provider));
         }
@@ -2535,14 +2559,18 @@ mod tests {
         ProviderManager::new(home.path())
             .set_api_key(ProviderId::OpenRouter, "router-key")
             .unwrap();
-        save_codex_catalog_cache(home.path(), &static_codex_presets()).unwrap();
+        // OpenAI API-key path: Platform catalog windows (~1.05M for Sol).
+        ProviderManager::new(home.path())
+            .set_api_key(ProviderId::OpenAi, "sk-test-openai")
+            .unwrap();
         let mut config = super::super::config::Config::default();
         ProviderManager::install_model_presets(&mut config);
         let models = super::super::config::resolve_model_list(&config, None);
         assert_eq!(models["openai-gpt-5.6-sol"].info.model, "gpt-5.6-sol");
         assert_eq!(
             models["openai-gpt-5.6-sol"].info.context_window.get(),
-            1_050_000
+            1_050_000,
+            "API-key OpenAI presets keep Platform context windows"
         );
         assert_eq!(
             models["openai-gpt-5.6-sol"].info.max_completion_tokens,
@@ -2553,81 +2581,31 @@ mod tests {
             Some(true)
         );
         assert!(models.contains_key("openrouter-openai-gpt-5.6-terra"));
-        assert!(!models["codex-subscription"].info.hidden);
-        assert_eq!(models["codex-subscription"].info.model, "gpt-5.6-sol");
-        let codex = &models["codex-subscription"];
-        let sampling = super::super::config::inference_config_for_model(
-            codex,
-            super::super::config::resolve_credentials(codex, None),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert_eq!(
-            sampling
-                .extra_headers
-                .get(super::super::model_providers::NATIVE_AGENT_PROVIDER_HEADER)
-                .map(String::as_str),
-            Some("grok_build_codex"),
-            "Codex routing identity must survive conversion to sampler config"
-        );
         set_stored_key_home_for_tests(None);
     }
 
     #[test]
-    #[serial_test::serial]
-    fn cached_codex_catalog_exposes_each_subscription_model_with_exact_efforts() {
-        use super::super::codex_app_server::CodexCatalogModel;
-
-        let home = tempfile::tempdir().unwrap();
-        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
-        let presets = codex_models_to_presets(vec![
-            CodexCatalogModel {
-                id: "sol".to_owned(),
-                model: "gpt-5.6-sol".to_owned(),
-                display_name: "GPT-5.6-Sol".to_owned(),
-                description: "frontier".to_owned(),
-                supported_reasoning_efforts: vec![
-                    "low".to_owned(),
-                    "max".to_owned(),
-                    "ultra".to_owned(),
-                ],
-                default_reasoning_effort: "low".to_owned(),
-                is_default: true,
-            },
-            CodexCatalogModel {
-                id: "terra".to_owned(),
-                model: "gpt-5.6-terra".to_owned(),
-                display_name: "GPT-5.6-Terra".to_owned(),
-                description: "balanced".to_owned(),
-                supported_reasoning_efforts: vec!["medium".to_owned(), "high".to_owned()],
-                default_reasoning_effort: "medium".to_owned(),
-                is_default: false,
-            },
-        ]);
-        save_codex_catalog_cache(home.path(), &presets).unwrap();
-
-        let models = super::super::config::resolve_model_list(
-            &super::super::config::Config::default(),
-            None,
-        );
-        assert_eq!(models["codex-subscription"].info.model, "gpt-5.6-sol");
-        let terra = &models["codex:gpt-5.6-terra"].info;
+    fn chatgpt_oauth_presets_use_subscription_context_caps() {
+        let presets = static_chatgpt_oauth_presets();
+        let by_id: std::collections::HashMap<_, _> =
+            presets.into_iter().map(|p| (p.id.clone(), p)).collect();
         assert_eq!(
-            terra.name.as_deref(),
-            Some("GPT-5.6-Terra (Codex / ChatGPT)")
+            by_id["openai-gpt-5.6-sol"].context_window,
+            Some(372_000),
+            "Codex product catalog caps GPT-5.6 Sol at 372k (not API 1.05M)"
         );
         assert_eq!(
-            terra.reasoning_effort,
-            Some(xai_grok_inference_types::ReasoningEffort::Medium)
+            by_id["openai-gpt-5.6-terra"].context_window,
+            Some(372_000)
         );
-        assert_eq!(terra.reasoning_efforts.len(), 2);
-        // Ultra is advertised by Codex but is not yet a scalar effort in the
-        // Grok sampling protocol, so it is not exposed as a broken choice.
-        assert_eq!(models["codex-subscription"].info.reasoning_efforts.len(), 2);
-        set_stored_key_home_for_tests(None);
+        assert_eq!(by_id["openai-gpt-5.6-luna"].context_window, Some(372_000));
+        assert_eq!(by_id["openai-gpt-5.5"].context_window, Some(400_000));
+        assert_eq!(by_id["openai-gpt-5.4"].context_window, Some(400_000));
+        assert_eq!(by_id["openai-gpt-5.4-mini"].context_window, Some(400_000));
     }
+
+    // removed obsolete codex app-server test
+
 
     #[test]
     #[serial_test::serial]
@@ -2697,7 +2675,7 @@ mod tests {
         let mut permissions = std::fs::metadata(&script).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&script, permissions).unwrap();
-        let manager = ProviderManager::new(home.path()).with_codex_program(&script);
+        let manager = ProviderManager::new(home.path());
 
         assert_eq!(
             manager.codex_status().await.unwrap().state,
@@ -2723,7 +2701,7 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&script, permissions).unwrap();
         save_codex_catalog_cache(home.path(), &static_codex_presets()).unwrap();
-        let manager = ProviderManager::new(home.path()).with_codex_program(&script);
+        let manager = ProviderManager::new(home.path());
 
         assert!(matches!(
             manager.codex_status().await,

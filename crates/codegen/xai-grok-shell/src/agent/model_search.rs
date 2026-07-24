@@ -4,9 +4,7 @@
 //! + identifier decomposition + BM25) without embedding APIs.
 
 use bm25::{Language, SearchEngineBuilder};
-use xai_grok_tools::implementations::search_models::{
-    ModelCatalogQuery, SearchModelsHit, SearchModelsResult,
-};
+use archanjo::{ModelCatalogQuery, SearchModelsHit, SearchModelsResult};
 
 use super::config::ModelEntry;
 use super::model_providers::ModelProviderKind;
@@ -80,7 +78,6 @@ fn provider_label(entry: &ModelEntry) -> String {
             ModelProviderKind::OpenRouter => "openrouter".to_string(),
             ModelProviderKind::OpenAi => "openai".to_string(),
             ModelProviderKind::Xai => "xai".to_string(),
-            ModelProviderKind::Codex => "codex".to_string(),
             ModelProviderKind::Custom => {
                 if provider.id.is_empty() {
                     "custom".to_string()

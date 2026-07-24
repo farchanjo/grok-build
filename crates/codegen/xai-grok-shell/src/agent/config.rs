@@ -3516,20 +3516,6 @@ pub fn resolve_model_list(
                 });
         let effective = with_provider.as_ref().unwrap_or(model_override);
         let mut entry = effective.apply(key, base, &cfg.endpoints);
-        let is_codex_agent = entry
-            .model_provider
-            .as_ref()
-            .is_some_and(|provider| provider.kind == ModelProviderKind::Codex);
-        if is_codex_agent {
-            // A Codex provider is an app-server-backed agent, never an
-            // inference endpoint. It remains visible as a primary model, while
-            // credentials fail closed if routing ever reaches the sampler.
-            entry.api_key = None;
-            entry.env_key = None;
-            entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(
-                "Codex app-server agent (not an inference endpoint)".to_string(),
-            ));
-        }
         let session_bearer_unsafe = !crate::util::is_xai_api_bearer_url(&entry.info.base_url)
             || entry
                 .api_base_url
@@ -4797,6 +4783,20 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
+    } else if let Some(creds) = model
+        .model_provider
+        .as_ref()
+        .and_then(|provider| crate::agent::providers::stored_openai_credentials(provider.kind))
+    {
+        // Deliberately re-read the provider-scoped vault for every turn. This
+        // makes a key/oauth token saved by the TUI effective without retaining
+        // secrets in the model catalog. OAuth uses the ChatGPT Codex Responses
+        // base URL; API keys use the model/provider base_url (api.openai.com).
+        (
+            Some(creds.bearer),
+            creds.base_url.unwrap_or_else(|| info.base_url.clone()),
+            xai_chat_state::AuthType::ApiKey,
+        )
     } else if let Some(key) = model
         .model_provider
         .as_ref()
@@ -5194,7 +5194,6 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
         Some(ModelProviderKind::Xai) => ProviderIdentity::Xai,
         Some(ModelProviderKind::OpenAi) => ProviderIdentity::OpenAi,
         Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
-        Some(ModelProviderKind::Codex) => ProviderIdentity::Codex,
         Some(ModelProviderKind::Custom) => ProviderIdentity::Custom,
     }
 }
@@ -5213,16 +5212,6 @@ pub fn inference_config_for_model(
     let temperature = info.temperature;
     let top_p = info.top_p;
     let mut extra_headers = info.extra_headers.clone();
-    if let Some(provider) = model
-        .model_provider
-        .as_ref()
-        .filter(|provider| provider.kind == ModelProviderKind::Codex)
-    {
-        extra_headers.insert(
-            crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER.to_string(),
-            provider.id.clone(),
-        );
-    }
     if model
         .model_provider
         .as_ref()
@@ -5234,6 +5223,14 @@ pub fn inference_config_for_model(
         extra_headers
             .entry("X-OpenRouter-Metadata".to_string())
             .or_insert_with(|| "enabled".to_string());
+    }
+    // ChatGPT subscription OAuth: Codex/OpenAI wire headers (not Grok-branded).
+    if credentials.base_url.contains("chatgpt.com/backend-api/codex") {
+        let account_id = crate::agent::providers::stored_openai_oauth_account_id();
+        for (key, value) in crate::auth::chatgpt_oauth::oauth_extra_headers(account_id.as_deref())
+        {
+            extra_headers.entry(key).or_insert(value);
+        }
     }
     inject_url_derived_headers(
         &mut extra_headers,

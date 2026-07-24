@@ -6,7 +6,7 @@ Grok connects to custom model endpoints for alternative providers, self-hosted m
 
 ## Default Models
 
-By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Connect xAI from `/providers`, run `grok login`, or set an API key before sending prompts to first-party models. The TUI itself starts without a mandatory Grok login so you can also use OpenAI, OpenRouter, or Codex credentials alone.
+By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Connect xAI from `/providers`, run `grok login`, or set an API key before sending prompts to first-party models. The TUI itself starts without a mandatory Grok login so you can also use OpenAI (ChatGPT OAuth or API key) or OpenRouter alone.
 
 List all available models:
 
@@ -200,7 +200,7 @@ The `messages` backend uses the Anthropic Messages protocol. Anthropic authentic
 ### xAI, OpenAI API, and OpenRouter
 
 Run `/providers` to manage xAI OAuth, xAI API-key, OpenAI API-key, OpenRouter
-API-key, and Codex/ChatGPT login independently. Keys are masked in the TUI and
+API-key, and ChatGPT OAuth login independently. Keys are masked in the TUI and
 stored under separate scopes in the owner-only `auth.json`; they are never
 written to `config.toml`. Removing one API key preserves every other provider
 credential. For xAI, removing the API key also preserves the OAuth session.
@@ -466,136 +466,79 @@ The exact balance never leaves the process except as a bucket label on the
 `grok_code.openrouter_credits` OTEL event (see
 [Monitoring Usage](24-monitoring-usage.md)).
 
-### Codex with a ChatGPT subscription
+### OpenAI: ChatGPT subscription (OAuth) or API key
 
-ChatGPT subscription access is not a general OpenAI API credential. Install
-the official Codex CLI, then select **Codex / ChatGPT** in `/providers` and
-press Enter to start the official browser login. Grok Build never asks for or
-stores the account password or ChatGPT token. The same login can be managed
-outside the TUI:
+OpenAI is a **single provider** with two mutually exclusive credentials:
 
-```bash
-codex login
-codex login status
-# On a remote/headless machine:
-codex login --device-auth
-```
+1. **ChatGPT Pro/Plus (OAuth)** — browser or device login against
+   `auth.openai.com` (same public Codex/OpenCode client flow). Tokens live in
+   `$GROK_HOME/auth.json` under `openai::oauth`. Requests use the ChatGPT
+   Responses endpoint `https://chatgpt.com/backend-api/codex` with
+   `Authorization: Bearer <access_token>` and `ChatGPT-Account-Id` when
+   present. Wire headers match Codex/OpenCode (`originator=opencode`), not a
+   Grok-branded client.
+2. **OpenAI API key** — stored under `openai::api_key`. Requests use
+   `https://api.openai.com/v1` as before.
 
-Codex CLI version 0.145.0 or newer is required. After a successful login, Grok Build asks the native app-server for its
-paginated `model/list` catalog. The server's default model is exposed through
-the stable `codex-subscription` alias; every other visible model is selectable
-as `codex:<model>`, for example `codex:gpt-5.6-terra` or
-`codex:gpt-5.6-luna`. The choices disappear after logout or an invalid login.
-Use `/model` to select any of them without an OpenAI API key. The following
-manual form is only needed to override the command or define a pinned entry:
+Connecting one method clears the other. In `/providers`, select **OpenAI**,
+press Enter, then choose **ChatGPT Pro/Plus (browser OAuth)** or **OpenAI API
+key**. Browser PKCE is the default on macOS, Windows, and graphical Linux.
+On headless Linux (no `DISPLAY`/`WAYLAND_DISPLAY`), or when
+`GROK_CHATGPT_DEVICE_AUTH=1` is set, login uses the device-code path and
+prints a one-time code on stderr for the OpenAI verification page.
+
+After ChatGPT OAuth succeeds, the model picker exposes real API slugs (for
+example `gpt-5.6-sol`, `gpt-5.4`) with reasoning-effort metadata. Turns run
+through Grok Build's normal inference runtime and host tools — there is no
+`codex app-server` process and no separate Codex agent identity.
+
+ChatGPT Codex accepts a restricted Responses dialect (same as OpenCode /
+Codex CLI). Grok Build strips Platform-only fields such as
+`max_output_tokens`, `temperature`, `top_p`, and `stream_tool_calls` on that
+endpoint, forces `store: false` and streaming, and sets function tools to
+`strict: false`.
+
+**Context windows (OAuth vs API key):** the OpenAI Platform API advertises
+~1.05M for GPT-5.6 Sol, but the ChatGPT **subscription / Codex** product
+catalog caps the same slugs lower (currently **372k** raw for GPT-5.6 Sol —
+about **353k** at the usual 95% effective budget; GPT-5.5 / 5.4 family around
+**400k** product context). Grok's OAuth presets use those product caps so
+auto-compaction fires before the backend truncates. API-key OpenAI models
+keep the larger Platform windows.
 
 ```toml
-[model_providers.codex]
-kind = "codex"
-# Optional override; this is the default:
-command = ["codex", "app-server", "--stdio"]
+[model_providers.grok_build_openai]
+kind = "openai"
+# API-key mode default; OAuth overrides the base URL at runtime:
+base_url = "https://api.openai.com/v1"
+api_backend = "responses"
 
-[model.codex-subscription]
+# API-key route (Platform ~1.05M). OAuth install uses product caps instead.
+[model.openai-gpt-5.6-sol]
 model = "gpt-5.6-sol"
-model_provider = "codex"
-name = "Codex (ChatGPT subscription)"
-context_window = 1050000
+model_provider = "grok_build_openai"
+name = "GPT-5.6 Sol"
+context_window = 372000
 ```
 
-Codex is a complete coding agent rather than a sampling endpoint. Primary
-turns and subagent turns therefore run through the official native app-server,
-not through the OpenAI API or Grok Build's inference runtime. During primary and subagent Codex turns, Grok Build forwards app-server stream
-notifications into the same ACP surfaces used by native models: assistant text
-deltas, reasoning/thought chunks, tool call cards (commands, file edits, MCP,
-host tools), plan updates, and completion status.
+Legacy `kind = "codex"` in TOML still deserializes as OpenAI (HTTP), not as an
+external agent.
 
-**Host dynamic tools on Codex primary turns:** Grok Build still injects a small
-set of host-owned tools into the Codex thread so catalog and subagent features
-work without leaving Codex:
-
-- `search_models` — BM25 lookup over the live Grok model catalog (product name →
-  exact slug for host `task` `model=`). Always advertised when the active agent
-  registers it (every stock toolset does).
-- `task` / `get_task_output` / `kill_task` — host-managed subagents, when the
-  agent toolset includes them.
-
-Codex keeps its own shell/edit tools; these host tools only fill gaps the
-app-server cannot see. Codex `userMessage` items are
-never rendered as fake tool cards: on the primary surface the host already owns
-the user bubble, and on a subagent surface the text appears as a normal user
-chunk. Only an explicit allowlist of tool-like item kinds increments tool
-statistics. Terminal metadata (model, provider, token usage, tool-call counts)
-is always persisted, including when the body already streamed live.
-
-Cancellation (Esc / Ctrl+C) sends a graceful `turn/interrupt` to the app-server
-before the process is reaped. Interjections, skill reminders, monitor events,
-and the first-turn memory reminder are drained into the Codex prompt at safe
-points (before the turn and after completion); mid-turn steering uses
-interrupt-and-reprompt — Codex owns its in-flight loop. Stream channels are
-bounded with backpressure: consecutive text/reasoning deltas may coalesce when
-the UI is slow, but lifecycle and tool events are never dropped. Host dynamic
-tools (`task`, …) run off the stdout drain so a slow tool cannot stall protocol
-reads.
-
-Subagent streams land on the child session view (`codex:<subagent-id>`) so
-opening a Codex task shows the full native turn live. The child also writes a
-durable transcript (`updates.jsonl`) and fsyncs it before completion is
-announced; file edits are folded into the parent's "files touched" set. The
-primary session persists its private Codex thread link in `codex_thread.json`
-(async atomic write) and resumes it on subsequent Codex turns.
-
-**Rewind limitation:** Codex applies file edits inside its own tool loop, so
-Grok's pre-edit snapshot tracker may not capture those changes. Rewind on
-Codex-made edits is best-effort and may fail safe rather than restore a full
-pre-edit snapshot. Context-usage gauges on Codex sessions reflect the usage
-reported by app-server at turn end (not a live estimate of the Codex-owned
-thread).
-
-API credential fields on a Codex provider are ignored and accidental direct
-inference fails closed:
+Subagents use the same OpenAI models and host tool lifecycle:
 
 ```text
 task(
   prompt="Review and fix the authentication module",
-  description="Codex auth review",
+  description="OpenAI auth review",
   subagent_type="general-purpose",
-  model="codex-subscription",
+  model="openai-gpt-5.6-sol",
   reasoning_effort="high",
   run_in_background=true
 )
 ```
 
-Codex tasks use the official JSONL app-server protocol over stdio, inherit the
-local `codex login` session, run non-interactively with approval escalation
-disabled, and can execute concurrently with OpenAI/OpenRouter subagents.
-`resume_from` accepts the original Grok Build subagent ID. The runtime resolves
-the private Codex thread ID from session metadata, validates session ownership,
-provider, model, working directory, and sandbox, then continues it through
-`thread/resume`.
-
-For a primary Codex conversation, Grok Build exposes its own `task`,
-`get_task_output`, and `kill_task` lifecycle tools to the app-server as dynamic
-tools. Native Codex multi-agent is disabled in this route so Grok Build remains
-the single owner of depth limits, permissions, provider selection, task state,
-and metrics. Codex subagents retain their resolved role, persona, memory, cwd,
-and sandbox ceiling, but cannot create another level of children.
-
-To use OpenAI, OpenRouter, and Codex concurrently, launch each task in the
-background:
-
-```text
-task(prompt="Analyze the API", description="OpenAI analysis",
-     model="openai-gpt-5.6-sol", run_in_background=true)
-task(prompt="Review the implementation", description="OpenRouter review",
-     model="openrouter:anthropic/claude-sonnet-4.6", run_in_background=true)
-task(prompt="Implement the selected fix", description="Codex implementation",
-     model="codex:gpt-5.6-terra", run_in_background=true)
-```
-
-Each call returns its own subagent ID immediately. OpenAI and OpenRouter use
-their native HTTP APIs; Codex uses its native app-server protocol. No ACP
-adapter is used as a provider transport. xAI remains available to the primary
-session and to any subagent that inherits or explicitly selects an xAI model.
+OpenAI, OpenRouter, and xAI can run concurrently as background tasks; each
+uses its own HTTP credential and Grok-owned tools.
 
 All provider routes receive the same neutral software-engineering and
 architecture role. A backend is not told to identify as Grok merely because

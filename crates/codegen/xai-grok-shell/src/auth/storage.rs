@@ -195,7 +195,7 @@ pub(crate) fn read_auth_json_or_empty_recovering_corrupt(
 ///   relogin). This window is inherent to any sub-1×-free single-file
 ///   replace and is preferable to persisting nothing at all, which would
 ///   leave every concurrent process with a stale, already-revoked token.
-pub(super) fn write_auth_json(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
+pub(crate) fn write_auth_json(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     write_auth_json_with(auth_file, auth_store, write_auth_json_atomic)
 }
 
@@ -398,6 +398,9 @@ pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
 /// the established owner-only, atomic `auth.json` store while remaining
 /// separate from xAI's `xai::api_key` and OAuth entries.
 pub const OPENAI_API_KEY_SCOPE: &str = "openai::api_key";
+/// ChatGPT / OpenAI subscription OAuth (access + refresh). Mutually exclusive
+/// with [`OPENAI_API_KEY_SCOPE`] — see `chatgpt_oauth` store helpers.
+pub const OPENAI_OAUTH_SCOPE: &str = "openai::oauth";
 pub const OPENROUTER_API_KEY_SCOPE: &str = "openrouter::api_key";
 
 fn validate_provider_scope(scope: &str) -> std::io::Result<()> {

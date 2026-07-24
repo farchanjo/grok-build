@@ -3281,50 +3281,8 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     assert_eq!(config.api_key.as_deref(), Some("tok-1"));
     assert_eq!(config.base_url, "https://gateway.example/v1");
 }
-#[test]
-fn codex_plan_sandbox_is_read_only_even_in_yolo_mode() {
-    assert_eq!(
-        codex_subagent_sandbox(
-            true,
-            None,
-            &xai_grok_agent::config::PermissionMode::Plan,
-        ),
-        crate::agent::codex_app_server::CodexSandboxMode::ReadOnly
-    );
-    assert_eq!(
-        codex_subagent_sandbox(
-            true,
-            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
-            &xai_grok_agent::config::PermissionMode::BypassPermissions,
-        ),
-        crate::agent::codex_app_server::CodexSandboxMode::ReadOnly
-    );
-    assert_eq!(
-        codex_subagent_sandbox(
-            true,
-            None,
-            &xai_grok_agent::config::PermissionMode::Default,
-        ),
-        crate::agent::codex_app_server::CodexSandboxMode::DangerFullAccess
-    );
-}
-#[test]
-fn codex_subagent_instructions_keep_task_separate_from_role_and_persona() {
-    let mut definition = xai_grok_agent::config::AgentDefinition::general_purpose();
-    definition.prompt_body = Some("Inspect boundaries before editing.".to_owned());
-    let runtime = xai_grok_subagent_resolution::EffectiveRuntimeConfig {
-        role_prompt: Some("Act as an architecture reviewer.".to_owned()),
-        persona_instructions: Some("Be concise and skeptical.".to_owned()),
-        ..Default::default()
-    };
-    let instructions = codex_subagent_developer_instructions(&definition, &runtime);
-    assert!(instructions.contains("software engineer and technical thought partner"));
-    assert!(instructions.contains("Inspect boundaries before editing."));
-    assert!(instructions.contains("Act as an architecture reviewer."));
-    assert!(instructions.contains("Be concise and skeptical."));
-    assert!(!instructions.contains("the delegated task text"));
-    assert!(instructions.contains("depth-one child"));
-}
+// Codex app-server sandbox / instruction helpers removed with native ChatGPT OAuth.
+
 #[test]
 fn non_cursor_persona_injected_as_system_reminder() {
     use xai_grok_inference_types::conversation::{ConversationItem, SyntheticReason};

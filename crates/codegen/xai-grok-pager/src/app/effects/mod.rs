@@ -4652,7 +4652,6 @@ async fn run_provider_operation(
             ProviderKind::Xai => ProviderId::Xai,
             ProviderKind::OpenAi => ProviderId::OpenAi,
             ProviderKind::OpenRouter => ProviderId::OpenRouter,
-            ProviderKind::Codex => ProviderId::Codex,
         }
     }
 
@@ -4755,7 +4754,7 @@ async fn run_provider_operation(
     let manager = ProviderManager::default();
     let (provider, status) = match operation {
         ProviderOperation::Refresh(provider) => {
-            let status = if provider == ProviderKind::Codex {
+            let status = if provider == ProviderKind::OpenAi /* ChatGPT oauth */ {
                 match manager.codex_status().await {
                     Ok(status) => display_status(status),
                     Err(error) => ProviderStatus::Error(error.to_string()),
@@ -4777,7 +4776,7 @@ async fn run_provider_operation(
                         ProviderKind::OpenRouter => {
                             let _ = manager.refresh_openrouter_catalog().await;
                         }
-                        ProviderKind::Xai | ProviderKind::Codex => unreachable!(),
+                        ProviderKind::Xai => unreachable!(),
                     }
                 }
                 display_status(manager.status(backend))
@@ -4819,14 +4818,19 @@ async fn run_provider_operation(
                 },
                 Err(error) => ProviderStatus::Error(error.to_string()),
             };
-            (ProviderKind::Codex, status)
+            (ProviderKind::OpenAi, status)
         }
         ProviderOperation::LogoutCodex => {
-            let status = match manager.codex_logout().await {
-                Ok(()) => ProviderStatus::Missing,
-                Err(error) => ProviderStatus::Error(error.to_string()),
+            // Clear ChatGPT OAuth and any OpenAI API key (one-or-another policy).
+            let oauth = manager.codex_logout().await;
+            let key = manager.remove_api_key(ProviderId::OpenAi);
+            let status = match (oauth, key) {
+                (Ok(()), Ok(())) | (Ok(()), Err(_)) | (Err(_), Ok(())) => {
+                    display_status(manager.status(ProviderId::OpenAi))
+                }
+                (Err(error), Err(_)) => ProviderStatus::Error(error.to_string()),
             };
-            (ProviderKind::Codex, status)
+            (ProviderKind::OpenAi, status)
         }
     };
 

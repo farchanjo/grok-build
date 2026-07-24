@@ -134,11 +134,8 @@ fn has_required_provider_credential(entry: &ModelEntry) -> bool {
 /// check) so `task_model_error_for_catalog` can distinguish an entry that
 /// fails the tools gate alone from one that is invisible or uncredentialed.
 fn is_task_visible_and_credentialed(entry: &ModelEntry, is_session_auth: bool) -> bool {
-    let is_codex_agent = entry.model_provider.as_ref().is_some_and(|provider| {
-        provider.kind == crate::agent::model_providers::ModelProviderKind::Codex
-    });
     entry.info.user_selectable
-        && (is_codex_agent || entry.info.visible_for_auth(is_session_auth))
+        && entry.info.visible_for_auth(is_session_auth)
         && has_required_provider_credential(entry)
 }
 

@@ -155,7 +155,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
 | `model`           | Optional model/provider catalog ID. Can target xAI, curated OpenAI, OpenRouter, or a configured Codex subscription agent. OpenAI entries prefixed with `openai:` are discovery-only and rejected for subagents because their tool support is unverified. |
-| `reasoning_effort` | Optional reasoning effort (`low`, `medium`, `high`, `max`, …) when the selected model supports it — including Codex subscription models (`codex-subscription`, `codex:<model>`). Omit to inherit role/persona/parent defaults. Ignored when `resume_from` is set. |
+| `reasoning_effort` | Optional reasoning effort (`low`, `medium`, `high`, `max`, …) when the selected model supports it — including OpenAI ChatGPT OAuth and API-key models. Omit to inherit role/persona/parent defaults. Ignored when `resume_from` is set. |
 | `run_in_background` | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
@@ -190,7 +190,7 @@ Do **not** use `openai:` discovery slugs for subagents. Entries like `openai:<up
 
 ### Resolving a product name to a slug (`search_models`)
 
-When you (or the agent) only know a product name such as “GLM 5.2” or “gpt-oss-120b”, use the built-in **`search_models`** tool before spawning. It ranks the live catalog with BM25 over name, slug, provider, and description, and returns task-eligible hits with:
+When you (or the agent) only know a product name such as “GLM 5.2” or “gpt-oss-120b”, use the **`search_models`** tool (`Archanjo:search_models` from the out-of-tree Archanjo tool pack) before spawning. It is registered on every stock Grok toolset (including explore/plan/concise), including when the primary model is an OpenAI ChatGPT OAuth or API-key model. It ranks the live catalog with BM25 over name, slug, provider, and description, and returns task-eligible hits with:
 
 - **name** — display label
 - **slug** — exact value for `spawn_subagent` `model=`
@@ -242,7 +242,7 @@ The `resume_from` parameter lets a new subagent continue where a completed subag
 
 The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
 
-For a `codex-subscription` task, the public `resume_from` value is still the
+For a `openai-gpt-5.6-sol` task, the public `resume_from` value is still the
 Grok Build subagent ID—not a Codex UUID. Grok Build resolves the private thread
 pointer from local metadata and fails closed if the session owner, provider,
 model, working directory, sandbox, or thread does not match.
@@ -361,7 +361,7 @@ Use `q`, `Esc`, or click the close button to pop back to the parent view. The pa
 Only the top-level session spawns subagents. A subagent cannot spawn its own subagents: the maximum nesting depth is one. If a subagent calls `spawn_subagent`, the call fails with a depth-limit error. This keeps the agent tree flat and prevents runaway spawning.
 
 The same limit applies when the primary model is Codex. Grok Build supplies
-its host-owned task lifecycle to the primary Codex app-server and disables
+its host-owned task lifecycle to the primary OpenAI (ChatGPT OAuth or API key) inference path and disables
 Codex's independent multi-agent feature, so there is one authoritative task
 tree rather than two competing orchestrators.
 

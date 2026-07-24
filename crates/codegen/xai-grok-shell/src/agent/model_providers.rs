@@ -20,13 +20,14 @@ pub enum ModelProviderKind {
     Custom,
     #[serde(rename = "xai")]
     Xai,
-    #[serde(rename = "openai")]
+    /// OpenAI API key or ChatGPT subscription OAuth (single provider).
+    ///
+    /// Legacy configs may still say `kind = "codex"`; that deserializes here
+    /// and is treated as OpenAI (HTTP Responses), never as an external agent.
+    #[serde(rename = "openai", alias = "codex")]
     OpenAi,
     #[serde(rename = "openrouter")]
     OpenRouter,
-    /// Run an official Codex agent through `codex app-server`, using the
-    /// locally cached `codex login` session (including ChatGPT subscriptions).
-    Codex,
 }
 
 // Re-exported from the sampler crate so the shell TOML layer and the sampler
@@ -55,8 +56,7 @@ pub struct ResolvedModelProvider {
     /// `kind = "openrouter"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openrouter_plugins: Vec<OpenRouterPlugin>,
-    /// Command used by the Codex app-server provider. The first item is the
-    /// executable and the remainder are arguments.
+    /// Unused; retained for forward-compatible TOML round-trips only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
 }
@@ -88,9 +88,7 @@ pub struct ModelProviderConfig {
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
     pub context_window: Option<u64>,
-    /// Optional command override for `kind = "codex"`.
-    ///
-    /// Defaults to `["codex", "app-server", "--stdio"]`.
+    /// Unused legacy field (previously Codex app-server command override).
     pub command: Vec<String>,
 }
 
@@ -102,15 +100,6 @@ impl ModelProviderConfig {
         provider_preferences: Option<OpenRouterProviderPreferences>,
         plugins: Vec<OpenRouterPlugin>,
     ) -> ResolvedModelProvider {
-        let command = if self.kind == ModelProviderKind::Codex && self.command.is_empty() {
-            vec![
-                "codex".to_string(),
-                "app-server".to_string(),
-                "--stdio".to_string(),
-            ]
-        } else {
-            self.command.clone()
-        };
         ResolvedModelProvider {
             id: id.to_string(),
             kind: self.kind,
@@ -123,7 +112,7 @@ impl ModelProviderConfig {
             openrouter_plugins: (self.kind == ModelProviderKind::OpenRouter)
                 .then_some(plugins)
                 .unwrap_or_default(),
-            command,
+            command: self.command.clone(),
         }
     }
 }
@@ -1059,33 +1048,17 @@ mod tests {
         let codex_provider = codex
             .model_provider
             .as_ref()
-            .expect("Codex provider is retained");
-        assert_eq!(codex_provider.kind, super::ModelProviderKind::Codex);
-        assert_eq!(codex_provider.command, ["codex", "app-server", "--stdio"]);
-        assert!(
-            !codex.info.hidden,
-            "Codex subscription is selectable as a native primary agent"
+            .expect("legacy kind=codex provider is retained as OpenAI");
+        assert_eq!(
+            codex_provider.kind,
+            super::ModelProviderKind::OpenAi,
+            "kind = \"codex\" deserializes as OpenAi (HTTP), not an external agent"
         );
         assert!(
-            codex.own_credential().is_none(),
-            "Codex provider credentials cannot leak into inference"
+            codex_provider.command.is_empty(),
+            "no app-server command default"
         );
-        assert!(
-            codex
-                .auth_provider
-                .as_ref()
-                .is_some_and(|provider| provider.is_fail_closed()),
-            "direct sampling of a Codex provider must fail closed"
-        );
-        assert!(
-            crate::agent::models::task_model_error_for_catalog(
-                "codex-subscription",
-                &resolved,
-                false,
-            )
-            .is_none(),
-            "a Codex agent remains selectable by Task.model"
-        );
+        assert!(!codex.info.hidden);
     }
 
     #[test]

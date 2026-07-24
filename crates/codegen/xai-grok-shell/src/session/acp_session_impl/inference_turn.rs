@@ -856,7 +856,11 @@ impl SessionActor {
         let detailed_message = error.message.clone();
         if matches!(error.kind, InferenceErrorKind::Api)
             && error.status_code == Some(400)
-            && error.message.contains("encrypted_content")
+            && (error.message.contains("encrypted_content")
+                || error
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("encrypted content"))
         {
             self.signals_handle()
                 .record_error_typed("encrypted_content_mismatch");
@@ -1198,6 +1202,42 @@ impl SessionActor {
     /// Soft failures with a still-usable access token still return here
     /// (grace / optimistic send); 401 recovery remains the safety net.
     pub(crate) async fn refresh_token_if_expired(&self) {
+        // ChatGPT subscription OAuth (OpenAI provider): refresh access token
+        // when near expiry. Independent of xAI AuthManager session path.
+        {
+            let base_url = self
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .map(|c| c.base_url)
+                .unwrap_or_default();
+            let home = crate::util::grok_home::grok_home();
+            let oauth_connected = crate::auth::chatgpt_oauth::status(&home)
+                == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected;
+            if oauth_connected || base_url.contains("chatgpt.com/backend-api/codex") {
+                match crate::auth::chatgpt_oauth::valid_access_token(&home).await {
+                    Ok(Some((access, _account))) => {
+                        let creds = self.chat_state_handle.get_credentials().await;
+                        if creds.api_key.as_deref() != Some(access.as_str()) {
+                            let mut creds = creds;
+                            creds.api_key = Some(access);
+                            self.chat_state_handle.update_credentials(creds);
+                        }
+                        // When OAuth is the active OpenAI credential, skip xAI refresh.
+                        if oauth_connected {
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ChatGPT OAuth pre-turn refresh failed");
+                        if oauth_connected {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
             let (model_id, base_url) = self

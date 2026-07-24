@@ -26,27 +26,24 @@ pub enum ProviderKind {
     Xai,
     OpenAi,
     OpenRouter,
-    Codex,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 4] = [Self::Xai, Self::OpenAi, Self::OpenRouter, Self::Codex];
+    pub const ALL: [Self; 3] = [Self::Xai, Self::OpenAi, Self::OpenRouter];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Xai => "xAI",
-            Self::OpenAi => "OpenAI API",
+            Self::OpenAi => "OpenAI",
             Self::OpenRouter => "OpenRouter",
-            Self::Codex => "Codex / ChatGPT",
         }
     }
 
     pub const fn detail(self) -> &'static str {
         match self {
             Self::Xai => "Grok/xAI account (OAuth) or xAI API key",
-            Self::OpenAi => "Responses API · key stored securely",
+            Self::OpenAi => "ChatGPT OAuth or API key · Responses",
             Self::OpenRouter => "Chat Completions · key stored securely",
-            Self::Codex => "ChatGPT subscription · official Codex login",
         }
     }
 
@@ -102,6 +99,9 @@ pub(crate) enum ProviderModalMode {
         action: XaiChoiceAction,
         selected: usize,
     },
+    ChoosingOpenAi {
+        selected: usize,
+    },
     EditingKey {
         provider: ProviderKind,
         editor: LineEditor,
@@ -115,6 +115,10 @@ impl std::fmt::Debug for ProviderModalMode {
             Self::ChoosingXai { action, selected } => f
                 .debug_struct("ChoosingXai")
                 .field("action", action)
+                .field("selected", selected)
+                .finish(),
+            Self::ChoosingOpenAi { selected } => f
+                .debug_struct("ChoosingOpenAi")
                 .field("selected", selected)
                 .finish(),
             Self::EditingKey { provider, .. } => f
@@ -151,6 +155,7 @@ impl std::fmt::Debug for ProviderModalState {
                 &match &self.mode {
                     ProviderModalMode::Browse => "browse",
                     ProviderModalMode::ChoosingXai { .. } => "choosing_xai_auth",
+                    ProviderModalMode::ChoosingOpenAi { .. } => "choosing_openai_auth",
                     ProviderModalMode::EditingKey { .. } => "editing_key_redacted",
                 },
             )
@@ -216,7 +221,6 @@ fn provider_index(provider: ProviderKind) -> usize {
         ProviderKind::Xai => 0,
         ProviderKind::OpenAi => 1,
         ProviderKind::OpenRouter => 2,
-        ProviderKind::Codex => 3,
     }
 }
 
@@ -270,8 +274,50 @@ fn handle_xai_choice(
     }
 }
 
+fn handle_openai_choice(
+    state: &mut ProviderModalState,
+    key: &KeyEvent,
+) -> Option<ProviderModalOutcome> {
+    let ProviderModalMode::ChoosingOpenAi { selected } = &mut state.mode else {
+        return None;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            state.mode = ProviderModalMode::Browse;
+            Some(ProviderModalOutcome::Changed)
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            *selected = selected.saturating_sub(1);
+            Some(ProviderModalOutcome::Changed)
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            *selected = (*selected + 1).min(1);
+            Some(ProviderModalOutcome::Changed)
+        }
+        KeyCode::Enter => {
+            let selected = *selected;
+            if selected == 1 {
+                // API key
+                state.mode = ProviderModalMode::EditingKey {
+                    provider: ProviderKind::OpenAi,
+                    editor: LineEditor::default(),
+                };
+                return Some(ProviderModalOutcome::Changed);
+            }
+            // ChatGPT OAuth (browser / device)
+            state.mode = ProviderModalMode::Browse;
+            state.set_status(ProviderKind::OpenAi, ProviderStatus::Connecting);
+            Some(ProviderModalOutcome::Command(ProviderCommand::LoginCodex))
+        }
+        _ => Some(ProviderModalOutcome::Unchanged),
+    }
+}
+
 pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderModalOutcome {
     if let Some(outcome) = handle_xai_choice(state, key) {
+        return outcome;
+    }
+    if let Some(outcome) = handle_openai_choice(state, key) {
         return outcome;
     }
     if matches!(&state.mode, ProviderModalMode::EditingKey { .. }) {
@@ -337,7 +383,8 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
                 return ProviderModalOutcome::Changed;
             }
             state.set_status(provider, ProviderStatus::Missing);
-            ProviderModalOutcome::Command(if provider == ProviderKind::Codex {
+            // OpenAI: clear ChatGPT OAuth and/or API key (mutual exclusion store).
+            ProviderModalOutcome::Command(if provider == ProviderKind::OpenAi {
                 ProviderCommand::LogoutCodex
             } else {
                 ProviderCommand::Disconnect(provider)
@@ -357,6 +404,10 @@ fn start_connect(state: &mut ProviderModalState) -> ProviderModalOutcome {
             action: XaiChoiceAction::Connect,
             selected: 0,
         };
+        ProviderModalOutcome::Changed
+    } else if provider == ProviderKind::OpenAi {
+        // ChatGPT OAuth or API key (mutually exclusive).
+        state.mode = ProviderModalMode::ChoosingOpenAi { selected: 0 };
         ProviderModalOutcome::Changed
     } else if provider.needs_api_key() {
         state.mode = ProviderModalMode::EditingKey {
@@ -549,12 +600,48 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
                 }),
             );
         }
+    } else if let ProviderModalMode::ChoosingOpenAi { selected } = &state.mode {
+        y = y.saturating_add(1);
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            "Connect OpenAI (one method at a time):",
+            Style::default().fg(theme.text_primary),
+        );
+        for (idx, label) in [
+            "ChatGPT Pro/Plus (browser OAuth)",
+            "OpenAI API key",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let prefix = if *selected == idx { "› " } else { "  " };
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                &format!("{prefix}{label}"),
+                Style::default().fg(if *selected == idx {
+                    theme.accent_user
+                } else {
+                    theme.gray
+                }),
+            );
+        }
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            "Switching methods clears the other credential.",
+            Style::default().fg(theme.gray_dim),
+        );
     } else {
         put_line(
             buf,
             content.content,
             &mut y,
-            "xAI: choose OAuth or API key. OpenAI/OpenRouter: add a key. Codex: official login.",
+            "xAI: OAuth or API key. OpenAI: ChatGPT login or API key. OpenRouter: API key.",
             Style::default().fg(theme.gray_dim),
         );
     }
@@ -580,7 +667,14 @@ mod tests {
     #[test]
     fn api_key_is_masked_and_submit_intent_has_no_secret() {
         let mut state = ProviderModalState::new();
-        state.selected = 1;
+        state.selected = 1; // OpenAI
+        // OpenAI: choose API key path from dual-auth chooser
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(&state.mode, ProviderModalMode::ChoosingOpenAi { .. }));
+        handle_key(&mut state, &key(KeyCode::Down));
         assert_eq!(
             handle_key(&mut state, &key(KeyCode::Enter)),
             ProviderModalOutcome::Changed
@@ -608,8 +702,10 @@ mod tests {
     #[test]
     fn diagnostics_never_render_typed_or_submitted_api_key() {
         let mut state = ProviderModalState::new();
-        state.selected = 1;
-        handle_key(&mut state, &key(KeyCode::Enter));
+        state.selected = 1; // OpenAI
+        handle_key(&mut state, &key(KeyCode::Enter)); // chooser
+        handle_key(&mut state, &key(KeyCode::Down)); // API key
+        handle_key(&mut state, &key(KeyCode::Enter)); // editing
         handle_paste(&mut state, "sk-super-secret");
         let editing_debug = format!("{state:?}");
         assert!(!editing_debug.contains("sk-super-secret"));
@@ -623,9 +719,17 @@ mod tests {
     }
 
     #[test]
-    fn codex_uses_login_not_key_entry() {
+    fn openai_chatgpt_oauth_is_default_connect_choice() {
         let mut state = ProviderModalState::new();
-        state.selected = 3;
+        state.selected = 1; // OpenAI
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChoosingOpenAi { selected: 0 }
+        ));
         assert_eq!(
             handle_key(&mut state, &key(KeyCode::Enter)),
             ProviderModalOutcome::Command(ProviderCommand::LoginCodex)

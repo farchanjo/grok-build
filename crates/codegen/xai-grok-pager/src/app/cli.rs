@@ -329,11 +329,13 @@ impl AgentArgs {
 /// Agent sub-subcommands.
 #[derive(Debug, Subcommand, Clone)]
 pub enum AgentCmd {
-    /// Run the agent over stdio
+    /// ACP stdio mode was removed. Use the interactive TUI or headless `-p`.
+    #[command(hide = true)]
     Stdio,
     /// Run the agent headlessly over the Grok WebSocket relay
     Headless(HeadlessArgs),
-    /// Run the agent as a WebSocket server
+    /// WebSocket serve mode was removed. Use the interactive TUI or headless `-p`.
+    #[command(hide = true)]
     Serve(ServeArgs),
     /// Run as the shared leader process for other clients
     Leader(LeaderArgs),
