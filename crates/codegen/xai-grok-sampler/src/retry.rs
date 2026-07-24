@@ -310,8 +310,20 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
             )
         }
         SamplingError::Api {
-            status, message, ..
+            status,
+            message,
+            diagnostics,
+            ..
         } => {
+            // Prefer the diagnostics provider_name (the selected OpenRouter
+            // upstream) over the generic provider label derived from the
+            // config's ProviderIdentity. This makes 502/520-class and 402
+            // copy name the actual upstream that failed rather than the
+            // router when that information is available.
+            let provider_label = diagnostics
+                .as_ref()
+                .and_then(|d| d.provider_name.as_deref())
+                .filter(|name| !name.is_empty());
             let status_hint = match status.as_u16() {
                 400 => " (bad request - check your input)",
                 401 | 403 => " (authentication issue - check your API key)",
@@ -321,6 +333,14 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 500 => " (server internal error)",
                 #[allow(clippy::manual_range_patterns)]
                 502 | 503 | 504 => " (server unavailable - please retry)",
+                402 => match provider_label {
+                    Some(name) => {
+                        return format!(
+                            "{retry_prefix}{name} account out of credits — add credits to continue. (HTTP 402): {message}"
+                        );
+                    }
+                    None => " (out of credits - add credits to continue)",
+                },
                 _ => "",
             };
             format!(
@@ -895,5 +915,54 @@ mod tests {
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
             RetryDecision::Fatal(_)
         ));
+    }
+
+    /// HTTP 402 (Payment Required) is OpenRouter's out-of-credits signal. It
+    /// must NOT be retried — there is no point burning the retry budget on a
+    /// billing failure. `is_retryable` excludes 402 (only 429/500/502/503/
+    /// 504/520 are retryable), so it falls through to the final Fatal arm.
+    #[test]
+    fn classify_402_payment_required_is_fatal() {
+        let err = api_err(StatusCode::PAYMENT_REQUIRED, "out of credits");
+        assert!(
+            !err.is_retryable(),
+            "402 must not be retryable — billing failure is deterministic"
+        );
+        assert!(matches!(
+            classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(_)
+        ));
+    }
+
+    /// `format_sampling_error` produces a dedicated, actionable credits
+    /// message for 402, naming the provider when diagnostics carry the
+    /// upstream `provider_name`.
+    #[test]
+    fn format_402_with_diagnostics_provider_name_dedicated_message() {
+        let err = SamplingError::Api {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: "insufficient_credits".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: Some(xai_grok_sampling_types::ApiErrorDiagnostics {
+                provider_name: Some("OpenRouter".into()),
+                ..Default::default()
+            }),
+        };
+        let s = format_sampling_error(&err, None);
+        assert!(s.contains("OpenRouter account out of credits"));
+        assert!(s.contains("add credits"));
+        assert!(s.contains("402"));
+    }
+
+    /// Without a diagnostics `provider_name`, the 402 arm falls back to the
+    /// generic "(out of credits - add credits to continue)" status hint.
+    #[test]
+    fn format_402_without_diagnostics_uses_generic_hint() {
+        let err = api_err(StatusCode::PAYMENT_REQUIRED, "insufficient_credits");
+        let s = format_sampling_error(&err, None);
+        assert!(s.contains("402"));
+        assert!(s.contains("out of credits"));
     }
 }

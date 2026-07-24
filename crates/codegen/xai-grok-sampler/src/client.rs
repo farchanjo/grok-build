@@ -20,7 +20,7 @@ use reqwest::header::{
 };
 use serde::Serialize;
 
-use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
+use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message_for};
 use xai_grok_sampling_types::{
     ApiErrorDiagnostics, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
     ConversationRequest, ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER,
@@ -475,6 +475,11 @@ pub struct SamplingClient {
     /// True only when the config targets OpenRouter, so error diagnostics
     /// treat the upstream metadata as explicitly requested.
     openrouter_metadata_requested: bool,
+    /// User-facing provider label derived from [`SamplerConfig::provider_identity`]
+    /// at construction time. Used as the fallback for provider-aware error
+    /// copy (502/520-class, 402) when the diagnostics `provider_name` (the
+    /// selected OpenRouter upstream) is unavailable at the call site.
+    provider_label: String,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -491,6 +496,7 @@ impl std::fmt::Debug for SamplingClient {
                 "openrouter_metadata_requested",
                 &self.openrouter_metadata_requested,
             )
+            .field("provider_label", &self.provider_label)
             .finish()
     }
 }
@@ -734,6 +740,7 @@ impl SamplingClient {
             header_injector: config.header_injector,
             first_party: config.provider_identity.is_first_party(),
             openrouter_metadata_requested: config.provider_identity.is_openrouter(),
+            provider_label: config.provider_identity.label().to_string(),
         })
     }
 
@@ -851,6 +858,21 @@ impl SamplingClient {
         }
     }
 
+    /// Resolve the user-facing provider label for an error response, preferring
+    /// the diagnostics `provider_name` (the selected OpenRouter upstream) over
+    /// the generic provider label derived from [`SamplerConfig::provider_identity`].
+    /// This makes 502/520-class and 402 copy name the actual upstream that failed
+    /// rather than the router when that information is available.
+    fn provider_label_for_diagnostics<'a>(
+        &'a self,
+        diagnostics: Option<&'a ApiErrorDiagnostics>,
+    ) -> &'a str {
+        diagnostics
+            .and_then(|d| d.provider_name.as_deref())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.provider_label)
+    }
+
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
         let auth_prefix = self.current_sent_bearer_prefix();
         let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
@@ -953,12 +975,15 @@ impl SamplingClient {
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
-                let server_message = user_facing_api_error_message(status, bytes.as_ref());
+                let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+                let server_message =
+                    user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401): {server_message}"
                 )));
             }
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+            let message = user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
             return Err(api_error(
                 status,
                 message,
@@ -1113,7 +1138,14 @@ impl SamplingClient {
                 );
                 let endpoint = self.endpoint("chat/completions");
                 let body = response.bytes().await.unwrap_or_default();
-                let server_message = user_facing_api_error_message(status, body.as_ref());
+                let diagnostics = extract_api_error_diagnostics(
+                    &response_headers,
+                    body.as_ref(),
+                    self.openrouter_metadata_requested,
+                );
+                let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+                let server_message =
+                    user_facing_api_error_message_for(status, body.as_ref(), provider_label);
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
@@ -1125,7 +1157,8 @@ impl SamplingClient {
                 bytes.as_ref(),
                 self.openrouter_metadata_requested,
             );
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+            let message = user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
             span.record("error", message.as_str());
             tracing::error!(
                 status = %status,
@@ -1321,13 +1354,16 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::Responses);
                 let endpoint = self.endpoint("responses");
-                let server_message = user_facing_api_error_message(status, bytes.as_ref());
+                let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+                let server_message =
+                    user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
 
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+            let message = user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
             tracing::warn!(
                 status = %status,
                 error_message = %message,
@@ -1485,7 +1521,14 @@ impl SamplingClient {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::ResponsesStream);
                 let endpoint = self.endpoint("responses");
                 let body = response.bytes().await.unwrap_or_default();
-                let server_message = user_facing_api_error_message(status, body.as_ref());
+                let diagnostics = extract_api_error_diagnostics(
+                    &response_headers,
+                    body.as_ref(),
+                    self.openrouter_metadata_requested,
+                );
+                let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+                let server_message =
+                    user_facing_api_error_message_for(status, body.as_ref(), provider_label);
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
@@ -1499,7 +1542,8 @@ impl SamplingClient {
                 bytes.as_ref(),
                 self.openrouter_metadata_requested,
             );
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+            let message = user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
             span.record("error", message.as_str());
             tracing::error!(
                 status = %status,
@@ -1677,13 +1721,16 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::Messages);
                 let endpoint = self.endpoint("messages");
-                let server_message = user_facing_api_error_message(status, bytes.as_ref());
+                let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+                let server_message =
+                    user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
 
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+            let message = user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
             tracing::warn!(
                 status = %status,
                 error_message = %message,
@@ -1801,7 +1848,14 @@ impl SamplingClient {
                 self.record_401_attribution(crate::attribution::SamplingConsumer::MessagesStream);
                 let endpoint = self.endpoint("messages");
                 let body = response.bytes().await.unwrap_or_default();
-                let server_message = user_facing_api_error_message(status, body.as_ref());
+                let diagnostics = extract_api_error_diagnostics(
+                    &response_headers,
+                    body.as_ref(),
+                    self.openrouter_metadata_requested,
+                );
+                let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+                let server_message =
+                    user_facing_api_error_message_for(status, body.as_ref(), provider_label);
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
@@ -1815,7 +1869,8 @@ impl SamplingClient {
                 bytes.as_ref(),
                 self.openrouter_metadata_requested,
             );
-            let message = user_facing_api_error_message(status, bytes.as_ref());
+            let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
+            let message = user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
             span.record("error", message.as_str());
             tracing::error!(
                 status = %status,

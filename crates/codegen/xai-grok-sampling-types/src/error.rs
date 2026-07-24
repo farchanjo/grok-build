@@ -455,22 +455,51 @@ fn openrouter_error_fields(error: Option<&serde_json::Value>) -> Option<(String,
 
 /// Max chars of a structured (JSON) error message shown to users.
 pub const MAX_USER_ERROR_BODY_CHARS: usize = 280;
+/// Head kept by [`truncate_user_error`] when a structured message exceeds
+/// [`MAX_USER_ERROR_BODY_CHARS`]. OpenRouter error bodies front-load
+/// boilerplate and put the upstream's useful message at the end, so we keep
+/// both the beginning and the end (see [`TAIL_CHARS`]).
+const HEAD_CHARS: usize = 120;
+/// Tail kept by [`truncate_user_error`] when a structured message exceeds
+/// [`MAX_USER_ERROR_BODY_CHARS`]. Together `HEAD_CHARS + TAIL_CHARS` (≈ 260)
+/// leaves room for the ellipsis separator under the 280-char cap.
+const TAIL_CHARS: usize = 140;
 
 /// Short status-based copy when the body is not a structured JSON error.
 ///
 /// Edge proxies (Cloudflare 52x, 502/503/504) return HTML pages; we never
-/// sniff body text — only the HTTP status drives this fallback.
+/// sniff body text — only the HTTP status drives this fallback. The copy is
+/// **provider-aware**: `provider_label` names the actual upstream (e.g.
+/// "OpenRouter", "OpenAI") instead of hardcoding "Grok". Use
+/// [`status_user_message`] for the historical xAI-only wording; new code
+/// should prefer [`status_user_message_for`] with the resolved provider label.
 pub fn status_user_message(status: StatusCode) -> String {
+    status_user_message_for(status, "Grok")
+}
+
+/// Provider-aware variant of [`status_user_message`].
+///
+/// `provider_label` is the user-facing name of the selected upstream (e.g.
+/// "Grok" for xAI, "OpenRouter", "OpenAI", or "the model provider" for
+/// unknown/custom providers). When the diagnostics `provider_name` (the
+/// specific OpenRouter upstream) is known, callers should pass that instead
+/// of the generic provider label.
+///
+/// HTTP 402 (Payment Required) — OpenRouter's out-of-credits signal —
+/// produces a dedicated, actionable credits message naming the provider. It
+/// is fatal (never retried; see [`crate::SamplingError::is_retryable`]).
+pub fn status_user_message_for(status: StatusCode, provider_label: &str) -> String {
     match status.as_u16() {
-        code @ 502..=504 => {
-            format!("Grok is temporarily unavailable. Please try again in a moment. (HTTP {code}).")
-        }
+        402 => format!(
+            "{provider_label} account out of credits — add credits to continue. (HTTP 402)."
+        ),
+        code @ 502..=504 => format!(
+            "{provider_label} is temporarily unavailable. Please try again in a moment. (HTTP {code})."
+        ),
         // Cloudflare edge codes (origin down / connect fail / timeout / …).
-        code @ 520..=524 => {
-            format!(
-                "Connection to Grok timed out or was interrupted. Please try again. (HTTP {code})."
-            )
-        }
+        code @ 520..=524 => format!(
+            "Connection to {provider_label} timed out or was interrupted. Please try again. (HTTP {code})."
+        ),
         code if status.is_server_error() => {
             format!("Something went wrong on the server (HTTP {code}).")
         }
@@ -485,9 +514,14 @@ fn truncate_user_error(s: &str) -> String {
     if count <= MAX_USER_ERROR_BODY_CHARS {
         return s.to_owned();
     }
-    let mut out: String = s.chars().take(MAX_USER_ERROR_BODY_CHARS).collect();
-    out.push('\u{2026}');
-    out
+    // OpenRouter (and other routers) front-load boilerplate and put the
+    // upstream's useful message at the end of the body. Keep both the head
+    // and the tail with an ellipsis between so the actionable portion is
+    // never lost. HEAD_CHARS + TAIL_CHARS (≈ 260) + 1 ellipsis stays under
+    // the 280-char cap.
+    let head: String = s.chars().take(HEAD_CHARS).collect();
+    let tail: String = s.chars().skip(count.saturating_sub(TAIL_CHARS)).collect();
+    format!("{head}\u{2026}{tail}")
 }
 
 /// Format a known JSON error envelope; `None` if the body is not structured.
@@ -505,8 +539,8 @@ fn structured_error_message(bytes: &[u8]) -> Option<String> {
 ///
 /// Only structured JSON error envelopes are surfaced. Non-JSON bodies
 /// (HTML edge pages, plain text dumps) return a fixed placeholder — never
-/// the raw bytes. Prefer [`user_facing_api_error_message`] when a status
-/// code is available.
+/// the raw bytes. Prefer [`user_facing_api_error_message_for`] when a
+/// status code and provider label are available.
 pub fn parse_error_bytes(bytes: &[u8]) -> String {
     structured_error_message(bytes).unwrap_or_else(|| "upstream error".into())
 }
@@ -515,9 +549,34 @@ pub fn parse_error_bytes(bytes: &[u8]) -> String {
 ///
 /// Structured JSON error envelopes keep their message. Everything else
 /// (including Cloudflare HTML) maps to a status-based string — no body
-/// content matching.
+/// content matching. Uses the historical xAI-only "Grok" wording; new code
+/// should prefer [`user_facing_api_error_message_for`] with the resolved
+/// provider label.
 pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String {
-    structured_error_message(bytes).unwrap_or_else(|| status_user_message(status))
+    user_facing_api_error_message_for(status, bytes, "Grok")
+}
+
+/// Provider-aware variant of [`user_facing_api_error_message`].
+///
+/// `provider_label` is the user-facing name of the selected upstream (e.g.
+/// "Grok" for xAI, "OpenRouter", "OpenAI", or "the model provider" for
+/// unknown/custom providers). It is used only for the status-based fallback
+/// (non-JSON bodies such as Cloudflare HTML). Structured JSON error
+/// envelopes keep their own message regardless of provider.
+///
+/// HTTP 402 (Payment Required) is OpenRouter's out-of-credits signal. Its
+/// status copy is a dedicated credits message naming the provider. When the
+/// body is a structured envelope (e.g. `{"error":{"message": "..."}}`) the
+/// envelope message is still surfaced, so the dedicated 402 copy only
+/// applies to non-JSON 402 responses — which matches the existing contract
+/// where structured bodies always win over status copy.
+pub fn user_facing_api_error_message_for(
+    status: StatusCode,
+    bytes: &[u8],
+    provider_label: &str,
+) -> String {
+    structured_error_message(bytes)
+        .unwrap_or_else(|| status_user_message_for(status, provider_label))
 }
 
 pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
@@ -789,7 +848,14 @@ mod tests {
         let bytes = format!(r#"{{"error":{{"message":"{long_msg}","type":"server_error"}}}}"#);
         let msg = parse_error_bytes(bytes.as_bytes());
         assert!(msg.chars().count() <= MAX_USER_ERROR_BODY_CHARS + 1);
-        assert!(msg.ends_with('\u{2026}'));
+        // Head + tail truncation: the message keeps both ends with a single
+        // ellipsis separator in the middle, so it neither starts nor ends
+        // with the ellipsis.
+        assert!(msg.contains('\u{2026}'));
+        assert!(!msg.starts_with('\u{2026}'));
+        assert!(!msg.ends_with('\u{2026}'));
+        assert!(msg.starts_with('x'));
+        assert!(msg.ends_with('x'));
     }
 
     /// Regression test: 403 Forbidden must NOT be classified as an auth
@@ -1040,5 +1106,122 @@ mod tests {
             !err.is_retryable(),
             "direct 400 must not be retryable by is_retryable()"
         );
+    }
+
+    // ── Provider-aware error copy (Phase 2 — OpenRouter compatibility) ──
+
+    /// 502-class status copy names the resolved provider label. xAI keeps the
+    /// historical "Grok" wording; non-xAI providers never say "Grok".
+    #[test]
+    fn status_user_message_for_502_is_provider_aware() {
+        let xai = status_user_message_for(StatusCode::BAD_GATEWAY, "Grok");
+        assert!(xai.contains("Grok is temporarily unavailable"));
+        assert!(xai.contains("502"));
+
+        let openrouter = status_user_message_for(StatusCode::BAD_GATEWAY, "OpenRouter");
+        assert!(openrouter.contains("OpenRouter is temporarily unavailable"));
+        assert!(!openrouter.contains("Grok"));
+
+        let openai = status_user_message_for(StatusCode::BAD_GATEWAY, "OpenAI");
+        assert!(openai.contains("OpenAI is temporarily unavailable"));
+        assert!(!openai.contains("Grok"));
+
+        let custom = status_user_message_for(StatusCode::BAD_GATEWAY, "the model provider");
+        assert!(custom.contains("the model provider is temporarily unavailable"));
+        assert!(!custom.contains("Grok"));
+    }
+
+    /// 520-class (Cloudflare edge) status copy names the resolved provider.
+    #[test]
+    fn status_user_message_for_520_is_provider_aware() {
+        let openrouter = status_user_message_for(StatusCode::from_u16(524).unwrap(), "OpenRouter");
+        assert!(openrouter.contains("Connection to OpenRouter timed out"));
+        assert!(!openrouter.contains("Grok"));
+
+        let xai = status_user_message_for(StatusCode::from_u16(520).unwrap(), "Grok");
+        assert!(xai.contains("Connection to Grok timed out"));
+    }
+
+    /// HTTP 402 produces a dedicated credits message naming the provider.
+    #[test]
+    fn status_user_message_for_402_dedicated_credits_message() {
+        let openrouter = status_user_message_for(StatusCode::PAYMENT_REQUIRED, "OpenRouter");
+        assert!(openrouter.contains("OpenRouter account out of credits"));
+        assert!(openrouter.contains("add credits"));
+        assert!(openrouter.contains("HTTP 402"));
+        assert!(!openrouter.contains("Grok"));
+
+        let openai = status_user_message_for(StatusCode::PAYMENT_REQUIRED, "OpenAI");
+        assert!(openai.contains("OpenAI account out of credits"));
+    }
+
+    /// `status_user_message` (legacy entry point) keeps the xAI "Grok" wording
+    /// so existing callers and tests are unaffected.
+    #[test]
+    fn status_user_message_legacy_keeps_grok_label() {
+        let msg = status_user_message(StatusCode::BAD_GATEWAY);
+        assert!(msg.contains("Grok is temporarily unavailable"));
+    }
+
+    /// `user_facing_api_error_message_for` prefers structured JSON envelopes
+    /// over status copy, even for 402 — the dedicated 402 message only applies
+    /// to non-JSON bodies.
+    #[test]
+    fn user_facing_message_for_402_structured_body_wins() {
+        let bytes =
+            br#"{"error":{"message":"insufficient credits","type":"insufficient_credits"}}"#;
+        let msg =
+            user_facing_api_error_message_for(StatusCode::PAYMENT_REQUIRED, bytes, "OpenRouter");
+        assert_eq!(msg, "insufficient_credits: insufficient credits");
+    }
+
+    #[test]
+    fn user_facing_message_for_402_non_json_uses_dedicated_copy() {
+        let msg = user_facing_api_error_message_for(
+            StatusCode::PAYMENT_REQUIRED,
+            b"not json",
+            "OpenRouter",
+        );
+        assert!(msg.contains("OpenRouter account out of credits"));
+        assert!(msg.contains("add credits"));
+    }
+
+    /// Head + tail truncation: when a structured message exceeds the cap,
+    /// both the beginning and the end are preserved with an ellipsis
+    /// between. OpenRouter bodies front-load boilerplate and put the
+    /// useful upstream message at the end.
+    #[test]
+    fn truncate_user_error_preserves_head_and_tail() {
+        let prefix = "A".repeat(200);
+        let suffix = "B".repeat(200);
+        // Use a separator that stays valid inside a JSON string (no raw
+        // control chars); the truncation is exercised regardless of the
+        // separator.
+        let long = format!("{prefix}-SEP-{suffix}");
+        let bytes = format!(
+            r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#,
+            long
+        );
+        let msg = parse_error_bytes(bytes.as_bytes());
+        // Stays under the cap (+1 slack for the ellipsis).
+        assert!(msg.chars().count() <= MAX_USER_ERROR_BODY_CHARS + 1);
+        // `error_type` is "server_error", so the message passes through
+        // without the "<type>: " prefix. The head begins with the prefix
+        // run of 'A's and the tail ends with the suffix run of 'B's,
+        // separated by a single ellipsis.
+        assert!(msg.starts_with('A'));
+        assert!(msg.ends_with('B'));
+        assert_eq!(msg.matches('\u{2026}').count(), 1);
+        // Neither end is the ellipsis.
+        assert!(!msg.starts_with('\u{2026}'));
+        assert!(!msg.ends_with('\u{2026}'));
+    }
+
+    /// Short structured messages pass through unchanged (no ellipsis).
+    #[test]
+    fn truncate_user_error_short_message_unchanged() {
+        let bytes = br#"{"error":{"message":"short","type":"server_error"}}"#;
+        let msg = parse_error_bytes(bytes);
+        assert_eq!(msg, "short");
     }
 }

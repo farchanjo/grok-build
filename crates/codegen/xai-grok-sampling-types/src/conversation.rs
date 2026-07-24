@@ -7096,10 +7096,7 @@ mod tests {
         }"#;
         let chunk: crate::types::ChatCompletionChunk =
             serde_json::from_str(raw).expect("finish_reason=error must deserialize");
-        assert_eq!(
-            chunk.choices[0].finish_reason,
-            Some(FinishReason::Error)
-        );
+        assert_eq!(chunk.choices[0].finish_reason, Some(FinishReason::Error));
         assert_eq!(
             StopReason::from(chunk.choices[0].finish_reason.unwrap()),
             StopReason::Error

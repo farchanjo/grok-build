@@ -67,6 +67,22 @@ impl ProviderIdentity {
     pub fn is_openrouter(self) -> bool {
         matches!(self, ProviderIdentity::OpenRouter)
     }
+
+    /// Generic user-facing label for this provider, used in
+    /// provider-aware error copy (502/520-class, 402, etc.). This is the
+    /// fallback when the diagnostics `provider_name` (the selected
+    /// OpenRouter upstream) is unavailable at the call site.
+    ///
+    /// xAI keeps the historical "Grok" wording; OpenRouter and OpenAI use
+    /// their product names; `Custom`/`Codex` use a neutral phrase.
+    pub fn label(self) -> &'static str {
+        match self {
+            ProviderIdentity::Xai => "Grok",
+            ProviderIdentity::OpenAi => "OpenAI",
+            ProviderIdentity::OpenRouter => "OpenRouter",
+            ProviderIdentity::Custom | ProviderIdentity::Codex => "the model provider",
+        }
+    }
 }
 
 /// All knobs that control a single sampling request.
