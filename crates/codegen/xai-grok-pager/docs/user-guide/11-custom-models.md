@@ -279,6 +279,14 @@ Both entries can coexist in the picker and in subagent model overrides. They
 use the same native Grok Build agent/tool loop; only inference routing and
 billing differ.
 
+> **Subagents:** when the parent session is already OpenRouter, omit `model`
+> on `spawn_subagent` so the child inherits the model, fallbacks,
+> `provider_preferences`, `plugins`, and key. An explicit subagent model must
+> be an `openrouter:` catalog id that advertises tool support; `openai:`
+> discovery slugs are still rejected for subagents. See
+> [Subagents and Personas](16-subagents.md) for the full rules and per-type
+> override example.
+
 For OpenRouter, `openrouter_fallback_models` is sent through its native
 `models` routing field, in the configured order, while `model` remains the
 primary route. A model inherits the provider list by default and can replace

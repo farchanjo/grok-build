@@ -166,6 +166,45 @@ When you run a subagent in the background, retrieve its result later with `get_c
 
 ---
 
+## OpenRouter as a Subagent Provider
+
+OpenRouter is a first-class subagent provider: it uses the same `spawn_subagent` tool, the same one-level depth limit, and the same neutral software-engineering role baseline as xAI, OpenAI, and Codex children. OpenRouter models enter the catalog as `openrouter:<upstream-id>` after you connect an OpenRouter key in `/providers` (see [Custom Models](11-custom-models.md) for setup, fallbacks, preferences, and rate-limit pacing).
+
+### Inherit the parent model (recommended)
+
+When the parent session is already running an OpenRouter model, **omit `model`** on `spawn_subagent`. The child inherits the parent's resolved model *and* its full OpenRouter sampling configuration:
+
+- the same `openrouter:<provider>/<model>` catalog id
+- `provider_preferences` (privacy routing, sort, price caps)
+- `plugins` (server-side post-processing)
+- `openrouter_fallback_models` (native fallback order)
+- the provider API key (BYOK — never the xAI session token)
+
+Inheritance is the safest default. The OpenRouter catalog is large and heterogeneous, and an explicit slug can pick a model that does not support tools, has a different context window, or silently differs in pricing. Prefer omitting `model` unless the user asked for a specific OpenRouter slug.
+
+### Explicit OpenRouter model
+
+Pass an explicit catalog id with `model="openrouter:<provider>/<model>"`, for example `model="openrouter:anthropic/claude-sonnet-4.6"`. The id **must advertise tool support**: OpenRouter populates `supports_tools` from the authenticated `/api/v1/models` catalog, and a model with `supports_tools = false` (or with the flag missing) is rejected before spawn with a clear error rather than starting a child that cannot call tools.
+
+Do **not** use `openai:` discovery slugs for subagents. Entries like `openai:<upstream-id>` come from the OpenAI `/v1/models` list, whose response does not prove coding-agent tool support; they are still hard-rejected for subagents even when the picker shows them as selectable for the primary session. Use a curated OpenAI entry or an `openrouter:` id instead.
+
+### Rate-limit pacing
+
+OpenRouter's process-level rate-limit pacing — the 429 retry cap (`GROK_OPENROUTER_RATE_LIMIT_RETRIES`), the minimum request interval (`GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS`), and the recovery-requests window (`GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS`) — applies to OpenRouter children exactly as it does to the primary session. A burst of parallel OpenRouter subagents shares the same pacer, so 429 backoff and spacing are honored across the whole task tree. See [Custom Models](11-custom-models.md) for the full list of overrides.
+
+### Per-type override example
+
+Pin a subagent type to a specific OpenRouter model in `config.toml`:
+
+```toml
+[subagents.models]
+explore = "openrouter:anthropic/claude-sonnet-4.6"
+```
+
+As with an explicit `model` argument, the pinned id must advertise tool support or the spawn fails closed. Without a pin, the type inherits the parent model.
+
+---
+
 ## Capability Modes
 
 A capability mode is an optional, coarse filter on a subagent's tools:
