@@ -89,6 +89,7 @@ mod tests {
                     reasoning_content: None,
                     tool_calls: vec![],
                     tool_call_id: None,
+                    reasoning_details: Vec::new(),
                 },
                 finish_reason: None,
             }],

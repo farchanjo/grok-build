@@ -1744,6 +1744,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         });
     h.handle.push_assistant_response(assistant_with_tools);
 
@@ -2030,6 +2031,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         }),
         // Only call_1 got persisted before the crash
         ConversationItem::tool_result("call_1", "fn main() { ... }"),
@@ -3662,6 +3664,7 @@ async fn get_last_model_metadata_returns_both_fields() {
             model_id: Some("grok-4.5".into()),
             model_fingerprint: Some("fp_abc123".into()),
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         }),
     ]);
     let meta = h.handle.get_last_model_metadata().await;
@@ -3711,6 +3714,7 @@ async fn sampling_config_survives_compaction_replacement() {
                 model_id: Some("grok-4.5".into()),
                 model_fingerprint: Some("fp_abc123".into()),
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
         ],
         config,
@@ -3794,6 +3798,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
                 model_id: Some("grok-4.5".into()),
                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
         ],
         config,
@@ -3829,6 +3834,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
                 model_id: Some("grok-4.5".into()),
                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             },
         ));
 

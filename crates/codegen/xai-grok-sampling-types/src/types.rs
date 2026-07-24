@@ -243,6 +243,12 @@ pub struct ChatRequestMessage {
     /// The reasoning/thinking content from the model (for models that support extended thinking)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// OpenRouter extension: structured reasoning detail blocks echoed back
+    /// verbatim on assistant messages for multi-turn reasoning fidelity. Additive
+    /// and serde-optional so messages without it serialize exactly as before.
+    /// Parsed as raw JSON values to tolerate shape drift across providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_details: Vec<serde_json::Value>,
 }
 
 impl ChatRequestMessage {
@@ -255,6 +261,7 @@ impl ChatRequestMessage {
             tool_call_id: None,
             model_id: None,
             reasoning_content: None,
+            reasoning_details: Vec::new(),
         }
     }
 
@@ -267,6 +274,7 @@ impl ChatRequestMessage {
             tool_call_id: None,
             model_id: None,
             reasoning_content: None,
+            reasoning_details: Vec::new(),
         }
     }
 
@@ -283,6 +291,7 @@ impl ChatRequestMessage {
             tool_call_id: None,
             model_id: Some(model_id.into()),
             reasoning_content,
+            reasoning_details: Vec::new(),
         }
     }
 
@@ -295,6 +304,7 @@ impl ChatRequestMessage {
             tool_call_id: None,
             model_id: None,
             reasoning_content: None,
+            reasoning_details: Vec::new(),
         }
     }
 
@@ -307,6 +317,7 @@ impl ChatRequestMessage {
             tool_call_id: Some(tool_call_id.into()),
             model_id: None,
             reasoning_content: None,
+            reasoning_details: Vec::new(),
         }
     }
 
@@ -505,6 +516,15 @@ pub struct ChatResponseMessage {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub citations: Option<Vec<String>>,
+    /// OpenRouter extension: structured reasoning blocks (e.g.
+    /// `{ type: "reasoning", text: "..." }`,
+    /// `{ type: "reasoning.encrypted", data: "..." }`) returned on assistant
+    /// messages. Echoed back verbatim on the next turn for multi-turn
+    /// reasoning fidelity. Additive and serde-optional so messages without
+    /// it serialize exactly as before. Parsed as raw JSON values to tolerate
+    /// shape drift across providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_details: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -683,6 +703,13 @@ pub struct ChatChunkDelta {
     pub tool_calls: Vec<ToolCallDelta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// OpenRouter extension: structured reasoning detail blocks streamed on
+    /// assistant deltas. Accumulated across chunks and stored verbatim on the
+    /// `AssistantItem` so they can be echoed back on the next turn. Additive
+    /// and serde-optional so chunks without it deserialize exactly as before.
+    /// Parsed as raw JSON values to tolerate shape drift across providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_details: Vec<serde_json::Value>,
 }
 
 /// Parameters to control realtime data.

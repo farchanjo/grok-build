@@ -965,6 +965,7 @@ async fn read_parent_sampling_config(
                     .sampling_config
                     .openrouter_provider_preferences
                     .clone(),
+                openrouter_plugins: ctx.sampling_config.openrouter_plugins.clone(),
                 api_backend: cfg.api_backend,
                 include_message_model_id: ctx.sampling_config.include_message_model_id,
                 auth_scheme,

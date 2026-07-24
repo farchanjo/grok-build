@@ -72,6 +72,10 @@ pub fn stream_chat_completions<'a>(
 
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
+        // OpenRouter structured reasoning detail blocks, accumulated across
+        // chunks and stored verbatim on the AssistantItem for echo-back on
+        // the next turn. Parsed as raw JSON values to tolerate shape drift.
+        let mut reasoning_details_acc: Vec<serde_json::Value> = Vec::new();
         // Tool call deltas keyed by positional index. Each entry is
         // (id, name, arguments_buffer); the first chunk for an index
         // carries id+name and starts the arguments buffer, subsequent
@@ -237,6 +241,15 @@ pub fn stream_chat_completions<'a>(
                         arguments_delta: args_for_event,
                     };
                 }
+
+                // Accumulate OpenRouter structured reasoning detail blocks.
+                // These are echoed back verbatim on the next turn; we collect
+                // them as raw JSON values to tolerate shape drift across
+                // providers.
+                if !delta.reasoning_details.is_empty() {
+                    chunk_has_content = true;
+                    reasoning_details_acc.extend(delta.reasoning_details);
+                }
             }
 
             if chunk_has_content {
@@ -284,6 +297,9 @@ pub fn stream_chat_completions<'a>(
                 model_fingerprint,
                 // Chat Completions does not echo the applied reasoning effort.
                 reasoning_effort: None,
+                // OpenRouter structured reasoning detail blocks, echoed back
+                // verbatim on the next turn for multi-turn reasoning fidelity.
+                reasoning_details: reasoning_details_acc,
             }));
         } else {
             items.push(ConversationItem::assistant(""));
@@ -379,6 +395,7 @@ mod tests {
             reasoning_content: None,
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_details: Vec::new(),
         }])
     }
 
@@ -475,6 +492,7 @@ mod tests {
             reasoning_content: Some("thinking...".into()),
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_details: Vec::new(),
         }]);
         reasoning_chunk.choices[0].finish_reason = None;
 
@@ -549,6 +567,7 @@ mod tests {
                 }),
             }],
             tool_call_id: None,
+            reasoning_details: Vec::new(),
         }]);
         // Second chunk has only argument fragment.
         let chunk2 = make_chunk(vec![ChatChunkDelta {
@@ -565,6 +584,7 @@ mod tests {
                 }),
             }],
             tool_call_id: None,
+            reasoning_details: Vec::new(),
         }]);
 
         let raw = stream::iter::<Vec<Result<ChatCompletionChunk, SamplingError>>>(vec![
@@ -928,6 +948,7 @@ mod tests {
             reasoning_content: None,
             tool_calls: vec![],
             tool_call_id: None,
+            reasoning_details: Vec::new(),
         }]);
         chunk.model = served.to_string();
         chunk
@@ -1051,5 +1072,120 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    /// OpenRouter returns `reasoning_details` (structured blocks) on streamed
+    /// assistant deltas. The stream transform must accumulate them across
+    /// chunks and store them verbatim on the trailing AssistantItem so they
+    /// can be echoed back on the next turn.
+    #[tokio::test]
+    async fn reasoning_details_accumulated_and_stored_on_assistant_item() {
+        let detail1 = serde_json::json!({"type": "reasoning.text", "text": "step 1"});
+        let detail2 = serde_json::json!({"type": "reasoning.summary", "text": "summary"});
+        let chunk1 = make_chunk(vec![ChatChunkDelta {
+            role: Some(Role::Assistant),
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_details: vec![detail1.clone()],
+        }]);
+        let chunk2 = make_chunk(vec![ChatChunkDelta {
+            role: Some(Role::Assistant),
+            content: Some("answer".into()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_details: vec![detail2.clone()],
+        }]);
+        let raw = stream::iter::<Vec<Result<ChatCompletionChunk, SamplingError>>>(vec![
+            Ok(chunk1),
+            Ok(chunk2),
+            Ok(final_chunk(FinishReason::Stop)),
+        ])
+        .boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            ProviderIdentity::OpenRouter,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                let a = response.assistant().expect("assistant item present");
+                assert_eq!(a.content.as_ref(), "answer");
+                assert_eq!(a.reasoning_details.len(), 2);
+                assert_eq!(a.reasoning_details[0], detail1);
+                assert_eq!(a.reasoning_details[1], detail2);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Details captured on turn N must echo back unchanged when the
+    /// conversation is converted to wire messages for turn N+1.
+    #[tokio::test]
+    async fn reasoning_details_echo_back_verbatim_via_conversation_to_chat_messages() {
+        let detail = serde_json::json!({"type": "reasoning.encrypted", "data": "abc123"});
+        let chunk1 = make_chunk(vec![ChatChunkDelta {
+            role: Some(Role::Assistant),
+            content: Some("hello".into()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_details: vec![detail.clone()],
+        }]);
+        let raw = stream::iter::<Vec<Result<ChatCompletionChunk, SamplingError>>>(vec![
+            Ok(chunk1),
+            Ok(final_chunk(FinishReason::Stop)),
+        ])
+        .boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            ProviderIdentity::OpenRouter,
+        ))
+        .await;
+
+        let response = match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => response,
+            other => panic!("expected Completed, got {other:?}"),
+        };
+        // Convert the response items back to wire messages (next-turn request body).
+        let messages =
+            xai_grok_sampling_types::conversation_to_chat_messages(response.items.clone());
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("assistant message present");
+        assert_eq!(assistant_msg.reasoning_details.len(), 1);
+        assert_eq!(assistant_msg.reasoning_details[0], detail);
+    }
+
+    /// Messages without `reasoning_details` must serialize exactly as before
+    /// — no new `reasoning_details` key on the wire.
+    #[test]
+    fn assistant_item_without_reasoning_details_omits_key() {
+        let item = ConversationItem::Assistant(AssistantItem {
+            content: std::sync::Arc::<str>::from("hi"),
+            tool_calls: Vec::new(),
+            model_id: None,
+            model_fingerprint: None,
+            reasoning_effort: None,
+            reasoning_details: Vec::new(),
+        });
+        let messages = xai_grok_sampling_types::conversation_to_chat_messages(vec![item]);
+        let json = serde_json::to_value(&messages[0]).unwrap();
+        assert!(
+            json.get("reasoning_details").is_none(),
+            "an assistant item without reasoning_details must not emit the key"
+        );
     }
 }

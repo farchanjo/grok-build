@@ -40,6 +40,8 @@ impl SessionActor {
             .replace(sampling_config.openrouter_fallback_models.clone());
         self.openrouter_provider_preferences
             .replace(sampling_config.openrouter_provider_preferences.clone());
+        self.openrouter_plugins
+            .replace(sampling_config.openrouter_plugins.clone());
         xai_grok_telemetry::unified_log::info(
             "backend_search: model switch",
             Some(self.session_info.id.0.as_ref()),

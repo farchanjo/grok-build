@@ -1371,6 +1371,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })
     }
 
@@ -1935,6 +1936,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }));
         }
         hist.push(ConversationItem::User(UserItem {
@@ -2532,6 +2534,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }));
         }
         hist.push(ConversationItem::User(UserItem {

@@ -266,6 +266,15 @@ pub struct AssistantItem {
     /// backends that don't echo it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<crate::ReasoningEffort>,
+    /// OpenRouter extension: structured reasoning detail blocks
+    /// (`reasoning_details` on the assistant message). Parsed as raw JSON
+    /// values to tolerate shape drift across providers. Echoed back verbatim
+    /// on the next turn for multi-turn reasoning fidelity. Additive and
+    /// serde-optional so assistant items without it serialize exactly as
+    /// before. Empty for non-OpenRouter providers and backends that don't
+    /// return it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_details: Vec<serde_json::Value>,
 }
 
 /// Tool result message
@@ -1164,6 +1173,7 @@ impl ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })
     }
 
@@ -1179,6 +1189,7 @@ impl ConversationItem {
             model_id: Some(model_id.into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })
     }
 
@@ -1190,6 +1201,7 @@ impl ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })
     }
 
@@ -1701,6 +1713,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                     model_id,
                     model_fingerprint: None,
                     reasoning_effort: None,
+                    reasoning_details: Vec::new(),
                 })
             }
             Role::Tool => {
@@ -1839,6 +1852,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                 tool_call_id: None,
                 model_id: None,
                 reasoning_content: None,
+                reasoning_details: Vec::new(),
             }
         }
         ConversationItem::Assistant(a) => {
@@ -1856,7 +1870,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
             // chat-completions wire path that wants `reasoning_content`
             // filled in should use `conversation_to_chat_messages` instead
             // of this per-item conversion, since reasoning lives as
-            // preceding sibling items.
+            // preceding sibling items. `reasoning_details` (OpenRouter
+            // structured reasoning blocks) IS stored on AssistantItem and
+            // echoed verbatim here for multi-turn reasoning fidelity.
             ChatRequestMessage {
                 role: Role::Assistant,
                 content: MessageContent::Text(a.content.as_ref().to_owned()),
@@ -1865,6 +1881,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                 tool_call_id: None,
                 model_id: a.model_id,
                 reasoning_content: None,
+                reasoning_details: a.reasoning_details,
             }
         }
         ConversationItem::ToolResult(t) => {
@@ -1891,6 +1908,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                     tool_call_id: Some(t.tool_call_id),
                     model_id: None,
                     reasoning_content: None,
+                    reasoning_details: Vec::new(),
                 }
             }
         }
@@ -1905,6 +1923,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
             tool_call_id: None,
             model_id: None,
             reasoning_content: None,
+            reasoning_details: Vec::new(),
         },
         // Unreachable: `conversation_to_chat_messages` (the only caller)
         // folds `Reasoning` siblings into the following assistant and
@@ -2009,6 +2028,7 @@ impl From<ChatResponseMessage> for ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: msg.reasoning_details,
         })
     }
 }
@@ -2124,6 +2144,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         model_id: Some(model_id),
         model_fingerprint,
         reasoning_effort,
+        reasoning_details: Vec::new(),
     }));
 
     items
@@ -3430,6 +3451,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
             model_id: Some(resp.model),
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })
     }
 }
@@ -4014,6 +4036,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             citations: None,
+            reasoning_details: Vec::new(),
         };
 
         let item: ConversationItem = response_msg.into();
@@ -4028,6 +4051,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             citations: None,
+            reasoning_details: Vec::new(),
         };
 
         let item: ConversationItem = response_with_reasoning.into();
@@ -4055,6 +4079,7 @@ mod tests {
             }],
             tool_call_id: None,
             citations: None,
+            reasoning_details: Vec::new(),
         };
 
         let item: ConversationItem = response_with_tools.into();
@@ -4064,6 +4089,70 @@ mod tests {
         assert_eq!(a.tool_calls.len(), 1);
         assert_eq!(a.tool_calls[0].id.as_ref(), "call_123");
         assert_eq!(a.tool_calls[0].name, "read_file");
+    }
+
+    /// Non-streaming `ChatResponseMessage` → `ConversationItem` → wire message
+    /// round-trip: `reasoning_details` captured on the response must appear
+    /// unchanged on the request body of the next turn. Ordering with
+    /// `content`/`tool_calls` is preserved (the field is additive, not
+    /// interleaved).
+    #[test]
+    fn reasoning_details_round_trip_non_stream_and_echo_ordering() {
+        use crate::types::{ToolCallFunction, ToolCallResponse};
+
+        let detail = serde_json::json!({"type": "reasoning.text", "text": "thinking"});
+        let detail2 = serde_json::json!({"type": "reasoning.encrypted", "data": "enc"});
+        let response_msg = ChatResponseMessage {
+            role: Role::Assistant,
+            content: Some("answer".to_string()),
+            reasoning_content: None,
+            tool_calls: vec![ToolCallResponse {
+                id: "call_1".to_string(),
+                kind: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "do_thing".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+            tool_call_id: None,
+            citations: None,
+            reasoning_details: vec![detail.clone(), detail2.clone()],
+        };
+
+        // Non-stream capture: From<ChatResponseMessage> stores details on AssistantItem.
+        let item: ConversationItem = response_msg.into();
+        let ConversationItem::Assistant(a) = &item else {
+            panic!("Expected Assistant item");
+        };
+        assert_eq!(a.reasoning_details.len(), 2);
+        assert_eq!(a.reasoning_details[0], detail);
+        assert_eq!(a.reasoning_details[1], detail2);
+
+        // Echo: conversation_to_chat_messages puts details verbatim on the
+        // outgoing assistant wire message, alongside content + tool_calls.
+        let messages = crate::conversation_to_chat_messages(vec![item]);
+        let msg = messages
+            .iter()
+            .find(|m| m.role == crate::types::Role::Assistant)
+            .expect("assistant message present");
+        assert_eq!(msg.text_content(), "answer");
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert_eq!(msg.reasoning_details.len(), 2);
+        assert_eq!(msg.reasoning_details[0], detail);
+        assert_eq!(msg.reasoning_details[1], detail2);
+
+        // Wire serialization carries the key; messages without details omit it.
+        let json = serde_json::to_value(msg).unwrap();
+        assert_eq!(json["reasoning_details"][0], detail);
+        assert_eq!(json["reasoning_details"][1], detail2);
+
+        let plain_item = ConversationItem::assistant("no details");
+        let plain_msgs = crate::conversation_to_chat_messages(vec![plain_item]);
+        let plain_json = serde_json::to_value(&plain_msgs[0]).unwrap();
+        assert!(
+            plain_json.get("reasoning_details").is_none(),
+            "an assistant message without reasoning_details must not emit the key"
+        );
     }
 
     #[test]
@@ -4336,6 +4425,7 @@ mod tests {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         };
 
         let item = ConversationItem::Assistant(assistant.clone());
@@ -4791,6 +4881,7 @@ mod tests {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         });
 
         for item in [reasoning_item, assistant_item] {
@@ -4823,6 +4914,7 @@ mod tests {
                 model_id: Some("grok-3".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
             // New user message
             ConversationItem::user("Now what is 3+3?"),
@@ -4883,6 +4975,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
         ]);
 
@@ -5524,6 +5617,7 @@ mod tests {
             model_id: Some("messages-compatible-model".into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         });
 
         // Reasoning now lives as a sibling `ConversationItem::Reasoning`,
@@ -5720,6 +5814,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
             // Completed tool pair
             ConversationItem::Assistant(AssistantItem {
@@ -5732,6 +5827,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result("call_1", "fn main() {}"),
             ConversationItem::Assistant(AssistantItem {
@@ -5740,6 +5836,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
             // Mid-turn: orphaned tool_use (no result yet)
             ConversationItem::Assistant(AssistantItem {
@@ -5752,6 +5849,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
         ]
     }
@@ -6487,6 +6585,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })];
 
         transform_conversation_cwd(&mut items, worktree, root);
@@ -6553,6 +6652,7 @@ mod tests {
                 model_id: Some("grok-3".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
         ];
 
@@ -6610,6 +6710,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+            reasoning_details: Vec::new(),
             }),
         ];
 
@@ -6661,6 +6762,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
         ];
 
@@ -6769,6 +6871,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })];
 
         transform_conversation_cwd(&mut items, "/old/path", "/new/path");
@@ -6887,6 +6990,7 @@ mod tests {
                 model_id: Some("test-model".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             })],
             stop_reason: Some(StopReason::Stop),
             usage: None,
@@ -6909,6 +7013,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             })],
             stop_reason: Some(StopReason::Stop),
             usage: None,
@@ -6935,6 +7040,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             })],
             stop_reason: Some(StopReason::ToolCalls),
             usage: None,
@@ -7165,6 +7271,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         }
         .with_model_id("grok-3");
 
@@ -7254,6 +7361,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            reasoning_details: Vec::new(),
         })
     }
 
@@ -7956,6 +8064,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result_with_images(
                 "call_1",
@@ -8491,6 +8600,7 @@ mod tests {
                     model_id: None,
                     model_fingerprint: None,
                     reasoning_effort: None,
+                    reasoning_details: Vec::new(),
                 }),
             ],
             stop_reason: Some(StopReason::Stop),
@@ -9726,6 +9836,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result("call_1", "file contents"),
         ]);

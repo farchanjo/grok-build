@@ -2178,6 +2178,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+            reasoning_details: Vec::new(),
             }),
         ];
     let ctx = verbatim_or_normalize_fork(items, 256_000);

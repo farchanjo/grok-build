@@ -694,6 +694,10 @@ pub(crate) struct SessionActor {
     /// configuration, not conversation state.
     pub(crate) openrouter_provider_preferences:
         std::cell::RefCell<Option<xai_grok_sampler::OpenRouterProviderPreferences>>,
+    /// OpenRouter native `plugins` request-body array for the active model.
+    /// Kept outside chat-state because it is provider transport configuration,
+    /// not conversation state.
+    pub(crate) openrouter_plugins: std::cell::RefCell<Vec<xai_grok_sampler::OpenRouterPlugin>>,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,
     /// Pending mid-turn interjections from the user (Ctrl+Enter).

@@ -331,6 +331,7 @@ pub fn test_sampler_config(
         top_p: None,
         openrouter_fallback_models: Vec::new(),
         openrouter_provider_preferences: None,
+        openrouter_plugins: Vec::new(),
         api_backend,
         include_message_model_id: true,
         auth_scheme: Default::default(),

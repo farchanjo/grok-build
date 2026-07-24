@@ -104,6 +104,25 @@ pub struct OpenRouterMaxPrice {
     pub completion: Option<f64>,
 }
 
+/// OpenRouter native `plugins` array entry. The documented wire shape is a
+/// table with a required `id` and arbitrary provider-specific knobs (e.g.
+/// `{ id = "web", max_results = 3 }`). We keep a light type — `id` plus a
+/// flattened `extra` map — so shape drift in the extra fields is tolerated
+/// without modeling each one field-by-field.
+///
+/// Owned by the sampler crate (like [`ProviderIdentity`]) so both the shell
+/// TOML layer and the sampler wire layer share one definition.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenRouterPlugin {
+    /// Plugin identifier (e.g. `"response-healing"`, `"web"`).
+    pub id: String,
+    /// Flattened provider-specific options. Serialized inline (not nested
+    /// under an `extra` key) so the wire shape matches
+    /// `{ "id": "web", "max_results": 3 }`. Unknown keys round-trip verbatim.
+    #[serde(flatten)]
+    pub extra: indexmap::IndexMap<String, serde_json::Value>,
+}
+
 impl OpenRouterProviderPreferences {
     /// Returns `true` when every field is unset, so the `provider` key can be
     /// omitted entirely from the request body.
@@ -201,6 +220,12 @@ pub struct SamplerConfig {
     /// an all-empty object omits the `provider` key entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openrouter_provider_preferences: Option<OpenRouterProviderPreferences>,
+    /// OpenRouter native `plugins` request-body array. Only serialized when
+    /// the identity is OpenRouter and the list is non-empty; an empty list
+    /// omits the `plugins` key entirely. Never emitted for non-OpenRouter
+    /// providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openrouter_plugins: Vec<OpenRouterPlugin>,
     pub api_backend: ApiBackend,
     /// Whether Chat Completions history may include xAI's non-standard
     /// `messages[].model_id` metadata. OpenAI-compatible third-party
@@ -300,6 +325,7 @@ impl Default for SamplerConfig {
             top_p: None,
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
             api_backend: ApiBackend::default(),
             include_message_model_id: true,
             auth_scheme: AuthScheme::default(),

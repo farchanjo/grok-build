@@ -993,6 +993,7 @@ mod compacted_history_shape_tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+            reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "fn login() { /* buggy code */ }"),
             ConversationItem::Assistant(AssistantItem {
@@ -1005,6 +1006,7 @@ mod compacted_history_shape_tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+            reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result("tc2", "Successfully replaced text."),
         ];
@@ -1170,6 +1172,7 @@ mod compacted_history_shape_tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "fn login() { /* ... */ }"),
         ];
@@ -1639,6 +1642,7 @@ mod reasoning_compaction_regression_tests {
             top_p: None,
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
             api_backend: ApiBackend::ChatCompletions,
             include_message_model_id: true,
             auth_scheme: Default::default(),

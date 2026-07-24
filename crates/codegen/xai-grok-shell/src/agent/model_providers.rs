@@ -31,7 +31,7 @@ pub enum ModelProviderKind {
 
 // Re-exported from the sampler crate so the shell TOML layer and the sampler
 // wire layer share one definition (matching the `ProviderIdentity` precedent).
-pub use xai_grok_sampler::{OpenRouterMaxPrice, OpenRouterProviderPreferences};
+pub use xai_grok_sampler::{OpenRouterMaxPrice, OpenRouterPlugin, OpenRouterProviderPreferences};
 
 /// Provider identity retained on a resolved [`super::config::ModelEntry`].
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -49,6 +49,12 @@ pub struct ResolvedModelProvider {
     /// `kind = "openrouter"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openrouter_provider_preferences: Option<OpenRouterProviderPreferences>,
+    /// OpenRouter native `plugins` request-body array. Model-level override
+    /// replaces the provider-level list for that model; absent override
+    /// inherits the provider-level list. Only populated for
+    /// `kind = "openrouter"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openrouter_plugins: Vec<OpenRouterPlugin>,
     /// Command used by the Codex app-server provider. The first item is the
     /// executable and the remainder are arguments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -73,6 +79,11 @@ pub struct ModelProviderConfig {
     /// that model.
     #[serde(default)]
     pub provider_preferences: Option<OpenRouterProviderPreferences>,
+    /// OpenRouter native `plugins` request-body array. Ignored unless
+    /// `kind = "openrouter"`. A model-level override replaces this list for
+    /// that model.
+    #[serde(default)]
+    pub plugins: Vec<OpenRouterPlugin>,
     pub extra_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
@@ -89,6 +100,7 @@ impl ModelProviderConfig {
         id: &str,
         openrouter_fallback_models: Vec<String>,
         provider_preferences: Option<OpenRouterProviderPreferences>,
+        plugins: Vec<OpenRouterPlugin>,
     ) -> ResolvedModelProvider {
         let command = if self.kind == ModelProviderKind::Codex && self.command.is_empty() {
             vec![
@@ -108,6 +120,9 @@ impl ModelProviderConfig {
             openrouter_provider_preferences: (self.kind == ModelProviderKind::OpenRouter)
                 .then_some(provider_preferences)
                 .unwrap_or(None),
+            openrouter_plugins: (self.kind == ModelProviderKind::OpenRouter)
+                .then_some(plugins)
+                .unwrap_or_default(),
             command,
         }
     }
@@ -272,6 +287,7 @@ impl ConfigModelOverride {
             api_backend,
             openrouter_fallback_models,
             provider_preferences,
+            plugins,
             extra_headers,
             auth_provider,
             auth,
@@ -291,10 +307,19 @@ impl ConfigModelOverride {
             .provider_preferences
             .clone()
             .or_else(|| provider_preferences.clone());
+        // Model-level plugins replace the provider-level list for that model;
+        // absent override inherits the provider-level list. Mirrors the
+        // `provider_preferences` inheritance contract.
+        let effective_plugins = self
+            .plugins
+            .clone()
+            .or_else(|| Some(plugins.clone()))
+            .unwrap_or_default();
         merged.resolved_model_provider = Some(provider.resolved(
             provider_id,
             effective_openrouter_fallback_models,
             effective_provider_preferences,
+            effective_plugins,
         ));
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
@@ -1422,6 +1447,137 @@ mod tests {
                 .map(String::as_str),
             Some("Grok Build"),
             "built-in default adds the X-OpenRouter-Title header"
+        );
+    }
+
+    #[test]
+    fn plugins_parse_and_resolve_for_openrouter() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openrouter]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [[model_providers.openrouter.plugins]]
+            id = "response-healing"
+
+            [[model_providers.openrouter.plugins]]
+            id = "web"
+            max_results = 3
+
+            [model.inherited]
+            model = "openai/gpt-5.6-sol"
+            model_provider = "openrouter"
+            context_window = 1050000
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let provider = resolved["inherited"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert_eq!(provider.kind, super::ModelProviderKind::OpenRouter);
+        let plugins = &provider.openrouter_plugins;
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].id, "response-healing");
+        assert_eq!(plugins[1].id, "web");
+        assert_eq!(
+            plugins[1].extra.get("max_results"),
+            Some(&serde_json::json!(3))
+        );
+
+        let sampling = sampling_config_for_model(
+            &resolved["inherited"],
+            resolve_credentials(&resolved["inherited"], None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            sampling.openrouter_plugins.len(),
+            2,
+            "plugins thread to SamplerConfig"
+        );
+    }
+
+    #[test]
+    fn plugins_model_override_replaces_provider_level() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openrouter]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [[model_providers.openrouter.plugins]]
+            id = "response-healing"
+
+            [model.inherited]
+            model = "openai/gpt-oss-120b"
+            model_provider = "openrouter"
+
+            [model.overridden]
+            model = "openai/gpt-oss-120b"
+            model_provider = "openrouter"
+
+            [[model.overridden.plugins]]
+            id = "web"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let inherited = resolved["inherited"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert_eq!(inherited.openrouter_plugins.len(), 1);
+        assert_eq!(inherited.openrouter_plugins[0].id, "response-healing");
+
+        let overridden = resolved["overridden"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert_eq!(
+            overridden.openrouter_plugins.len(),
+            1,
+            "model override replaces provider-level plugins"
+        );
+        assert_eq!(overridden.openrouter_plugins[0].id, "web");
+    }
+
+    #[test]
+    fn plugins_not_emitted_for_non_openrouter() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openai]
+            kind = "openai"
+            base_url = "https://api.openai.com/v1"
+
+            [[model_providers.openai.plugins]]
+            id = "web"
+
+            [model.via-openai]
+            model = "gpt-5.6"
+            model_provider = "openai"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let provider = resolved["via-openai"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert_eq!(provider.kind, super::ModelProviderKind::OpenAi);
+        assert!(
+            provider.openrouter_plugins.is_empty(),
+            "non-OpenRouter providers must never carry plugins"
         );
     }
 }

@@ -3413,6 +3413,7 @@ mod tests {
                 kind: crate::agent::model_providers::ModelProviderKind::OpenAi,
                 openrouter_fallback_models: Vec::new(),
                 openrouter_provider_preferences: None,
+                openrouter_plugins: Vec::new(),
                 command: Vec::new(),
             }),
             api_key: None,

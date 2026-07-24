@@ -238,6 +238,7 @@ pub(crate) async fn create_test_actor_ex(
         model_auth_memo: std::cell::RefCell::new(None),
         openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
         openrouter_provider_preferences: std::cell::RefCell::new(None),
+        openrouter_plugins: std::cell::RefCell::new(Vec::new()),
         attribution_callback: None,
         auth_manager: None,
         state,

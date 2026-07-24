@@ -426,6 +426,10 @@ struct StreamingChatRequest<'a> {
     /// OpenAI/xAI/Codex requests and when no preferences are configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<&'a crate::config::OpenRouterProviderPreferences>,
+    /// OpenRouter extension: native `plugins` array. Absent for native
+    /// OpenAI/xAI/Codex requests and when no plugins are configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugins: Option<&'a [crate::config::OpenRouterPlugin]>,
     stream: bool,
     stream_options: StreamOptions,
 }
@@ -440,6 +444,10 @@ struct ChatRequestWithFallbacks<'a> {
     models: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<&'a crate::config::OpenRouterProviderPreferences>,
+    /// OpenRouter extension: native `plugins` array. Absent for native
+    /// OpenAI/xAI/Codex requests and when no plugins are configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugins: Option<&'a [crate::config::OpenRouterPlugin]>,
 }
 
 #[derive(Serialize)]
@@ -519,6 +527,7 @@ struct ClientDefaults {
     top_p: Option<f32>,
     openrouter_fallback_models: Vec<String>,
     openrouter_provider_preferences: Option<crate::config::OpenRouterProviderPreferences>,
+    openrouter_plugins: Vec<crate::config::OpenRouterPlugin>,
     api_backend: ApiBackend,
     include_message_model_id: bool,
     auth_scheme: AuthScheme,
@@ -735,6 +744,7 @@ impl SamplingClient {
             top_p: config.top_p,
             openrouter_fallback_models: config.openrouter_fallback_models,
             openrouter_provider_preferences: config.openrouter_provider_preferences,
+            openrouter_plugins: config.openrouter_plugins,
             api_backend: config.api_backend,
             include_message_model_id: config.include_message_model_id,
             auth_scheme: config.auth_scheme,
@@ -1001,6 +1011,18 @@ impl SamplingClient {
             .filter(|prefs| !prefs.is_empty())
     }
 
+    /// OpenRouter's native `plugins` request-body array. Only emitted when
+    /// the identity is OpenRouter and the list is non-empty. `None` for
+    /// non-OpenRouter providers and an empty list, so the `plugins` key is
+    /// omitted from the wire body.
+    fn openrouter_plugins(&self) -> Option<&[crate::config::OpenRouterPlugin]> {
+        if !self.openrouter_metadata_requested {
+            return None;
+        }
+        (!self.defaults.openrouter_plugins.is_empty())
+            .then_some(self.defaults.openrouter_plugins.as_slice())
+    }
+
     async fn handle_response(&self, response: reqwest::Response) -> Result<ChatCompletionResponse> {
         let status = response.status();
         let headers = response.headers().clone();
@@ -1084,6 +1106,7 @@ impl SamplingClient {
                 inner: &payload,
                 models: self.openrouter_fallback_models(),
                 provider: self.openrouter_provider_preferences(),
+                plugins: self.openrouter_plugins(),
             });
 
         let response = http_request.send().await.map_err(|e| {
@@ -1126,6 +1149,7 @@ impl SamplingClient {
             inner: &payload,
             models: self.openrouter_fallback_models(),
             provider: self.openrouter_provider_preferences(),
+            plugins: self.openrouter_plugins(),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -2281,6 +2305,8 @@ mod tests {
             top_p: None,
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+
             api_backend: ApiBackend::ChatCompletions,
             include_message_model_id: true,
             auth_scheme: AuthScheme::Bearer,
@@ -2340,6 +2366,7 @@ mod tests {
             inner: &request,
             models: None,
             provider: None,
+            plugins: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -2389,6 +2416,7 @@ mod tests {
             inner: &request,
             models: Some(&fallbacks),
             provider: None,
+            plugins: None,
         })
         .unwrap();
         assert_eq!(
@@ -2402,6 +2430,7 @@ mod tests {
             inner: &request,
             models: None,
             provider: None,
+            plugins: None,
         })
         .unwrap();
         assert!(
@@ -2455,6 +2484,7 @@ mod tests {
             inner: &request,
             models: None,
             provider: Some(&prefs),
+            plugins: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -2483,6 +2513,7 @@ mod tests {
             inner: &request,
             models: None,
             provider: Some(&empty_prefs),
+            plugins: None,
         })
         .unwrap();
         // serde still serializes the object because the field is `Some`, but
@@ -2495,6 +2526,7 @@ mod tests {
             inner: &request,
             models: None,
             provider: None,
+            plugins: None,
         })
         .unwrap();
         assert!(
@@ -2523,6 +2555,7 @@ mod tests {
             inner: &request,
             models: None,
             provider: Some(&prefs),
+            plugins: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -2599,6 +2632,97 @@ mod tests {
         assert!(
             client.openrouter_provider_preferences().is_none(),
             "an all-empty preferences object must be omitted from the wire"
+        );
+    }
+
+    // ── plugins wire shape / suppression ─────────────────────────────────
+
+    #[test]
+    fn client_supplies_plugins_for_openrouter_identity() {
+        let plugins = vec![
+            crate::config::OpenRouterPlugin {
+                id: "response-healing".to_string(),
+                ..Default::default()
+            },
+            crate::config::OpenRouterPlugin {
+                id: "web".to_string(),
+                extra: indexmap::IndexMap::from([(
+                    "max_results".to_string(),
+                    serde_json::json!(3),
+                )]),
+            },
+        ];
+        let cfg = SamplerConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            openrouter_plugins: plugins.clone(),
+            ..SamplerConfig::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let wire_plugins = client
+            .openrouter_plugins()
+            .expect("OpenRouter identity should expose plugins");
+        assert_eq!(wire_plugins.len(), 2);
+        assert_eq!(wire_plugins[0].id, "response-healing");
+        assert_eq!(wire_plugins[1].id, "web");
+        assert_eq!(
+            wire_plugins[1].extra.get("max_results"),
+            Some(&serde_json::json!(3))
+        );
+
+        // Wire serialization carries the plugins array next to provider/models.
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let payload = client.apply_defaults(request).unwrap();
+        let serialized = serde_json::to_value(&ChatRequestWithFallbacks {
+            inner: &payload,
+            models: client.openrouter_fallback_models(),
+            provider: client.openrouter_provider_preferences(),
+            plugins: client.openrouter_plugins(),
+        })
+        .unwrap();
+        let wire = serialized
+            .get("plugins")
+            .and_then(|v| v.as_array())
+            .expect("plugins array must be present on the wire");
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0]["id"], "response-healing");
+        assert_eq!(wire[1]["id"], "web");
+        assert_eq!(wire[1]["max_results"], 3);
+        // Flattened extras must not nest under an "extra" key.
+        assert!(wire[1].get("extra").is_none());
+    }
+
+    #[test]
+    fn client_omits_plugins_when_empty_for_openrouter() {
+        let cfg = SamplerConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            openrouter_plugins: Vec::new(),
+            ..SamplerConfig::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert!(
+            client.openrouter_plugins().is_none(),
+            "an empty plugins list must be omitted from the wire"
+        );
+    }
+
+    #[test]
+    fn client_omits_plugins_for_non_openrouter_identity() {
+        let plugins = vec![crate::config::OpenRouterPlugin {
+            id: "web".to_string(),
+            ..Default::default()
+        }];
+        let cfg = SamplerConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenAi,
+            openrouter_plugins: plugins,
+            ..SamplerConfig::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert!(
+            client.openrouter_plugins().is_none(),
+            "non-OpenRouter identity must suppress plugins"
         );
     }
 
