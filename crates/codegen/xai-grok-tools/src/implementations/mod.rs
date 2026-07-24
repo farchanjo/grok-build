@@ -8,7 +8,6 @@ pub mod lsp;
 pub mod memory;
 pub mod opencode;
 pub mod read_file;
-pub mod search_models;
 pub mod search_tool;
 pub mod skills;
 pub mod task_output;
@@ -25,7 +24,6 @@ pub use opencode::{
     OpenCodeBashTool, OpenCodeEditTool, OpenCodeGlobTool, OpenCodeGrepTool, OpenCodeReadTool,
     OpenCodeSkillTool, OpenCodeTodoWriteTool, OpenCodeWriteTool,
 };
-pub use search_models::{ModelCatalogSearch, SearchModelsTool};
 pub use search_tool::SearchTool;
 pub use use_tool::{UseTool, UseToolInput};
 pub use web_search::WebSearchConfig;

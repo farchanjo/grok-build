@@ -176,6 +176,9 @@ impl AgentRebuildSpec {
         persisted_skill_names: Option<std::collections::HashSet<String>>,
         preloaded_skills: Option<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>>,
     ) -> Result<Agent, AgentBuildError> {
+        // Out-of-tree packs (Archanjo) must be registered before the tool
+        // registry materializes for this agent.
+        crate::register_extension_tool_packs();
         let Self {
             working_directory,
             terminal_backend,
@@ -320,9 +323,7 @@ impl AgentRebuildSpec {
         agent
             .tool_bridge()
             .update_resource(
-                xai_grok_tools::implementations::search_models::ModelCatalogSearch::new(
-                    move |query| model_catalog.search_models(query),
-                ),
+                archanjo::ModelCatalogSearch::new(move |query| model_catalog.search_models(query)),
             )
             .await;
         if let Some(event_tx) = subagent_event_tx.clone() {

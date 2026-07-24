@@ -275,6 +275,7 @@ mod tests {
                 ToolNamespace::Codex => ("codex", "Codex"),
                 ToolNamespace::OpenCode => ("opencode", "OpenCode"),
                 ToolNamespace::MCP => ("mcp", "MCP"),
+                ToolNamespace::Archanjo => ("archanjo", "Archanjo"),
             }
         }
         for ns in ToolNamespace::iter() {

@@ -316,6 +316,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "archanjo"
+version = "0.1.0"
+dependencies = [
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "xai-grok-tools",
+ "xai-tool-protocol",
+ "xai-tool-runtime",
+ "xai-tool-types",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13117,6 +13132,7 @@ dependencies = [
 name = "xai-grok-agent"
 version = "0.1.0"
 dependencies = [
+ "archanjo",
  "chrono",
  "dirs 6.0.0",
  "dunce",
@@ -13529,6 +13545,7 @@ name = "xai-grok-pager-bin"
 version = "0.2.110"
 dependencies = [
  "anyhow",
+ "archanjo",
  "clap",
  "cryptify",
  "dunce",
@@ -13754,6 +13771,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "arc-swap",
+ "archanjo",
  "async-openai",
  "async-trait",
  "axum",

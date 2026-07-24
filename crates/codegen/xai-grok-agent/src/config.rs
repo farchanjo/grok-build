@@ -147,6 +147,14 @@ fn bash_tool_config() -> ToolConfig {
         .with_name("run_terminal_command")
         .with_param_rename("is_background", "background")
 }
+/// Catalog slug lookup for `spawn_subagent` / host `task` model resolution.
+///
+/// Lives in the out-of-tree Archanjo pack (`Archanjo:search_models`). Included
+/// in every product toolset so name→slug discovery is always native, including
+/// Codex primary turns (via host dynamic tools) and minimal roles.
+fn search_models_tool_config() -> ToolConfig {
+    (&archanjo::SearchModelsTool).into()
+}
 /// Task/subagent tool with clearer model-facing names:
 /// `task` → `spawn_subagent`, `run_in_background` → `background`.
 fn task_tool_config() -> ToolConfig {
@@ -204,6 +212,7 @@ fn grok_computer_toolset() -> ToolServerConfig {
         (&grok_build::GrepTool).into(),
         (&grok_build::KillTerminalCommandTool).into(),
         (&grok_build::GetTerminalCommandOutputTool).into(),
+        search_models_tool_config(),
     ];
     ToolServerConfig {
         tools,
@@ -278,7 +287,7 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
-            (&xai_grok_tools::implementations::search_models::SearchModelsTool).into(),
+            search_models_tool_config(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
@@ -301,6 +310,7 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerDeleteTool).into(),
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
+            search_models_tool_config(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
         ],
@@ -330,7 +340,7 @@ pub fn grok_build_hashline_toolset(
         (&grok_build::SchedulerListTool).into(),
         (&grok_build::MonitorTool).into(),
         (&search_tool::SearchTool).into(),
-        (&xai_grok_tools::implementations::search_models::SearchModelsTool).into(),
+        search_models_tool_config(),
         (&use_tool::UseTool).into(),
         (&grok_build::UpdateGoalTool).into(),
         (&grok_build::WorkflowTool).into(),
@@ -352,7 +362,7 @@ fn codex_toolset() -> ToolServerConfig {
             (&grok_build::TodoWriteTool).into(),
             task_output_tool_config(),
             (&search_tool::SearchTool).into(),
-            (&xai_grok_tools::implementations::search_models::SearchModelsTool).into(),
+            search_models_tool_config(),
             (&use_tool::UseTool).into(),
         ],
         behavior_preset: None,
@@ -360,17 +370,19 @@ fn codex_toolset() -> ToolServerConfig {
 }
 /// Read-only toolset for the **explore** subagent.
 ///
-/// Genuinely read-only: `read_file` (Read), `list_dir` (Glob), `grep` (Grep).
-/// `run_terminal_command` (Bash) is intentionally omitted so exploration cannot
-/// mutate the workspace — the read-only guarantee is enforced by the toolset,
-/// not merely by the prompt. With no `BashTool`, the background-task helpers
-/// (`KillTaskTool`/`TaskOutputTool`) are unnecessary and also omitted.
+/// Genuinely read-only: `read_file` (Read), `list_dir` (Glob), `grep` (Grep),
+/// plus `search_models` (catalog lookup only). `run_terminal_command` (Bash)
+/// is intentionally omitted so exploration cannot mutate the workspace — the
+/// read-only guarantee is enforced by the toolset, not merely by the prompt.
+/// With no `BashTool`, the background-task helpers (`KillTaskTool`/
+/// `TaskOutputTool`) are unnecessary and also omitted.
 fn explore_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
             (&grok_build::ReadFileTool).into(),
             (&grok_build::ListDirTool).into(),
             (&grok_build::GrepTool).into(),
+            search_models_tool_config(),
         ],
         behavior_preset: None,
     }
@@ -379,7 +391,8 @@ fn explore_toolset() -> ToolServerConfig {
 ///
 /// Enforces read-only at the toolset: the agent may inspect the repo and keep
 /// a todo list, but `search_replace` (file edits) and `run_terminal_command`
-/// (shell) are both omitted so it cannot mutate the workspace.
+/// (shell) are both omitted so it cannot mutate the workspace. `search_models`
+/// is included (catalog lookup is read-only).
 fn plan_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
@@ -388,6 +401,7 @@ fn plan_toolset() -> ToolServerConfig {
             (&grok_build::GrepTool).into(),
             // (&grok_build::SkillTool).into(),
             (&grok_build::TodoWriteTool).into(),
+            search_models_tool_config(),
             // search_replace + run_terminal_command intentionally omitted (read-only)
         ],
         behavior_preset: None,
@@ -417,7 +431,7 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
-            (&xai_grok_tools::implementations::search_models::SearchModelsTool).into(),
+            search_models_tool_config(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
@@ -450,7 +464,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             kill_task_tool_config(),
             // Skills and MCP
             (&search_tool::SearchTool).into(),
-            (&xai_grok_tools::implementations::search_models::SearchModelsTool).into(),
+            search_models_tool_config(),
             (&use_tool::UseTool).into(),
             // Planning and user interaction
             (&grok_build::TodoWriteTool).into(),
@@ -504,6 +518,7 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
+            search_models_tool_config(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
@@ -537,6 +552,7 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&grok_build::SchedulerListTool).into(),
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
+            search_models_tool_config(),
             (&use_tool::UseTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
@@ -559,6 +575,7 @@ fn opencode_toolset() -> ToolServerConfig {
             (&opencode::OpenCodeSkillTool).into(),
             kill_task_tool_config(),
             task_output_tool_config(),
+            search_models_tool_config(),
         ],
         behavior_preset: None,
     }
@@ -1688,6 +1705,44 @@ mod tests {
             );
         }
         assert!(toolset_for_preset("does-not-exist").is_none());
+    }
+    /// `search_models` is host catalog lookup — every product/agent toolset
+    /// must ship it so name→slug resolution works natively (including Codex
+    /// primary turns that advertise it as a host dynamic tool).
+    #[test]
+    fn every_builtin_toolset_includes_search_models() {
+        let search_id = search_models_tool_config().id;
+        let toolsets: Vec<(&str, ToolServerConfig)> = vec![
+            ("default_grok_build", default_grok_build_toolset()),
+            ("workspace_grok_build", workspace_grok_build_toolset()),
+            ("grok_build_concise", grok_build_concise_toolset()),
+            ("grok_build_plan", grok_build_plan_toolset()),
+            (
+                "grok_build_plan_no_subagents",
+                grok_build_plan_no_subagents_toolset(),
+            ),
+            ("grok_build_ask_user", grok_build_ask_user_toolset()),
+            ("codex", codex_toolset()),
+            ("explore", explore_toolset()),
+            ("plan", plan_toolset()),
+            ("orchestrator", orchestrator_toolset()),
+            ("opencode", opencode_toolset()),
+            ("grok_computer", grok_computer_toolset()),
+        ];
+        for (label, cfg) in toolsets {
+            assert!(
+                cfg.tools.iter().any(|t| t.id == search_id),
+                "toolset `{label}` must include search_models ({search_id})"
+            );
+            assert_eq!(
+                cfg.tools
+                    .iter()
+                    .find(|t| t.id == search_id)
+                    .and_then(|t| t.kind),
+                Some(xai_grok_tools::types::tool::ToolKind::SearchModels),
+                "toolset `{label}` search_models must carry ToolKind::SearchModels"
+            );
+        }
     }
     #[test]
     fn presets_select_distinct_toolsets_by_size() {

@@ -1,7 +1,7 @@
 //! `search_models` — discover task-eligible catalog models for `spawn_subagent`.
 //!
 //! Backend is injected by the shell (`ModelCatalogSearch`) so this crate stays
-//! free of ModelsManager / provider types. Ranking (BM25) lives in the shell.
+//! free of `ModelsManager` / provider types. Ranking (BM25) lives in the shell.
 
 mod types;
 
@@ -11,18 +11,21 @@ pub use types::{
 
 use std::sync::Arc;
 
-use crate::types::output::ToolOutput;
-use crate::types::tool::{ToolKind, ToolNamespace};
+use xai_grok_tools::types::output::ToolOutput;
+use xai_grok_tools::types::tool::{ToolKind, ToolNamespace};
+use xai_grok_tools::types::tool_io::ToolInput;
+use xai_grok_tools::types::tool_metadata::ToolMetadata;
 
 /// Injected catalog search backend (shell implements with ModelsManager + BM25).
-type SearchModelsFn =
-    dyn Fn(ModelCatalogQuery) -> SearchModelsResult + Send + Sync;
+type SearchModelsFn = dyn Fn(ModelCatalogQuery) -> SearchModelsResult + Send + Sync;
 
 #[derive(Clone)]
 pub struct ModelCatalogSearch(Arc<SearchModelsFn>);
 
 impl ModelCatalogSearch {
-    pub fn new(search: impl Fn(ModelCatalogQuery) -> SearchModelsResult + Send + Sync + 'static) -> Self {
+    pub fn new(
+        search: impl Fn(ModelCatalogQuery) -> SearchModelsResult + Send + Sync + 'static,
+    ) -> Self {
         Self(Arc::new(search))
     }
 
@@ -37,7 +40,7 @@ impl std::fmt::Debug for ModelCatalogSearch {
     }
 }
 
-crate::register_resource!("grok_build", "ModelCatalogSearch", ModelCatalogSearch);
+xai_grok_tools::register_resource!("archanjo", "ModelCatalogSearch", ModelCatalogSearch);
 
 const DESCRIPTION: &str = r#"Search available model catalog entries for subagent spawning.
 
@@ -50,22 +53,33 @@ example. Pass the **slug** field exactly as `model` — do not invent slugs.
 If the user does not request a model, omit `model` on spawn to inherit the parent.
 Empty query returns a short provider summary only (not the full catalog)."#;
 
+/// Archanjo catalog search tool (`Archanjo:search_models`).
 #[derive(Debug, Default)]
 pub struct SearchModelsTool;
 
-impl crate::types::tool_metadata::ToolMetadata for SearchModelsTool {
+impl ToolMetadata for SearchModelsTool {
     fn kind(&self) -> ToolKind {
         ToolKind::SearchModels
     }
 
     fn tool_namespace(&self) -> ToolNamespace {
-        ToolNamespace::GrokBuild
+        ToolNamespace::Archanjo
     }
 
     fn description_template(&self) -> &str {
         DESCRIPTION
     }
+}
 
+impl From<SearchModelsInput> for ToolInput {
+    fn from(input: SearchModelsInput) -> Self {
+        // Out-of-tree packs map through Dynamic so core ToolInput stays free
+        // of custom pack type dependencies.
+        match serde_json::to_value(input) {
+            Ok(value) => ToolInput::Dynamic(value),
+            Err(_) => ToolInput::Dynamic(serde_json::json!({})),
+        }
+    }
 }
 
 impl xai_tool_runtime::Tool for SearchModelsTool {
@@ -82,7 +96,7 @@ impl xai_tool_runtime::Tool for SearchModelsTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "search_models",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            ToolMetadata::description_template(self),
         )
     }
 
@@ -99,7 +113,7 @@ impl xai_tool_runtime::Tool for SearchModelsTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: SearchModelsInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
-        use crate::types::tool_metadata::shared_resources;
+        use xai_grok_tools::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
         let Some(catalog) = resources.lock().await.get::<ModelCatalogSearch>().cloned() else {
@@ -126,7 +140,7 @@ impl xai_tool_runtime::Tool for SearchModelsTool {
         tracing::info!(
             result_count = result.results.len() as u32,
             truncated = result.truncated,
-            "search_models.search"
+            "archanjo.search_models.search"
         );
 
         Ok(ToolOutput::Text(format_result(&result).into()))
@@ -137,15 +151,14 @@ fn format_result(result: &SearchModelsResult) -> String {
     if let Ok(pretty) = serde_json::to_string_pretty(result) {
         return pretty;
     }
-    // Fallback if serialization ever fails.
     format!("results={}", result.results.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::resources::Resources;
-    use crate::types::tool_metadata::test_ctx;
+    use xai_grok_tools::types::resources::Resources;
+    use xai_grok_tools::types::tool_metadata::test_ctx;
 
     #[tokio::test]
     async fn missing_backend_returns_note() {
@@ -212,13 +225,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_id_and_kind() {
+    fn tool_id_kind_and_namespace() {
         let t = SearchModelsTool;
         assert_eq!(xai_tool_runtime::Tool::id(&t).as_str(), "search_models");
+        assert_eq!(ToolMetadata::kind(&t), ToolKind::SearchModels);
+        assert_eq!(ToolMetadata::tool_namespace(&t), ToolNamespace::Archanjo);
+        assert!(ToolMetadata::is_read_only(&t));
         assert_eq!(
-            crate::types::tool_metadata::ToolMetadata::kind(&t),
-            ToolKind::SearchModels
+            format!(
+                "{}:{}",
+                ToolMetadata::tool_namespace(&t),
+                xai_tool_runtime::Tool::id(&t).as_str()
+            ),
+            "Archanjo:search_models"
         );
-        assert!(crate::types::tool_metadata::ToolMetadata::is_read_only(&t));
     }
 }

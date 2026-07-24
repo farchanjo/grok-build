@@ -43,6 +43,9 @@ pub enum ToolNamespace {
     OpenCode,
     #[serde(rename = "mcp", alias = "MCP")]
     MCP,
+    /// Out-of-tree Archanjo custom tool pack (`crates/codegen/archanjo`).
+    #[serde(rename = "archanjo", alias = "Archanjo")]
+    Archanjo,
 }
 /// Categorizes what a tool does at a high level.
 ///

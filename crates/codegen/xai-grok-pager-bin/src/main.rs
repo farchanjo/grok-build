@@ -1322,7 +1322,13 @@ async fn run_agent_command(
         }
     }
     match agent_args.mode {
-        Some(AgentCmd::Stdio) => run_stdio_agent(&agent_config, None, agent_memory_config).await,
+        Some(AgentCmd::Stdio) => {
+            eprintln!(
+                "error: `grok agent stdio` (ACP agent mode) has been removed.\n\
+                 Use the interactive TUI (`grok`) or headless single-turn (`grok -p`)."
+            );
+            std::process::exit(2);
+        }
         Some(AgentCmd::Headless(a)) => {
             let mut agent_config = agent_config.clone();
             apply_headless_args_to_config(&a, &mut agent_config);
@@ -1333,16 +1339,12 @@ async fn run_agent_command(
             )
             .await
         }
-        Some(AgentCmd::Serve(a)) => {
-            let mut agent_config = agent_config.clone();
-            apply_headless_args_to_config(&a.headless, &mut agent_config);
-            let secret = a.get_secret();
-            let server_config = xai_grok_shell::agent::ServerConfig {
-                bind_addr: a.bind,
-                secret: secret.clone(),
-            };
-            print_serve_startup_info(a.bind, &secret);
-            xai_grok_shell::agent::run_agent_server(server_config, agent_config).await
+        Some(AgentCmd::Serve(_a)) => {
+            eprintln!(
+                "error: `grok agent serve` (ACP WebSocket agent mode) has been removed.\n\
+                 Use the interactive TUI (`grok`) or headless single-turn (`grok -p`)."
+            );
+            std::process::exit(2);
         }
         Some(AgentCmd::Leader(a)) => {
             let mut agent_config = agent_config.clone();
@@ -1652,6 +1654,8 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     true
 }
 fn main() {
+    // Out-of-tree tool packs MUST register before any ToolRegistryBuilder::new().
+    archanjo::register();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
     }

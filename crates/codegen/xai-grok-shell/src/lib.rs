@@ -44,3 +44,11 @@ pub mod tools;
 pub mod trace_classifier;
 pub mod upload;
 pub mod util;
+
+/// Register out-of-tree tool packs (Archanjo, …) for this process.
+///
+/// Composition roots and tests that build a tool registry must call this
+/// before the first `ToolRegistryBuilder::new()`. Idempotent.
+pub fn register_extension_tool_packs() {
+    archanjo::register();
+}

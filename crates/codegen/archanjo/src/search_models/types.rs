@@ -1,4 +1,4 @@
-//! Types for the `search_models` tool.
+//! Types for the Archanjo `search_models` tool.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

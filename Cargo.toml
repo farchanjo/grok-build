@@ -7,6 +7,7 @@ async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "9
 resolver = "2"
 members = [
     "crates/build/xai-proto-build",
+    "crates/codegen/archanjo",
     "crates/codegen/ptyctl",
     "crates/codegen/ptyctl-cli",
     "crates/codegen/xai-acp-lib",
@@ -93,6 +94,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+archanjo = { path = "crates/codegen/archanjo" }
 agent-client-protocol = { version = "0.10.4", features = ["unstable"] }
 alacritty_terminal = "0.26.0"
 ansi-to-tui = "7.0.0"
@@ -369,14 +371,23 @@ inherits = "release-dist"
 # All settings now match the parent — this is an intentional alias.
 
 
+# Dev loop: keep workspace crates lightly optimized so edits recompile
+# quickly, while dependencies stay more optimized and cached (they change
+# rarely). Pattern from common Rust build-speed guidance: prefer this over
+# daily `cargo build --release`.
 [profile.dev]
 panic = "abort"
 split-debuginfo = "unpacked"
 codegen-units = 128
 debug = "line-tables-only"
-opt-level = 0
+opt-level = 1
 lto = false
 incremental = true
+
+# Non-root packages (crates.io + path deps) get more optimization; the package
+# under edit still uses profile.dev opt-level above.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.bench]
 debug = true

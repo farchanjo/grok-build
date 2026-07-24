@@ -161,6 +161,25 @@ fn ensure_plan_mode_tools(tool_config: &mut xai_grok_tools::registry::types::Too
             .push((&grok_build::AskUserQuestionTool).into());
     }
 }
+/// Ensure Archanjo `search_models` is present on every agent toolset.
+///
+/// Catalog slug lookup is a product default: enabled for all stock and custom
+/// agents unless an explicit tools denylist removes it later in `build()`.
+/// Idempotent when the tool (by id or `ToolKind::SearchModels`) is already listed.
+fn ensure_search_models_tool(tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig) {
+    use xai_grok_tools::types::tool::ToolKind;
+    let already = tool_config.tools.iter().any(|tc| {
+        tc.kind == Some(ToolKind::SearchModels)
+            || tc.id == "Archanjo:search_models"
+            || tc.id.ends_with(":search_models")
+    });
+    if already {
+        return;
+    }
+    tool_config
+        .tools
+        .push((&archanjo::SearchModelsTool).into());
+}
 /// Merge a shell-resolved params map into every matching tool's
 /// `ToolConfig.params` (single copy of the loop the per-tool injections share).
 fn merge_tool_params(
@@ -701,6 +720,8 @@ impl AgentBuilder {
         } else {
             std::collections::HashSet::new()
         };
+        // Out-of-tree packs must register before the tool bridge materializes.
+        archanjo::register();
         let tool_bridge_builder = ToolBridge::get_builder();
         let state_path = self.state_path.clone().unwrap_or_default();
         let mut tool_config = definition.tool_config.clone();
@@ -765,6 +786,9 @@ impl AgentBuilder {
             }
             ensure_plan_mode_tools(&mut tool_config);
         }
+        // Always on by default (stock + custom agents). Session denylist may
+        // still remove it further below.
+        ensure_search_models_tool(&mut tool_config);
         if self.memory_backend.is_none() {
             let grok_build_ns = xai_grok_tools::types::tool::ToolNamespace::GrokBuild.to_string();
             let mem_search_id = format!(
@@ -1696,6 +1720,42 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn ensure_search_models_tool_is_idempotent_and_fills_gaps() {
+        use xai_grok_tools::registry::types::ToolServerConfig;
+        // Empty → injects Archanjo:search_models
+        let mut empty = ToolServerConfig {
+            tools: vec![],
+            behavior_preset: None,
+        };
+        ensure_search_models_tool(&mut empty);
+        assert_eq!(empty.tools.len(), 1);
+        assert_eq!(empty.tools[0].id, "Archanjo:search_models");
+        assert_eq!(
+            empty.tools[0].kind,
+            Some(xai_grok_tools::types::tool::ToolKind::SearchModels)
+        );
+        // Second call does not duplicate
+        ensure_search_models_tool(&mut empty);
+        assert_eq!(empty.tools.len(), 1);
+        // Already present by kind → no-op even with different id shape
+        let mut by_kind = ToolServerConfig {
+            tools: vec![xai_grok_tools::registry::types::ToolConfig {
+                id: "Custom:search_models".into(),
+                params: None,
+                name_override: None,
+                params_name_overrides: None,
+                description_override: None,
+                behavior_version: None,
+                kind: Some(xai_grok_tools::types::tool::ToolKind::SearchModels),
+            }],
+            behavior_preset: None,
+        };
+        ensure_search_models_tool(&mut by_kind);
+        assert_eq!(by_kind.tools.len(), 1);
+        assert_eq!(by_kind.tools[0].id, "Custom:search_models");
+    }
+
     #[tokio::test]
     async fn curated_empty_toolset_fails_agent_build() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
