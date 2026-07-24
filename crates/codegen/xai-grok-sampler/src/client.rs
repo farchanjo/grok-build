@@ -20,7 +20,9 @@ use reqwest::header::{
 };
 use serde::Serialize;
 
-use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message_for};
+use xai_grok_sampling_types::error::{
+    parse_rate_limit_reset, try_parse_stream_error, user_facing_api_error_message_for,
+};
 use xai_grok_sampling_types::{
     ApiErrorDiagnostics, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
     ConversationRequest, ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER,
@@ -304,10 +306,12 @@ fn extract_api_error_diagnostics(
     bytes: &[u8],
     openrouter_metadata_requested: bool,
 ) -> Option<ApiErrorDiagnostics> {
+    let rate_limit_reset_raw = diagnostic_header(headers, "x-ratelimit-reset");
     let mut diagnostics = ApiErrorDiagnostics {
         rate_limit_limit: diagnostic_header(headers, "x-ratelimit-limit"),
         rate_limit_remaining: diagnostic_header(headers, "x-ratelimit-remaining"),
-        rate_limit_reset: diagnostic_header(headers, "x-ratelimit-reset"),
+        rate_limit_reset: rate_limit_reset_raw.clone(),
+        rate_limit_reset_secs: parse_rate_limit_reset(rate_limit_reset_raw.as_deref()),
         generation_id: diagnostic_header(headers, "x-generation-id"),
         ..Default::default()
     };

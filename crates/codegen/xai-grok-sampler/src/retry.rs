@@ -42,6 +42,34 @@ use xai_grok_sampling_types::SamplingError;
 /// no point burning a long backoff just to be rate-limited again.
 pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 
+/// Default 429 retry cap for OpenRouter. OpenRouter enforces per-model
+/// limits and a tool-heavy turn can burst several requests in quick
+/// succession, so a slightly higher cap than the generic threshold gives
+/// the reset window a chance to elapse before giving up. Overridable via
+/// the `GROK_OPENROUTER_RATE_LIMIT_RETRIES` environment variable.
+pub const OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD: u32 = 3;
+
+/// Resolve the per-provider 429 retry cap.
+///
+/// OpenRouter honours `GROK_OPENROUTER_RATE_LIMIT_RETRIES` (default
+/// [`OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD`]); every other provider keeps
+/// the generic [`RATE_LIMIT_RETRY_THRESHOLD`]. A non-positive parsed env
+/// value falls back to the default so a misconfiguration can't silently
+/// disable all 429 retries.
+pub fn resolve_rate_limit_threshold(
+    provider_identity: crate::config::ProviderIdentity,
+    env_override: Option<&str>,
+) -> u32 {
+    use crate::config::ProviderIdentity;
+    match provider_identity {
+        ProviderIdentity::OpenRouter => env_override
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD),
+        _ => RATE_LIMIT_RETRY_THRESHOLD,
+    }
+}
+
 /// Default max retries when no env or model override is set.
 /// With 30s backoff cap this gives ~6 min of retry budget:
 /// retries 1-4 are exponential (2s+4s+8s+16s ≈ 30s), retries
@@ -97,6 +125,24 @@ pub fn retry_backoff_with_jitter(retry_count: u32) -> Duration {
     std::thread::current().id().hash(&mut hasher);
     let jitter = hasher.finish() % (jitter_range * 2 + 1);
     Duration::from_millis(base_ms - jitter_range + jitter)
+}
+
+/// Resolve the backoff for a 429 (rate-limited) retry.
+///
+/// Order of precedence:
+/// 1. `Retry-After` header (`retry_after_secs`) — the standard, most
+///    authoritative source;
+/// 2. parsed `x-ratelimit-reset` (`rate_limit_reset_secs`) — used by
+///    OpenRouter/proxies that report the actual reset window;
+/// 3. exponential jitter — the fallback when the server gave no hint.
+///
+/// `next_attempt` is the 1-based retry index, used only for the jitter
+/// fallback. The function is pure and performs no I/O.
+pub fn rate_limit_backoff(err: &SamplingError, next_attempt: u32) -> Duration {
+    err.retry_after()
+        .map(Duration::from_secs)
+        .or_else(|| err.rate_limit_reset_secs().map(Duration::from_secs))
+        .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt))
 }
 
 /// What the actor should do next given a sampling error and retry context.
@@ -218,10 +264,7 @@ pub fn classify_error(
         if next_attempt >= effective_cap {
             return RetryDecision::Fatal(clone_error(err));
         }
-        let backoff = err
-            .retry_after()
-            .map(Duration::from_secs)
-            .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
+        let backoff = rate_limit_backoff(err, next_attempt);
         return RetryDecision::RetryWithBackoff {
             backoff,
             is_rate_limited: true,
@@ -489,6 +532,38 @@ mod tests {
         }
     }
 
+    fn api_err_with_reset(status: StatusCode, reset_secs: u64) -> SamplingError {
+        SamplingError::Api {
+            status,
+            message: "x".to_string(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: Some(xai_grok_sampling_types::ApiErrorDiagnostics {
+                rate_limit_reset_secs: Some(reset_secs),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn api_err_with_retry_after_and_reset(
+        status: StatusCode,
+        retry_after: u64,
+        reset_secs: u64,
+    ) -> SamplingError {
+        SamplingError::Api {
+            status,
+            message: "x".to_string(),
+            model_metadata: None,
+            retry_after_secs: Some(retry_after),
+            should_retry: None,
+            diagnostics: Some(xai_grok_sampling_types::ApiErrorDiagnostics {
+                rate_limit_reset_secs: Some(reset_secs),
+                ..Default::default()
+            }),
+        }
+    }
+
     #[test]
     fn resolve_max_retries_env_override_takes_precedence() {
         assert_eq!(resolve_max_retries_with_env(Some("9"), Some(3)), 9);
@@ -647,6 +722,135 @@ mod tests {
             }
             other => panic!("expected Fatal at threshold, got {other:?}"),
         }
+    }
+
+    /// 429 with only `x-ratelimit-reset` falls back to the parsed reset
+    /// (no `Retry-After`).
+    #[test]
+    fn classify_rate_limited_uses_reset_when_no_retry_after() {
+        let err = api_err_with_reset(StatusCode::TOO_MANY_REQUESTS, 30);
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                backoff,
+                is_rate_limited,
+            } => {
+                assert!(is_rate_limited);
+                assert_eq!(backoff, Duration::from_secs(30));
+            }
+            other => panic!("expected RetryWithBackoff, got {other:?}"),
+        }
+    }
+
+    /// `Retry-After` wins over `x-ratelimit-reset` when both are present.
+    #[test]
+    fn classify_rate_limited_retry_after_wins_over_reset() {
+        let err = api_err_with_retry_after_and_reset(StatusCode::TOO_MANY_REQUESTS, 7, 30);
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff { backoff, .. } => {
+                assert_eq!(backoff, Duration::from_secs(7));
+            }
+            other => panic!("expected RetryWithBackoff, got {other:?}"),
+        }
+    }
+
+    /// 429 with neither `Retry-After` nor reset falls back to jitter.
+    #[test]
+    fn classify_rate_limited_no_hints_uses_jitter() {
+        let err = api_err(StatusCode::TOO_MANY_REQUESTS, "slow");
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff { backoff, .. } => {
+                // Jitter base for next_attempt=1 is ~2s +/- 20%.
+                assert!(backoff >= Duration::from_millis(1600));
+                assert!(backoff <= Duration::from_millis(2400));
+            }
+            other => panic!("expected RetryWithBackoff, got {other:?}"),
+        }
+    }
+
+    /// `rate_limit_backoff` precedence: Retry-After > reset > jitter.
+    #[test]
+    fn rate_limit_backoff_precedence() {
+        // Retry-After wins.
+        let err = api_err_with_retry_after_and_reset(StatusCode::TOO_MANY_REQUESTS, 9, 30);
+        assert_eq!(rate_limit_backoff(&err, 1), Duration::from_secs(9));
+
+        // Reset wins when no Retry-After.
+        let err = api_err_with_reset(StatusCode::TOO_MANY_REQUESTS, 30);
+        assert_eq!(rate_limit_backoff(&err, 1), Duration::from_secs(30));
+
+        // Jitter when neither.
+        let err = api_err(StatusCode::TOO_MANY_REQUESTS, "slow");
+        let b = rate_limit_backoff(&err, 1);
+        assert!(b >= Duration::from_millis(1600) && b <= Duration::from_millis(2400));
+    }
+
+    /// OpenRouter gets the higher default threshold (3) via the resolver.
+    #[test]
+    fn resolve_rate_limit_threshold_openrouter_default() {
+        assert_eq!(
+            resolve_rate_limit_threshold(crate::config::ProviderIdentity::OpenRouter, None),
+            OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD
+        );
+    }
+
+    /// Non-OpenRouter providers keep the generic threshold (2).
+    #[test]
+    fn resolve_rate_limit_threshold_non_openrouter_keeps_generic() {
+        for identity in [
+            crate::config::ProviderIdentity::Custom,
+            crate::config::ProviderIdentity::Xai,
+            crate::config::ProviderIdentity::OpenAi,
+        ] {
+            assert_eq!(
+                resolve_rate_limit_threshold(identity, None),
+                RATE_LIMIT_RETRY_THRESHOLD
+            );
+        }
+    }
+
+    /// Env override is honoured for OpenRouter.
+    #[test]
+    fn resolve_rate_limit_threshold_openrouter_env_override() {
+        assert_eq!(
+            resolve_rate_limit_threshold(crate::config::ProviderIdentity::OpenRouter, Some("5")),
+            5
+        );
+    }
+
+    /// A non-positive env override falls back to the default (don't silently
+    /// disable all 429 retries via a misconfiguration).
+    #[test]
+    fn resolve_rate_limit_threshold_openrouter_env_zero_falls_back() {
+        assert_eq!(
+            resolve_rate_limit_threshold(crate::config::ProviderIdentity::OpenRouter, Some("0")),
+            OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD
+        );
+    }
+
+    /// Env override does not leak into non-OpenRouter providers.
+    #[test]
+    fn resolve_rate_limit_threshold_env_ignored_for_non_openrouter() {
+        assert_eq!(
+            resolve_rate_limit_threshold(crate::config::ProviderIdentity::Xai, Some("9")),
+            RATE_LIMIT_RETRY_THRESHOLD
+        );
+    }
+
+    /// With the OpenRouter threshold (3), a 429 is retried on attempt 2
+    /// (next_attempt=2 < 3) but escalates on attempt 3.
+    #[test]
+    fn classify_rate_limited_openrouter_threshold_allows_third_retry() {
+        let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 1);
+        // retry_count=1 -> next_attempt=2 < 3 -> retry.
+        assert!(matches!(
+            classify_error(&err, 1, 15, OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::RetryWithBackoff { .. }
+        ));
+        // retry_count=2 -> next_attempt=3 >= 3 -> Fatal.
+        assert!(matches!(
+            classify_error(&err, 2, 15, OPENROUTER_RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(_)
+        ));
     }
 
     #[test]

@@ -344,7 +344,19 @@ async fn apply_retry_decision(
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
     inference_pacer: &InferencePacer,
 ) -> bool {
-    let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
+    // Provider-aware 429 retry cap. OpenRouter honours
+    // `GROK_OPENROUTER_RATE_LIMIT_RETRIES` (default 3) because its
+    // per-model limits and tool-loop bursts deserve a slightly larger
+    // budget than the generic 2-retry cap. A non-OpenRouter provider
+    // keeps the policy-configured threshold (which defaults to 2).
+    let rate_limit_threshold = if config.provider_identity.is_openrouter() {
+        retry_mod::resolve_rate_limit_threshold(
+            config.provider_identity,
+            std::env::var("GROK_OPENROUTER_RATE_LIMIT_RETRIES")
+                .ok()
+                .as_deref(),
+        )
+    } else if retry_policy.rate_limit_retry_threshold == 0 {
         retry_mod::RATE_LIMIT_RETRY_THRESHOLD
     } else {
         retry_policy.rate_limit_retry_threshold
@@ -389,7 +401,14 @@ async fn apply_retry_decision(
         } => {
             *retry_count += 1;
             if is_rate_limited {
-                inference_pacer.note_rate_limit(config, backoff).await;
+                // Feed the pacer the server-derived reset window when the
+                // upstream reported one (x-ratelimit-reset), so the cooldown
+                // and recovery interval track the actual limit instead of
+                // the backoff-guess slice.
+                let server_reset = err.rate_limit_reset_secs().map(Duration::from_secs);
+                inference_pacer
+                    .note_rate_limit(config, backoff, server_reset)
+                    .await;
             }
             emit_retrying(
                 event_tx,

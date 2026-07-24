@@ -129,13 +129,29 @@ impl InferencePacer {
     }
 
     /// Apply a route-wide cooldown and conservative spacing after a 429.
-    pub(crate) async fn note_rate_limit(&self, config: &SamplerConfig, backoff: Duration) {
+    ///
+    /// `backoff` is the delay the retry loop will sleep before the next
+    /// attempt (from `Retry-After`, `x-ratelimit-reset`, or jitter).
+    /// `server_reset`, when present, is the server-reported reset window
+    /// parsed from `x-ratelimit-reset` — it overrides the jitter-derived
+    /// `backoff / 12` estimate so `next_allowed` and the recovery interval
+    /// track the actual window the upstream reported.
+    pub(crate) async fn note_rate_limit(
+        &self,
+        config: &SamplerConfig,
+        backoff: Duration,
+        server_reset: Option<Duration>,
+    ) {
         let Some(key) = route_key(config) else {
             return;
         };
         let now = Instant::now();
-        let recovery_interval =
-            (backoff / RECOVERY_BACKOFF_SLICES).clamp(MIN_RECOVERY_INTERVAL, MAX_RECOVERY_INTERVAL);
+        // Prefer the server-derived reset window for both the cooldown
+        // and the recovery interval so the pacer tracks the actual limit
+        // instead of the backoff-guess slice (backoff / 12).
+        let cooldown = server_reset.unwrap_or(backoff);
+        let recovery_interval = (cooldown / RECOVERY_BACKOFF_SLICES)
+            .clamp(MIN_RECOVERY_INTERVAL, MAX_RECOVERY_INTERVAL);
         let recovery_interval_ms = if self.recovery_requests > 0 {
             recovery_interval.as_millis() as u64
         } else {
@@ -143,7 +159,7 @@ impl InferencePacer {
         };
         let mut routes = self.routes.lock().await;
         let state = routes.entry(key).or_insert_with(|| RouteState::new(now));
-        state.next_allowed = state.next_allowed.max(now + backoff);
+        state.next_allowed = state.next_allowed.max(now + cooldown);
         state.recovery_interval = (self.recovery_requests > 0).then(|| {
             state
                 .recovery_interval
@@ -155,6 +171,7 @@ impl InferencePacer {
             target: crate::sampling_log::TARGET,
             model = %config.model,
             backoff_ms = backoff.as_millis() as u64,
+            server_reset_ms = server_reset.map(|d| d.as_millis() as u64),
             recovery_interval_ms,
             recovery_requests = self.recovery_requests,
             "OpenRouter rate-limit pacing enabled"
@@ -264,7 +281,7 @@ mod tests {
 
         assert!(pacer.wait_for_slot(&config, &cancel).await);
         pacer
-            .note_rate_limit(&config, Duration::from_secs(60))
+            .note_rate_limit(&config, Duration::from_secs(60), None)
             .await;
 
         let cooldown_started = Instant::now();
@@ -299,7 +316,7 @@ mod tests {
 
         assert!(pacer.wait_for_slot(&config, &cancel).await);
         pacer
-            .note_rate_limit(&config, Duration::from_secs(60))
+            .note_rate_limit(&config, Duration::from_secs(60), None)
             .await;
 
         assert!(pacer.wait_for_slot(&config, &cancel).await);
@@ -308,6 +325,66 @@ mod tests {
         assert_eq!(
             Instant::now().duration_since(normal_started),
             Duration::from_millis(100)
+        );
+    }
+
+    /// When the server reports a reset window, `note_rate_limit` uses it
+    /// for both the cooldown and the recovery interval instead of the
+    /// jitter-derived `backoff / 12` guess. Here a short reset (12s) with
+    /// a large backoff (60s) must produce a 12s cooldown (reset wins),
+    /// and the recovery interval must derive from 12s/12 = 1s.
+    #[tokio::test(start_paused = true)]
+    async fn rate_limit_uses_server_reset_over_backoff_for_cooldown() {
+        let pacer = InferencePacer::new(Duration::from_millis(100), 2);
+        let config = config("https://openrouter.ai/api/v1");
+        let cancel = CancellationToken::new();
+
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        // backoff=60s (jitter guess) but server_reset=12s wins.
+        pacer
+            .note_rate_limit(
+                &config,
+                Duration::from_secs(60),
+                Some(Duration::from_secs(12)),
+            )
+            .await;
+
+        let cooldown_started = Instant::now();
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        // Cooldown tracks the server reset (12s), not the backoff (60s).
+        assert_eq!(
+            Instant::now().duration_since(cooldown_started),
+            Duration::from_secs(12)
+        );
+        pacer.note_success(&config).await;
+
+        // Recovery interval = 12s / 12 = 1s (clamped to MIN_RECOVERY_INTERVAL).
+        let recovery_started = Instant::now();
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert_eq!(
+            Instant::now().duration_since(recovery_started),
+            Duration::from_secs(1)
+        );
+    }
+
+    /// Without a server reset, the pacer falls back to the backoff for the
+    /// cooldown and derives the recovery interval from backoff / 12 (clamped).
+    #[tokio::test(start_paused = true)]
+    async fn rate_limit_without_reset_uses_backoff_for_cooldown() {
+        let pacer = InferencePacer::new(Duration::from_millis(100), 2);
+        let config = config("https://openrouter.ai/api/v1");
+        let cancel = CancellationToken::new();
+
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        pacer
+            .note_rate_limit(&config, Duration::from_secs(60), None)
+            .await;
+
+        let cooldown_started = Instant::now();
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert_eq!(
+            Instant::now().duration_since(cooldown_started),
+            Duration::from_secs(60)
         );
     }
 }

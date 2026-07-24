@@ -102,10 +102,23 @@ pub struct ApiErrorDiagnostics {
     /// providers legitimately use both delta-seconds and absolute timestamps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_reset: Option<String>,
+    /// Parsed `x-ratelimit-reset` value expressed as seconds-until-reset,
+    /// clamped to `[0, RATE_LIMIT_RESET_MAX_SECS]`. Derived from the raw
+    /// [`Self::rate_limit_reset`] string: delta-seconds are used as-is;
+    /// epoch seconds are converted to a delta against the current time
+    /// (past epochs clamp to 0); unparseable/HTTP-date values are `None`.
+    /// Additive and serde-optional, so older payloads keep deserializing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_secs: Option<u64>,
     /// Opaque generation identifier returned by a router for support/debugging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_id: Option<String>,
 }
+
+/// Upper bound (in seconds) for a parsed `x-ratelimit-reset` window. A
+/// misbehaving upstream could otherwise report an absurdly large reset and
+/// stall sampling indefinitely; values above this clamp down to it.
+pub const RATE_LIMIT_RESET_MAX_SECS: u64 = 600;
 
 impl ApiErrorDiagnostics {
     pub fn is_empty(&self) -> bool {
@@ -115,8 +128,57 @@ impl ApiErrorDiagnostics {
             && self.rate_limit_limit.is_none()
             && self.rate_limit_remaining.is_none()
             && self.rate_limit_reset.is_none()
+            && self.rate_limit_reset_secs.is_none()
             && self.generation_id.is_none()
     }
+
+    /// Parsed seconds-until-reset derived from the raw
+    /// [`Self::rate_limit_reset`] string, when present and interpretable.
+    /// OpenRouter/proxies send either a delta-seconds value (`"30"`) or an
+    /// absolute epoch-seconds timestamp. HTTP-dates and any unparseable form
+    /// yield `None` so callers fall back to other backoff sources.
+    ///
+    /// Delta-seconds are clamped to `[0, RATE_LIMIT_RESET_MAX_SECS]`. Epoch
+    /// seconds in the past clamp to `0`; future epoch seconds are converted to
+    /// a delta against `now` and then clamped.
+    pub fn parsed_reset_secs(&self) -> Option<u64> {
+        self.rate_limit_reset_secs
+    }
+}
+
+/// Parse an `x-ratelimit-reset` header value into seconds-until-reset.
+///
+/// Providers send one of:
+/// - delta-seconds (e.g. `"30"`) — used directly;
+/// - epoch seconds (e.g. `"1735689600"`) — converted to a delta against
+///   `now` (past epochs clamp to `0`);
+/// - HTTP-date or anything unparseable — `None`.
+///
+/// The result is clamped to `[0, RATE_LIMIT_RESET_MAX_SECS]` so a
+/// misbehaving upstream can't stall sampling indefinitely. The heuristic for
+/// distinguishing delta from epoch is the value's magnitude: anything at or
+/// above `1_000_000_000` (a 10-digit epoch near 2001) is treated as epoch
+/// seconds, mirroring common `Retry-After` parsing practice.
+pub fn parse_rate_limit_reset(value: Option<&str>) -> Option<u64> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Only the integer-seconds form is documented for these providers; an
+    // HTTP-date (contains a non-digit such as ':' or letters) is rejected.
+    let parsed: u64 = raw.parse().ok()?;
+    let secs = if parsed >= 1_000_000_000 {
+        // Interpret as epoch seconds relative to now.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        parsed.saturating_sub(now)
+    } else {
+        // Delta-seconds.
+        parsed
+    };
+    Some(secs.min(RATE_LIMIT_RESET_MAX_SECS))
 }
 
 /// Display prefix of [`SamplingError::Serialization`]. Shared with the
@@ -312,6 +374,18 @@ impl SamplingError {
             SamplingError::Api {
                 retry_after_secs, ..
             } => *retry_after_secs,
+            _ => None,
+        }
+    }
+
+    /// Parsed `x-ratelimit-reset` seconds-until-reset from the error's
+    /// [`ApiErrorDiagnostics`], when available. See
+    /// [`ApiErrorDiagnostics::parsed_reset_secs`].
+    pub fn rate_limit_reset_secs(&self) -> Option<u64> {
+        match self {
+            SamplingError::Api { diagnostics, .. } => {
+                diagnostics.as_ref().and_then(|d| d.parsed_reset_secs())
+            }
             _ => None,
         }
     }
@@ -1223,5 +1297,115 @@ mod tests {
         let bytes = br#"{"error":{"message":"short","type":"server_error"}}"#;
         let msg = parse_error_bytes(bytes);
         assert_eq!(msg, "short");
+    }
+
+    // --- parse_rate_limit_reset ---
+
+    #[test]
+    fn parse_reset_none_for_absent() {
+        assert_eq!(parse_rate_limit_reset(None), None);
+        assert_eq!(parse_rate_limit_reset(Some("")), None);
+        assert_eq!(parse_rate_limit_reset(Some("   ")), None);
+    }
+
+    #[test]
+    fn parse_reset_delta_seconds() {
+        assert_eq!(parse_rate_limit_reset(Some("30")), Some(30));
+        assert_eq!(parse_rate_limit_reset(Some("0")), Some(0));
+        assert_eq!(parse_rate_limit_reset(Some("  5  ")), Some(5));
+    }
+
+    #[test]
+    fn parse_reset_clamps_to_max() {
+        // A delta above RATE_LIMIT_RESET_MAX_SECS clamps down to it.
+        assert_eq!(
+            parse_rate_limit_reset(Some("3600")),
+            Some(RATE_LIMIT_RESET_MAX_SECS)
+        );
+    }
+
+    #[test]
+    fn parse_reset_past_epoch_clamps_to_zero() {
+        // An epoch far in the past (above the 1_000_000_000 threshold so it
+        // is interpreted as epoch seconds, not delta-seconds) resolves to a
+        // zero delta. 1_500_000_000 ≈ 2017-07-14, well before now.
+        assert_eq!(parse_rate_limit_reset(Some("1500000000")), Some(0));
+    }
+
+    #[test]
+    fn parse_reset_future_epoch_is_delta() {
+        // An epoch ~120s in the future resolves to roughly 120s (allow
+        // a couple seconds of wall-clock slack).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let future = now + 120;
+        let parsed = parse_rate_limit_reset(Some(&future.to_string())).unwrap();
+        assert!(parsed >= 118 && parsed <= 120, "got {parsed}");
+    }
+
+    #[test]
+    fn parse_reset_rejects_non_integer() {
+        // HTTP-dates and any non-numeric form yield None.
+        assert_eq!(
+            parse_rate_limit_reset(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(parse_rate_limit_reset(Some("abc")), None);
+        assert_eq!(parse_rate_limit_reset(Some("12.5")), None);
+    }
+
+    #[test]
+    fn api_error_diagnostics_is_empty_excludes_parsed_reset() {
+        // The new field participates in is_empty (non-None => not empty).
+        let with_reset = ApiErrorDiagnostics {
+            rate_limit_reset_secs: Some(10),
+            ..Default::default()
+        };
+        assert!(!with_reset.is_empty());
+        assert_eq!(with_reset.parsed_reset_secs(), Some(10));
+
+        let empty = ApiErrorDiagnostics::default();
+        assert!(empty.is_empty());
+        assert_eq!(empty.parsed_reset_secs(), None);
+    }
+
+    #[test]
+    fn rate_limit_reset_secs_accessor_reads_diagnostics() {
+        let err = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "slow".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: Some(ApiErrorDiagnostics {
+                rate_limit_reset_secs: Some(42),
+                ..Default::default()
+            }),
+        };
+        assert_eq!(err.rate_limit_reset_secs(), Some(42));
+
+        let err_no_diag = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "slow".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+        };
+        assert_eq!(err_no_diag.rate_limit_reset_secs(), None);
+    }
+
+    /// Older payloads that omit `rate_limit_reset_secs` keep deserializing
+    /// (serde-additive field defaults to None).
+    #[test]
+    fn api_error_diagnostics_legacy_payload_deserializes() {
+        let legacy =
+            r#"{"rate_limit_limit":"100","rate_limit_remaining":"0","rate_limit_reset":"30"}"#;
+        let d: ApiErrorDiagnostics = serde_json::from_str(legacy).unwrap();
+        assert_eq!(d.rate_limit_limit.as_deref(), Some("100"));
+        assert_eq!(d.rate_limit_reset.as_deref(), Some("30"));
+        assert_eq!(d.rate_limit_reset_secs, None);
     }
 }
