@@ -764,6 +764,15 @@ pub struct ConversationResponse {
     /// the wire (Messages `message_delta.stop_details.explanation`); `None`
     /// otherwise and on backends that don't report one.
     pub stop_message: Option<String>,
+    /// The model that actually served this turn, when it differs from the
+    /// requested model. Only set by the Chat Completions stream transform
+    /// when the config's `provider_identity` is `OpenRouter` (OpenRouter may
+    /// silently serve a fallback from `openrouter_fallback_models`); the
+    /// streamed `model` field then names a different model than the one the
+    /// session requested. `None` for every other provider and for matched
+    /// models — consumers must treat `None` as "no fallback" (the common
+    /// case), never as "unknown".
+    pub fallback_served_model: Option<String>,
 }
 
 /// Normalize a wire cost-ticks value at capture.
@@ -6832,6 +6841,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(response.is_empty());
 
@@ -6844,6 +6854,7 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(!response.is_empty());
 
@@ -6860,6 +6871,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(!response.is_empty());
     }
@@ -6882,6 +6894,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(
             response.is_empty(),
@@ -6903,6 +6916,7 @@ mod tests {
             message_chunks_emitted: 1,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(
             !response.is_empty(),
@@ -6928,6 +6942,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(
             !response.is_empty(),
@@ -6956,6 +6971,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
 
         let calls = response.tool_calls();
@@ -6976,6 +6992,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -6995,6 +7012,7 @@ mod tests {
             message_chunks_emitted: 42,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -7010,6 +7028,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -7029,6 +7048,7 @@ mod tests {
             message_chunks_emitted: 0, // only reasoning chunks were streamed
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -7051,6 +7071,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -8427,6 +8448,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         }
     }
 
@@ -8477,6 +8499,7 @@ mod tests {
             message_chunks_emitted: 0,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model: None,
         };
         assert_eq!(
             response.empty_reason(),

@@ -546,6 +546,7 @@ pub(crate) fn stream_responses_tracked<'a>(
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals,
             stop_message: None, // not reported on the Responses API
+            fallback_served_model: None,
         };
 
         yield SamplingEvent::Completed {

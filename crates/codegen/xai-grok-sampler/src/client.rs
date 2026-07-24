@@ -749,6 +749,20 @@ impl SamplingClient {
         self.defaults.api_backend.clone()
     }
 
+    /// The configured model the session requested for turns on this client.
+    /// Used by the Chat Completions stream transform to detect an OpenRouter
+    /// fallback (served model differs from this requested model).
+    pub fn model(&self) -> &str {
+        &self.defaults.model
+    }
+
+    /// Whether this client targets OpenRouter. Gates fallback-model
+    /// detection so non-OpenRouter providers never produce a fallback
+    /// signal even when the served model id differs.
+    pub fn is_openrouter(&self) -> bool {
+        self.openrouter_metadata_requested
+    }
+
     /// POST with default headers. Overrides auth from resolver if wired.
     fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
         let mut headers = self.default_headers.clone();
@@ -2179,8 +2193,18 @@ impl SamplingClient {
         let result = match self.api_backend() {
             ApiBackend::ChatCompletions => {
                 let (raw, meta) = self.conversation_stream(request).await?;
-                let events =
-                    crate::stream::stream_chat_completions(raw, meta, request_id, idle_timeout);
+                let events = crate::stream::stream_chat_completions(
+                    raw,
+                    meta,
+                    request_id,
+                    idle_timeout,
+                    Some(&self.defaults.model),
+                    if self.is_openrouter() {
+                        crate::config::ProviderIdentity::OpenRouter
+                    } else {
+                        crate::config::ProviderIdentity::Custom
+                    },
+                );
                 crate::stream::collect_response(events).await
             }
             ApiBackend::Responses => {

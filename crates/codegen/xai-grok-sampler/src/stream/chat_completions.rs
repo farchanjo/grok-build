@@ -14,6 +14,7 @@ use xai_grok_sampling_types::{
     ResponseModelMetadata, SamplingError, StopReason, TokenUsage, ToolCall,
 };
 
+use crate::config::ProviderIdentity;
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
@@ -38,6 +39,8 @@ pub fn stream_chat_completions<'a>(
     model_metadata: Option<ResponseModelMetadata>,
     request_id: RequestId,
     idle_timeout: Duration,
+    requested_model: Option<&'a str>,
+    provider_identity: ProviderIdentity,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
     async_stream::stream! {
         let stream_start = Instant::now();
@@ -271,7 +274,7 @@ pub fn stream_chat_completions<'a>(
             items.push(ConversationItem::Assistant(AssistantItem {
                 content: std::sync::Arc::<str>::from(content_acc),
                 tool_calls,
-                model_id: Some(model),
+                model_id: Some(model.clone()),
                 model_fingerprint,
                 // Chat Completions does not echo the applied reasoning effort.
                 reasoning_effort: None,
@@ -284,6 +287,32 @@ pub fn stream_chat_completions<'a>(
         let metrics =
             InferenceLatencyStats::from_timestamps(stream_start, &chunk_timestamps, stream_end);
 
+        // Detect an OpenRouter fallback: when the provider is OpenRouter and
+        // the model the server actually served (`model`, captured from the
+        // first chunk) differs from the model the session requested, OpenRouter
+        // silently substituted a fallback from `openrouter_fallback_models`.
+        // Other providers never produce this signal — `provider_identity` gates
+        // it so a transient model-id mismatch on a first-party or custom
+        // endpoint is never misreported as a fallback.
+        let fallback_served_model = if provider_identity.is_openrouter()
+            && first_chunk_seen
+            && let Some(requested) = requested_model
+            && !requested.is_empty()
+            && model != requested
+        {
+            Some(model.clone())
+        } else {
+            None
+        };
+        if fallback_served_model.is_some() {
+            tracing::info!(
+                requested_model = requested_model.unwrap_or(""),
+                served_model = %model,
+                provider = "OpenRouter",
+                "openrouter fallback served: model differs from requested"
+            );
+        }
+
         let response = ConversationResponse {
             items,
             stop_reason: finish_reason,
@@ -292,6 +321,7 @@ pub fn stream_chat_completions<'a>(
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            fallback_served_model,
         };
 
         yield SamplingEvent::Completed {
@@ -369,6 +399,8 @@ mod tests {
             None,
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -395,6 +427,8 @@ mod tests {
             None,
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -449,6 +483,8 @@ mod tests {
             None,
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -535,6 +571,8 @@ mod tests {
             None,
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -592,6 +630,8 @@ mod tests {
             None,
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -618,6 +658,8 @@ mod tests {
             None,
             rid(),
             Duration::from_millis(100),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -644,6 +686,8 @@ mod tests {
             Some(metadata.clone()),
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -680,6 +724,8 @@ mod tests {
             None,
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
 
@@ -719,6 +765,8 @@ mod tests {
                 None,
                 rid(),
                 Duration::from_secs(60),
+                None,
+                crate::config::ProviderIdentity::Custom,
             ))
             .await;
             match events.last().unwrap() {
@@ -762,11 +810,146 @@ mod tests {
             None,
             rid(),
             Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
         ))
         .await;
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.cost_usd_ticks, Some(99));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Helper: chunks whose `model` field names a fallback model.
+    fn fallback_chunk(text: &str, served: &str) -> ChatCompletionChunk {
+        let mut chunk = make_chunk(vec![ChatChunkDelta {
+            role: Some(Role::Assistant),
+            content: Some(text.to_string()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            tool_call_id: None,
+        }]);
+        chunk.model = served.to_string();
+        chunk
+    }
+
+    /// OpenRouter + served model differs from requested → the completion
+    /// carries `fallback_served_model` naming the served model.
+    #[tokio::test]
+    async fn openrouter_fallback_detected_when_served_model_differs() {
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
+            Ok(fallback_chunk("hi", "openai/gpt-5-mini")),
+            Ok(final_chunk(FinishReason::Stop)),
+        ];
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            Some("anthropic/claude-opus-4"),
+            ProviderIdentity::OpenRouter,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(
+                    response.fallback_served_model.as_deref(),
+                    Some("openai/gpt-5-mini"),
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// OpenRouter + served model matches requested → no fallback signal.
+    #[tokio::test]
+    async fn openrouter_matched_model_produces_no_fallback_signal() {
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> =
+            vec![Ok(text_chunk("hi")), Ok(final_chunk(FinishReason::Stop))];
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            Some("test-model"),
+            ProviderIdentity::OpenRouter,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert!(
+                    response.fallback_served_model.is_none(),
+                    "matched model must not produce a fallback signal",
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Non-OpenRouter provider with a mismatched served model → no signal,
+    /// even though the served model differs from the requested one.
+    #[tokio::test]
+    async fn non_openrouter_mismatch_never_produces_fallback_signal() {
+        for identity in [
+            ProviderIdentity::Xai,
+            ProviderIdentity::OpenAi,
+            ProviderIdentity::Custom,
+            ProviderIdentity::Codex,
+        ] {
+            let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
+                Ok(fallback_chunk("hi", "other-model")),
+                Ok(final_chunk(FinishReason::Stop)),
+            ];
+            let raw = stream::iter(chunks).boxed();
+            let events = collect(stream_chat_completions(
+                raw,
+                None,
+                rid(),
+                Duration::from_secs(60),
+                Some("test-model"),
+                identity,
+            ))
+            .await;
+            match events.last().unwrap() {
+                SamplingEvent::Completed { response, .. } => {
+                    assert!(
+                        response.fallback_served_model.is_none(),
+                        "{identity:?} must never produce a fallback signal",
+                    );
+                }
+                other => panic!("expected Completed, got {other:?}"),
+            }
+        }
+    }
+
+    /// OpenRouter but no requested model supplied (`None`) → no signal,
+    /// because there is no requested model to compare against.
+    #[tokio::test]
+    async fn openrouter_without_requested_model_produces_no_signal() {
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
+            Ok(fallback_chunk("hi", "other-model")),
+            Ok(final_chunk(FinishReason::Stop)),
+        ];
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            ProviderIdentity::OpenRouter,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert!(response.fallback_served_model.is_none());
             }
             other => panic!("expected Completed, got {other:?}"),
         }

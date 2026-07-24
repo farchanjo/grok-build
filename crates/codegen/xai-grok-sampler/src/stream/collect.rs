@@ -118,7 +118,14 @@ mod tests {
         let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> =
             vec![Ok(text_chunk("hello")), Ok(final_chunk())];
         let raw = stream::iter(chunks).boxed();
-        let events = stream_chat_completions(raw, None, rid(), Duration::from_secs(60));
+        let events = stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
+        );
 
         let (response, _metrics) = collect_response(events)
             .await
@@ -135,7 +142,14 @@ mod tests {
             Err(SamplingError::EventStreamError("boom".into())),
         ];
         let raw = stream::iter(chunks).boxed();
-        let events = stream_chat_completions(raw, None, rid(), Duration::from_secs(60));
+        let events = stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
+        );
 
         let err = collect_response(events).await.expect_err("error returned");
         assert!(err.message.contains("boom"));
@@ -172,6 +186,7 @@ mod tests {
                 message_chunks_emitted: 1,
                 doom_loop_signals: Vec::new(),
                 stop_message: None,
+                fallback_served_model: None,
             }),
             metrics: InferenceLatencyStats::default(),
         };
@@ -179,5 +194,32 @@ mod tests {
         let (response, _) = collect_response(s).await.expect("ok");
         let a = response.assistant().expect("assistant item present");
         assert_eq!(a.content.as_ref(), "hi");
+    }
+
+    /// Non-streaming-style consumption (the buffered collector used by
+    /// `conversation_collect`) carries the OpenRouter fallback signal
+    /// through to the final `ConversationResponse`.
+    #[tokio::test]
+    async fn openrouter_fallback_carries_through_collect_response() {
+        let mut chunk = text_chunk("hi");
+        chunk.model = "openai/gpt-5-mini".into();
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> =
+            vec![Ok(chunk), Ok(final_chunk())];
+        let raw = stream::iter(chunks).boxed();
+        let events = stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            Some("anthropic/claude-opus-4"),
+            crate::config::ProviderIdentity::OpenRouter,
+        );
+        let (response, _metrics) = collect_response(events)
+            .await
+            .expect("happy path returns Ok");
+        assert_eq!(
+            response.fallback_served_model.as_deref(),
+            Some("openai/gpt-5-mini"),
+        );
     }
 }

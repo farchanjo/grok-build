@@ -516,6 +516,7 @@ pub fn stream_messages<'a>(
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals: Vec::new(),
             stop_message: final_stop_message,
+            fallback_served_model: None,
         };
 
         yield SamplingEvent::Completed {

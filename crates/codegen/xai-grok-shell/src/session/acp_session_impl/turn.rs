@@ -2663,6 +2663,25 @@ impl SessionActor {
                 );
             }
             self.record_response_token_usage(&response, Some(model_duration_ms));
+            // Surface an OpenRouter fallback (served model differed from the
+            // requested model) as a concise, non-modal scrollback note. The
+            // stream transform only sets `fallback_served_model` for
+            // `provider_identity == OpenRouter`, so a `Some` here is already
+            // gated on the provider. Log the mismatch (models only, no
+            // content) for diagnosis.
+            if let Some(ref served) = response.fallback_served_model {
+                let requested = self.current_model_id().await;
+                tracing::warn!(
+                    requested_model = %requested,
+                    served_model = %served,
+                    provider = "OpenRouter",
+                    "openrouter fallback served: model differs from requested"
+                );
+                self.send_xai_notification(XaiSessionUpdate::HookAnnotation {
+                    message: format!("served by {served} (fallback)"),
+                })
+                .await;
+            }
             if let Some(pt) = prompt_timing.take() {
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self

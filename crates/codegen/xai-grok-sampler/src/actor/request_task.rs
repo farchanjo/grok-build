@@ -532,7 +532,18 @@ async fn run_one_attempt(
                 Err(e) => return AttemptOutcome::InitFailed { error: e },
             };
             let (teed, captured) = tee_errors(raw);
-            let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
+            let l2 = stream_chat_completions(
+                teed,
+                metadata,
+                request_id.clone(),
+                idle_timeout,
+                Some(client.model()),
+                if client.is_openrouter() {
+                    crate::config::ProviderIdentity::OpenRouter
+                } else {
+                    crate::config::ProviderIdentity::Custom
+                },
+            );
             drive_l2(
                 l2,
                 request_id,
