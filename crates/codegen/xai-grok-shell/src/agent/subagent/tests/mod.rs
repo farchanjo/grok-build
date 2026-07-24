@@ -3639,6 +3639,35 @@ fn byok_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
         ..test_model_entry(model_id)
     }
 }
+/// A catalog entry backed by an OpenRouter provider (no per-model key — the
+/// key lives in the provider vault, so `has_own_credentials()` is false).
+fn openrouter_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
+    crate::agent::config::ModelEntry {
+        model_provider: Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "openrouter".to_string(),
+            kind: crate::agent::model_providers::ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: vec!["fallback-1".to_string()],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        }),
+        ..test_model_entry(model_id)
+    }
+}
+/// A catalog entry backed by an OpenAI provider.
+fn openai_provider_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
+    crate::agent::config::ModelEntry {
+        model_provider: Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "openai".to_string(),
+            kind: crate::agent::model_providers::ModelProviderKind::OpenAi,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        }),
+        ..test_model_entry(model_id)
+    }
+}
 #[test]
 fn subagent_auth_type_rule() {
     use crate::agent::auth_method::{CACHED_TOKEN_AUTH_METHOD_ID, XAI_API_KEY_METHOD_ID};
@@ -3669,6 +3698,42 @@ fn subagent_auth_type_rule() {
         );
     assert_eq!(super::subagent_auth_type(None, &api_key), AuthType::ApiKey);
 }
+
+#[test]
+fn provider_scoped_byok_detects_openrouter_and_openai_entries() {
+    let or_entry = openrouter_model_entry("or/claude");
+    let oai_entry = openai_provider_model_entry("oai/gpt");
+    let plain = test_model_entry("grok-plain");
+    // OpenRouter/OpenAI entries have no per-model key, so has_own_credentials
+    // is false — but is_provider_scoped_byok must still report true.
+    assert!(!or_entry.has_own_credentials());
+    assert!(super::is_provider_scoped_byok(&or_entry));
+    assert!(super::is_provider_scoped_byok(&oai_entry));
+    assert!(!super::is_provider_scoped_byok(&plain));
+}
+
+#[test]
+fn subagent_auth_type_openrouter_is_apikey_even_under_session_auth() {
+    use crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID;
+    use xai_chat_state::AuthType;
+    // When the parent uses session auth, an OpenRouter/OpenAI catalog model
+    // must NOT be mislabeled as SessionToken — it is always BYOK (ApiKey).
+    // The auth_type is ApiKey regardless of whether a provider key is present;
+    // a missing key fails closed at request time with the existing missing-key
+    // UX rather than borrowing the xAI session.
+    let session = acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID);
+    let or_entry = openrouter_model_entry("or/claude");
+    let oai_entry = openai_provider_model_entry("oai/gpt");
+    assert_eq!(
+        super::subagent_auth_type(Some(&or_entry), &session),
+        AuthType::ApiKey
+    );
+    assert_eq!(
+        super::subagent_auth_type(Some(&oai_entry), &session),
+        AuthType::ApiKey
+    );
+}
+
 #[test]
 fn fresh_tool_model_accepts_visible_key_and_internal_id() {
     let mut models = indexmap::IndexMap::new();

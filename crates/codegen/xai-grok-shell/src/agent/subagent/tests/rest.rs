@@ -2871,6 +2871,76 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
             "fallback path should also resolve compactions-remaining capability from the catalog"
         );
 }
+
+#[tokio::test]
+async fn read_parent_sampling_config_openrouter_preserves_identity_and_model_id_flag() {
+    use xai_grok_sampler::config::ProviderIdentity;
+    // Parent catalog entry is OpenRouter. The chat-state SamplingConfig has no
+    // provider-scoped fields, so the inherit path must derive provider_identity,
+    // openrouter_fallback_models, and include_message_model_id from the catalog
+    // entry (via sampling_config_for_model), not from the chat-state slug.
+    let mut entry = openrouter_model_entry("anthropic/claude-3.5-sonnet");
+    entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+    let mut models = indexmap::IndexMap::new();
+    models.insert("or/claude".to_string(), entry);
+    let ctx = ctx_with_parent_chat_state(
+        "or/claude",
+        "anthropic/claude-3.5-sonnet",
+        "or/claude",
+        models,
+    );
+    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(model_id.0.as_ref(), "or/claude");
+    assert_eq!(
+        config.provider_identity,
+        ProviderIdentity::OpenRouter,
+        "inherited config must carry OpenRouter identity from the catalog entry"
+    );
+    assert!(
+        !config.include_message_model_id,
+        "OpenRouter models must have include_message_model_id = false"
+    );
+    assert_eq!(
+        config.openrouter_fallback_models,
+        vec!["fallback-1".to_string()],
+        "openrouter_fallback_models must come from the catalog entry, not the chat-state slug"
+    );
+}
+
+#[tokio::test]
+async fn read_parent_sampling_config_preserves_max_retries_from_spawn_context() {
+    // max_retries must be preserved from ctx.sampling_config.max_retries
+    // (the parent's resolved config at spawn time), not wiped to None.
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.max_retries = Some(7);
+    let mut models = indexmap::IndexMap::new();
+    models.insert("auto".to_string(), entry);
+    let mut ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
+    ctx.sampling_config.max_retries = Some(3);
+    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(
+        config.max_retries,
+        Some(3),
+        "max_retries must be preserved from the spawn context, not wiped to None"
+    );
+}
+
+#[tokio::test]
+async fn read_parent_sampling_config_max_retries_falls_back_to_catalog_default() {
+    // When ctx.sampling_config.max_retries is None, the catalog entry's
+    // max_retries (set via sampling_config_for_model) should win.
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.max_retries = Some(9);
+    let mut models = indexmap::IndexMap::new();
+    models.insert("auto".to_string(), entry);
+    let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
+    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(
+        config.max_retries,
+        Some(9),
+        "max_retries should fall back to the catalog default when spawn context has none"
+    );
+}
 /// Drive the REAL precedence path
 /// (`resolve_effective_model_config`, which `handle_subagent_request`
 /// calls) with BOTH an explicit `runtime_override_model` AND a
@@ -3118,8 +3188,56 @@ async fn resolve_subagent_agent_definition_unknown_model_falls_through_to_inheri
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "grok-4.5");
 }
-/// Spawn-time credentials are cache-only: a cold spawn has no key,
-/// never the parent session key.
+/// S6: An OpenRouter model override with no resolvable API key must fail
+/// closed before spawn — `resolve_model_override_to_config` returns None,
+/// so the override is unresolvable and the subagent falls through to inherit
+/// the parent model rather than spawning a child that would mis-authenticate.
+///
+/// Serial because it touches the process environment (`OPENROUTER_API_KEY`)
+/// and the thread-local stored-key-home override to guarantee no provider key
+/// is resolvable, regardless of the development profile's vault state.
+#[tokio::test]
+#[serial_test::serial]
+async fn resolve_model_override_openrouter_without_key_fails_closed() {
+    use xai_grok_agent::config::ModelOverride;
+    use xai_grok_test_support::EnvGuard;
+
+    // Point the provider vault at an empty temp dir and unset the env var so
+    // resolve_credentials yields no api_key for the OpenRouter entry.
+    let empty_home = tempfile::tempdir().unwrap();
+    let _env_guard = EnvGuard::unset("OPENROUTER_API_KEY");
+    crate::agent::providers::set_stored_key_home_for_tests(Some(
+        empty_home.path().to_path_buf(),
+    ));
+
+    let mut entry = openrouter_model_entry("anthropic/claude-3.5-sonnet");
+    entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+    let mut models = indexmap::IndexMap::new();
+    models.insert("or/claude".to_string(), entry);
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.model_id = acp::ModelId::new("grok-4.5");
+    ctx.available_models = models;
+    ctx.subagent_model_overrides
+        .insert("explore".to_string(), "or/claude".to_string());
+    let (config, model_id) = resolve_subagent_sampling_config(
+            "explore",
+            &ModelOverride::Inherit,
+            &ctx,
+        )
+        .await;
+
+    // Restore the thread-local override so other tests are unaffected.
+    crate::agent::providers::set_stored_key_home_for_tests(None);
+
+    // The OpenRouter override is unresolvable (no provider key), so the
+    // subagent must fall through to inherit the parent model.
+    assert_eq!(
+        config.model, "grok-4.5",
+        "OpenRouter override without a key must fail closed and inherit the parent model"
+    );
+    assert_eq!(model_id.0.as_ref(), "grok-4.5");
+}
 #[tokio::test]
 async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     use xai_grok_agent::config::ModelOverride;

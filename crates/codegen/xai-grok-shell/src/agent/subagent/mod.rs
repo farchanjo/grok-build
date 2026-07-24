@@ -944,59 +944,150 @@ async fn read_parent_sampling_config(
     if let Some(ref chat_state) = ctx.parent_chat_state {
         if let Some(cfg) = chat_state.get_sampling_config().await {
             let creds = chat_state.get_credentials().await;
-            let mut extra_headers = cfg.extra_headers;
-            crate::agent::config::inject_url_derived_headers(
-                &mut extra_headers,
-                creds.alpha_test_key.as_deref(),
-                &cfg.base_url,
-            );
-            let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
+            let model_id = ctx.model_id.clone();
+
+            // Resolve the parent catalog entry so provider identity, OpenRouter
+            // extensions, auth_scheme, and include_message_model_id come from the
+            // same source that `sampling_config_for_model` would produce. The
+            // chat-state `SamplingConfig` carries no provider-scoped fields, and
+            // `cfg.model` is the routing slug (not the catalog id), so resolving
+            // auth_scheme through `try_resolve_model_credentials(&cfg.model, …)`
+            // is unreliable for BYOK providers.
+            let parent_entry =
+                crate::agent::config::find_model_by_id(&ctx.available_models, model_id.0.as_ref());
+
+            let mut inherited = if let Some(entry) = parent_entry {
+                // Build the canonical config through the catalog entry so
+                // provider_identity / openrouter_* / include_message_model_id /
+                // auth_scheme survive for BYOK providers.
+                let mut canonical_creds = crate::agent::config::resolve_credentials(entry, None);
+                canonical_creds.auth_type = subagent_auth_type(Some(entry), &ctx.auth_method_id);
+                let mut base = crate::agent::config::sampling_config_for_model(
+                    entry,
+                    canonical_creds,
+                    ctx.alpha_test_key.clone(),
+                    ctx.sampling_config.client_version.clone(),
+                    ctx.sampling_config.deployment_id.clone(),
+                    ctx.sampling_config.user_id.clone(),
+                );
+
+                // Overlay live chat-state values so mid-session tweaks win,
+                // but never overwrite provider-scoped identity fields that
+                // `sampling_config_for_model` set correctly.
+                base.api_key = creds.api_key;
+                base.base_url = cfg.base_url.clone();
+                base.model = cfg.model.clone();
+                base.max_completion_tokens = cfg.max_completion_tokens;
+                base.temperature = cfg.temperature;
+                base.top_p = cfg.top_p;
+                base.reasoning_effort = cfg.reasoning_effort;
+                base.stream_tool_calls = cfg.stream_tool_calls.unwrap_or(false);
+                base.context_window = cfg.context_window.get();
+                base.api_backend = cfg.api_backend;
+
+                // Refresh URL-derived headers against the live base_url.
+                {
+                    let mut extra = cfg.extra_headers.clone();
+                    crate::agent::config::inject_url_derived_headers(
+                        &mut extra,
+                        creds.alpha_test_key.as_deref(),
+                        &cfg.base_url,
+                    );
+                    base.extra_headers = extra;
+                }
+
+                // Preserve max_retries from the spawn-context baseline (the
+                // parent's resolved config at spawn time), falling back to the
+                // catalog default. Never hardcode None.
+                base.max_retries = ctx.sampling_config.max_retries.or(base.max_retries);
+
+                // Keep spawn-context client identity / attribution / injector.
+                base.client_identifier = ctx.sampling_config.client_identifier.clone();
+                base.origin_client = ctx.sampling_config.origin_client.clone();
+                base.deployment_id = ctx.sampling_config.deployment_id.clone();
+                base.user_id = ctx.sampling_config.user_id.clone();
+                base.client_version = creds.client_version.clone();
+                base.attribution_callback = ctx.attribution_callback.clone();
+                base.header_injector = ctx.sampling_config.header_injector.clone();
+                base.doom_loop_recovery = ctx.sampling_config.doom_loop_recovery;
+                base.bearer_resolver = None;
+                base.force_http1 = false;
+                base.idle_timeout_secs = None;
+                base.supports_backend_search = ctx
+                    .models_manager
+                    .model_supports_backend_search(ctx.model_id.0.as_ref());
+                base.compactions_remaining = ctx
+                    .models_manager
+                    .model_compactions_remaining(ctx.model_id.0.as_ref());
+                base.compaction_at_tokens = ctx
+                    .models_manager
+                    .model_compaction_at_tokens(ctx.model_id.0.as_ref());
+                base
+            } else {
+                // Parent entry not in the catalog: keep chat-state values with
+                // spawn-context identity, but preserve max_retries instead of
+                // wiping it, and resolve auth_scheme through the catalog id
+                // (not the routing slug).
+                let mut extra_headers = cfg.extra_headers.clone();
+                crate::agent::config::inject_url_derived_headers(
+                    &mut extra_headers,
+                    creds.alpha_test_key.as_deref(),
+                    &cfg.base_url,
+                );
+                let auth_scheme = crate::agent::config::try_resolve_model_credentials(
+                    ctx.model_id.0.as_ref(),
+                    None,
+                )
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
-            let inherited = xai_grok_sampler::SamplerConfig {
-                api_key: creds.api_key,
-                base_url: cfg.base_url,
-                model: cfg.model.clone(),
-                max_completion_tokens: cfg.max_completion_tokens,
-                temperature: cfg.temperature,
-                top_p: cfg.top_p,
-                openrouter_fallback_models: ctx.sampling_config.openrouter_fallback_models.clone(),
-                openrouter_provider_preferences: ctx
-                    .sampling_config
-                    .openrouter_provider_preferences
-                    .clone(),
-                openrouter_plugins: ctx.sampling_config.openrouter_plugins.clone(),
-                api_backend: cfg.api_backend,
-                include_message_model_id: ctx.sampling_config.include_message_model_id,
-                auth_scheme,
-                extra_headers,
-                context_window: cfg.context_window.get(),
-                client_version: creds.client_version,
-                reasoning_effort: cfg.reasoning_effort,
-                force_http1: false,
-                max_retries: None,
-                stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
-                idle_timeout_secs: None,
-                client_identifier: ctx.sampling_config.client_identifier.clone(),
-                deployment_id: ctx.sampling_config.deployment_id.clone(),
-                user_id: ctx.sampling_config.user_id.clone(),
-                origin_client: ctx.sampling_config.origin_client.clone(),
-                attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver: None,
-                supports_backend_search: ctx
-                    .models_manager
-                    .model_supports_backend_search(ctx.model_id.0.as_ref()),
-                compactions_remaining: ctx
-                    .models_manager
-                    .model_compactions_remaining(ctx.model_id.0.as_ref()),
-                compaction_at_tokens: ctx
-                    .models_manager
-                    .model_compaction_at_tokens(ctx.model_id.0.as_ref()),
-                doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
-                header_injector: ctx.sampling_config.header_injector.clone(),
-                provider_identity: ctx.sampling_config.provider_identity,
+                xai_grok_sampler::SamplerConfig {
+                    api_key: creds.api_key,
+                    base_url: cfg.base_url.clone(),
+                    model: cfg.model.clone(),
+                    max_completion_tokens: cfg.max_completion_tokens,
+                    temperature: cfg.temperature,
+                    top_p: cfg.top_p,
+                    openrouter_fallback_models: ctx
+                        .sampling_config
+                        .openrouter_fallback_models
+                        .clone(),
+                    openrouter_provider_preferences: ctx
+                        .sampling_config
+                        .openrouter_provider_preferences
+                        .clone(),
+                    openrouter_plugins: ctx.sampling_config.openrouter_plugins.clone(),
+                    api_backend: cfg.api_backend,
+                    include_message_model_id: ctx.sampling_config.include_message_model_id,
+                    auth_scheme,
+                    extra_headers,
+                    context_window: cfg.context_window.get(),
+                    client_version: creds.client_version,
+                    reasoning_effort: cfg.reasoning_effort,
+                    force_http1: false,
+                    max_retries: ctx.sampling_config.max_retries,
+                    stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
+                    idle_timeout_secs: None,
+                    client_identifier: ctx.sampling_config.client_identifier.clone(),
+                    deployment_id: ctx.sampling_config.deployment_id.clone(),
+                    user_id: ctx.sampling_config.user_id.clone(),
+                    origin_client: ctx.sampling_config.origin_client.clone(),
+                    attribution_callback: ctx.attribution_callback.clone(),
+                    bearer_resolver: None,
+                    supports_backend_search: ctx
+                        .models_manager
+                        .model_supports_backend_search(ctx.model_id.0.as_ref()),
+                    compactions_remaining: ctx
+                        .models_manager
+                        .model_compactions_remaining(ctx.model_id.0.as_ref()),
+                    compaction_at_tokens: ctx
+                        .models_manager
+                        .model_compaction_at_tokens(ctx.model_id.0.as_ref()),
+                    doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
+                    header_injector: ctx.sampling_config.header_injector.clone(),
+                    provider_identity: ctx.sampling_config.provider_identity,
+                }
             };
-            let model_id = ctx.model_id.clone();
+
             let global_model_id = ctx.models_manager.current_model_id();
             xai_grok_telemetry::unified_log::debug(
                 "subagent read parent config (live)",
@@ -1040,14 +1131,36 @@ async fn read_parent_sampling_config(
         .model_compaction_at_tokens(ctx.model_id.0.as_ref());
     (fallback, ctx.model_id.clone())
 }
-/// `AuthType` for a subagent: BYOK ⇒ `ApiKey` (don't overwrite the BYOK
-/// key); session-based ACP method ⇒ `SessionToken` (keep refresh wired);
+/// `true` when the entry is governed by a provider-scoped BYOK vault
+/// (OpenRouter or OpenAI). Such models are always API-key authenticated even
+/// when `has_own_credentials()` is false (their key lives in the provider
+/// vault, not on the per-model entry).
+///
+/// Per the OpenRouter parity design, the auth *type* is `ApiKey` whenever the
+/// model provider is OpenRouter or OpenAI, regardless of whether a key is
+/// currently present. A missing key fails closed at request time with the
+/// existing missing-key UX; it must never fall through to `SessionToken`,
+/// which would mislabel an OpenRouter child as borrowing the parent's xAI
+/// session.
+fn is_provider_scoped_byok(entry: &crate::agent::config::ModelEntry) -> bool {
+    use crate::agent::model_providers::ModelProviderKind;
+    entry.model_provider.as_ref().is_some_and(|provider| {
+        matches!(
+            provider.kind,
+            ModelProviderKind::OpenAi | ModelProviderKind::OpenRouter
+        )
+    })
+}
+
+/// `AuthType` for a subagent: BYOK or provider-scoped BYOK (OpenRouter/OpenAI)
+/// ⇒ `ApiKey` (don't overwrite the BYOK key and don't mislabel as session);
+/// session-based ACP method ⇒ `SessionToken` (keep refresh wired);
 /// otherwise `ApiKey`.
 fn subagent_auth_type(
     model: Option<&crate::agent::config::ModelEntry>,
     auth_method_id: &acp::AuthMethodId,
 ) -> xai_chat_state::AuthType {
-    if model.is_some_and(|m| m.has_own_credentials()) {
+    if model.is_some_and(|m| m.has_own_credentials() || is_provider_scoped_byok(m)) {
         xai_chat_state::AuthType::ApiKey
     } else if crate::agent::auth_method::is_session_based_method(auth_method_id) {
         xai_chat_state::AuthType::SessionToken
@@ -1073,6 +1186,39 @@ fn resolve_model_override_to_config(
     let mut credentials = resolve_credentials(&entry, session_key);
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
+    // Fail closed before spawn: a provider-scoped BYOK model (OpenRouter or
+    // OpenAI) without a resolvable API key cannot authenticate against its
+    // third-party endpoint. Returning None here surfaces the failure as an
+    // unresolvable override rather than spawning a child that would emit a
+    // misleading upstream 401 (or worse, borrow the xAI session).
+    if is_provider_scoped_byok(&entry) && credentials.api_key.is_none() {
+        let provider_name = entry
+            .model_provider
+            .as_ref()
+            .map(|p| match p.kind {
+                crate::agent::model_providers::ModelProviderKind::OpenRouter => "OpenRouter",
+                crate::agent::model_providers::ModelProviderKind::OpenAi => "OpenAI",
+                _ => "provider",
+            })
+            .unwrap_or("provider");
+        tracing::warn!(
+            model_id,
+            provider = provider_name,
+            "{provider_name} API key is not configured — subagent model override is unresolvable"
+        );
+        xai_grok_telemetry::unified_log::warn(
+            "subagent model override unresolvable (missing provider key)",
+            None,
+            Some(serde_json::json!({
+                "model_id": model_id,
+                "canonical_model": canonical_model_id.0.as_ref(),
+                "provider": provider_name,
+                "has_session_key": has_session_key,
+                "auth_method_id": ctx.auth_method_id.0.as_ref(),
+            })),
+        );
+        return None;
+    }
     let config = sampling_config_for_model(
         &entry,
         credentials,
