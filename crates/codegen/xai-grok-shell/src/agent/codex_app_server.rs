@@ -14,7 +14,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+use crate::agent::codex_stream::{self, CodexStreamEvent};
 
 const INITIALIZE_ID: u64 = 1;
 const THREAD_START_ID: u64 = 2;
@@ -182,6 +185,10 @@ pub struct CodexRunRequest {
     pub disable_native_multi_agent: bool,
     /// Per-message deadline. It resets whenever app-server emits a frame.
     pub idle_timeout: Duration,
+    /// Optional live event sink. When set, app-server notifications are
+    /// classified and forwarded while the turn is still running so the host
+    /// can stream text, reasoning, tools, and plan updates natively.
+    pub stream_tx: Option<mpsc::UnboundedSender<CodexStreamEvent>>,
 }
 
 impl CodexRunRequest {
@@ -204,6 +211,7 @@ impl CodexRunRequest {
             dynamic_tool_handler: None,
             disable_native_multi_agent: false,
             idle_timeout: Duration::from_secs(300),
+            stream_tx: None,
         }
     }
 }
@@ -811,6 +819,7 @@ async fn run_protocol(
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
+        emit_stream_events(&request.stream_tx, &message);
         if accumulator.apply(&message)? {
             break;
         }
@@ -970,6 +979,22 @@ async fn handle_server_request(
         }),
     )
     .await
+}
+
+fn emit_stream_events(
+    stream_tx: &Option<mpsc::UnboundedSender<CodexStreamEvent>>,
+    message: &Value,
+) {
+    let Some(tx) = stream_tx else {
+        return;
+    };
+    for event in codex_stream::classify_notification(message) {
+        // A closed receiver means the host abandoned the UI stream; keep
+        // accumulating the turn so the final result remains available.
+        if tx.send(event).is_err() {
+            break;
+        }
+    }
 }
 
 fn ensure_response_ok(message: &Value) -> Result<(), CodexAppServerError> {
@@ -1241,7 +1266,13 @@ while IFS= read -r line; do
     *'"id":2'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-test"}}}' ;;
     *'"id":3'*)
       printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-test"}}}'
-      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"delta":"native result"}}'
+      printf '%s\n' '{"method":"turn/started","params":{"turn":{"id":"turn-test","status":"inProgress"}}}'
+      printf '%s\n' '{"method":"item/started","params":{"item":{"id":"cmd-1","type":"commandExecution","command":"echo hi","status":"inProgress"}}}'
+      printf '%s\n' '{"method":"item/commandExecution/outputDelta","params":{"itemId":"cmd-1","delta":"hi\n"}}'
+      printf '%s\n' '{"method":"item/completed","params":{"item":{"id":"cmd-1","type":"commandExecution","command":"echo hi","status":"completed","aggregatedOutput":"hi\n","exitCode":0}}}'
+      printf '%s\n' '{"method":"item/reasoning/summaryTextDelta","params":{"itemId":"r1","delta":"thinking "}}'
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"native "}}'
+      printf '%s\n' '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"result"}}'
       printf '%s\n' '{"method":"turn/completed","params":{"turn":{"id":"turn-test","status":"completed"}}}'
       break
       ;;
@@ -1252,6 +1283,8 @@ done
             CodexRunRequest::new("gpt-test", std::env::current_dir().unwrap(), "do the work");
         request.command = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
         request.idle_timeout = Duration::from_secs(2);
+        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+        request.stream_tx = Some(stream_tx);
 
         let result = run_codex_turn(request, CancellationToken::new())
             .await
@@ -1259,6 +1292,49 @@ done
         assert_eq!(result.thread_id, "thread-test");
         assert_eq!(result.turn_id, "turn-test");
         assert_eq!(result.output, "native result");
+        assert_eq!(result.tools.command_executions, 1);
+
+        let mut events = Vec::new();
+        while let Ok(event) = stream_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, CodexStreamEvent::TurnStarted { .. })),
+            "expected turn/started: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                CodexStreamEvent::ItemStarted(item)
+                    if item.kind == crate::agent::codex_stream::CodexItemKind::CommandExecution
+            )),
+            "expected command item/started: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                CodexStreamEvent::ItemOutputDelta { item_id, text }
+                    if item_id == "cmd-1" && text == "hi\n"
+            )),
+            "expected command output delta: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                CodexStreamEvent::ReasoningDelta { text, .. } if text == "thinking "
+            )),
+            "expected reasoning delta: {events:?}"
+        );
+        let agent_text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                CodexStreamEvent::AgentMessageDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(agent_text, "native result");
     }
 
     #[cfg(unix)]

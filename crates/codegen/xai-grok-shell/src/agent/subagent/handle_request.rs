@@ -141,6 +141,29 @@ pub(super) fn codex_subagent_developer_instructions(
     sections.join("\n\n")
 }
 
+/// Forward one live Codex app-server event into the child subagent session so
+/// the pager's nested view renders the native stream (text, reasoning, tools,
+/// plan) while the turn is still running.
+fn emit_codex_subagent_stream_event(
+    gateway: &GatewaySender,
+    child_session_id: &acp::SessionId,
+    event: crate::agent::codex_stream::CodexStreamEvent,
+    ui: &mut crate::agent::codex_stream::CodexStreamUiState,
+) {
+    use crate::agent::codex_stream::stream_event_to_acp;
+
+    for chunk in stream_event_to_acp(event, ui) {
+        let mut notification =
+            acp::SessionNotification::new(child_session_id.clone(), chunk.update);
+        if let Some(idx) = chunk.chunk_index {
+            let mut meta = serde_json::Map::new();
+            meta.insert("chunkId".into(), serde_json::json!(idx));
+            notification = notification.meta(Some(meta));
+        }
+        gateway.forward_fire_and_forget(notification);
+    }
+}
+
 /// Load the durable native-Codex resume pointer and reject any attempt to
 /// cross a parent session, provider, model, cwd, or sandbox boundary. The
 /// thread is resumed by app-server from its own persisted rollout; Grok Build
@@ -850,11 +873,44 @@ pub(crate) async fn handle_subagent_request(
         }
         let codex_sandbox = codex_request.sandbox;
 
-        let run_result = crate::agent::codex_app_server::run_codex_turn(
+        // Stream native app-server events into the child subagent view so
+        // Codex subagents render the same live surface as primary Codex turns
+        // (text, reasoning, tools, plan). Keep `child_session_id` stable as
+        // `codex:{request.id}` for the whole lifecycle; the private thread id
+        // lives only in resume metadata.
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::agent::codex_stream::CodexStreamEvent,
+        >();
+        codex_request.stream_tx = Some(stream_tx);
+        let mut stream_ui = crate::agent::codex_stream::CodexStreamUiState::default();
+        let child_acp_id = acp::SessionId::new(child_session_id.clone());
+        let mut run_fut = std::pin::pin!(crate::agent::codex_app_server::run_codex_turn(
             codex_request,
             cancel_token.clone(),
-        )
-        .await;
+        ));
+        let run_result = loop {
+            tokio::select! {
+                Some(event) = stream_rx.recv() => {
+                    emit_codex_subagent_stream_event(
+                        gateway,
+                        &child_acp_id,
+                        event,
+                        &mut stream_ui,
+                    );
+                }
+                result = &mut run_fut => {
+                    while let Ok(event) = stream_rx.try_recv() {
+                        emit_codex_subagent_stream_event(
+                            gateway,
+                            &child_acp_id,
+                            event,
+                            &mut stream_ui,
+                        );
+                    }
+                    break result;
+                }
+            }
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
         let mut completed_codex_thread_id = None;
         let mut codex_cached_input_tokens = 0;
@@ -868,7 +924,9 @@ pub(crate) async fn handle_subagent_request(
                     success: true,
                     output: std::sync::Arc::from(codex.output),
                     subagent_id: request.id.clone(),
-                    child_session_id: codex.thread_id,
+                    // Stable UI id (matches SubagentSpawned), not the private
+                    // Codex thread id used only for resume.
+                    child_session_id: child_session_id.clone(),
                     tool_calls: codex.tools.total(),
                     turns: 1,
                     duration_ms,
@@ -916,11 +974,22 @@ pub(crate) async fn handle_subagent_request(
         if result.output.is_empty() && result.success {
             result.output = std::sync::Arc::from("Codex agent completed successfully.");
         }
+        // When the app-server suppressed text deltas, surface the final body
+        // into the child view so open-subagent scrollback still has the answer.
+        if result.success && !stream_ui.streamed_agent_text && !result.output.is_empty() {
+            gateway.forward_fire_and_forget(acp::SessionNotification::new(
+                child_acp_id.clone(),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new(result.output.to_string())),
+                )),
+            ));
+        }
         if let Some(thread_id) = completed_codex_thread_id {
             let meta = SubagentMeta {
                 subagent_id: request.id.clone(),
                 parent_session_id: ctx.parent_session_id.clone(),
-                child_session_id: thread_id.clone(),
+                // Keep the public child session id stable for UI/replay.
+                child_session_id: child_session_id.clone(),
                 subagent_type: request.subagent_type.clone(),
                 description: request.description.clone(),
                 prompt: request.prompt.clone(),

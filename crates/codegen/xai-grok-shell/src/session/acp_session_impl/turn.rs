@@ -35,6 +35,8 @@ fn validate_structured_output(
         Err(e) => Err(format!("output does not match the required schema: {e}")),
     }
 }
+
+
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
 /// **Ledger marks** only when [`Self::fail_closed`]. Sticky and background
@@ -244,31 +246,71 @@ impl SessionActor {
             orchestration_instructions,
         ));
 
-        let result = run_codex_turn(request, tokio_util::sync::CancellationToken::new())
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    provider_id = %provider.id,
-                    model = %sampling.model,
-                    ?error,
-                    "primary Codex subscription turn failed"
-                );
-                let guidance = match error {
-                    crate::agent::codex_app_server::CodexAppServerError::Spawn(_) => {
-                        "Codex CLI is unavailable. Install the official Codex CLI, then open \
-                         /providers and connect Codex."
+        // Live-forward app-server notifications into ACP so Codex primary turns
+        // stream text, reasoning, tools, and plan updates like a native agent.
+        let (stream_tx, mut stream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::agent::codex_stream::CodexStreamEvent>();
+        request.stream_tx = Some(stream_tx);
+
+        let stream_start_ms = chrono::Utc::now().timestamp_millis();
+        {
+            let prompt_id = self
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned")
+                .clone();
+            let mut cap = self.streaming_turn_capture.lock();
+            cap.begin_turn(prompt_id, self.current_turn_number.get());
+            cap.start_stream(stream_start_ms);
+        }
+        self.chat_state_handle.record_stream_start(stream_start_ms);
+        self.emit_event(crate::session::events::Event::PhaseChanged {
+            phase: crate::session::events::Phase::WaitingForModel,
+        });
+
+        let mut ui = crate::agent::codex_stream::CodexStreamUiState::default();
+        let mut run_fut = std::pin::pin!(run_codex_turn(
+            request,
+            tokio_util::sync::CancellationToken::new()
+        ));
+        let result = loop {
+            tokio::select! {
+                Some(event) = stream_rx.recv() => {
+                    self.apply_codex_stream_event(event, &mut ui).await;
+                }
+                result = &mut run_fut => {
+                    while let Ok(event) = stream_rx.try_recv() {
+                        self.apply_codex_stream_event(event, &mut ui).await;
                     }
-                    crate::agent::codex_app_server::CodexAppServerError::Cancelled => {
-                        "Codex subscription turn was cancelled."
-                    }
-                    _ => {
-                        "Codex subscription turn failed. Open /providers to verify or renew the \
-                         ChatGPT login, then retry."
-                    }
-                };
-                acp::Error::internal_error().data(guidance)
-            })?;
+                    break result;
+                }
+            }
+        }
+        .map_err(|error| {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                provider_id = %provider.id,
+                model = %sampling.model,
+                ?error,
+                "primary Codex subscription turn failed"
+            );
+            let guidance = match error {
+                crate::agent::codex_app_server::CodexAppServerError::Spawn(_) => {
+                    "Codex CLI is unavailable. Install the official Codex CLI, then open \
+                     /providers and connect Codex."
+                }
+                crate::agent::codex_app_server::CodexAppServerError::Cancelled => {
+                    "Codex subscription turn was cancelled."
+                }
+                _ => {
+                    "Codex subscription turn failed. Open /providers to verify or renew the \
+                     ChatGPT login, then retry."
+                }
+            };
+            acp::Error::internal_error().data(guidance)
+        })?;
+
+        self.streaming_turn_capture.lock().clear_current_segment();
 
         if result.usage.total_tokens > 0 {
             let clamp = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
@@ -340,8 +382,18 @@ impl SessionActor {
                 "totalTokens": result.usage.total_tokens,
             }),
         );
-        self.send_slash_command_output_with_meta(&result.output, Some(chunk_meta))
-            .await;
+        // If text already streamed live, do not re-print the full body.
+        // Still flush so the replay buffer delivers the final chunks before
+        // the turn ends, and attach terminal meta via a trailing empty chunk
+        // only when nothing was streamed (fallback path below).
+        if ui.streamed_agent_text {
+            if let Err(e) = crate::session::replay_events::flush_replay_actor(&self.event_tx).await {
+                tracing::warn!(?e, "flush_replay_actor failed after Codex stream");
+            }
+        } else {
+            self.send_slash_command_output_with_meta(&result.output, Some(chunk_meta))
+                .await;
+        }
         self.record_assistant_response(ConversationItem::assistant_with_model(
             result.output,
             sampling.model,
@@ -350,10 +402,50 @@ impl SessionActor {
 
         Ok(TurnOutcome::Completed {
             snapshot: Box::new(None),
-            tools_called: Vec::new(),
+            tools_called: ui.tools_called,
             structured_output,
             refusal: None,
         })
+    }
+
+    /// Map one live Codex app-server event into ACP session updates.
+    async fn apply_codex_stream_event(
+        &self,
+        event: crate::agent::codex_stream::CodexStreamEvent,
+        ui: &mut crate::agent::codex_stream::CodexStreamUiState,
+    ) {
+        use crate::agent::codex_stream::{CodexStreamEvent, stream_event_to_acp};
+
+        if matches!(event, CodexStreamEvent::TurnStarted { .. }) {
+            self.emit_event(crate::session::events::Event::PhaseChanged {
+                phase: crate::session::events::Phase::WaitingForModel,
+            });
+        }
+
+        for chunk in stream_event_to_acp(event, ui) {
+            if chunk.is_agent_text {
+                if let Some(text) = chunk.text.as_deref() {
+                    let mut cap = self.streaming_turn_capture.lock();
+                    cap.append(false, text);
+                }
+                self.emit_event(crate::session::events::Event::PhaseChanged {
+                    phase: crate::session::events::Phase::StreamingText,
+                });
+            } else if chunk.is_reasoning {
+                if let Some(text) = chunk.text.as_deref() {
+                    let mut cap = self.streaming_turn_capture.lock();
+                    cap.append(true, text);
+                }
+                self.emit_event(crate::session::events::Event::PhaseChanged {
+                    phase: crate::session::events::Phase::StreamingReasoning,
+                });
+            } else if chunk.is_tool {
+                self.emit_event(crate::session::events::Event::PhaseChanged {
+                    phase: crate::session::events::Phase::ToolExecution,
+                });
+            }
+            self.send_update(chunk.update, chunk.chunk_index).await;
+        }
     }
 
     /// Run the image-normalization pipeline (re-encode caps, min-side and

@@ -334,10 +334,15 @@ context_window = 1050000
 
 Codex is a complete coding agent rather than a sampling endpoint. Primary
 turns and subagent turns therefore run through the official native app-server,
-not through the OpenAI API or Grok Build's inference sampler. The primary
-session persists its private Codex thread link in `codex_thread.json` and
-resumes it on subsequent Codex turns. API credential fields on a Codex
-provider are ignored and accidental direct inference fails closed:
+not through the OpenAI API or Grok Build's inference sampler. During primary and subagent Codex turns, Grok Build forwards app-server stream
+notifications into the same ACP surfaces used by native models: assistant text
+deltas, reasoning/thought chunks, tool call cards (commands, file edits, MCP,
+host tools), plan updates, and completion status. Subagent streams land on the
+child session view (`codex:<subagent-id>`) so opening a Codex task shows the
+full native turn live. The primary session persists its private Codex thread
+link in `codex_thread.json` and resumes it on subsequent Codex turns. API
+credential fields on a Codex provider are ignored and accidental direct
+inference fails closed:
 
 ```text
 task(

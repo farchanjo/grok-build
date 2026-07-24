@@ -3,6 +3,7 @@ pub mod app;
 pub mod auth_method;
 pub mod chat_modes;
 pub mod codex_app_server;
+pub mod codex_stream;
 pub mod config;
 pub mod config_model_override_parse;
 mod ext_parsers;
