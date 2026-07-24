@@ -23,6 +23,11 @@ const OPENAI_CACHE_FILE: &str = "openai_models_cache.json";
 const OPENAI_CACHE_VERSION: u8 = 1;
 const OPENROUTER_CACHE_FILE: &str = "openrouter_models_cache.json";
 const OPENROUTER_CACHE_VERSION: u8 = 1;
+/// Default freshness window for the OpenRouter catalog cache. A stale cache is
+/// revalidated in the background while the picker/session keeps using the
+/// last-good models.
+const OPENROUTER_CATALOG_DEFAULT_TTL_SECS: u64 = 6 * 60 * 60;
+const OPENROUTER_CATALOG_TTL_ENV: &str = "GROK_OPENROUTER_CATALOG_TTL_SECS";
 
 /// A provider understood by the built-in provider screen.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -197,6 +202,11 @@ pub struct OpenAiCatalog {
 pub struct OpenRouterCatalog {
     pub source: OpenRouterCatalogSource,
     pub models: Vec<ProviderModelPreset>,
+    /// Epoch seconds when the live catalog was fetched and cached. Absent for
+    /// legacy caches written before catalog freshness tracking, which are
+    /// treated as stale. Not part of the provider picker contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<u64>,
 }
 
 /// A safe outcome of testing an API connection.
@@ -466,6 +476,12 @@ impl ProviderManager {
                 presets.retain(|preset| preset.provider != ProviderId::OpenRouter);
                 presets.extend(cached.models);
             }
+            // Stale-while-revalidate: if the cached catalog is older than the
+            // TTL, trigger a non-blocking background refresh so long-lived
+            // sessions eventually see retired/new models. The picker/session
+            // keeps using the cached models meanwhile. This is the single
+            // auto-refresh entry point; the TTL check is the only trigger.
+            maybe_spawn_openrouter_background_refresh(&credential_lookup_manager().grok_home);
         }
         presets.retain(|preset| preset.provider != ProviderId::Codex);
         if let Ok(cached) = load_codex_catalog_cache(&credential_lookup_manager().grok_home) {
@@ -836,6 +852,7 @@ impl ProviderManager {
             let catalog = OpenRouterCatalog {
                 source: OpenRouterCatalogSource::Live,
                 models,
+                fetched_at: current_epoch_secs(),
             };
             // A cache write failure is fail-closed for persistence but must
             // not discard a successfully authenticated response in memory.
@@ -1352,6 +1369,11 @@ struct OpenRouterTopProvider {
 struct OpenRouterCatalogCache {
     version: u8,
     models: Vec<ProviderModelPreset>,
+    /// Epoch seconds when the cache was written. Legacy caches predating
+    /// catalog freshness tracking omit this field; tolerant deserialize
+    /// yields `None` so a single background refresh is attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fetched_at: Option<u64>,
 }
 
 fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
@@ -1418,6 +1440,186 @@ fn openrouter_cache_path(grok_home: &Path) -> PathBuf {
     grok_home.join(OPENROUTER_CACHE_FILE)
 }
 
+/// Return the current Unix epoch seconds, or `None` if the system clock is
+/// before the epoch (which should never happen in practice).
+fn current_epoch_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+/// Resolve the OpenRouter catalog freshness window. The default is
+/// [`OPENROUTER_CATALOG_DEFAULT_TTL_SECS`]; `GROK_OPENROUTER_CATALOG_TTL_SECS`
+/// overrides it. A value of `0` disables automatic background revalidation.
+fn openrouter_catalog_ttl_secs() -> u64 {
+    std::env::var(OPENROUTER_CATALOG_TTL_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(OPENROUTER_CATALOG_DEFAULT_TTL_SECS)
+}
+
+/// A cached catalog is stale when no `fetched_at` timestamp is recorded
+/// (legacy cache) or the elapsed time since the last fetch exceeds the TTL.
+/// A TTL of `0` disables auto-refresh, so the cache is never considered
+/// stale by this check.
+fn openrouter_cache_is_stale(fetched_at: Option<u64>, ttl: u64) -> bool {
+    if ttl == 0 {
+        return false;
+    }
+    let Some(fetched_at) = fetched_at else {
+        return true;
+    };
+    let Some(now) = current_epoch_secs() else {
+        // A non-monotonic clock cannot prove freshness; treat as stale so a
+        // refresh is attempted once and the cache is rewritten on success.
+        return true;
+    };
+    now.saturating_sub(fetched_at) >= ttl
+}
+
+/// Process-wide guard preventing concurrent OpenRouter catalog background
+/// refreshes from stampeding. Tracks whether a refresh is in flight and the
+/// epoch seconds of the most recent attempt. [`try_claim_openrouter_refresh`]
+/// returns a guard that releases the claim on drop; a `None` result means a
+/// refresh is already in flight and the caller should keep using the cache.
+static OPENROUTER_REFRESH_GUARD: std::sync::Mutex<Option<OpenRouterRefreshState>> =
+    std::sync::Mutex::new(None);
+
+struct OpenRouterRefreshState {
+    in_flight: bool,
+    last_attempt_secs: u64,
+}
+
+/// Claim the process-wide OpenRouter background refresh slot. Returns a guard
+/// when the cache is stale and no refresh is already running, or `None` when
+/// the cache is fresh, a refresh is disabled, a refresh is in flight, or the
+/// last attempt was too recent to retry (debounce within the TTL window).
+fn try_claim_openrouter_refresh(
+    fetched_at: Option<u64>,
+    ttl: u64,
+) -> Option<OpenRouterRefreshClaim> {
+    if !openrouter_cache_is_stale(fetched_at, ttl) {
+        return None;
+    }
+    let now = current_epoch_secs().unwrap_or(0);
+    let mut guard = OPENROUTER_REFRESH_GUARD.lock().ok()?;
+    let state = guard.get_or_insert(OpenRouterRefreshState {
+        in_flight: false,
+        last_attempt_secs: 0,
+    });
+    if state.in_flight {
+        return None;
+    }
+    // Debounce: never retry within the TTL window after the last attempt,
+    // even if the cache is still stale (for example, a refresh that failed
+    // without rewriting the timestamp).
+    if now.saturating_sub(state.last_attempt_secs) < ttl {
+        return None;
+    }
+    state.in_flight = true;
+    state.last_attempt_secs = now;
+    Some(OpenRouterRefreshClaim)
+}
+
+/// RAII guard marking the process-wide OpenRouter refresh slot as no longer
+/// in flight when dropped. The refresh attempt timestamp is retained for
+/// debouncing.
+struct OpenRouterRefreshClaim;
+
+impl Drop for OpenRouterRefreshClaim {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = OPENROUTER_REFRESH_GUARD.lock()
+            && let Some(state) = guard.as_mut()
+        {
+            state.in_flight = false;
+        }
+    }
+}
+
+/// Reset the process-wide OpenRouter refresh guard. Test-only: serial tests
+/// that exercise [`maybe_spawn_openrouter_background_refresh`] call this to
+/// start from a known state so a prior test's debounce timestamp does not
+/// suppress the refresh under test.
+#[cfg(test)]
+fn reset_openrouter_refresh_guard_for_tests() {
+    if let Ok(mut guard) = OPENROUTER_REFRESH_GUARD.lock() {
+        *guard = None;
+    }
+}
+
+/// Trigger a non-blocking background refresh of the OpenRouter catalog when
+/// the on-disk cache is stale and an OpenRouter credential is configured.
+/// The picker/session continues with the cached models meanwhile; a failed
+/// refresh keeps the last-good cache. This is the single auto-refresh entry
+/// point: the TTL check is the only trigger, and there are no periodic loops.
+fn maybe_spawn_openrouter_background_refresh(grok_home: &Path) {
+    let ttl = openrouter_catalog_ttl_secs();
+    if ttl == 0 {
+        return;
+    }
+    let manager = credential_lookup_manager();
+    // Only refresh when an OpenRouter key is configured; without one the
+    // live request fails closed and there is nothing to revalidate.
+    let Ok(Some(_)) = manager.api_key(ProviderId::OpenRouter) else {
+        return;
+    };
+    // Reuse the manager's grok_home unless the caller (tests) supplied a
+    // thread-local override; otherwise honor the explicit path so the cache
+    // file and credential vault are consistent.
+    let home = if grok_home == manager.grok_home {
+        manager.grok_home.clone()
+    } else {
+        grok_home.to_path_buf()
+    };
+    let fetched_at = load_openrouter_catalog_cache(&home)
+        .ok()
+        .and_then(|catalog| catalog.fetched_at);
+    let Some(_claim) = try_claim_openrouter_refresh(fetched_at, ttl) else {
+        return;
+    };
+    // Spawn the refresh on a dedicated thread with its own tokio runtime so
+    // this synchronous caller (install_model_presets/resolve_model_list) is
+    // never blocked. The claim is moved into the thread and released on drop.
+    #[cfg(test)]
+    let catalog_url_override = OPENROUTER_CATALOG_URL_OVERRIDE.with(|value| value.borrow().clone());
+    std::thread::spawn(move || {
+        let _claim = _claim;
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::warn!(%error, "OpenRouter catalog background runtime failed");
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let mut manager = ProviderManager::new(&home);
+            #[cfg(test)]
+            if let Some(url) = catalog_url_override {
+                manager = manager.with_openrouter_catalog_url(url);
+            }
+            match manager.refresh_openrouter_catalog().await {
+                Ok(catalog) => {
+                    tracing::info!(
+                        model_count = catalog.models.len(),
+                        source = ?catalog.source,
+                        "OpenRouter model catalog background refresh completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "OpenRouter model catalog background refresh failed; last-good cache retained"
+                    );
+                }
+            }
+        });
+    });
+}
+
 fn load_openrouter_catalog_cache(grok_home: &Path) -> Result<OpenRouterCatalog, ()> {
     let path = openrouter_cache_path(grok_home);
     let bytes = std::fs::read(&path).map_err(|_| ())?;
@@ -1431,6 +1633,7 @@ fn load_openrouter_catalog_cache(grok_home: &Path) -> Result<OpenRouterCatalog, 
     Ok(OpenRouterCatalog {
         source: OpenRouterCatalogSource::Cache,
         models: cache.models,
+        fetched_at: cache.fetched_at,
     })
 }
 
@@ -1442,6 +1645,7 @@ fn save_openrouter_catalog_cache(
     let cache = OpenRouterCatalogCache {
         version: OPENROUTER_CACHE_VERSION,
         models: catalog.models.clone(),
+        fetched_at: catalog.fetched_at.or_else(current_epoch_secs),
     };
     let bytes = serde_json::to_vec(&cache).map_err(std::io::Error::other)?;
     let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
@@ -1543,11 +1747,18 @@ fn remove_cache_file(path: &Path) -> std::io::Result<()> {
 thread_local! {
     static STORED_KEY_HOME_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
         const { std::cell::RefCell::new(None) };
+    static OPENROUTER_CATALOG_URL_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub(crate) fn set_stored_key_home_for_tests(home: Option<std::path::PathBuf>) {
     STORED_KEY_HOME_OVERRIDE.with(|value| *value.borrow_mut() = home);
+}
+
+#[cfg(test)]
+pub(crate) fn set_openrouter_catalog_url_for_tests(url: Option<String>) {
+    OPENROUTER_CATALOG_URL_OVERRIDE.with(|value| *value.borrow_mut() = url);
 }
 
 #[cfg(test)]
@@ -2001,6 +2212,7 @@ mod tests {
                 br#"{"data":[{"id":"acme/private","context_length":64000,"top_provider":{"max_completion_tokens":64000},"supported_parameters":["tools","reasoning"]}]}"#,
             )
             .unwrap(),
+            fetched_at: None,
         };
         assert_eq!(cached.models[0].max_completion_tokens, Some(64000));
         save_openrouter_catalog_cache(home.path(), &cached).unwrap();
@@ -2241,5 +2453,295 @@ mod tests {
         ));
         manager.refresh_configured_catalogs().await;
         assert!(!home.path().join(CODEX_CACHE_FILE).exists());
+    }
+
+    /// Write an OpenRouter catalog cache with the given models and
+    /// `fetched_at` timestamp directly to disk, bypassing the live fetch.
+    fn write_openrouter_cache(
+        home: &Path,
+        models: &[ProviderModelPreset],
+        fetched_at: Option<u64>,
+    ) {
+        let cache = OpenRouterCatalogCache {
+            version: OPENROUTER_CACHE_VERSION,
+            models: models.to_vec(),
+            fetched_at,
+        };
+        let bytes = serde_json::to_vec(&cache).unwrap();
+        let path = openrouter_cache_path(home);
+        xai_grok_shell_base::util::secure_file::write_secure_file(&path, &bytes).unwrap();
+    }
+
+    fn openrouter_cache_fetched_at(home: &Path) -> Option<u64> {
+        let bytes = std::fs::read(openrouter_cache_path(home)).unwrap();
+        let cache: OpenRouterCatalogCache = serde_json::from_slice(&bytes).unwrap();
+        cache.fetched_at
+    }
+
+    #[test]
+    fn openrouter_cache_is_stale_when_missing_timestamp() {
+        // A legacy cache without fetched_at is treated as stale so a single
+        // background refresh is attempted, then the cache is rewritten with
+        // a timestamp on success.
+        assert!(openrouter_cache_is_stale(None, 6 * 60 * 60));
+    }
+
+    #[test]
+    fn openrouter_cache_is_fresh_within_ttl() {
+        let now = current_epoch_secs().unwrap();
+        // Fetched one minute ago with a six-hour TTL is still fresh.
+        assert!(!openrouter_cache_is_stale(Some(now - 60), 6 * 60 * 60));
+    }
+
+    #[test]
+    fn openrouter_cache_is_stale_beyond_ttl() {
+        let now = current_epoch_secs().unwrap();
+        // Fetched twelve hours ago exceeds the six-hour default TTL.
+        assert!(openrouter_cache_is_stale(
+            Some(now - 12 * 60 * 60),
+            6 * 60 * 60
+        ));
+    }
+
+    #[test]
+    fn openrouter_cache_is_never_stale_when_ttl_disables_auto_refresh() {
+        let now = current_epoch_secs().unwrap();
+        // TTL=0 disables auto-refresh entirely, regardless of age.
+        assert!(!openrouter_cache_is_stale(
+            Some(now - 365 * 24 * 60 * 60),
+            0
+        ));
+        assert!(!openrouter_cache_is_stale(None, 0));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openrouter_fresh_cache_does_not_trigger_background_refresh() {
+        let home = tempfile::tempdir().unwrap();
+        let _openrouter = EnvGuard::unset("OPENROUTER_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        set_openrouter_catalog_url_for_tests(None);
+        reset_openrouter_refresh_guard_for_tests();
+
+        ProviderManager::new(home.path())
+            .set_api_key(ProviderId::OpenRouter, "router-key")
+            .unwrap();
+        let now = current_epoch_secs().unwrap();
+        let models = parse_openrouter_catalog(
+            br#"{"data":[{"id":"acme/fresh","context_length":32000,"supported_parameters":["tools"]}]}"#,
+        )
+        .unwrap();
+        write_openrouter_cache(home.path(), &models, Some(now));
+
+        // The cache is fresh: no background refresh is claimed.
+        let fetched_at = openrouter_cache_fetched_at(home.path());
+        assert_eq!(fetched_at, Some(now));
+        let claim = try_claim_openrouter_refresh(Some(now), 6 * 60 * 60);
+        assert!(claim.is_none(), "fresh cache must not trigger a refresh");
+
+        // The picker is still populated from the cache.
+        let mut config = super::super::config::Config::default();
+        ProviderManager::install_model_presets(&mut config);
+        let models = super::super::config::resolve_model_list(&config, None);
+        assert!(models.contains_key("openrouter:acme/fresh"));
+        assert_eq!(openrouter_cache_fetched_at(home.path()), Some(now));
+
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openrouter_stale_legacy_cache_triggers_background_refresh_and_rewrites_timestamp() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let home = tempfile::tempdir().unwrap();
+        let _openrouter = EnvGuard::unset("OPENROUTER_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        reset_openrouter_refresh_guard_for_tests();
+
+        // Legacy cache without fetched_at (None) and a stale model set.
+        let stale_models = parse_openrouter_catalog(
+            br#"{"data":[{"id":"acme/old","context_length":8000,"supported_parameters":["tools"]}]}"#,
+        )
+        .unwrap();
+        write_openrouter_cache(home.path(), &stale_models, None);
+        assert_eq!(openrouter_cache_fetched_at(home.path()), None);
+
+        // Mock server returns a fresh catalog.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            let body = r#"{"data":[{"id":"acme/new","context_length":128000,"supported_parameters":["tools"]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let manager = ProviderManager::new(home.path())
+            .with_openrouter_catalog_url(format!("http://{address}/models"));
+        manager
+            .set_api_key(ProviderId::OpenRouter, "router-key")
+            .unwrap();
+        set_openrouter_catalog_url_for_tests(Some(format!("http://{address}/models")));
+
+        // The picker continues with the stale cached models immediately.
+        let mut config = super::super::config::Config::default();
+        ProviderManager::install_model_presets(&mut config);
+        let models = super::super::config::resolve_model_list(&config, None);
+        assert!(
+            models.contains_key("openrouter:acme/old"),
+            "stale-while-revalidate must populate the picker from cache"
+        );
+
+        // Wait for the background refresh to complete and rewrite the cache.
+        server.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if openrouter_cache_fetched_at(home.path()).is_some() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("background refresh did not rewrite the timestamp");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // The cache now has a fresh timestamp and the new model.
+        let updated = load_openrouter_catalog_cache(home.path()).unwrap();
+        assert!(updated.fetched_at.is_some(), "timestamp was rewritten");
+        assert!(
+            updated.models.iter().any(|m| m.id == "openrouter:acme/new"),
+            "background refresh updated the cached models"
+        );
+
+        set_stored_key_home_for_tests(None);
+        set_openrouter_catalog_url_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openrouter_failed_background_refresh_keeps_last_good_cache() {
+        let home = tempfile::tempdir().unwrap();
+        let _openrouter = EnvGuard::unset("OPENROUTER_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        reset_openrouter_refresh_guard_for_tests();
+
+        // A stale last-good cache (old timestamp + valid models).
+        let now = current_epoch_secs().unwrap();
+        let last_good = parse_openrouter_catalog(
+            br#"{"data":[{"id":"acme/lastgood","context_length":32000,"supported_parameters":["tools"]}]}"#,
+        )
+        .unwrap();
+        write_openrouter_cache(home.path(), &last_good, Some(now - 365 * 24 * 60 * 60));
+
+        ProviderManager::new(home.path())
+            .set_api_key(ProviderId::OpenRouter, "router-key")
+            .unwrap();
+        // Point the background refresh at an unreachable endpoint so the live
+        // fetch fails; the cached models must remain usable.
+        set_openrouter_catalog_url_for_tests(Some("http://127.0.0.1:1/models".to_owned()));
+
+        let mut config = super::super::config::Config::default();
+        ProviderManager::install_model_presets(&mut config);
+        let models = super::super::config::resolve_model_list(&config, None);
+        assert!(
+            models.contains_key("openrouter:acme/lastgood"),
+            "failed refresh must keep last-good cache"
+        );
+
+        // Give the background refresh a moment to fail, then verify the cache
+        // file still holds the last-good models and the stale timestamp.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let retained = load_openrouter_catalog_cache(home.path()).unwrap();
+        assert!(
+            retained
+                .models
+                .iter()
+                .any(|m| m.id == "openrouter:acme/lastgood"),
+            "last-good models remain after a failed refresh"
+        );
+
+        set_stored_key_home_for_tests(None);
+        set_openrouter_catalog_url_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openrouter_ttl_zero_disables_background_refresh() {
+        let home = tempfile::tempdir().unwrap();
+        let _openrouter = EnvGuard::unset("OPENROUTER_API_KEY");
+        let _ttl = EnvGuard::set(OPENROUTER_CATALOG_TTL_ENV, "0");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        set_openrouter_catalog_url_for_tests(None);
+        reset_openrouter_refresh_guard_for_tests();
+
+        // A deeply stale cache that would trigger a refresh if auto-refresh
+        // were enabled.
+        let now = current_epoch_secs().unwrap();
+        let stale_models = parse_openrouter_catalog(
+            br#"{"data":[{"id":"acme/stale","context_length":8000,"supported_parameters":["tools"]}]}"#,
+        )
+        .unwrap();
+        write_openrouter_cache(home.path(), &stale_models, Some(now - 365 * 24 * 60 * 60));
+        let original_fetched_at = openrouter_cache_fetched_at(home.path());
+
+        ProviderManager::new(home.path())
+            .set_api_key(ProviderId::OpenRouter, "router-key")
+            .unwrap();
+
+        // The staleness check returns false when TTL=0, so no refresh is
+        // claimed even for a year-old cache.
+        let claim = try_claim_openrouter_refresh(
+            Some(now - 365 * 24 * 60 * 60),
+            openrouter_catalog_ttl_secs(),
+        );
+        assert!(claim.is_none(), "TTL=0 must disable auto-refresh");
+
+        // install_model_presets must not rewrite the cache either.
+        let mut config = super::super::config::Config::default();
+        ProviderManager::install_model_presets(&mut config);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            openrouter_cache_fetched_at(home.path()),
+            original_fetched_at,
+            "TTL=0 must leave the cache untouched"
+        );
+
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn openrouter_refresh_guard_debounces_concurrent_triggers() {
+        reset_openrouter_refresh_guard_for_tests();
+
+        // First claim succeeds for a stale cache.
+        let now = current_epoch_secs().unwrap();
+        let first = try_claim_openrouter_refresh(Some(now - 12 * 60 * 60), 6 * 60 * 60);
+        assert!(first.is_some(), "first stale trigger should claim");
+
+        // While the first refresh is in flight, a second concurrent trigger
+        // must not stampede: no second claim is granted.
+        let second = try_claim_openrouter_refresh(Some(now - 12 * 60 * 60), 6 * 60 * 60);
+        assert!(second.is_none(), "in-flight refresh must suppress a second");
+
+        // Dropping the first claim releases the slot; the last-attempt
+        // timestamp is retained so a retry within the TTL is still debounced.
+        drop(first);
+        let third = try_claim_openrouter_refresh(Some(now - 12 * 60 * 60), 6 * 60 * 60);
+        assert!(
+            third.is_none(),
+            "debounce within the TTL must suppress an immediate retry"
+        );
+
+        reset_openrouter_refresh_guard_for_tests();
     }
 }
