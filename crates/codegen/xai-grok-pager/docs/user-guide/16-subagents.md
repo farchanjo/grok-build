@@ -155,6 +155,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
 | `model`           | Optional model/provider catalog ID. Can target xAI, curated OpenAI, OpenRouter, or a configured Codex subscription agent. OpenAI entries prefixed with `openai:` are discovery-only and rejected for subagents because their tool support is unverified. |
+| `reasoning_effort` | Optional reasoning effort (`low`, `medium`, `high`, `max`, …) when the selected model supports it — including Codex subscription models (`codex-subscription`, `codex:<model>`). Omit to inherit role/persona/parent defaults. Ignored when `resume_from` is set. |
 | `run_in_background` | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
@@ -195,6 +196,14 @@ For a `codex-subscription` task, the public `resume_from` value is still the
 Grok Build subagent ID—not a Codex UUID. Grok Build resolves the private thread
 pointer from local metadata and fails closed if the session owner, provider,
 model, working directory, sandbox, or thread does not match.
+
+Codex subagents stream natively into the child view (`codex:<subagent-id>`):
+user messages, reasoning, tools, plan updates, and assistant text appear live.
+A durable child transcript is appended and fsynced before `SubagentFinished` is
+emitted, so reload shows the turn once. Pass `reasoning_effort` on `task` the
+same way as for other models when the selected Codex catalog model supports
+it. Cancellation of the parent turn interrupts the Codex child via the shared
+cancel token.
 
 ---
 

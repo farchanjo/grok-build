@@ -485,6 +485,11 @@ pub enum FinishReason {
     ToolCalls,
     ContentFilter,
     FunctionCall,
+    /// OpenRouter's normalized terminal marker for a generation that failed
+    /// mid-stream (provider disconnect, rate limit after partial output, ...).
+    /// Without this variant, a single error chunk fails deserialization of the
+    /// whole request and discards already-streamed content.
+    Error,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

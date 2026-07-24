@@ -292,6 +292,14 @@ impl SessionActor {
             self.cancel_running_turn_subagents();
         }
 
+        // Signal graceful cancel first so Codex primary turns can send
+        // `turn/interrupt` before the task abort drops the future.
+        {
+            let cancelled = self.turn_cancel.borrow().clone();
+            cancelled.cancel();
+            *self.turn_cancel.borrow_mut() = tokio_util::sync::CancellationToken::new();
+        }
+
         // Don't count send-now/rewound cancels — they'd skew the cancel-rate signal.
         if !rewind_if_pristine && trigger.as_deref() != Some("send_now") {
             self.signals_handle().record_cancellation();

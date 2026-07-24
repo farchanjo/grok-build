@@ -380,6 +380,31 @@ struct FlatErrorResponse {
 
 /// Extract `(error_type, message)` from either error format.
 fn try_parse_error(data: &str) -> Option<(String, String)> {
+    // Prefer Value-based OpenRouter hybrid detection first: a
+    // chat.completion.chunk with finish_reason=error also deserializes as a
+    // loose ErrorResponse (extra fields ignored, type missing → "unknown"),
+    // which would hide rate-limit / provider metadata.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+        let finish = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str());
+        if finish == Some("error") {
+            if let Some((kind, message)) = openrouter_error_fields(value.get("error")) {
+                return Some((kind, message));
+            }
+            return Some((
+                "finish_reason_error".to_string(),
+                "Upstream model stream ended with finish_reason=error".to_string(),
+            ));
+        }
+        // Top-level error object without choices (pure error envelope that
+        // still carries code/metadata instead of OpenAI `type`).
+        if value.get("choices").is_none()
+            && let Some((kind, message)) = openrouter_error_fields(value.get("error"))
+        {
+            return Some((kind, message));
+        }
+    }
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
         return Some((
             resp.error.kind.unwrap_or_else(|| "unknown".to_string()),
@@ -395,6 +420,37 @@ fn try_parse_error(data: &str) -> Option<(String, String)> {
         ));
     }
     None
+}
+
+/// Pull `(type, message)` from OpenRouter's flexible `error` object.
+/// `code` may be a string or number; `type` / `metadata.error_type` are optional.
+fn openrouter_error_fields(error: Option<&serde_json::Value>) -> Option<(String, String)> {
+    let error = error?.as_object()?;
+    let message = error
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())?;
+    let kind = error
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            error
+                .get("metadata")
+                .and_then(|m| m.get("error_type"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            error.get("code").and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| "finish_reason_error".to_string());
+    Some((kind, message))
 }
 
 /// Max chars of a structured (JSON) error message shown to users.
@@ -626,6 +682,57 @@ mod tests {
             try_parse_stream_error(data).is_none(),
             "valid chunk should not be parsed as error"
         );
+    }
+
+    #[test]
+    fn try_parse_stream_error_openrouter_finish_reason_error() {
+        // Hybrid mid-stream error chunk (OpenRouter docs shape).
+        let data = r#"{
+            "id":"gen-abc123",
+            "object":"chat.completion.chunk",
+            "created":1234567890,
+            "model":"z-ai/glm-5.2",
+            "provider":"Z.AI",
+            "error":{
+                "code":429,
+                "message":"Rate limit exceeded",
+                "metadata":{"error_type":"rate_limit_exceeded"}
+            },
+            "choices":[{
+                "index":0,
+                "delta":{"content":""},
+                "finish_reason":"error"
+            }]
+        }"#;
+        let err = try_parse_stream_error(data).expect("hybrid error chunk must parse");
+        match err {
+            SamplingError::StreamError {
+                error_type,
+                message,
+            } => {
+                assert_eq!(error_type, "rate_limit_exceeded");
+                assert_eq!(message, "Rate limit exceeded");
+            }
+            other => panic!("expected StreamError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_parse_stream_error_finish_reason_error_without_envelope() {
+        let data = r#"{
+            "id":"gen-x",
+            "object":"chat.completion.chunk",
+            "created":1,
+            "model":"z-ai/glm-5.2",
+            "choices":[{"index":0,"delta":{},"finish_reason":"error"}]
+        }"#;
+        let err = try_parse_stream_error(data).expect("finish_reason=error alone must parse");
+        match err {
+            SamplingError::StreamError { error_type, .. } => {
+                assert_eq!(error_type, "finish_reason_error");
+            }
+            other => panic!("expected StreamError, got {other:?}"),
+        }
     }
 
     #[test]

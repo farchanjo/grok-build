@@ -649,6 +649,10 @@ pub enum StopReason {
     ToolCalls,
     /// Content was filtered
     ContentFilter,
+    /// The upstream generation errored mid-stream (e.g. OpenRouter's
+    /// `finish_reason: "error"`). Distinct from `ContentFilter` so the agent
+    /// loop can surface a provider failure instead of a refusal.
+    Error,
 }
 
 impl StopReason {
@@ -659,6 +663,7 @@ impl StopReason {
             StopReason::Length => "length",
             StopReason::ToolCalls => "tool_calls",
             StopReason::ContentFilter => "content_filter",
+            StopReason::Error => "error",
         }
     }
 }
@@ -670,6 +675,7 @@ impl From<FinishReason> for StopReason {
             FinishReason::Length => StopReason::Length,
             FinishReason::ToolCalls | FinishReason::FunctionCall => StopReason::ToolCalls,
             FinishReason::ContentFilter => StopReason::ContentFilter,
+            FinishReason::Error => StopReason::Error,
         }
     }
 }
@@ -7069,6 +7075,35 @@ mod tests {
             StopReason::from(FinishReason::ContentFilter),
             StopReason::ContentFilter
         );
+        assert_eq!(StopReason::from(FinishReason::Error), StopReason::Error);
+        assert_eq!(StopReason::Error.as_str(), "error");
+    }
+
+    #[test]
+    fn openrouter_error_finish_reason_deserializes_on_chunk() {
+        // OpenRouter mid-stream failure: finish_reason "error" on a normal
+        // chat.completion.chunk (often without a top-level error envelope).
+        let raw = r#"{
+            "id":"gen-test",
+            "object":"chat.completion.chunk",
+            "created":1234567890,
+            "model":"z-ai/glm-5.2",
+            "choices":[{
+                "index":0,
+                "delta":{"content":""},
+                "finish_reason":"error"
+            }]
+        }"#;
+        let chunk: crate::types::ChatCompletionChunk =
+            serde_json::from_str(raw).expect("finish_reason=error must deserialize");
+        assert_eq!(
+            chunk.choices[0].finish_reason,
+            Some(FinishReason::Error)
+        );
+        assert_eq!(
+            StopReason::from(chunk.choices[0].finish_reason.unwrap()),
+            StopReason::Error
+        );
     }
 
     // ============================================================================
@@ -8478,6 +8513,7 @@ mod tests {
         assert_eq!(StopReason::Length.as_str(), "length");
         assert_eq!(StopReason::ToolCalls.as_str(), "tool_calls");
         assert_eq!(StopReason::ContentFilter.as_str(), "content_filter");
+        assert_eq!(StopReason::Error.as_str(), "error");
     }
 
     // ============================================================================

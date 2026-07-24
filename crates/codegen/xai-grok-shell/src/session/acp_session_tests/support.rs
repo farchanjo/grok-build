@@ -319,6 +319,7 @@ pub(crate) async fn create_test_actor_ex(
         feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
         upload_queue: Arc::new(OnceLock::new()),
         sync_loop_cancel: None,
+        turn_cancel: std::cell::RefCell::new(tokio_util::sync::CancellationToken::new()),
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,

@@ -721,6 +721,11 @@ pub(crate) struct SessionActor {
         std::sync::Arc<std::sync::OnceLock<xai_file_utils::queue::UploadQueue>>,
     /// Cancellation token for the feedback sync loop (None if no feedback client)
     pub(crate) sync_loop_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Per-turn cancellation signal. Replaced at each prompt start; cancelled by
+    /// [`SessionActor::cancel_running_task`] before the task abort so Codex
+    /// primary turns can send a graceful `turn/interrupt` instead of relying
+    /// solely on future-drop + process kill.
+    pub(crate) turn_cancel: std::cell::RefCell<tokio_util::sync::CancellationToken>,
     /// The fully-built Agent: owns the ToolBridge, system prompt, policies,
     /// and the AgentDefinition. Replaces the old `tool_bridge` + `agent_definition` fields.
     /// Wrapped in `RefCell` for mid-session mutation (skill refresh, prompt regen).

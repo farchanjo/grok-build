@@ -103,6 +103,21 @@ pub struct TaskToolInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Optional reasoning effort for this subagent (for example `"low"`, `"medium"`,
+    /// `"high"`, `"max"`). Applied when the selected model supports reasoning
+    /// effort. Works for Codex subscription models (`codex-subscription`,
+    /// `codex:<model>`) and other providers that advertise effort options.
+    /// Omit to inherit role/persona/parent defaults. Do not pass if
+    /// `resume_from` is set (source effort is retained).
+    #[schemars(
+        description = "Optional reasoning effort for this agent (e.g. \"low\", \"medium\", \
+            \"high\", \"max\"). Applied when the selected model supports reasoning effort, \
+            including Codex subscription models. If omitted, the subagent inherits role, \
+            persona, or parent defaults. Do not pass if resume_from is set."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+
     /// Server-injected before execution. Becomes the subagent's session ID.
     #[schemars(skip)]
     #[serde(default)]
@@ -1151,6 +1166,7 @@ mod tests {
             resume_from: None,
             cwd: None,
             model: None,
+            reasoning_effort: None,
             task_id: None,
         };
         let value = serde_json::to_value(&input).unwrap();

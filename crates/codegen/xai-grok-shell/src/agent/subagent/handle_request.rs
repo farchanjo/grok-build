@@ -141,27 +141,169 @@ pub(super) fn codex_subagent_developer_instructions(
     sections.join("\n\n")
 }
 
-/// Forward one live Codex app-server event into the child subagent session so
-/// the pager's nested view renders the native stream (text, reasoning, tools,
-/// plan) while the turn is still running.
-fn emit_codex_subagent_stream_event(
-    gateway: &GatewaySender,
-    child_session_id: &acp::SessionId,
-    event: crate::agent::codex_stream::CodexStreamEvent,
-    ui: &mut crate::agent::codex_stream::CodexStreamUiState,
-) {
-    use crate::agent::codex_stream::stream_event_to_acp;
+/// Lightweight durable sink for a Codex child's ACP stream.
+///
+/// Forwards each update live to the child view, appends it to the child's
+/// `updates.jsonl` for reload, and collects file-edit paths so the parent
+/// can fold them into `agent_edited_paths` before completion is announced.
+struct CodexChildStreamSink {
+    child_session_id: acp::SessionId,
+    transcript_path: PathBuf,
+    edited_paths: std::collections::BTreeSet<String>,
+    child_cwd: PathBuf,
+}
 
-    for chunk in stream_event_to_acp(event, ui) {
-        let mut notification =
-            acp::SessionNotification::new(child_session_id.clone(), chunk.update);
-        if let Some(idx) = chunk.chunk_index {
-            let mut meta = serde_json::Map::new();
-            meta.insert("chunkId".into(), serde_json::json!(idx));
-            notification = notification.meta(Some(meta));
+impl CodexChildStreamSink {
+    fn new(child_session_id: acp::SessionId, child_cwd: PathBuf) -> Self {
+        let child_info = SessionInfo {
+            id: child_session_id.clone(),
+            cwd: child_cwd.to_string_lossy().to_string(),
+        };
+        let child_dir = session::persistence::session_dir(&child_info);
+        let _ = std::fs::create_dir_all(&child_dir);
+        Self {
+            child_session_id,
+            transcript_path: child_dir.join(crate::session::storage::UPDATES_FILE),
+            edited_paths: std::collections::BTreeSet::new(),
+            child_cwd,
         }
-        gateway.forward_fire_and_forget(notification);
     }
+
+    fn emit(
+        &mut self,
+        gateway: &GatewaySender,
+        event: crate::agent::codex_stream::CodexStreamEvent,
+        ui: &mut crate::agent::codex_stream::CodexStreamUiState,
+    ) {
+        use crate::agent::codex_stream::{
+            CodexItemKind, CodexProjectionTarget, CodexStreamEvent, stream_event_to_acp,
+        };
+
+        // Collect file-change paths for parent "files touched" tracking.
+        match &event {
+            CodexStreamEvent::ItemStarted(item) | CodexStreamEvent::ItemCompleted(item)
+                if item.kind == CodexItemKind::FileChange =>
+            {
+                for loc in &item.locations {
+                    let rel = relativize_edited_path(&self.child_cwd, loc);
+                    if !rel.is_empty() {
+                        self.edited_paths.insert(rel);
+                    }
+                }
+                for change in &item.changes {
+                    let rel = relativize_edited_path(&self.child_cwd, &change.path);
+                    if !rel.is_empty() {
+                        self.edited_paths.insert(rel);
+                    }
+                }
+            }
+            CodexStreamEvent::FileChangePatch { changes, .. } => {
+                for change in changes {
+                    let rel = relativize_edited_path(&self.child_cwd, &change.path);
+                    if !rel.is_empty() {
+                        self.edited_paths.insert(rel);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for chunk in stream_event_to_acp(event, ui, CodexProjectionTarget::Subagent) {
+            // Capture edit locations from projected tool cards as well.
+            if let acp::SessionUpdate::ToolCall(ref tool_call) = chunk.update
+                && matches!(tool_call.kind, acp::ToolKind::Edit)
+            {
+                for loc in &tool_call.locations {
+                    let rel = relativize_edited_path(&self.child_cwd, &loc.path);
+                    if !rel.is_empty() {
+                        self.edited_paths.insert(rel);
+                    }
+                }
+            }
+
+            let mut notification =
+                acp::SessionNotification::new(self.child_session_id.clone(), chunk.update);
+            if let Some(idx) = chunk.chunk_index {
+                let mut meta = serde_json::Map::new();
+                meta.insert("chunkId".into(), serde_json::json!(idx));
+                notification = notification.meta(Some(meta));
+            }
+            // Live view first, then durable append (best-effort; final fsync at end).
+            gateway.forward_fire_and_forget(notification.clone());
+            if let Err(error) = append_codex_child_transcript_line(&self.transcript_path, &notification)
+            {
+                tracing::warn!(
+                    child_session_id = %self.child_session_id.0,
+                    ?error,
+                    "failed to append Codex child transcript line"
+                );
+            }
+        }
+    }
+
+    /// Fsync the transcript so completion is only announced after durable write.
+    fn flush_ack(&self) -> bool {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.transcript_path)
+        {
+            Ok(file) => {
+                if let Err(error) = file.sync_all() {
+                    tracing::warn!(
+                        child_session_id = %self.child_session_id.0,
+                        ?error,
+                        "failed to fsync Codex child transcript"
+                    );
+                    return false;
+                }
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // No stream events — empty transcript is fine.
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    child_session_id = %self.child_session_id.0,
+                    ?error,
+                    "failed to open Codex child transcript for fsync"
+                );
+                false
+            }
+        }
+    }
+}
+
+fn relativize_edited_path(cwd: &Path, path: &Path) -> String {
+    let p = if path.is_absolute() {
+        path.strip_prefix(cwd).unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    p.to_string_lossy().to_string()
+}
+
+fn append_codex_child_transcript_line(
+    path: &Path,
+    notification: &acp::SessionNotification,
+) -> std::io::Result<()> {
+    use crate::session::storage::{SessionUpdate, SessionUpdateEnvelope};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let update = SessionUpdate::Acp(Box::new(notification.clone()));
+    let envelope = SessionUpdateEnvelope::from_update(&update)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut line = serde_json::to_vec(&envelope)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    line.push(b'\n');
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(&line)
 }
 
 /// Load the durable native-Codex resume pointer and reject any attempt to
@@ -877,13 +1019,18 @@ pub(crate) async fn handle_subagent_request(
         // Codex subagents render the same live surface as primary Codex turns
         // (text, reasoning, tools, plan). Keep `child_session_id` stable as
         // `codex:{request.id}` for the whole lifecycle; the private thread id
-        // lives only in resume metadata.
-        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel::<
+        // lives only in resume metadata. The sink also appends a durable
+        // child transcript and collects file-edit paths for the parent.
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<
             crate::agent::codex_stream::CodexStreamEvent,
-        >();
+        >(crate::agent::codex_app_server::CODEX_STREAM_CHANNEL_CAPACITY);
         codex_request.stream_tx = Some(stream_tx);
         let mut stream_ui = crate::agent::codex_stream::CodexStreamUiState::default();
         let child_acp_id = acp::SessionId::new(child_session_id.clone());
+        let mut stream_sink = CodexChildStreamSink::new(
+            child_acp_id.clone(),
+            PathBuf::from(&effective_cwd),
+        );
         let mut run_fut = std::pin::pin!(crate::agent::codex_app_server::run_codex_turn(
             codex_request,
             cancel_token.clone(),
@@ -891,21 +1038,11 @@ pub(crate) async fn handle_subagent_request(
         let run_result = loop {
             tokio::select! {
                 Some(event) = stream_rx.recv() => {
-                    emit_codex_subagent_stream_event(
-                        gateway,
-                        &child_acp_id,
-                        event,
-                        &mut stream_ui,
-                    );
+                    stream_sink.emit(gateway, event, &mut stream_ui);
                 }
                 result = &mut run_fut => {
                     while let Ok(event) = stream_rx.try_recv() {
-                        emit_codex_subagent_stream_event(
-                            gateway,
-                            &child_acp_id,
-                            event,
-                            &mut stream_ui,
-                        );
+                        stream_sink.emit(gateway, event, &mut stream_ui);
                     }
                     break result;
                 }
@@ -977,13 +1114,60 @@ pub(crate) async fn handle_subagent_request(
         // When the app-server suppressed text deltas, surface the final body
         // into the child view so open-subagent scrollback still has the answer.
         if result.success && !stream_ui.streamed_agent_text && !result.output.is_empty() {
-            gateway.forward_fire_and_forget(acp::SessionNotification::new(
+            let notification = acp::SessionNotification::new(
                 child_acp_id.clone(),
                 acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
                     acp::ContentBlock::Text(acp::TextContent::new(result.output.to_string())),
                 )),
-            ));
+            );
+            gateway.forward_fire_and_forget(notification.clone());
+            if let Err(error) =
+                append_codex_child_transcript_line(&stream_sink.transcript_path, &notification)
+            {
+                tracing::warn!(
+                    child_session_id = %child_session_id,
+                    ?error,
+                    "failed to append Codex child final-body transcript line"
+                );
+            }
         }
+
+        // Terminal completion metadata for the child view (parity with primary).
+        if result.success {
+            let mut chunk_meta = serde_json::Map::new();
+            chunk_meta.insert(
+                "modelId".into(),
+                serde_json::json!(effective_model_id.0.to_string()),
+            );
+            chunk_meta.insert("provider".into(), serde_json::json!("codex-subscription"));
+            chunk_meta.insert("toolCalls".into(), serde_json::json!(result.tool_calls));
+            chunk_meta.insert(
+                "tokenUsage".into(),
+                serde_json::json!({
+                    "inputTokens": result.tokens_used,
+                    "cachedInputTokens": codex_cached_input_tokens,
+                    "outputTokens": result.output_tokens_used,
+                    "reasoningOutputTokens": codex_reasoning_tokens,
+                    "totalTokens": result.total_tokens_used,
+                }),
+            );
+            let meta_notification = acp::SessionNotification::new(
+                child_acp_id.clone(),
+                acp::SessionUpdate::AgentMessageChunk(
+                    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                        String::new(),
+                    )))
+                    .meta(Some(chunk_meta)),
+                ),
+            );
+            gateway.forward_fire_and_forget(meta_notification.clone());
+            let _ = append_codex_child_transcript_line(
+                &stream_sink.transcript_path,
+                &meta_notification,
+            );
+        }
+
+        // Persist Codex thread ID / resume meta BEFORE announcing completion.
         if let Some(thread_id) = completed_codex_thread_id {
             let meta = SubagentMeta {
                 subagent_id: request.id.clone(),
@@ -1026,6 +1210,23 @@ pub(crate) async fn handle_subagent_request(
             }
         }
         let persisted_output_dir = persist_subagent_output(&subagent_meta_dir, &result);
+
+        // Durability barrier: fsync child transcript before SubagentFinished.
+        if !stream_sink.flush_ack() {
+            tracing::warn!(
+                subagent_id = %request.id,
+                "Codex child transcript fsync failed; completion still announced with best-effort durability"
+            );
+        }
+
+        // Fold child file edits into the parent's agent_edited_paths set.
+        if !stream_sink.edited_paths.is_empty()
+            && let Some(cmd_tx) = ctx.parent_cmd_tx.as_ref()
+        {
+            let _ = cmd_tx.send(crate::session::commands::SessionCommand::RecordAgentEditedPaths {
+                paths: stream_sink.edited_paths.into_iter().collect(),
+            });
+        }
         let usage_incomplete = result.output_usage_incomplete;
         let by_model = if result.total_tokens_used == 0 {
             Vec::new()

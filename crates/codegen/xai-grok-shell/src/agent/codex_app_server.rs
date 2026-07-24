@@ -17,7 +17,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::codex_stream::{self, CodexStreamEvent};
+use crate::agent::codex_stream::{self, CodexItemKind, CodexStreamEvent, counts_as_tool};
 
 const INITIALIZE_ID: u64 = 1;
 const THREAD_START_ID: u64 = 2;
@@ -27,6 +27,11 @@ const MODEL_LIST_INITIAL_ID: u64 = 2;
 const MAX_MODEL_LIST_PAGES: usize = 100;
 const TURN_INTERRUPT_ID: u64 = 4;
 pub(crate) const PRIMARY_THREAD_STATE_FILE: &str = "codex_thread.json";
+/// Capacity of the live Codex → ACP stream channel. Lifecycle, tool, plan,
+/// and completion events are never dropped; consecutive text/reasoning deltas
+/// may coalesce when the channel is full so a slow UI does not stall the
+/// protocol reader.
+pub(crate) const CODEX_STREAM_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CodexSandboxMode {
@@ -188,7 +193,8 @@ pub struct CodexRunRequest {
     /// Optional live event sink. When set, app-server notifications are
     /// classified and forwarded while the turn is still running so the host
     /// can stream text, reasoning, tools, and plan updates natively.
-    pub stream_tx: Option<mpsc::UnboundedSender<CodexStreamEvent>>,
+    /// Bounded for backpressure; see [`CODEX_STREAM_CHANNEL_CAPACITY`].
+    pub stream_tx: Option<mpsc::Sender<CodexStreamEvent>>,
 }
 
 impl CodexRunRequest {
@@ -372,6 +378,23 @@ pub(crate) fn save_primary_thread_state(
     )
 }
 
+/// Async sibling of [`save_primary_thread_state`]: uses Tokio fs so the Codex
+/// completion path does not perform synchronous filesystem work on the async
+/// runtime. Prefer this from session/subagent async code.
+pub(crate) async fn save_primary_thread_state_async(
+    session_dir: &Path,
+    state: &PrimaryCodexThreadState,
+) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(session_dir).await?;
+    let bytes = serde_json::to_vec_pretty(state)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    crate::session::storage::write_bytes_atomic_async(
+        &session_dir.join(PRIMARY_THREAD_STATE_FILE),
+        bytes,
+    )
+    .await
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CodexAppServerError {
     #[error("Codex app-server command is empty")]
@@ -412,7 +435,7 @@ pub async fn run_codex_turn(
         .kill_on_drop(true)
         .spawn()
         .map_err(CodexAppServerError::Spawn)?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
+    let stdin = child.stdin.take().ok_or_else(|| {
         CodexAppServerError::Protocol("app-server stdin was not piped".to_string())
     })?;
     let stdout = child.stdout.take().ok_or_else(|| {
@@ -432,12 +455,11 @@ pub async fn run_codex_turn(
     });
     let mut reader = BufReader::new(stdout);
 
-    let result = run_protocol(&request, &cancellation, &mut stdin, &mut reader).await;
+    let result = run_protocol(&request, &cancellation, stdin, &mut reader).await;
     // The npm-distributed `codex` executable is a launcher for the native
     // binary. Close our inherited pipes before waiting: otherwise the native
     // app-server can remain alive after its launcher exits, keeping stderr
     // open and deadlocking this cleanup path.
-    drop(stdin);
     drop(reader);
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
@@ -528,7 +550,7 @@ async fn list_models_protocol(
         }),
     )
     .await?;
-    wait_for_response(
+    wait_for_response_stdin(
         INITIALIZE_ID,
         request.idle_timeout,
         cancellation,
@@ -556,7 +578,8 @@ async fn list_models_protocol(
         )
         .await?;
         let response =
-            wait_for_response(id, request.idle_timeout, cancellation, stdin, reader).await?;
+            wait_for_response_stdin(id, request.idle_timeout, cancellation, stdin, reader)
+                .await?;
         let data = response
             .pointer("/result/data")
             .and_then(Value::as_array)
@@ -647,36 +670,49 @@ fn parse_catalog_model(model: &Value) -> Result<CodexCatalogModel, CodexAppServe
 async fn run_protocol(
     request: &CodexRunRequest,
     cancellation: &CancellationToken,
-    stdin: &mut ChildStdin,
+    stdin: ChildStdin,
     reader: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<CodexRunResult, CodexAppServerError> {
-    send(
-        stdin,
-        &json!({
-            "method": "initialize",
-            "id": INITIALIZE_ID,
-            "params": {
-                "clientInfo": {
-                    "name": "grok_build",
-                    "title": "Grok Build",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "experimentalApi": true
-                }
+    // Serialized stdin writer: preserves per-request response ordering while
+    // allowing `item/tool/call` handlers to run off the read loop.
+    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Value>();
+    let writer = tokio::spawn(async move {
+        let mut stdin = stdin;
+        while let Some(message) = write_rx.recv().await {
+            if send_raw(&mut stdin, &message).await.is_err() {
+                break;
             }
-        }),
-    )
-    .await?;
+        }
+    });
+    let write = |message: Value| -> Result<(), CodexAppServerError> {
+        write_tx
+            .send(message)
+            .map_err(|_| CodexAppServerError::Protocol("Codex stdin writer closed".into()))
+    };
+
+    write(json!({
+        "method": "initialize",
+        "id": INITIALIZE_ID,
+        "params": {
+            "clientInfo": {
+                "name": "grok_build",
+                "title": "Grok Build",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": {
+                "experimentalApi": true
+            }
+        }
+    }))?;
     wait_for_response(
         INITIALIZE_ID,
         request.idle_timeout,
         cancellation,
-        stdin,
+        &write_tx,
         reader,
     )
     .await?;
-    send(stdin, &json!({"method": "initialized", "params": {}})).await?;
+    write(json!({"method": "initialized", "params": {}}))?;
 
     let dynamic_tools = request
         .dynamic_tools
@@ -714,7 +750,7 @@ async fn run_protocol(
     }
 
     let (thread_method, mut thread_params) = match request.resume_thread_id.as_deref() {
-        Some(thread_id) => ("thread/resume", common_thread_params),
+        Some(_thread_id) => ("thread/resume", common_thread_params),
         None => ("thread/start", common_thread_params),
     };
     if let Some(thread_id) = request.resume_thread_id.as_deref() {
@@ -724,20 +760,16 @@ async fn run_protocol(
         // thread cannot be resumed after this process exits.
         thread_params["ephemeral"] = Value::Bool(false);
     }
-    send(
-        stdin,
-        &json!({
-            "method": thread_method,
-            "id": THREAD_START_ID,
-            "params": thread_params
-        }),
-    )
-    .await?;
+    write(json!({
+        "method": thread_method,
+        "id": THREAD_START_ID,
+        "params": thread_params
+    }))?;
     let thread_response = wait_for_response(
         THREAD_START_ID,
         request.idle_timeout,
         cancellation,
-        stdin,
+        &write_tx,
         reader,
     )
     .await?;
@@ -771,59 +803,86 @@ async fn run_protocol(
     if let Some(schema) = request.output_schema.clone() {
         turn_params["outputSchema"] = schema;
     }
-    send(
-        stdin,
-        &json!({
-            "method": "turn/start",
-            "id": TURN_START_ID,
-            "params": turn_params
-        }),
-    )
-    .await?;
+    write(json!({
+        "method": "turn/start",
+        "id": TURN_START_ID,
+        "params": turn_params
+    }))?;
 
     let mut accumulator = TurnAccumulator::default();
+    // In-flight host dynamic tools: completed results are applied without
+    // blocking stdout drain.
+    let mut tool_joins = tokio::task::JoinSet::<(u32, Value)>::new();
     loop {
-        let message = match read_message(reader, request.idle_timeout, cancellation).await {
-            Ok(message) => message,
-            Err(CodexAppServerError::Cancelled) => {
-                let _ = send(
-                    stdin,
-                    &json!({
-                        "method": "turn/interrupt",
-                        "id": TURN_INTERRUPT_ID,
-                        "params": {
-                            "threadId": thread_id,
-                            "turnId": accumulator.turn_id
-                        }
-                    }),
-                )
-                .await;
-                return Err(CodexAppServerError::Cancelled);
+        tokio::select! {
+            biased;
+            // Prefer completed tool responses so accounting stays current.
+            Some(joined) = tool_joins.join_next(), if !tool_joins.is_empty() => {
+                match joined {
+                    Ok((_count, response)) => {
+                        let _ = write_tx.send(response);
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "Codex dynamic tool task join failed");
+                    }
+                }
             }
-            Err(error) => return Err(error),
-        };
-        if message.get("method").is_some() && message.get("id").is_some() {
-            handle_server_request(
-                stdin,
-                &message,
-                request.dynamic_tool_handler.as_deref(),
-                &mut accumulator,
-            )
-            .await?;
-            continue;
-        }
-        if message.get("id").and_then(Value::as_u64) == Some(TURN_START_ID) {
-            ensure_response_ok(&message)?;
-            accumulator.turn_id = message
-                .pointer("/result/turn/id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-        }
-        emit_stream_events(&request.stream_tx, &message);
-        if accumulator.apply(&message)? {
-            break;
+            message = read_message(reader, request.idle_timeout, cancellation) => {
+                let message = match message {
+                    Ok(message) => message,
+                    Err(CodexAppServerError::Cancelled) => {
+                        let _ = write_tx.send(json!({
+                            "method": "turn/interrupt",
+                            "id": TURN_INTERRUPT_ID,
+                            "params": {
+                                "threadId": thread_id,
+                                "turnId": accumulator.turn_id
+                            }
+                        }));
+                        // Drop writer so the task exits; ignore join errors.
+                        drop(write_tx);
+                        let _ = writer.await;
+                        return Err(CodexAppServerError::Cancelled);
+                    }
+                    Err(error) => {
+                        drop(write_tx);
+                        let _ = writer.await;
+                        return Err(error);
+                    }
+                };
+                if message.get("method").is_some() && message.get("id").is_some() {
+                    handle_server_request_async(
+                        &write_tx,
+                        &message,
+                        request.dynamic_tool_handler.clone(),
+                        &mut accumulator,
+                        &mut tool_joins,
+                    )?;
+                    continue;
+                }
+                if message.get("id").and_then(Value::as_u64) == Some(TURN_START_ID) {
+                    ensure_response_ok(&message)?;
+                    accumulator.turn_id = message
+                        .pointer("/result/turn/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                emit_stream_events(&request.stream_tx, &message).await;
+                if accumulator.apply(&message)? {
+                    break;
+                }
+            }
         }
     }
+
+    // Drain remaining tool tasks before shutting the writer (best-effort).
+    while let Some(joined) = tool_joins.join_next().await {
+        if let Ok((_count, response)) = joined {
+            let _ = write_tx.send(response);
+        }
+    }
+    drop(write_tx);
+    let _ = writer.await;
 
     let turn_id = accumulator.turn_id.clone().unwrap_or_default();
     let output = accumulator.output();
@@ -837,6 +896,27 @@ async fn run_protocol(
 }
 
 async fn wait_for_response(
+    expected_id: u64,
+    idle_timeout: Duration,
+    cancellation: &CancellationToken,
+    write_tx: &mpsc::UnboundedSender<Value>,
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+) -> Result<Value, CodexAppServerError> {
+    loop {
+        let message = read_message(reader, idle_timeout, cancellation).await?;
+        if message.get("method").is_some() && message.get("id").is_some() {
+            reject_server_request_tx(write_tx, &message)?;
+            continue;
+        }
+        if message.get("id").and_then(Value::as_u64) == Some(expected_id) {
+            ensure_response_ok(&message)?;
+            return Ok(message);
+        }
+    }
+}
+
+/// Model-list path still owns stdin directly (no concurrent tool dispatch).
+async fn wait_for_response_stdin(
     expected_id: u64,
     idle_timeout: Duration,
     cancellation: &CancellationToken,
@@ -856,12 +936,16 @@ async fn wait_for_response(
     }
 }
 
-async fn send(stdin: &mut ChildStdin, message: &Value) -> Result<(), CodexAppServerError> {
+async fn send_raw(stdin: &mut ChildStdin, message: &Value) -> Result<(), CodexAppServerError> {
     let mut line = serde_json::to_vec(message)?;
     line.push(b'\n');
     stdin.write_all(&line).await?;
     stdin.flush().await?;
     Ok(())
+}
+
+async fn send(stdin: &mut ChildStdin, message: &Value) -> Result<(), CodexAppServerError> {
+    send_raw(stdin, message).await
 }
 
 async fn read_message(
@@ -905,23 +989,44 @@ async fn reject_server_request(
     .await
 }
 
-async fn handle_server_request(
-    stdin: &mut ChildStdin,
+fn reject_server_request_tx(
+    write_tx: &mpsc::UnboundedSender<Value>,
     message: &Value,
-    handler: Option<&dyn CodexDynamicToolHandler>,
+) -> Result<(), CodexAppServerError> {
+    let Some(id) = message.get("id").cloned() else {
+        return Ok(());
+    };
+    write_tx
+        .send(json!({
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": "Grok Build's Codex bridge runs with approvalPolicy=never and does not accept interactive server requests"
+            }
+        }))
+        .map_err(|_| CodexAppServerError::Protocol("Codex stdin writer closed".into()))
+}
+
+/// Dispatch inbound server requests without blocking the stdout reader.
+/// Host dynamic tools run on a JoinSet; their JSON-RPC responses are written
+/// via the serialized stdin writer when they complete.
+fn handle_server_request_async(
+    write_tx: &mpsc::UnboundedSender<Value>,
+    message: &Value,
+    handler: Option<Arc<dyn CodexDynamicToolHandler>>,
     accumulator: &mut TurnAccumulator,
+    tool_joins: &mut tokio::task::JoinSet<(u32, Value)>,
 ) -> Result<(), CodexAppServerError> {
     let method = message.get("method").and_then(Value::as_str);
     if method != Some("item/tool/call") {
-        return reject_server_request(stdin, message).await;
+        return reject_server_request_tx(write_tx, message);
     }
     let Some(id) = message.get("id").cloned() else {
         return Ok(());
     };
     let Some(handler) = handler else {
-        return send(
-            stdin,
-            &json!({
+        return write_tx
+            .send(json!({
                 "id": id,
                 "result": {
                     "success": false,
@@ -930,26 +1035,26 @@ async fn handle_server_request(
                         "text": "Host dynamic tools are unavailable for this Codex thread."
                     }]
                 }
-            }),
-        )
-        .await;
+            }))
+            .map_err(|_| CodexAppServerError::Protocol("Codex stdin writer closed".into()));
     };
     let tool = message
         .pointer("/params/tool")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_owned();
     let call_id = message
         .pointer("/params/callId")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_owned();
     let arguments = message
         .pointer("/params/arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
     if tool.is_empty() || call_id.is_empty() {
-        return send(
-            stdin,
-            &json!({
+        return write_tx
+            .send(json!({
                 "id": id,
                 "result": {
                     "success": false,
@@ -958,43 +1063,66 @@ async fn handle_server_request(
                         "text": "Codex sent an invalid dynamic-tool request."
                     }]
                 }
-            }),
-        )
-        .await;
+            }))
+            .map_err(|_| CodexAppServerError::Protocol("Codex stdin writer closed".into()));
     }
 
-    let result = handler.call(tool, call_id, arguments).await;
     accumulator.tools.dynamic_tool_calls = accumulator.tools.dynamic_tool_calls.saturating_add(1);
-    send(
-        stdin,
-        &json!({
-            "id": id,
-            "result": {
-                "success": result.success,
-                "contentItems": [{
-                    "type": "inputText",
-                    "text": result.text
-                }]
-            }
-        }),
-    )
-    .await
+    tool_joins.spawn(async move {
+        let result = handler.call(&tool, &call_id, arguments).await;
+        (
+            1u32,
+            json!({
+                "id": id,
+                "result": {
+                    "success": result.success,
+                    "contentItems": [{
+                        "type": "inputText",
+                        "text": result.text
+                    }]
+                }
+            }),
+        )
+    });
+    Ok(())
 }
 
-fn emit_stream_events(
-    stream_tx: &Option<mpsc::UnboundedSender<CodexStreamEvent>>,
+async fn emit_stream_events(
+    stream_tx: &Option<mpsc::Sender<CodexStreamEvent>>,
     message: &Value,
 ) {
     let Some(tx) = stream_tx else {
         return;
     };
     for event in codex_stream::classify_notification(message) {
-        // A closed receiver means the host abandoned the UI stream; keep
-        // accumulating the turn so the final result remains available.
-        if tx.send(event).is_err() {
-            break;
+        // Prefer non-blocking send. On full channel, coalesce consecutive
+        // text/reasoning/output deltas (drop this delta) but never drop
+        // lifecycle, tool, or plan events — await capacity for those so a
+        // slow UI applies real backpressure without losing state.
+        match tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => break,
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                if is_coalescable_delta(&event) {
+                    tracing::trace!("Codex stream channel full; coalescing delta");
+                    continue;
+                }
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
         }
     }
+}
+
+fn is_coalescable_delta(event: &CodexStreamEvent) -> bool {
+    matches!(
+        event,
+        CodexStreamEvent::AgentMessageDelta { .. }
+            | CodexStreamEvent::ReasoningDelta { .. }
+            | CodexStreamEvent::PlanDelta { .. }
+            | CodexStreamEvent::ItemOutputDelta { .. }
+    )
 }
 
 fn ensure_response_ok(message: &Value) -> Result<(), CodexAppServerError> {
@@ -1088,7 +1216,10 @@ impl TurnAccumulator {
             return;
         };
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-        if item_type == "agentMessage" {
+        let kind = CodexItemKind::from_type(item_type);
+        // Items that are not tool-like (agentMessage, reasoning, plan,
+        // userMessage, lifecycle, unknown) never increment any counter.
+        if !counts_as_tool(kind) {
             return;
         }
         let item_id = item
@@ -1099,25 +1230,27 @@ impl TurnAccumulator {
         if !self.counted_items.insert(item_id) {
             return;
         }
-        match item_type {
-            "commandExecution" => {
+        match kind {
+            CodexItemKind::CommandExecution => {
                 self.tools.command_executions = self.tools.command_executions.saturating_add(1);
             }
-            "fileChange" => {
+            CodexItemKind::FileChange => {
                 self.tools.file_changes = self.tools.file_changes.saturating_add(1);
             }
-            "mcpToolCall" => {
+            CodexItemKind::McpToolCall => {
                 self.tools.mcp_calls = self.tools.mcp_calls.saturating_add(1);
             }
-            "dynamicToolCall" => {
+            CodexItemKind::DynamicToolCall => {
                 // Counted when the corresponding server request is handled so
                 // app-server versions that omit a completed item still report
                 // the host call exactly once.
             }
-            "collabAgentToolCall" | "collabToolCall" => {
-                self.tools.collaboration_calls = self.tools.collaboration_calls.saturating_add(1);
+            CodexItemKind::CollabToolCall => {
+                self.tools.collaboration_calls =
+                    self.tools.collaboration_calls.saturating_add(1);
             }
-            "" => {}
+            // All remaining tool-like kinds (WebSearch, ImageView, Sleep,
+            // ContextCompaction, Review) are bucketed as other_calls.
             _ => {
                 self.tools.other_calls = self.tools.other_calls.saturating_add(1);
             }
@@ -1256,6 +1389,82 @@ mod tests {
         assert!(error.to_string().contains("model unavailable"));
     }
 
+    #[test]
+    fn non_tool_items_do_not_increment_tool_counters() {
+        let mut acc = TurnAccumulator::default();
+        // userMessage must not inflate any counter.
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "u-1", "type": "userMessage", "content": [{"type":"text","text":"hi"}]}}
+        }))
+        .unwrap();
+        // reasoning must not inflate any counter.
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "r-1", "type": "reasoning", "summary": []}}
+        }))
+        .unwrap();
+        // plan must not inflate any counter.
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "p-1", "type": "plan"}}
+        }))
+        .unwrap();
+        // An unknown item type must not inflate any counter.
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "x-1", "type": "brandNewCodexThing"}}
+        }))
+        .unwrap();
+        // Only commandExecution and fileChange should increment counters.
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "c-1", "type": "commandExecution"}}
+        }))
+        .unwrap();
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "f-1", "type": "fileChange"}}
+        }))
+        .unwrap();
+        let tools = &acc.tools;
+        assert_eq!(tools.command_executions, 1);
+        assert_eq!(tools.file_changes, 1);
+        assert_eq!(tools.mcp_calls, 0);
+        assert_eq!(tools.dynamic_tool_calls, 0);
+        assert_eq!(tools.collaboration_calls, 0);
+        assert_eq!(tools.other_calls, 0);
+        assert_eq!(tools.total(), 2);
+    }
+
+    #[test]
+    fn agent_message_does_not_increment_tool_counters() {
+        let mut acc = TurnAccumulator::default();
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "a-1", "type": "agentMessage", "text": "done"}}
+        }))
+        .unwrap();
+        assert_eq!(acc.tools.total(), 0);
+    }
+
+    #[test]
+    fn tool_like_other_kinds_increment_other_calls() {
+        let mut acc = TurnAccumulator::default();
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "w-1", "type": "webSearch"}}
+        }))
+        .unwrap();
+        acc.apply(&json!({
+            "method": "item/completed",
+            "params": {"item": {"id": "i-1", "type": "imageView"}}
+        }))
+        .unwrap();
+        assert_eq!(acc.tools.other_calls, 2);
+        assert_eq!(acc.tools.total(), 2);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn completes_jsonl_stdio_handshake_with_app_server_process() {
@@ -1283,7 +1492,7 @@ done
             CodexRunRequest::new("gpt-test", std::env::current_dir().unwrap(), "do the work");
         request.command = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
         request.idle_timeout = Duration::from_secs(2);
-        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+        let (stream_tx, mut stream_rx) = mpsc::channel(CODEX_STREAM_CHANNEL_CAPACITY);
         request.stream_tx = Some(stream_tx);
 
         let result = run_codex_turn(request, CancellationToken::new())
@@ -1501,6 +1710,26 @@ done
             vec!["medium", "high"]
         );
         assert!(models[1].is_default);
+    }
+
+    #[tokio::test]
+    async fn primary_thread_state_async_save_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("workspace");
+        let state = PrimaryCodexThreadState::new(
+            "grok_build_codex",
+            "thread-async",
+            "gpt-test",
+            cwd.clone(),
+        );
+        save_primary_thread_state_async(dir.path(), &state)
+            .await
+            .unwrap();
+        let loaded = load_primary_thread_state(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            loaded.matching_thread_id("grok_build_codex", "gpt-test", &cwd),
+            Some("thread-async")
+        );
     }
 
     #[test]

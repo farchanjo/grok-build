@@ -1524,6 +1524,7 @@ pub(crate) async fn spawn_session_actor(
         feedback_manager: feedback_manager.clone(),
         upload_queue: upload_queue.clone(),
         sync_loop_cancel: sync_loop_cancel.clone(),
+        turn_cancel: std::cell::RefCell::new(tokio_util::sync::CancellationToken::new()),
         agent: std::cell::RefCell::new(agent),
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,

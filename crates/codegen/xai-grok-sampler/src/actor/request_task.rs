@@ -669,6 +669,25 @@ async fn drive_l2(
                             error: SamplingError::MaxTokensTruncation,
                         };
                     }
+                    // OpenRouter (and some other routers) terminate mid-stream with
+                    // finish_reason "error". That is a provider failure, not a
+                    // successful empty turn — surface StreamError so the agent
+                    // can retry or report it, instead of completing with silence.
+                    if response.stop_reason == Some(xai_grok_sampling_types::StopReason::Error) {
+                        let message = response
+                            .stop_message
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                "Upstream model stream ended with finish_reason=error".to_owned()
+                            });
+                        return AttemptOutcome::Failed {
+                            error: SamplingError::StreamError {
+                                error_type: "finish_reason_error".into(),
+                                message,
+                            },
+                        };
+                    }
                     // A content-filtered turn (Anthropic refusal, OpenAI
                     // content_filter stop reason) is legitimately content-less and
                     // deterministic — resampling it would retry-storm.

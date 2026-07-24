@@ -119,7 +119,7 @@ impl SessionActor {
     /// attach structurally. Sessions whose template rejects inline images
     /// instead transcribe normalized survivors into the text via the existing
     /// describe pipeline, or drop them with a notice.
-    async fn prepare_interjection_images(
+    pub(super) async fn prepare_interjection_images(
         &self,
         wrapped: &mut String,
         images: Vec<acp::ImageContent>,
@@ -236,7 +236,7 @@ impl SessionActor {
     /// model as a bare, unexpanded slash command. Returns `None` when the
     /// conversation as a standalone synthetic user message
     /// text references no known skill.
-    async fn interjection_skill_information(&self, text: &str) -> Option<String> {
+    pub(super) async fn interjection_skill_information(&self, text: &str) -> Option<String> {
         // Mirror turn-start gating (`parse_slash_prefix`): only a leading
         // slash invokes skills — "don't run /commit yet" is steering text,
         // not an invocation.

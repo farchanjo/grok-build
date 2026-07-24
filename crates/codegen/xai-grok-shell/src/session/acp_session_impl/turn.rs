@@ -172,8 +172,14 @@ impl SessionActor {
     ) -> Result<TurnOutcome, acp::Error> {
         use crate::agent::codex_app_server::{
             CodexHostTaskTools, CodexRunRequest, CodexSandboxMode, PrimaryCodexThreadState,
-            load_primary_thread_state, run_codex_turn, save_primary_thread_state,
+            load_primary_thread_state, run_codex_turn, save_primary_thread_state_async,
         };
+
+        // Codex-safe drain points: inject queued context before the turn so it
+        // is not silently swallowed (native turns drain inside the sample loop,
+        // which this route bypasses). Append context to the prompt string —
+        // Codex owns its conversation thread and does not re-read Grok history.
+        let prompt = self.augment_codex_prompt_with_pending_context(prompt).await;
 
         let cwd = std::path::PathBuf::from(&self.session_info.cwd);
         let session_dir = crate::session::persistence::session_dir(&self.session_info);
@@ -248,8 +254,12 @@ impl SessionActor {
 
         // Live-forward app-server notifications into ACP so Codex primary turns
         // stream text, reasoning, tools, and plan updates like a native agent.
+        // Bounded channel applies backpressure; lifecycle/tool/error events are
+        // never coalesced (only consecutive text/reasoning deltas may be).
         let (stream_tx, mut stream_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::agent::codex_stream::CodexStreamEvent>();
+            tokio::sync::mpsc::channel::<crate::agent::codex_stream::CodexStreamEvent>(
+                crate::agent::codex_app_server::CODEX_STREAM_CHANNEL_CAPACITY,
+            );
         request.stream_tx = Some(stream_tx);
 
         let stream_start_ms = chrono::Utc::now().timestamp_millis();
@@ -268,25 +278,81 @@ impl SessionActor {
             phase: crate::session::events::Phase::WaitingForModel,
         });
 
+        // Use the session turn-cancel token so Esc / cancel_running_task can
+        // send a graceful turn/interrupt instead of only aborting the task.
+        let cancel_token = {
+            let mut slot = self.turn_cancel.borrow_mut();
+            if slot.is_cancelled() {
+                *slot = tokio_util::sync::CancellationToken::new();
+            }
+            slot.clone()
+        };
+
         let mut ui = crate::agent::codex_stream::CodexStreamUiState::default();
-        let mut run_fut = std::pin::pin!(run_codex_turn(
-            request,
-            tokio_util::sync::CancellationToken::new()
-        ));
+        let mut first_token_emitted = false;
+        let mut run_fut = std::pin::pin!(run_codex_turn(request, cancel_token));
         let result = loop {
             tokio::select! {
                 Some(event) = stream_rx.recv() => {
+                    if !first_token_emitted
+                        && matches!(
+                            &event,
+                            crate::agent::codex_stream::CodexStreamEvent::AgentMessageDelta { .. }
+                                | crate::agent::codex_stream::CodexStreamEvent::ReasoningDelta { .. }
+                        )
+                    {
+                        first_token_emitted = true;
+                        self.emit_event(crate::session::events::Event::FirstToken);
+                    }
                     self.apply_codex_stream_event(event, &mut ui).await;
                 }
                 result = &mut run_fut => {
                     while let Ok(event) = stream_rx.try_recv() {
+                        if !first_token_emitted
+                            && matches!(
+                                &event,
+                                crate::agent::codex_stream::CodexStreamEvent::AgentMessageDelta { .. }
+                                    | crate::agent::codex_stream::CodexStreamEvent::ReasoningDelta { .. }
+                            )
+                        {
+                            first_token_emitted = true;
+                            self.emit_event(crate::session::events::Event::FirstToken);
+                        }
                         self.apply_codex_stream_event(event, &mut ui).await;
                     }
                     break result;
                 }
             }
+        };
+
+        // Always clear stream-capture segment on success, error, and cancel.
+        self.streaming_turn_capture.lock().clear_current_segment();
+
+        // Post-turn drain so interjections that arrived mid-Codex turn are not
+        // lost: they land in conversation for the next prompt (Codex owns its
+        // loop, so mid-turn steering is interrupt-and-reprompt only).
+        let drained_after = self.drain_pending_interjections().await;
+        self.flush_pending_skill_reminders().await;
+        self.inject_pending_monitor_events().await;
+        if drained_after {
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                "drained interjection(s) after Codex turn — queued for next prompt"
+            );
+            self.send_update(
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new(
+                        "Note: your mid-turn message was queued and will apply on the next turn \
+                         (Codex owns its in-flight loop; interrupt and re-prompt to steer sooner)."
+                            .to_string(),
+                    )),
+                )),
+                None,
+            )
+            .await;
         }
-        .map_err(|error| {
+
+        let result = result.map_err(|error| {
             tracing::warn!(
                 session_id = %self.session_info.id.0,
                 provider_id = %provider.id,
@@ -309,8 +375,6 @@ impl SessionActor {
             };
             acp::Error::internal_error().data(guidance)
         })?;
-
-        self.streaming_turn_capture.lock().clear_current_segment();
 
         if result.usage.total_tokens > 0 {
             let clamp = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
@@ -350,7 +414,7 @@ impl SessionActor {
 
         let state =
             PrimaryCodexThreadState::new(&provider.id, &result.thread_id, &sampling.model, cwd);
-        if let Err(error) = save_primary_thread_state(&session_dir, &state) {
+        if let Err(error) = save_primary_thread_state_async(&session_dir, &state).await {
             tracing::error!(
                 session_id = %self.session_info.id.0,
                 ?error,
@@ -382,14 +446,12 @@ impl SessionActor {
                 "totalTokens": result.usage.total_tokens,
             }),
         );
-        // If text already streamed live, do not re-print the full body.
-        // Still flush so the replay buffer delivers the final chunks before
-        // the turn ends, and attach terminal meta via a trailing empty chunk
-        // only when nothing was streamed (fallback path below).
+        // Always persist terminal metadata. When text already streamed live,
+        // attach meta via a trailing empty chunk so the body is not re-printed.
+        // When nothing streamed, emit the full body + meta (fallback path).
         if ui.streamed_agent_text {
-            if let Err(e) = crate::session::replay_events::flush_replay_actor(&self.event_tx).await {
-                tracing::warn!(?e, "flush_replay_actor failed after Codex stream");
-            }
+            self.send_slash_command_output_with_meta("", Some(chunk_meta))
+                .await;
         } else {
             self.send_slash_command_output_with_meta(&result.output, Some(chunk_meta))
                 .await;
@@ -408,13 +470,76 @@ impl SessionActor {
         })
     }
 
+    /// Drain Codex-bypassed context queues and fold their text into the prompt
+    /// string Codex will receive. Interjections, skill reminders, monitor
+    /// events, and the first-turn memory reminder otherwise never reach a
+    /// Codex turn because the native sampling-loop drain is skipped.
+    async fn augment_codex_prompt_with_pending_context(&self, mut prompt: String) -> String {
+        // Drain interjections into conversation (same path as native turns)
+        // and also append their model-visible text to the Codex prompt, since
+        // Codex does not re-read Grok conversation history.
+        let interjection_entries = self.pending_interjections.drain_all();
+        let mut interjection_texts = Vec::new();
+        if !interjection_entries.is_empty() {
+            for PendingInterjection { text, attachments } in interjection_entries {
+                let sanitized =
+                    crate::session::placeholder_images::strip_paths_from_image_placeholders(text);
+                let skill_information = self.interjection_skill_information(&sanitized).await;
+                let mut wrapped = format_interjection(sanitized);
+                let images = self
+                    .prepare_interjection_images(&mut wrapped, attachments)
+                    .await;
+                let model_text = match &skill_information {
+                    Some(skill_information) => format!("{wrapped}\n{skill_information}"),
+                    None => wrapped.clone(),
+                };
+                interjection_texts.push(model_text.clone());
+                let mut item = ConversationItem::interjection(model_text);
+                for img in &images {
+                    item.add_image(pick_user_image_url(img));
+                }
+                self.inject_synthetic_user_message(&wrapped, item, false, &images)
+                    .await;
+            }
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                count = interjection_texts.len(),
+                "injected pre-Codex interjection(s) into conversation and prompt"
+            );
+        }
+
+        self.flush_pending_skill_reminders().await;
+        self.inject_pending_monitor_events().await;
+        let memory_reminder = self.first_turn_memory_reminder().await;
+        if memory_reminder.is_some() {
+            self.memory
+                .injection_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_INJECT: first-turn memory context injected (Codex route)"
+            );
+        }
+        self.maybe_inject_mcp_reminder().await;
+
+        if let Some(reminder) = memory_reminder {
+            prompt = format!("{prompt}\n\n{reminder}");
+        }
+        for text in interjection_texts {
+            prompt = format!("{prompt}\n\n{text}");
+        }
+        prompt
+    }
+
     /// Map one live Codex app-server event into ACP session updates.
     async fn apply_codex_stream_event(
         &self,
         event: crate::agent::codex_stream::CodexStreamEvent,
         ui: &mut crate::agent::codex_stream::CodexStreamUiState,
     ) {
-        use crate::agent::codex_stream::{CodexStreamEvent, stream_event_to_acp};
+        use crate::agent::codex_stream::{
+            CodexProjectionTarget, CodexStreamEvent, stream_event_to_acp,
+        };
 
         if matches!(event, CodexStreamEvent::TurnStarted { .. }) {
             self.emit_event(crate::session::events::Event::PhaseChanged {
@@ -422,7 +547,7 @@ impl SessionActor {
             });
         }
 
-        for chunk in stream_event_to_acp(event, ui) {
+        for chunk in stream_event_to_acp(event, ui, CodexProjectionTarget::Primary) {
             if chunk.is_agent_text {
                 if let Some(text) = chunk.text.as_deref() {
                     let mut cap = self.streaming_turn_capture.lock();

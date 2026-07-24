@@ -1190,6 +1190,13 @@ pub(super) async fn run_session(
                                 Err(()) => {}
                             }
                         }
+                        SessionCommand::RecordAgentEditedPaths { paths } => {
+                            for path in paths {
+                                if !path.is_empty() {
+                                    session.chat_state_handle.record_agent_edited_path(path);
+                                }
+                            }
+                        }
                         SessionCommand::MarkSubagentUsageNotApplied {
                             parent_prompt_id,
                             respond_to,

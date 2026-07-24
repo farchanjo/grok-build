@@ -353,6 +353,12 @@ pub enum SessionCommand {
         incomplete: bool,
         respond_to: oneshot::Sender<()>,
     },
+    /// Fold file paths edited by a Codex (or other gateway-direct) subagent into
+    /// the parent's `agent_edited_paths` set so "files touched" / hunk tracking
+    /// see child edits that never passed through primary `send_update`.
+    RecordAgentEditedPaths {
+        paths: Vec<String>,
+    },
     /// Sticky incomplete for a parent prompt (or the live pin when `None`). Acks when marked.
     MarkSubagentUsageNotApplied {
         parent_prompt_id: Option<String>,

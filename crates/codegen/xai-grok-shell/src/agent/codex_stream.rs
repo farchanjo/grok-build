@@ -68,6 +68,7 @@ pub enum CodexItemKind {
     AgentMessage,
     Reasoning,
     Plan,
+    UserMessage,
     CommandExecution,
     FileChange,
     McpToolCall,
@@ -87,6 +88,7 @@ impl CodexItemKind {
             "agentMessage" => Self::AgentMessage,
             "reasoning" => Self::Reasoning,
             "plan" => Self::Plan,
+            "userMessage" => Self::UserMessage,
             "commandExecution" => Self::CommandExecution,
             "fileChange" => Self::FileChange,
             "mcpToolCall" => Self::McpToolCall,
@@ -102,22 +104,50 @@ impl CodexItemKind {
     }
 
     /// Whether this item should surface as an ACP tool call card.
+    ///
+    /// Only the explicit tool-like allowlist renders as a tool card. Unknown
+    /// item types (`Other`) are deliberately excluded so that non-tool events
+    /// such as `userMessage`, lifecycle, and future protocol additions never
+    /// render as fake tool cards.
     pub fn is_tool_like(self) -> bool {
-        matches!(
-            self,
-            Self::CommandExecution
-                | Self::FileChange
-                | Self::McpToolCall
-                | Self::DynamicToolCall
-                | Self::CollabToolCall
-                | Self::WebSearch
-                | Self::ImageView
-                | Self::Sleep
-                | Self::ContextCompaction
-                | Self::Review
-                | Self::Other
-        )
+        counts_as_tool(self)
     }
+}
+
+/// Authoritative tool-card projection predicate.
+///
+/// Returns `true` only for the explicit allowlist of tool-like item kinds:
+/// `CommandExecution`, `FileChange`, `McpToolCall`, `DynamicToolCall`,
+/// `CollabToolCall`, `WebSearch`, `ImageView`, `Sleep`,
+/// `ContextCompaction`, and `Review`. Everything else — including `Other`
+/// (unknown item types) and non-tool events like `AgentMessage`, `Reasoning`,
+/// `Plan`, and `UserMessage` — returns `false` and never renders as a tool
+/// card nor increments tool statistics.
+pub fn counts_as_tool(kind: CodexItemKind) -> bool {
+    matches!(
+        kind,
+        CodexItemKind::CommandExecution
+            | CodexItemKind::FileChange
+            | CodexItemKind::McpToolCall
+            | CodexItemKind::DynamicToolCall
+            | CodexItemKind::CollabToolCall
+            | CodexItemKind::WebSearch
+            | CodexItemKind::ImageView
+            | CodexItemKind::Sleep
+            | CodexItemKind::ContextCompaction
+            | CodexItemKind::Review
+    )
+}
+
+/// Which surface a Codex stream is being projected into.
+///
+/// Primary turns suppress the remote `userMessage` echo because the canonical
+/// user bubble is already owned by the host. Subagent views emit the
+/// `userMessage` text so a nested Codex child's input is visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodexProjectionTarget {
+    Primary,
+    Subagent,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -381,7 +411,33 @@ fn item_title(
         CodexItemKind::Plan => "Plan".to_owned(),
         CodexItemKind::Reasoning => "Reasoning".to_owned(),
         CodexItemKind::AgentMessage => "Message".to_owned(),
+        CodexItemKind::UserMessage => "User message".to_owned(),
         CodexItemKind::Other => item_type.to_owned(),
+    }
+}
+
+/// Extract concatenated user-message text from a Codex `userMessage` item.
+///
+/// The Codex shape stores the message body in a `content` array of user-input
+/// parts (e.g. `{"type":"text","text":...}`); text parts are concatenated in
+/// order. Returns `None` when no text is available.
+fn extract_user_message_text(item: &CodexItemSnapshot) -> Option<String> {
+    let parts = item.raw.get("content").and_then(Value::as_array)?;
+    let text = parts
+        .iter()
+        .filter_map(|part| {
+            let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
+            if part_type != "text" {
+                return None;
+            }
+            part.get("text").and_then(Value::as_str).map(str::to_owned)
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
     }
 }
 
@@ -449,9 +505,14 @@ pub struct CodexAcpChunk {
 }
 
 /// Project one stream event into zero or more ACP session updates.
+///
+/// `target` selects the surface: primary turns suppress the remote
+/// `userMessage` echo (the canonical user bubble already exists), while
+/// subagent views forward the `userMessage` text as a `UserMessageChunk`.
 pub fn stream_event_to_acp(
     event: CodexStreamEvent,
     ui: &mut CodexStreamUiState,
+    target: CodexProjectionTarget,
 ) -> Vec<CodexAcpChunk> {
     match event {
         CodexStreamEvent::TurnStarted { .. } => Vec::new(),
@@ -499,6 +560,25 @@ pub fn stream_event_to_acp(
         }
         CodexStreamEvent::ItemStarted(item) => match item.kind {
             CodexItemKind::AgentMessage => Vec::new(),
+            CodexItemKind::UserMessage => match target {
+                CodexProjectionTarget::Primary => Vec::new(),
+                CodexProjectionTarget::Subagent => {
+                    let Some(text) = extract_user_message_text(&item) else {
+                        return Vec::new();
+                    };
+                    let chunk_index = ui.next_chunk_index();
+                    vec![CodexAcpChunk {
+                        update: acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
+                        )),
+                        chunk_index: Some(chunk_index),
+                        is_agent_text: false,
+                        is_reasoning: false,
+                        is_tool: false,
+                        text: Some(text.clone()),
+                    }]
+                }
+            },
             CodexItemKind::Reasoning | CodexItemKind::Plan => {
                 let Some(text) = item.text.filter(|t| !t.is_empty()) else {
                     return Vec::new();
@@ -609,6 +689,25 @@ pub fn stream_event_to_acp(
                 }]
             }
             CodexItemKind::Reasoning | CodexItemKind::Plan => Vec::new(),
+            CodexItemKind::UserMessage => match target {
+                CodexProjectionTarget::Primary => Vec::new(),
+                CodexProjectionTarget::Subagent => {
+                    let Some(text) = extract_user_message_text(&item) else {
+                        return Vec::new();
+                    };
+                    let chunk_index = ui.next_chunk_index();
+                    vec![CodexAcpChunk {
+                        update: acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
+                        )),
+                        chunk_index: Some(chunk_index),
+                        is_agent_text: false,
+                        is_reasoning: false,
+                        is_tool: false,
+                        text: Some(text.clone()),
+                    }]
+                }
+            },
             kind if kind.is_tool_like() => {
                 let tool_call_id =
                     acp::ToolCallId::new(Arc::<str>::from(format!("codex:{}", item.id)));
@@ -750,9 +849,10 @@ fn item_presentation(
         | CodexItemKind::DynamicToolCall
         | CodexItemKind::CollabToolCall
         | CodexItemKind::Other => acp::ToolKind::Other,
-        CodexItemKind::AgentMessage | CodexItemKind::Reasoning | CodexItemKind::Plan => {
-            acp::ToolKind::Think
-        }
+        CodexItemKind::AgentMessage
+        | CodexItemKind::Reasoning
+        | CodexItemKind::Plan
+        | CodexItemKind::UserMessage => acp::ToolKind::Think,
     };
     let mut content = if !item.changes.is_empty() {
         file_change_content(&item.changes)
@@ -916,6 +1016,7 @@ mod tests {
                 text: "hello".into(),
             },
             &mut ui,
+            CodexProjectionTarget::Primary,
         );
         assert!(ui.streamed_agent_text);
         assert!(matches!(
@@ -937,6 +1038,7 @@ mod tests {
                 changes: Vec::new(),
             }),
             &mut ui,
+            CodexProjectionTarget::Primary,
         );
         assert_eq!(ui.tools_called, vec!["$ echo hi"]);
         assert!(matches!(tool[0].update, acp::SessionUpdate::ToolCall(_)));
@@ -956,7 +1058,199 @@ mod tests {
                 changes: Vec::new(),
             }),
             &mut ui,
+            CodexProjectionTarget::Primary,
         );
         assert!(completed.is_empty());
+    }
+
+    fn user_message_snapshot(id: &str, text: &str) -> CodexItemSnapshot {
+        CodexItemSnapshot {
+            id: id.to_owned(),
+            item_type: "userMessage".to_owned(),
+            kind: CodexItemKind::UserMessage,
+            title: "User message".to_owned(),
+            status: None,
+            raw: json!({
+                "id": id,
+                "type": "userMessage",
+                "content": [
+                    {"type": "text", "text": text},
+                ],
+            }),
+            text: None,
+            output: None,
+            locations: Vec::new(),
+            changes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn user_message_is_suppressed_on_primary_surface() {
+        let mut ui = CodexStreamUiState::default();
+        for event in [
+            CodexStreamEvent::ItemStarted(user_message_snapshot("u1", "hello there")),
+            CodexStreamEvent::ItemCompleted(user_message_snapshot("u1", "hello there")),
+        ] {
+            let chunks = stream_event_to_acp(event, &mut ui, CodexProjectionTarget::Primary);
+            assert!(
+                chunks.is_empty(),
+                "primary surface must not emit userMessage echoes: {chunks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_message_is_forwarded_on_subagent_surface() {
+        let mut ui = CodexStreamUiState::default();
+        let started = stream_event_to_acp(
+            CodexStreamEvent::ItemStarted(user_message_snapshot("u1", "hello there")),
+            &mut ui,
+            CodexProjectionTarget::Subagent,
+        );
+        assert_eq!(started.len(), 1);
+        match &started[0].update {
+            acp::SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                acp::ContentBlock::Text(text) => assert_eq!(text.text, "hello there"),
+                other => panic!("expected text block, got {other:?}"),
+            },
+            other => panic!("expected UserMessageChunk, got {other:?}"),
+        }
+
+        let completed = stream_event_to_acp(
+            CodexStreamEvent::ItemCompleted(user_message_snapshot("u1", "hello there")),
+            &mut ui,
+            CodexProjectionTarget::Subagent,
+        );
+        assert_eq!(completed.len(), 1);
+        match &completed[0].update {
+            acp::SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                acp::ContentBlock::Text(text) => assert_eq!(text.text, "hello there"),
+                other => panic!("expected text block, got {other:?}"),
+            },
+            other => panic!("expected UserMessageChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_subagent_concatenates_text_parts() {
+        let snapshot = CodexItemSnapshot {
+            id: "u2".to_owned(),
+            item_type: "userMessage".to_owned(),
+            kind: CodexItemKind::UserMessage,
+            title: "User message".to_owned(),
+            status: None,
+            raw: json!({
+                "id": "u2",
+                "type": "userMessage",
+                "content": [
+                    {"type": "text", "text": "alpha "},
+                    {"type": "image", "image": "..."},
+                    {"type": "text", "text": "bravo"},
+                ],
+            }),
+            text: None,
+            output: None,
+            locations: Vec::new(),
+            changes: Vec::new(),
+        };
+        let mut ui = CodexStreamUiState::default();
+        let chunks = stream_event_to_acp(
+            CodexStreamEvent::ItemStarted(snapshot),
+            &mut ui,
+            CodexProjectionTarget::Subagent,
+        );
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0].update {
+            acp::SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                acp::ContentBlock::Text(text) => assert_eq!(text.text, "alpha bravo"),
+                other => panic!("expected concatenated text, got {other:?}"),
+            },
+            other => panic!("expected UserMessageChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_subagent_emits_nothing_without_text() {
+        let snapshot = CodexItemSnapshot {
+            id: "u3".to_owned(),
+            item_type: "userMessage".to_owned(),
+            kind: CodexItemKind::UserMessage,
+            title: "User message".to_owned(),
+            status: None,
+            raw: json!({
+                "id": "u3",
+                "type": "userMessage",
+                "content": [
+                    {"type": "image", "image": "..."},
+                ],
+            }),
+            text: None,
+            output: None,
+            locations: Vec::new(),
+            changes: Vec::new(),
+        };
+        let mut ui = CodexStreamUiState::default();
+        let chunks = stream_event_to_acp(
+            CodexStreamEvent::ItemStarted(snapshot),
+            &mut ui,
+            CodexProjectionTarget::Subagent,
+        );
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn unknown_item_type_does_not_render_as_tool_card() {
+        let mut ui = CodexStreamUiState::default();
+        let snapshot = CodexItemSnapshot {
+            id: "x-1".to_owned(),
+            item_type: "brandNewCodexThing".to_owned(),
+            kind: CodexItemKind::Other,
+            title: "brandNewCodexThing".to_owned(),
+            status: Some("inProgress".to_owned()),
+            raw: json!({"id":"x-1","type":"brandNewCodexThing"}),
+            text: None,
+            output: None,
+            locations: Vec::new(),
+            changes: Vec::new(),
+        };
+        let started = stream_event_to_acp(
+            CodexStreamEvent::ItemStarted(snapshot.clone()),
+            &mut ui,
+            CodexProjectionTarget::Primary,
+        );
+        assert!(
+            started.is_empty(),
+            "unknown item types must not render a tool card: {started:?}"
+        );
+        let completed = stream_event_to_acp(
+            CodexStreamEvent::ItemCompleted(snapshot),
+            &mut ui,
+            CodexProjectionTarget::Primary,
+        );
+        assert!(
+            completed.is_empty(),
+            "unknown item types must not render a tool card: {completed:?}"
+        );
+        assert!(ui.tools_called.is_empty());
+    }
+
+    #[test]
+    fn counts_as_tool_only_allows_explicit_tool_kinds() {
+        assert!(counts_as_tool(CodexItemKind::CommandExecution));
+        assert!(counts_as_tool(CodexItemKind::FileChange));
+        assert!(counts_as_tool(CodexItemKind::McpToolCall));
+        assert!(counts_as_tool(CodexItemKind::DynamicToolCall));
+        assert!(counts_as_tool(CodexItemKind::CollabToolCall));
+        assert!(counts_as_tool(CodexItemKind::WebSearch));
+        assert!(counts_as_tool(CodexItemKind::ImageView));
+        assert!(counts_as_tool(CodexItemKind::Sleep));
+        assert!(counts_as_tool(CodexItemKind::ContextCompaction));
+        assert!(counts_as_tool(CodexItemKind::Review));
+
+        assert!(!counts_as_tool(CodexItemKind::AgentMessage));
+        assert!(!counts_as_tool(CodexItemKind::Reasoning));
+        assert!(!counts_as_tool(CodexItemKind::Plan));
+        assert!(!counts_as_tool(CodexItemKind::UserMessage));
+        assert!(!counts_as_tool(CodexItemKind::Other));
     }
 }
