@@ -15,6 +15,20 @@ fi
 export GROK_HOME
 export GROK_LEADER_SOCKET="${GROK_LEADER_SOCKET:-${GROK_HOME}/leader.sock}"
 
+# Export content-redacted development usage telemetry to the dedicated Alloy
+# receiver. Pin the routing before Grok starts so ambient OTEL settings cannot
+# mix this profile with production or leak unrelated collector credentials.
+export GROK_EXTERNAL_OTEL=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://vm.services:14318
+export OTEL_LOG_USER_PROMPTS=0
+export OTEL_LOG_TOOL_DETAILS=0
+unset OTEL_EXPORTER_OTLP_LOGS_ENDPOINT OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+unset OTEL_EXPORTER_OTLP_HEADERS OTEL_EXPORTER_OTLP_LOGS_HEADERS
+unset OTEL_EXPORTER_OTLP_METRICS_HEADERS
+
 # Disable only the Claude/Cursor compatibility hooks. Native Grok hooks remain enabled.
 export GROK_CURSOR_HOOKS_ENABLED="${GROK_CURSOR_HOOKS_ENABLED:-false}"
 export GROK_CLAUDE_HOOKS_ENABLED="${GROK_CLAUDE_HOOKS_ENABLED:-false}"

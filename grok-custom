@@ -33,6 +33,20 @@ fi
 export GROK_HOME="${HOME}/.grok-prod"
 export GROK_LEADER_SOCKET="${GROK_HOME}/leader.sock"
 
+# Export content-redacted production usage telemetry to the dedicated Alloy
+# receiver. Pin the routing before Grok starts so ambient OTEL settings cannot
+# mix this profile with development or leak unrelated collector credentials.
+export GROK_EXTERNAL_OTEL=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://vm.services:24318
+export OTEL_LOG_USER_PROMPTS=0
+export OTEL_LOG_TOOL_DETAILS=0
+unset OTEL_EXPORTER_OTLP_LOGS_ENDPOINT OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+unset OTEL_EXPORTER_OTLP_HEADERS OTEL_EXPORTER_OTLP_LOGS_HEADERS
+unset OTEL_EXPORTER_OTLP_METRICS_HEADERS
+
 if ! /bin/mkdir -p "${GROK_HOME}"; then
     echo "grok-custom: failed to create GROK_HOME: ${GROK_HOME}" >&2
     exit 1

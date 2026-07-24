@@ -162,6 +162,16 @@ verify:
 	done; \
 	/usr/bin/grep -Fqx 'export GROK_HOME="$${HOME}/.grok-prod"' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'export GROK_LEADER_SOCKET="$${GROK_HOME}/leader.sock"' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export GROK_EXTERNAL_OTEL=1' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export OTEL_METRICS_EXPORTER=otlp' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export OTEL_LOGS_EXPORTER=otlp' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export OTEL_EXPORTER_OTLP_ENDPOINT=http://vm.services:24318' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export OTEL_LOG_USER_PROMPTS=0' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export OTEL_LOG_TOOL_DETAILS=0' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fq 'unset OTEL_EXPORTER_OTLP_LOGS_ENDPOINT OTEL_EXPORTER_OTLP_METRICS_ENDPOINT' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fq 'unset OTEL_EXPORTER_OTLP_HEADERS OTEL_EXPORTER_OTLP_LOGS_HEADERS' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fq 'unset OTEL_EXPORTER_OTLP_METRICS_HEADERS' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'exec "$${GROK_BINARY}" "$$@"' "$(DEPLOY_WRAPPER)"; \
 	$(CODESIGN) --verify --strict --verbose=2 "$(DEPLOY_BINARY)"; \
 	$(CODESIGN) -dvv "$(DEPLOY_BINARY)" 2>&1; \
