@@ -145,6 +145,12 @@ There is no `cost.usage` metric: join `grok_code.token.usage` with your own
 price sheet. `lines_of_code.count` and `active_time.total` are planned for a
 later phase.
 
+The `cost_usd_ticks` attribute on `grok_code.api_request` carries the
+server-reported cost in USD ticks (1 USD = 10,000,000,000 ticks). OpenRouter
+reports `usage.cost` as a USD float, normalized to the same tick scale so cost
+display and telemetry work uniformly across providers. Absent when the
+provider did not report a cost.
+
 `tool_name` values: built-in tool names pass verbatim; MCP tools collapse to
 `mcp_tool` and other non-built-in tools to `custom_tool` unless
 `OTEL_LOG_TOOL_DETAILS=1`.
@@ -163,8 +169,8 @@ active.
 | `grok_code.session_end` | `duration_secs`, `turn_count`, `tool_call_count`, `compaction_count`, `model` |
 | `grok_code.user_prompt` | `prompt_length`, `model`, `screen_mode?` (`fullscreen` \| `inline` \| `minimal` \| `headless` \| `other`); `prompt` (**prompts**) |
 | `grok_code.turn_completed` | `outcome`, `duration_ms`, `tool_call_count`, `model`, `error_category?`, `cancellation_category?` |
-| `grok_code.api_request` | `model`, `duration_ms`, `stop_reason?`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens` |
-| `grok_code.api_error` | `error_category`, `model`, `status_code?`, `duration_ms?` |
+| `grok_code.api_request` | `model`, `duration_ms`, `stop_reason?`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_read_tokens`; additive OpenRouter attrs (absent for xAI): `provider_name?`, `cost_usd_ticks?`, `is_byok?`, `generation_id?`, `served_model?` |
+| `grok_code.api_error` | `error_category`, `model`, `status_code?`, `duration_ms?`; additive OpenRouter attrs (absent for xAI): `provider_name?`, `generation_id?` |
 | `grok_code.tool_result` | `tool_name`, `outcome`, `success`, `duration_ms`, `file_extension`; `tool_parameters`, `file_path` (**details**) |
 | `grok_code.tool_decision` | `tool_name`, `decision`, `access_kind`, `permission_mode`, `source` |
 | `grok_code.mcp_server_connection` | `status`, `transport_type`, `duration_ms`, `tool_count?`, `error_type?`; `mcp_server.name` (**details**; collapsed to `mcp_server` otherwise) |
@@ -176,6 +182,8 @@ active.
 | `grok_code.auth` | `auth_method` |
 | `grok_code.internal_error` | `error_type` (class only — no message, no location) |
 | `grok_code.model_switched` | `from_model`, `to_model`, `success`, `error_code?` |
+| `grok_code.api_fallback_served` | `model` (requested), `served_model`, `provider_name`. Emitted when OpenRouter serves a fallback model (served differs from requested). Models only — no content or credentials. |
+| `grok_code.openrouter_credits` | `credits_bucket` (`lt_1` \| `1_to_10` \| `10_to_100` \| `gte_100` \| `unknown`), `provider_name`. Emitted when the remaining OpenRouter balance falls below `GROK_OPENROUTER_LOW_CREDIT_USD`. The exact balance never leaves the process — only the bucket label is exported. |
 
 ## Privacy model
 

@@ -108,6 +108,17 @@ Grok resolves the API key in this order:
 For a third-party `model_provider`, missing provider credentials fail closed:
 Grok does not send an xAI session token or `XAI_API_KEY` to that provider.
 
+### Header Privacy
+
+First-party xAI requests carry stable session and conversation identifiers in
+`x-grok-*` request headers (for example `x-grok-session-id`,
+`x-grok-conv-id`, `x-grok-req-id`). These headers are gated to the xAI
+provider only: OpenAI, OpenRouter, and any custom provider never receive them,
+so third-party endpoints cannot correlate Grok sessions or turns. The `kind`
+field on the provider (`"xai"`, `"openai"`, `"openrouter"`, `"codex"`, or
+`"custom"`) drives the gate — it is identity-based, not URL-based, so a
+mistyped `base_url` cannot leak the headers.
+
 ### Context Window
 
 The `context_window` value tells Grok when to trigger auto-compaction. When you override a known model, Grok inherits that model's context window. When you define a new model and omit `context_window`, Grok defaults to 200,000 tokens, so set it explicitly to match your provider.
@@ -281,9 +292,37 @@ openrouter_fallback_models = []
 ```
 
 Fallbacks may have different prices, context windows, and tool capabilities,
-so choose compatible models. After HTTP 429, Grok Build honors the server
-backoff, spaces subsequent OpenRouter requests conservatively, and shows the
-provider plus a live retry countdown in the turn status. Normal OpenRouter
+so choose compatible models.
+
+#### Fallback visibility
+
+When OpenRouter silently substitutes a fallback from `openrouter_fallback_models`,
+Grok Build surfaces the served model as a non-modal scrollback note:
+`served by <upstream-id> (fallback)`. The mismatch is logged for diagnosis
+(models only — no request content or credentials). The served model also
+appears on the `served_model` attribute of the `grok_code.api_fallback_served`
+OTEL event (see [Monitoring Usage](24-monitoring-usage.md)).
+
+#### Rate-limit handling and 429 backoff
+
+After HTTP 429, Grok Build honors the server-reported backoff, spaces
+subsequent OpenRouter requests conservatively, and shows the provider plus a
+live retry countdown in the turn status. The server's `x-ratelimit-reset`
+header is parsed into a seconds-until-reset window and used for both the
+retry sleep and the pacer cooldown, so the recovery interval tracks the
+actual limit instead of a guessed slice. When `x-ratelimit-reset` is absent,
+`Retry-After` (then exponential jitter) drives the backoff.
+
+OpenRouter gets a slightly higher 429 retry cap than the generic provider
+default (2), because its per-model limits and tool-loop bursts deserve a
+larger budget for the reset window to elapse. Overridable:
+
+```bash
+export GROK_OPENROUTER_RATE_LIMIT_RETRIES=3   # default
+```
+
+A non-positive or unparseable value falls back to the default so a
+misconfiguration cannot silently disable all 429 retries. Normal OpenRouter
 requests are spaced by two seconds by default. These process-level controls
 are optional:
 
@@ -295,6 +334,129 @@ export GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS=8
 Set the minimum interval to `0` to disable normal spacing. Structured logs
 include safe provider, rate-limit, and generation identifiers when OpenRouter
 returns them; request content and credentials are not logged.
+
+#### Catalog TTL
+
+The OpenRouter model catalog (`openrouter_models_cache.json`) is cached and
+revalidated in the background after a 6-hour freshness window (stale-while-
+revalidate): the picker and session keep using the last-good models while a
+refresh runs. If a refresh fails, the last valid cache is used; without a
+key, no OpenRouter entry is shown. Override the window:
+
+```bash
+export GROK_OPENROUTER_CATALOG_TTL_SECS=21600   # default 6h
+```
+
+Set it to `0` to disable automatic background revalidation (the cache is
+refreshed only on explicit `/providers` test/save/refresh actions).
+
+#### Provider-aware errors
+
+API error messages name the upstream that failed rather than hardcoding
+"Grok": when OpenRouter diagnostics carry the selected upstream's
+`provider_name`, that name appears in the error copy. HTTP 402 (Payment
+Required) — OpenRouter's out-of-credits signal — produces a dedicated,
+actionable message (`<provider> account out of credits — add credits to
+continue.`) and is never retried (billing failure is deterministic). Long
+structured error bodies are truncated head+tail (120 + 140 chars with an
+ellipsis) so the actionable portion OpenRouter puts at the end is never lost;
+non-JSON bodies (HTML edge pages) are never surfaced verbatim.
+
+#### `reasoning_effort` stripping
+
+Some OpenRouter models hard-400 the whole request when `reasoning_effort` is
+present but they never advertised reasoning support. When a model's catalog
+entry disclaims support (`supported_parameters` has no `reasoning`), Grok
+Build strips any `reasoning_effort` before it reaches the request body. An
+explicit `Some(true)` or unknown (`None`) keeps the field, so hand-written
+TOML models without a `supports_reasoning_effort` flag still honor an
+explicit user-set effort.
+
+#### `provider_preferences`
+
+OpenRouter's native `provider` request-body field lets you control routing,
+privacy, and price. Declare it on the provider block and/or per model. A
+model-level `[model.<id>.provider_preferences]` table **replaces** the
+provider-level object entirely for that model (fields not set on the model
+are not inherited from the provider level). Only emitted for
+`kind = "openrouter"`; an all-empty object omits the `provider` key from the
+wire entirely.
+
+```toml
+[model_providers.openrouter]
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+api_backend = "chat_completions"
+
+[model_providers.openrouter.provider_preferences]
+sort = "latency"                    # "price" | "throughput" | "latency"
+order = ["deepinfra/turbo"]         # preferred provider slugs, descending priority
+only = []                           # provider slugs to use exclusively
+ignore = []                         # provider slugs to skip
+allow_fallbacks = true              # allow fallbacks when the primary fails
+require_parameters = true           # only use providers supporting the request params
+data_collection = "deny"            # "allow" | "deny" — training on requests
+zdr = true                          # zero-data retention (opt-in)
+quantizations = ["int8"]            # quantization preferences
+max_price = { prompt = 0.5, completion = 2.0 }  # per-token-kind USD caps
+
+# A model-level table replaces the provider-level object for this model:
+[model.my-model.provider_preferences]
+sort = "throughput"
+data_collection = "deny"
+```
+
+Built-in defaults: when you connect OpenRouter through `/providers`, Grok
+Build applies `data_collection = "deny"` and `require_parameters = true` by
+default, and sets `X-OpenRouter-Title = "Grok Build"`. These privacy defaults
+are not applied to a hand-written `[model_providers.openrouter]` block — set
+them explicitly there.
+
+`zdr` is opt-in. Zero-data retention narrows the pool of compliant providers,
+so enabling it may reduce routing options or raise cost. Set it only when
+your compliance posture requires it.
+
+#### `plugins`
+
+OpenRouter's native `plugins` request-body array enables server-side
+post-processing. Declare it on the provider block and/or per model; a
+model-level list replaces the provider-level list for that model. Each entry
+is a table with a required `id` and arbitrary provider-specific knobs that
+serialize inline (flattened, not nested under an `extra` key). Only emitted
+for `kind = "openrouter"`; an empty list omits the `plugins` key entirely.
+
+```toml
+[model_providers.openrouter]
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+plugins = [
+  { id = "response-healing" },
+  { id = "web", max_results = 3 },
+]
+
+# A model-level list replaces the provider-level list for this model:
+[model.my-model]
+model = "openai/gpt-5.6-sol"
+model_provider = "openrouter"
+plugins = [{ id = "response-healing" }]
+```
+
+#### Credits display
+
+`/providers` shows the OpenRouter account's remaining credits (from
+`GET /api/v1/key`). When the remaining balance falls below the low-credit
+threshold, the status flags it with a ⚠ low-balance marker. Override the
+threshold:
+
+```bash
+export GROK_OPENROUTER_LOW_CREDIT_USD=1.0   # default $1
+```
+
+The exact balance never leaves the process except as a bucket label on the
+`grok_code.openrouter_credits` OTEL event (see
+[Monitoring Usage](24-monitoring-usage.md)).
 
 ### Codex with a ChatGPT subscription
 
