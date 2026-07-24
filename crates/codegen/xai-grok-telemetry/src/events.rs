@@ -1041,11 +1041,56 @@ pub struct ModelResponseReceived {
     pub reasoning_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_prompt_tokens: Option<u32>,
+    // Phase 8: additive provider/cost attrs. All optional; absent for xAI
+    // turns (the original producer), populated for OpenRouter turns.
+    /// Upstream provider name (e.g. "OpenRouter" or an OpenRouter-selected
+    /// upstream). Absent when the provider did not report one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    /// Server-reported cost in USD ticks (1 USD = 1e10 ticks). Absent when
+    /// unreported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd_ticks: Option<i64>,
+    /// Whether the turn used a BYOK upstream (OpenRouter `usage.is_byok`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_byok: Option<bool>,
+    /// Opaque generation id from a router (OpenRouter). Absent when the
+    /// router did not report one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    /// The model that actually served the turn, when it differs from the
+    /// requested model (OpenRouter fallback). Absent when no fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Memory
-// ---------------------------------------------------------------------------
+/// Phase 8: OpenRouter served a fallback model (the served model differed
+/// from the requested model). Emitted from the session turn path when
+/// `ConversationResponse.fallback_served_model` is `Some`. Product event +
+/// external OTEL mapping.
+#[derive(Serialize)]
+pub struct ApiFallbackServed {
+    /// The model the session requested.
+    pub requested_model: String,
+    /// The model the router actually served.
+    pub served_model: String,
+    /// Provider name (e.g. "OpenRouter"). Always "OpenRouter" for this event
+    /// today (the stream transform only sets `fallback_served_model` for
+    /// `provider_identity == OpenRouter`), but kept as a field so the
+    /// mapping stays provider-neutral.
+    pub provider_name: String,
+}
+
+/// Phase 8: OpenRouter credits low-balance event. Emitted from the provider
+/// connection test / catalog refresh when the remaining credits fall below
+/// the low-credit threshold. Product event + external OTEL mapping. The
+/// balance is **bucketed**, never exact — the producer computes the bucket
+/// before emitting.
+#[derive(Serialize)]
+pub struct OpenrouterCredits {
+    /// Bucketed balance: "lt_1", "1_to_10", "10_to_100", "gte_100", "unknown".
+    pub bucket: String,
+}
 
 #[derive(Serialize)]
 pub struct MemoryFlushed {
@@ -1388,6 +1433,15 @@ pub struct ApiError {
     pub status_code: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    // Phase 8: additive provider diagnostics from the OpenRouter error
+    // metadata surface. Absent for xAI errors.
+    /// Upstream provider name from router diagnostics (e.g. "OpenRouter" or
+    /// an OpenRouter-selected upstream).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    /// Opaque generation id from a router (OpenRouter `x-generation-id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
 }
 
 /// Internal (our-code) error class for the external `internal_error` event.
@@ -1709,6 +1763,17 @@ telemetry_event!(
     ModelResponseReceived,
     "model_response_received",
     external = crate::external::schema::map_api_request
+);
+// Phase 8: OpenRouter fallback + credits events.
+telemetry_event!(
+    ApiFallbackServed,
+    "api_fallback_served",
+    external = crate::external::schema::map_api_fallback_served
+);
+telemetry_event!(
+    OpenrouterCredits,
+    "openrouter_credits",
+    external = crate::external::schema::map_openrouter_credits
 );
 telemetry_event!(MemoryFlushed, "memory_flushed");
 telemetry_event!(MediaGenerated, "media_generated");

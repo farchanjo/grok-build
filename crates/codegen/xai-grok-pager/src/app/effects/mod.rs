@@ -4727,9 +4727,17 @@ async fn run_provider_operation(
         saved_now: bool,
     ) -> ProviderStatus {
         match result {
-            ProviderConnectionTest::Connected => ProviderStatus::Connected {
-                detail: Some("Connection verified without an inference charge".to_owned()),
-            },
+            ProviderConnectionTest::Connected { credits } => {
+                let detail = match credits {
+                    Some(credits) => format!(
+                        "Connection verified without an inference charge · {credits}"
+                    ),
+                    None => "Connection verified without an inference charge".to_owned(),
+                };
+                ProviderStatus::Connected {
+                    detail: Some(detail),
+                }
+            }
             ProviderConnectionTest::NotConfigured => ProviderStatus::Missing,
             ProviderConnectionTest::Rejected => ProviderStatus::Error(if saved_now {
                 "API key was saved, but the provider rejected it".to_owned()

@@ -77,6 +77,11 @@ fn external_stream_grpc_end_to_end() {
         completion_tokens: Some(7),
         reasoning_tokens: None,
         cached_prompt_tokens: None,
+        provider_name: None,
+        cost_usd_ticks: None,
+        is_byok: None,
+        generation_id: None,
+        served_model: None,
     });
 
     xai_grok_telemetry::external::flush();

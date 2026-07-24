@@ -134,7 +134,13 @@ pub fn stream_chat_completions<'a>(
             if let Some(u) = chunk.usage.clone() {
                 // Wire cost is cumulative for the response, so last-write-wins.
                 // Never clobber a known cost with missing/unreported.
-                let chunk_cost = xai_grok_sampling_types::reported_cost_ticks(u.cost_in_usd_ticks);
+                // Provider routing: xAI reports `cost_in_usd_ticks`; OpenRouter
+                // reports `cost` (USD float). When ticks are absent, fall back
+                // to the OpenRouter float and convert to the same tick scale
+                // (1 USD = 1e10 ticks) so cost display/telemetry work uniformly.
+                let chunk_cost =
+                    xai_grok_sampling_types::reported_cost_ticks(u.cost_in_usd_ticks)
+                        .or_else(|| xai_grok_sampling_types::usd_to_cost_ticks(u.cost.unwrap_or(0.0)));
                 cost_usd_ticks = match (cost_usd_ticks, chunk_cost) {
                     (_, Some(n)) => Some(n),
                     (prev, None) => prev,
@@ -711,6 +717,9 @@ mod tests {
             prompt_tokens_details: None,
             completion_tokens_details: None,
             cost_in_usd_ticks: None,
+            cost: None,
+            cost_details: None,
+            is_byok: None,
         });
 
         let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
@@ -753,6 +762,9 @@ mod tests {
                 prompt_tokens_details: None,
                 completion_tokens_details: None,
                 cost_in_usd_ticks: wire,
+                cost: None,
+                cost_details: None,
+                is_byok: None,
             });
             let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
                 Ok(text_chunk("ok")),
@@ -788,6 +800,9 @@ mod tests {
             prompt_tokens_details: None,
             completion_tokens_details: None,
             cost_in_usd_ticks: Some(99),
+            cost: None,
+            cost_details: None,
+            is_byok: None,
         });
         let mut second = make_chunk(vec![ChatChunkDelta::default()]);
         second.usage = Some(Usage {
@@ -797,6 +812,9 @@ mod tests {
             prompt_tokens_details: None,
             completion_tokens_details: None,
             cost_in_usd_ticks: Some(0),
+            cost: None,
+            cost_details: None,
+            is_byok: None,
         });
         let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
             Ok(text_chunk("ok")),
@@ -817,6 +835,86 @@ mod tests {
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.cost_usd_ticks, Some(99));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// OpenRouter reports `usage.cost` (USD float) instead of `cost_in_usd_ticks`.
+    /// When ticks are absent, the collector converts the USD float to the same
+    /// tick scale (1 USD = 1e10 ticks) so cost display/telemetry work uniformly.
+    #[tokio::test]
+    async fn openrouter_cost_float_converted_to_ticks() {
+        // $0.001 → 10_000_000 ticks
+        let mut chunk_with_usage = make_chunk(vec![ChatChunkDelta::default()]);
+        chunk_with_usage.usage = Some(Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            cost_in_usd_ticks: None,
+            cost: Some(0.001),
+            cost_details: None,
+            is_byok: None,
+        });
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
+            Ok(text_chunk("ok")),
+            Ok(chunk_with_usage),
+            Ok(final_chunk(FinishReason::Stop)),
+        ];
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::OpenRouter,
+        ))
+        .await;
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.cost_usd_ticks, Some(10_000_000));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// When both `cost_in_usd_ticks` (xAI) and `cost` (OpenRouter) are present,
+    /// the ticks value takes precedence (it's the provider-native field).
+    #[tokio::test]
+    async fn ticks_take_precedence_over_cost_float() {
+        let mut chunk_with_usage = make_chunk(vec![ChatChunkDelta::default()]);
+        chunk_with_usage.usage = Some(Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            cost_in_usd_ticks: Some(42),
+            cost: Some(999.0),
+            cost_details: None,
+            is_byok: None,
+        });
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
+            Ok(text_chunk("ok")),
+            Ok(chunk_with_usage),
+            Ok(final_chunk(FinishReason::Stop)),
+        ];
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            crate::config::ProviderIdentity::Custom,
+        ))
+        .await;
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.cost_usd_ticks, Some(42));
             }
             other => panic!("expected Completed, got {other:?}"),
         }

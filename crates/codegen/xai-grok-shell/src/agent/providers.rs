@@ -210,13 +210,26 @@ pub struct OpenRouterCatalog {
 }
 
 /// A safe outcome of testing an API connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderConnectionTest {
-    Connected,
+    /// The key was accepted. For OpenRouter, `credits` carries a display-only
+    /// credits-remaining string (e.g. "credits remaining: $4.21" or
+    /// "unlimited") when the `/key` probe returned balance data. Never the
+    /// raw body.
+    Connected {
+        credits: Option<String>,
+    },
     NotConfigured,
     Rejected,
     Unavailable,
+}
+
+impl ProviderConnectionTest {
+    /// Shorthand for a connected test with no credits data (xAI/OpenAI).
+    pub fn connected() -> Self {
+        Self::Connected { credits: None }
+    }
 }
 
 /// Errors exposed to the UI. Never include command output, HTTP bodies, URLs
@@ -814,6 +827,41 @@ impl ProviderManager {
             .await;
         match response {
             Ok(response) if response.status().is_success() => {
+                // For OpenRouter, the same `/key` probe that validates the
+                // credential also returns credits balance. Parse it
+                // defensively — all fields optional; the raw body is never
+                // retained or logged. A parse failure degrades to `None`
+                // (Connected without a credits string).
+                let credits = if provider == ProviderId::OpenRouter {
+                    let info = response
+                        .bytes()
+                        .await
+                        .ok()
+                        .as_deref()
+                        .and_then(parse_openrouter_credits);
+                    // Emit the low-balance telemetry event when the remaining
+                    // credits fall below the threshold. The balance is
+                    // bucketed — never exact — and the event is product-only
+                    // (not surfaced to the external OTEL stream unless the
+                    // customer has enabled it).
+                    if let Some(ref info) = info {
+                        let threshold = openrouter_low_credit_threshold();
+                        let below = info
+                            .remaining_usd
+                            .is_some_and(|remaining| remaining < threshold);
+                        if below {
+                            let bucket = openrouter_credits_bucket(info.remaining_usd);
+                            xai_grok_telemetry::session_ctx::log_event(
+                                xai_grok_telemetry::events::OpenrouterCredits {
+                                    bucket: bucket.to_owned(),
+                                },
+                            );
+                        }
+                    }
+                    info.map(|info| info.display)
+                } else {
+                    None
+                };
                 // A successful providers-modal save/test populates the model
                 // cache opportunistically. Catalog failure does not make a
                 // verified key look invalid; the next explicit refresh can
@@ -827,7 +875,7 @@ impl ProviderManager {
                     }
                     ProviderId::Xai | ProviderId::Codex => {}
                 }
-                Ok(ProviderConnectionTest::Connected)
+                Ok(ProviderConnectionTest::Connected { credits })
             }
             Ok(response)
                 if response.status().as_u16() == 401 || response.status().as_u16() == 403 =>
@@ -1451,6 +1499,105 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
 
 fn openrouter_cache_path(grok_home: &Path) -> PathBuf {
     grok_home.join(OPENROUTER_CACHE_FILE)
+}
+
+/// Low-credit threshold in USD. When the remaining OpenRouter credits fall
+/// below this, the provider status flags it. Configurable via
+/// `GROK_OPENROUTER_LOW_CREDIT_USD` for deployments that want a different
+/// cutoff. A non-parseable override falls back to the default.
+const OPENROUTER_LOW_CREDIT_USD_DEFAULT: f64 = 1.0;
+const OPENROUTER_LOW_CREDIT_USD_ENV: &str = "GROK_OPENROUTER_LOW_CREDIT_USD";
+
+fn openrouter_low_credit_threshold() -> f64 {
+    std::env::var(OPENROUTER_LOW_CREDIT_USD_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| *value >= 0.0)
+        .unwrap_or(OPENROUTER_LOW_CREDIT_USD_DEFAULT)
+}
+
+/// Bucketed credits balance for telemetry. Exact balances must never leave
+/// the process; the buckets are the only value that reaches the external
+/// stream. Kept generic so the credits fetch (Part B) and the telemetry event
+/// (Part D) share one definition.
+pub fn openrouter_credits_bucket(remaining_usd: Option<f64>) -> &'static str {
+    match remaining_usd {
+        None => "unknown",
+        Some(value) if value < 1.0 => "lt_1",
+        Some(value) if value < 10.0 => "1_to_10",
+        Some(value) if value < 100.0 => "10_to_100",
+        Some(_) => "gte_100",
+    }
+}
+
+/// Parse OpenRouter's `GET /api/v1/key` response into a display-only credits
+/// string and (when available) the numeric remaining balance for telemetry
+/// bucketing. The response shape (defensive — all fields optional):
+/// ```json
+/// { "data": { "limit_remaining": 4.21, "limit": 10.0, "usage": 5.79 } }
+/// ```
+/// Returns `None` on parse failure or when no balance data is present; the
+/// raw body is never retained or logged. When `limit` is missing or the
+/// remaining balance is non-decreasing relative to a `null` limit, "unlimited"
+/// is surfaced (OpenRouter reports `limit: null` for uncapped keys).
+fn parse_openrouter_credits(body: &[u8]) -> Option<OpenRouterCreditsInfo> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let data = value.get("data").unwrap_or(&value);
+    let limit_remaining = data.get("limit_remaining").and_then(|v| v.as_f64());
+    let limit = data.get("limit").and_then(|v| v.as_f64());
+    let usage = data.get("usage").and_then(|v| v.as_f64());
+
+    // No balance fields at all → nothing to display.
+    if limit_remaining.is_none() && limit.is_none() && usage.is_none() {
+        return None;
+    }
+
+    let threshold = openrouter_low_credit_threshold();
+
+    // OpenRouter reports `limit: null` for uncapped (unlimited-credit) keys.
+    // Treat an absent/null limit as unlimited regardless of usage.
+    let is_unlimited = limit.is_none();
+
+    let display = if is_unlimited {
+        "unlimited".to_owned()
+    } else {
+        // Prefer `limit_remaining`; fall back to `limit - usage` when only
+        // those are present. Clamp negatives to 0.
+        let remaining = limit_remaining
+            .or_else(|| limit.zip(usage).map(|(l, u)| (l - u).max(0.0)))
+            .unwrap_or(0.0);
+        format!("credits remaining: ${remaining:.2}")
+    };
+
+    // Low-credit flag only for capped keys with a concrete remaining balance.
+    // Also capture the numeric balance for telemetry bucketing.
+    let numeric_remaining = if is_unlimited {
+        None
+    } else {
+        limit_remaining.or_else(|| limit.zip(usage).map(|(l, u)| (l - u).max(0.0)))
+    };
+
+    let display = if !is_unlimited
+        && let Some(remaining) = numeric_remaining
+        && remaining < threshold
+    {
+        format!("{display} ⚠ low balance")
+    } else {
+        display
+    };
+
+    Some(OpenRouterCreditsInfo {
+        display,
+        remaining_usd: numeric_remaining,
+    })
+}
+
+/// Parsed OpenRouter credits info: a display-only string for the provider
+/// status and an optional numeric balance for telemetry bucketing. The
+/// numeric balance never leaves the process except as a bucket label.
+struct OpenRouterCreditsInfo {
+    display: String,
+    remaining_usd: Option<f64>,
 }
 
 /// Return the current Unix epoch seconds, or `None` if the system clock is
@@ -2213,6 +2360,116 @@ mod tests {
         assert_eq!(cached.models, live.models);
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn openrouter_test_connection_surfaces_credits() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let home = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // The /key probe and /models catalog refresh both hit the mock.
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let read = stream.read(&mut request).unwrap();
+                let request = std::str::from_utf8(&request[..read]).unwrap();
+                let body = if request.contains("GET /key") {
+                    r#"{"data":{"label":"default","limit_remaining":4.21,"limit":10.0,"usage":5.79}}"#
+                } else {
+                    r#"{"data":[{"id":"acme/test","context_length":65536,"supported_parameters":["tools"]}]}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let manager = ProviderManager::with_endpoints(
+            home.path(),
+            "https://api.openai.com/v1/models",
+            format!("http://{address}/key"),
+        )
+        .with_openrouter_catalog_url(format!("http://{address}/models"));
+        manager
+            .set_api_key(ProviderId::OpenRouter, "router-test-key")
+            .unwrap();
+
+        let result = manager
+            .test_connection(ProviderId::OpenRouter)
+            .await
+            .unwrap();
+        match result {
+            ProviderConnectionTest::Connected { credits } => {
+                let credits = credits.expect("credits should be surfaced");
+                assert!(
+                    credits.contains("credits remaining: $4.21"),
+                    "got: {credits}"
+                );
+            }
+            other => panic!("expected Connected with credits, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn openrouter_test_connection_credits_failure_degrades_gracefully() {
+        // /key returns invalid JSON; the connection must still be Connected
+        // with credits = None (the failure must not affect Connected state).
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let home = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request).unwrap();
+                let body = if request.starts_with(b"GET /key") {
+                    "not valid json"
+                } else {
+                    r#"{"data":[{"id":"acme/test","context_length":65536,"supported_parameters":["tools"]}]}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let manager = ProviderManager::with_endpoints(
+            home.path(),
+            "https://api.openai.com/v1/models",
+            format!("http://{address}/key"),
+        )
+        .with_openrouter_catalog_url(format!("http://{address}/models"));
+        manager
+            .set_api_key(ProviderId::OpenRouter, "router-test-key")
+            .unwrap();
+
+        let result = manager
+            .test_connection(ProviderId::OpenRouter)
+            .await
+            .unwrap();
+        match result {
+            ProviderConnectionTest::Connected { credits } => {
+                assert_eq!(credits, None, "credits parse failure must degrade to None");
+            }
+            other => panic!("expected Connected, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
     #[test]
     #[serial_test::serial]
     fn cached_openrouter_models_enter_picker_only_with_a_key() {
@@ -2763,5 +3020,99 @@ mod tests {
         );
 
         reset_openrouter_refresh_guard_for_tests();
+    }
+
+    #[test]
+    fn parse_openrouter_credits_remaining_with_limit() {
+        let body = br#"{"data":{"label":"default","limit_remaining":4.21,"limit":10.0,"usage":5.79,"is_free_tier":false}}"#;
+        let credits = parse_openrouter_credits(body).expect("should parse");
+        assert!(
+            credits.display.contains("credits remaining: $4.21"),
+            "got: {}",
+            credits.display
+        );
+        assert!(
+            !credits.display.contains("low"),
+            "not below threshold: {}",
+            credits.display
+        );
+        assert_eq!(credits.remaining_usd, Some(4.21));
+    }
+
+    #[test]
+    fn parse_openrouter_credits_low_balance_flagged() {
+        // Default threshold is $1.0; $0.50 is below it.
+        let body = br#"{"data":{"limit_remaining":0.5,"limit":10.0,"usage":9.5}}"#;
+        let credits = parse_openrouter_credits(body).expect("should parse");
+        assert!(
+            credits.display.contains("low"),
+            "low-balance flag expected: {}",
+            credits.display
+        );
+        assert_eq!(credits.remaining_usd, Some(0.5));
+    }
+
+    #[test]
+    fn parse_openrouter_credits_unlimited_when_limit_null() {
+        // OpenRouter reports `limit: null` for uncapped keys.
+        let body =
+            br#"{"data":{"label":"default","limit_remaining":null,"limit":null,"usage":123.45}}"#;
+        let credits = parse_openrouter_credits(body).expect("should parse");
+        assert_eq!(credits.display, "unlimited");
+        assert_eq!(
+            credits.remaining_usd, None,
+            "unlimited keys have no balance"
+        );
+    }
+
+    #[test]
+    fn parse_openrouter_credits_falls_back_to_limit_minus_usage() {
+        let body = br#"{"data":{"limit":10.0,"usage":7.75}}"#;
+        let credits = parse_openrouter_credits(body).expect("should parse");
+        assert!(
+            credits.display.contains("credits remaining: $2.25"),
+            "got: {}",
+            credits.display
+        );
+        assert_eq!(credits.remaining_usd, Some(2.25));
+    }
+
+    #[test]
+    fn parse_openrouter_credits_returns_none_on_missing_data() {
+        let body = br#"{"data":{"label":"default"}}"#;
+        assert!(parse_openrouter_credits(body).is_none());
+    }
+
+    #[test]
+    fn parse_openrouter_credits_returns_none_on_invalid_json() {
+        let body = b"not json at all";
+        assert!(parse_openrouter_credits(body).is_none());
+    }
+
+    #[test]
+    fn parse_openrouter_credits_returns_none_on_empty_body() {
+        assert!(parse_openrouter_credits(b"").is_none());
+    }
+
+    #[test]
+    fn parse_openrouter_credits_never_logs_raw_body() {
+        // A key-shaped string in the body must not appear in the output.
+        let body = br#"{"data":{"limit_remaining":4.21,"limit":10.0,"usage":5.79,"sk-secret":"sk-CANARYabcdef123456"}}"#;
+        let credits = parse_openrouter_credits(body).expect("should parse");
+        assert!(
+            !credits.display.contains("sk-CANARY"),
+            "raw body leaked into credits: {}",
+            credits.display
+        );
+    }
+
+    #[test]
+    fn openrouter_credits_bucket_boundaries() {
+        assert_eq!(openrouter_credits_bucket(None), "unknown");
+        assert_eq!(openrouter_credits_bucket(Some(0.5)), "lt_1");
+        assert_eq!(openrouter_credits_bucket(Some(5.0)), "1_to_10");
+        assert_eq!(openrouter_credits_bucket(Some(50.0)), "10_to_100");
+        assert_eq!(openrouter_credits_bucket(Some(100.0)), "gte_100");
+        assert_eq!(openrouter_credits_bucket(Some(999.0)), "gte_100");
     }
 }

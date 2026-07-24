@@ -1498,6 +1498,14 @@ impl SessionActor {
                         model_id: turn_model_id.clone(),
                         status_code: None,
                         duration_ms: Some(turn_duration_ms),
+                        // Phase 8: additive provider diagnostics. The turn
+                        // error path does not currently surface OpenRouter
+                        // diagnostics from the `SamplingError` here; left as
+                        // None (the field is additive, so xAI errors are
+                        // unaffected). A follow-up can thread diagnostics
+                        // through if the error carries them.
+                        provider_name: None,
+                        generation_id: None,
                     },
                 );
                 xai_grok_telemetry::session_ctx::log_event(
@@ -2643,6 +2651,15 @@ impl SessionActor {
             let model_duration_ms = model_timer.elapsed().as_millis() as u64;
             {
                 let model_id = self.current_model_id().await;
+                // Phase 8: provider/cost attrs on `ModelResponseReceived`.
+                // `fallback_served_model` being `Some` implies OpenRouter
+                // (the stream transform only sets it for that provider), so
+                // the provider name and served model are derived from the
+                // response. Cost ticks flow from the stream collector.
+                let provider_name = response
+                    .fallback_served_model
+                    .as_ref()
+                    .map(|_| "OpenRouter".to_owned());
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::events::ModelResponseReceived {
                         model_id,
@@ -2658,6 +2675,11 @@ impl SessionActor {
                             .usage
                             .as_ref()
                             .map(|u| u.cached_prompt_tokens),
+                        provider_name,
+                        cost_usd_ticks: response.cost_usd_ticks,
+                        is_byok: None,
+                        generation_id: None,
+                        served_model: response.fallback_served_model.clone(),
                     },
                 );
             }
@@ -2675,6 +2697,15 @@ impl SessionActor {
                     served_model = %served,
                     provider = "OpenRouter",
                     "openrouter fallback served: model differs from requested"
+                );
+                // Phase 8: emit the external OTEL `api_fallback_served`
+                // event. Models only, no content or credentials.
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::ApiFallbackServed {
+                        requested_model: requested,
+                        served_model: served.clone(),
+                        provider_name: "OpenRouter".to_owned(),
+                    },
                 );
                 self.send_xai_notification(XaiSessionUpdate::HookAnnotation {
                     message: format!("served by {served} (fallback)"),

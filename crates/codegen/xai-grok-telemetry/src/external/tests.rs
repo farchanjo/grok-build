@@ -153,6 +153,16 @@ fn external_allowed_keys_are_pinned() {
         "error_code",
         "tip",
         "action",
+        // Phase 8: additive provider/cost/fallback keys. No user content or
+        // credentials — provider_name is a known label, generation_id is
+        // opaque router metadata (sanitized by the scrub layer), cost is an
+        // integer tick count, served_model is a provider-published id.
+        "provider_name",
+        "cost_usd_ticks",
+        "is_byok",
+        "generation_id",
+        "served_model",
+        "credits_bucket",
     ];
     let actual: Vec<&str> = schema::ALL_KEYS.iter().map(|k| k.as_str()).collect();
     assert_eq!(
@@ -223,6 +233,11 @@ fn event_names_are_pinned() {
         (E::InternalError, "grok_code.internal_error"),
         (E::ModelSwitched, "grok_code.model_switched"),
         (E::ContextualTip, "grok_code.contextual_tip"),
+        // Phase 8: additive OpenRouter events. Fallback-served carries model
+        // ids only; credits carries a bucketed balance + provider. No
+        // content, no credentials, no exact balances.
+        (E::ApiFallbackServed, "grok_code.api_fallback_served"),
+        (E::OpenrouterCredits, "grok_code.openrouter_credits"),
     ];
     assert_eq!(expected.len(), <E as strum::EnumCount>::COUNT);
     for (variant, name) in expected {
@@ -384,6 +399,13 @@ fn api_request_snapshot_and_token_usage() {
             completion_tokens: Some(50),
             reasoning_tokens: Some(25),
             cached_prompt_tokens: None,
+            // Phase 8: additive provider/cost fields. Absent for xAI turns;
+            // populated for OpenRouter turns.
+            provider_name: None,
+            cost_usd_ticks: None,
+            is_byok: None,
+            generation_id: None,
+            served_model: None,
         },
     );
     let events = exported_events(&stream);
@@ -396,6 +418,116 @@ fn api_request_snapshot_and_token_usage() {
     assert_eq!(
         exported_metric_names(&stream),
         vec!["grok_code.token.usage"]
+    );
+}
+
+/// Phase 8: an OpenRouter turn populates the additive provider/cost attrs
+/// on `grok_code.api_request`. No content or credentials — model ids and
+/// provider labels only; generation_id is opaque router metadata.
+#[test]
+fn api_request_attaches_openrouter_provider_cost_attrs() {
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::ModelResponseReceived {
+            model_id: "anthropic/claude-opus-4".into(),
+            duration_ms: 1200,
+            stop_reason: Some("stop".into()),
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            reasoning_tokens: None,
+            cached_prompt_tokens: None,
+            provider_name: Some("OpenRouter".into()),
+            cost_usd_ticks: Some(10_000_000),
+            is_byok: Some(false),
+            generation_id: Some("gen_abc".into()),
+            served_model: Some("openai/gpt-5-mini".into()),
+        },
+    );
+    let events = exported_events(&stream);
+    let ev = &events[0];
+    assert_eq!(ev.0, "grok_code.api_request");
+    assert_eq!(attr(ev, "provider_name").as_deref(), Some("OpenRouter"));
+    assert_eq!(attr(ev, "cost_usd_ticks").as_deref(), Some("10000000"));
+    assert_eq!(attr(ev, "is_byok").as_deref(), Some("false"));
+    assert_eq!(attr(ev, "generation_id").as_deref(), Some("gen_abc"));
+    assert_eq!(
+        attr(ev, "served_model").as_deref(),
+        Some("openai/gpt-5-mini")
+    );
+}
+
+/// Phase 8: `grok_code.api_error` carries provider_name + generation_id from
+/// OpenRouter error diagnostics when present.
+#[test]
+fn api_error_attaches_provider_and_generation_id() {
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::ApiError {
+            error_category: "server_error".into(),
+            model_id: "anthropic/claude-opus-4".into(),
+            status_code: Some(500),
+            duration_ms: Some(100),
+            provider_name: Some("OpenRouter".into()),
+            generation_id: Some("gen_xyz".into()),
+        },
+    );
+    let events = exported_events(&stream);
+    let ev = &events[0];
+    assert_eq!(ev.0, "grok_code.api_error");
+    assert_eq!(attr(ev, "provider_name").as_deref(), Some("OpenRouter"));
+    assert_eq!(attr(ev, "generation_id").as_deref(), Some("gen_xyz"));
+}
+
+/// Phase 8: `grok_code.api_fallback_served` carries requested model, served
+/// model, and provider name. No content or credentials.
+#[test]
+fn api_fallback_served_maps_requested_served_provider() {
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::ApiFallbackServed {
+            requested_model: "anthropic/claude-opus-4".into(),
+            served_model: "openai/gpt-5-mini".into(),
+            provider_name: "OpenRouter".into(),
+        },
+    );
+    let events = exported_events(&stream);
+    let ev = &events[0];
+    assert_eq!(ev.0, "grok_code.api_fallback_served");
+    assert_eq!(
+        attr(ev, "model").as_deref(),
+        Some("anthropic/claude-opus-4")
+    );
+    assert_eq!(
+        attr(ev, "served_model").as_deref(),
+        Some("openai/gpt-5-mini")
+    );
+    assert_eq!(attr(ev, "provider_name").as_deref(), Some("OpenRouter"));
+}
+
+/// Phase 8: `grok_code.openrouter_credits` carries a bucketed balance (never
+/// exact) + provider attr. The bucket is a closed set of labels.
+#[test]
+fn openrouter_credits_maps_bucketed_balance() {
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::OpenrouterCredits {
+            bucket: "lt_1".into(),
+        },
+    );
+    let events = exported_events(&stream);
+    let ev = &events[0];
+    assert_eq!(ev.0, "grok_code.openrouter_credits");
+    assert_eq!(attr(ev, "credits_bucket").as_deref(), Some("lt_1"));
+    assert_eq!(attr(ev, "provider_name").as_deref(), Some("OpenRouter"));
+    // No exact balance ever appears.
+    let blob = format!("{events:?}");
+    assert!(
+        !blob.contains("4.21") && !blob.contains("$"),
+        "exact balance leaked: {blob}"
     );
 }
 
@@ -422,6 +554,9 @@ fn one_failed_turn_increments_error_count_exactly_once() {
             model_id: "grok-4".into(),
             status_code: Some(429),
             duration_ms: Some(10),
+            // Phase 8: additive provider diagnostics. Absent for xAI errors.
+            provider_name: None,
+            generation_id: None,
         },
     );
     emit_event_into(

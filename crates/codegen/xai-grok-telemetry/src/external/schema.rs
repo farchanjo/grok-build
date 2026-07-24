@@ -43,6 +43,14 @@ pub enum ExternalEventName {
     InternalError,
     ModelSwitched,
     ContextualTip,
+    /// OpenRouter served a fallback model (the served model differed from the
+    /// requested model). Emitted from the session turn path when
+    /// `ConversationResponse.fallback_served_model` is `Some`.
+    ApiFallbackServed,
+    /// OpenRouter credits low-balance event. Emitted from the provider
+    /// connection test / catalog refresh when the remaining credits fall below
+    /// the low-credit threshold. The balance is **bucketed**, never exact.
+    OpenrouterCredits,
 }
 
 impl ExternalEventName {
@@ -68,6 +76,14 @@ impl ExternalEventName {
             Self::InternalError => "grok_code.internal_error",
             Self::ModelSwitched => "grok_code.model_switched",
             Self::ContextualTip => "grok_code.contextual_tip",
+            // Phase 8: OpenRouter fallback-served detection from the session
+            // turn path. Attrs: session.id, requested model, served model,
+            // provider name. No content or credentials.
+            Self::ApiFallbackServed => "grok_code.api_fallback_served",
+            // Phase 8: OpenRouter credits low-balance. The balance is
+            // bucketed ("lt_1", "1_to_10", "10_to_100", "gte_100", "unknown")
+            // + provider attr. Exact balances never leave the process.
+            Self::OpenrouterCredits => "grok_code.openrouter_credits",
         }
     }
 }
@@ -162,6 +178,28 @@ pub enum ExternalKey {
     // Contextual tips
     Tip,
     Action,
+    // Phase 8: Provider / cost / fallback attrs (additive).
+    /// Upstream provider name for a model turn (e.g. "OpenRouter", an
+    /// OpenRouter-selected upstream). Free text from the router metadata
+    /// surface; sanitized at the mapping site to a known provider label.
+    ProviderName,
+    /// Server-reported cost in USD ticks (1 USD = 1e10 ticks). Mirrors the
+    /// internal `cost_usd_ticks` field; additive for OpenRouter turns.
+    CostUsdTicks,
+    /// Whether the model turn used a BYOK (bring-your-own-key) upstream
+    /// (OpenRouter `usage.is_byok`).
+    IsByok,
+    /// Opaque generation id from a router (OpenRouter `x-generation-id` /
+    /// `generation_id`). Sanitized at the mapping site (it is free text from
+    /// a header/body); used for correlation only.
+    GenerationId,
+    /// The model that actually served a turn, when it differs from the
+    /// requested model (OpenRouter fallback). Mirrors
+    /// `ConversationResponse.fallback_served_model`.
+    ServedModel,
+    /// Bucketed OpenRouter credits balance ("lt_1", "1_to_10", "10_to_100",
+    /// "gte_100", "unknown"). Exact balances never reach the wire.
+    CreditsBucket,
 }
 
 impl ExternalKey {
@@ -235,6 +273,13 @@ impl ExternalKey {
             Self::ErrorCode => "error_code",
             Self::Tip => "tip",
             Self::Action => "action",
+            // Phase 8: additive provider/cost/fallback keys.
+            Self::ProviderName => "provider_name",
+            Self::CostUsdTicks => "cost_usd_ticks",
+            Self::IsByok => "is_byok",
+            Self::GenerationId => "generation_id",
+            Self::ServedModel => "served_model",
+            Self::CreditsBucket => "credits_bucket",
         }
     }
 }
@@ -309,6 +354,13 @@ pub(crate) const ALL_KEYS: &[ExternalKey] = &[
     ExternalKey::ErrorCode,
     ExternalKey::Tip,
     ExternalKey::Action,
+    // Phase 8: additive provider/cost/fallback keys.
+    ExternalKey::ProviderName,
+    ExternalKey::CostUsdTicks,
+    ExternalKey::IsByok,
+    ExternalKey::GenerationId,
+    ExternalKey::ServedModel,
+    ExternalKey::CreditsBucket,
 ];
 
 /// Compile-time completeness guard: a new `ExternalKey` variant that is not
@@ -829,7 +881,16 @@ pub fn map_api_request(ev: &events::ModelResponseReceived) -> Option<ExternalRec
         .attr_opt(ExternalKey::InputTokens, ev.prompt_tokens)
         .attr_opt(ExternalKey::OutputTokens, ev.completion_tokens)
         .attr_opt(ExternalKey::ReasoningTokens, ev.reasoning_tokens)
-        .attr_opt(ExternalKey::CacheReadTokens, ev.cached_prompt_tokens);
+        .attr_opt(ExternalKey::CacheReadTokens, ev.cached_prompt_tokens)
+        // Phase 8: additive provider/cost/fallback attrs. All optional and
+        // absent for xAI turns (the original producer). No content or
+        // credentials — provider_name is a known label, generation_id is
+        // opaque router metadata (sanitized by the scrub layer).
+        .attr_opt(ExternalKey::ProviderName, ev.provider_name.as_deref())
+        .attr_opt(ExternalKey::CostUsdTicks, ev.cost_usd_ticks)
+        .attr_opt(ExternalKey::IsByok, ev.is_byok)
+        .attr_opt(ExternalKey::GenerationId, ev.generation_id.as_deref())
+        .attr_opt(ExternalKey::ServedModel, ev.served_model.as_deref());
     for (token_type, count) in [
         ("input", ev.prompt_tokens),
         ("output", ev.completion_tokens),
@@ -871,7 +932,37 @@ pub fn map_api_error(ev: &events::ApiError) -> Option<ExternalRecord> {
             .attr(ExternalKey::ErrorCategory, ev.error_category.as_str())
             .attr(ExternalKey::Model, ev.model_id.as_str())
             .attr_opt(ExternalKey::StatusCode, ev.status_code.map(|c| c as i64))
-            .attr_opt(ExternalKey::DurationMs, ev.duration_ms),
+            .attr_opt(ExternalKey::DurationMs, ev.duration_ms)
+            // Phase 8: additive provider diagnostics from OpenRouter error
+            // metadata. Absent for xAI errors; sanitized by the scrub layer.
+            .attr_opt(ExternalKey::ProviderName, ev.provider_name.as_deref())
+            .attr_opt(ExternalKey::GenerationId, ev.generation_id.as_deref()),
+    )
+}
+
+/// `ApiFallbackServed` → `grok_code.api_fallback_served` (Phase 8).
+/// Emitted from the session turn path when the served model differs from
+/// the requested model (OpenRouter fallback). Attrs: requested model, served
+/// model, provider name. No content or credentials — model ids are
+/// provider-published identifiers, not user content.
+pub fn map_api_fallback_served(ev: &events::ApiFallbackServed) -> Option<ExternalRecord> {
+    Some(
+        ExternalRecord::event(ExternalEventName::ApiFallbackServed)
+            .attr(ExternalKey::Model, ev.requested_model.as_str())
+            .attr(ExternalKey::ServedModel, ev.served_model.as_str())
+            .attr(ExternalKey::ProviderName, ev.provider_name.as_str()),
+    )
+}
+
+/// `OpenrouterCredits` → `grok_code.openrouter_credits` (Phase 8).
+/// The balance is **bucketed** ("lt_1", "1_to_10", "10_to_100", "gte_100",
+/// "unknown") — the producer computes the bucket before emitting; exact
+/// balances never reach the wire. Provider attr is always "OpenRouter".
+pub fn map_openrouter_credits(ev: &events::OpenrouterCredits) -> Option<ExternalRecord> {
+    Some(
+        ExternalRecord::event(ExternalEventName::OpenrouterCredits)
+            .attr(ExternalKey::CreditsBucket, ev.bucket.as_str())
+            .attr(ExternalKey::ProviderName, "OpenRouter"),
     )
 }
 

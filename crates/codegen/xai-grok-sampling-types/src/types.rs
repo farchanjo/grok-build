@@ -551,6 +551,37 @@ pub struct Usage {
     /// normalize `0` to "unreported" (see `stream/chat_completions.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_in_usd_ticks: Option<i64>,
+    /// OpenRouter extension: total request cost in USD (float). When
+    /// `cost_in_usd_ticks` is absent, the streaming collector converts this
+    /// to ticks (1 USD = 1e10 ticks) so downstream cost display/telemetry
+    /// work uniformly across providers. Additive and serde-optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// OpenRouter extension: breakdown of the cost (e.g. upstream vs. router
+    /// margin). Parsed but not surfaced in telemetry; retained for
+    /// diagnostics. Additive and serde-optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_details: Option<serde_json::Value>,
+    /// OpenRouter extension: whether the request used a BYOK (bring-your-own-
+    /// key) upstream, meaning the cost is $0. Additive and serde-optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_byok: Option<bool>,
+}
+
+/// USD-to-ticks scale factor. xAI reports cost as integer ticks where
+/// 1 USD = 1e10 ticks. OpenRouter reports `usage.cost` as a USD float;
+/// the streaming collector mirrors the xAI scale so both providers feed
+/// the same cost display and telemetry path.
+pub const COST_USD_TICKS_PER_DOLLAR: i64 = 10_000_000_000;
+
+/// Convert a USD cost (OpenRouter `usage.cost`) to the xAI tick scale.
+/// Returns `None` for non-finite/negative values (treated as "unreported").
+pub fn usd_to_cost_ticks(usd: f64) -> Option<i64> {
+    if !usd.is_finite() || usd <= 0.0 {
+        return None;
+    }
+    let ticks = (usd * COST_USD_TICKS_PER_DOLLAR as f64) as i64;
+    (ticks > 0).then_some(ticks)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -1517,5 +1548,72 @@ mod tests {
         let inner: &dyn TraceContext = &*cloned_trace;
         let downcast = inner.as_any().downcast_ref::<TestTrace>().unwrap();
         assert_eq!(downcast.0, "trace-data");
+    }
+
+    #[test]
+    fn usd_to_cost_ticks_converts_to_tick_scale() {
+        // 1 USD = 1e10 ticks
+        assert_eq!(usd_to_cost_ticks(1.0), Some(10_000_000_000));
+        // $0.001 → 10_000_000 ticks
+        assert_eq!(usd_to_cost_ticks(0.001), Some(10_000_000));
+        // $0.0001 → 1_000_000 ticks
+        assert_eq!(usd_to_cost_ticks(0.0001), Some(1_000_000));
+    }
+
+    #[test]
+    fn usd_to_cost_ticks_rejects_non_positive_and_non_finite() {
+        assert_eq!(usd_to_cost_ticks(0.0), None, "zero is unreported");
+        assert_eq!(usd_to_cost_ticks(-1.0), None, "negative is invalid");
+        assert_eq!(
+            usd_to_cost_ticks(f64::INFINITY),
+            None,
+            "infinite is invalid"
+        );
+        assert_eq!(usd_to_cost_ticks(f64::NAN), None, "NaN is invalid");
+    }
+
+    #[test]
+    fn usage_parses_openrouter_cost_fields() {
+        let json = serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost": 0.0021,
+            "cost_details": {"upstream": 0.002, "router": 0.0001},
+            "is_byok": false
+        });
+        let u: Usage = serde_json::from_value(json).unwrap();
+        assert_eq!(u.cost, Some(0.0021));
+        assert!(u.cost_details.is_some());
+        assert_eq!(u.is_byok, Some(false));
+        assert!(u.cost_in_usd_ticks.is_none());
+    }
+
+    #[test]
+    fn usage_parses_xai_cost_in_usd_ticks() {
+        let json = serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost_in_usd_ticks": 78000000
+        });
+        let u: Usage = serde_json::from_value(json).unwrap();
+        assert_eq!(u.cost_in_usd_ticks, Some(78_000_000));
+        assert!(u.cost.is_none(), "OpenRouter cost absent on xAI");
+        assert!(u.is_byok.is_none());
+    }
+
+    #[test]
+    fn usage_defaults_openrouter_cost_fields_to_none() {
+        let json = serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15
+        });
+        let u: Usage = serde_json::from_value(json).unwrap();
+        assert!(u.cost.is_none());
+        assert!(u.cost_details.is_none());
+        assert!(u.is_byok.is_none());
+        assert!(u.cost_in_usd_ticks.is_none());
     }
 }
