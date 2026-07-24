@@ -15,6 +15,16 @@ fi
 export GROK_HOME
 export GROK_LEADER_SOCKET="${GROK_LEADER_SOCKET:-${GROK_HOME}/leader.sock}"
 
+# Isolate artifacts from concurrent cargo test/check/build on ./target so this
+# runner never blocks on "file lock on artifact directory". sccache (configured
+# in .cargo/config.toml) still shares the compile cache across target dirs.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${SCRIPT_DIR}/target-dev}"
+
+# Prefer sccache when available even if .cargo/config is overridden.
+if [[ -z "${RUSTC_WRAPPER:-}" ]] && command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER=sccache
+fi
+
 # Export content-redacted development usage telemetry to the dedicated Alloy
 # receiver. Pin the routing before Grok starts so ambient OTEL settings cannot
 # mix this profile with production or leak unrelated collector credentials.
@@ -40,6 +50,7 @@ export GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS="${GROK_OPENROUTER_RATE_LIMI
 
 mkdir -p "${GROK_HOME}"
 chmod 700 "${GROK_HOME}"
+mkdir -p "${CARGO_TARGET_DIR}"
 
 cd "${SCRIPT_DIR}"
 exec cargo run -p xai-grok-pager-bin -- "$@"

@@ -35,11 +35,20 @@ rustflags = [
     "link-args=-ObjC",
 ]
 
+# Faster linker for GNU Linux hosts (lld). Requires `lld` on PATH (e.g.
+# clang/lld package). Skipped on musl/release-hardening targets below.
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "force-unwind-tables=yes"]
+rustflags = [
+    "-C", "force-unwind-tables=yes",
+    "-C", "link-arg=-fuse-ld=lld",
+]
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=neoverse-v2", "-C", "force-unwind-tables=yes"]
+rustflags = [
+    "-C", "target-cpu=neoverse-v2",
+    "-C", "force-unwind-tables=yes",
+    "-C", "link-arg=-fuse-ld=lld",
+]
 
 [target.x86_64-unknown-linux-musl]
 rustflags = [
