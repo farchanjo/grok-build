@@ -65,6 +65,7 @@ impl ToolKind {
             ToolKind::ReferenceToVideo => "Generate Video",
             ToolKind::DeployApp => "Deploy App",
             ToolKind::SearchTool => "Search Tools",
+            ToolKind::SearchModels => "Search Models",
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
@@ -112,6 +113,7 @@ impl ToolKind {
             | ToolKind::GoalUpdate
             | ToolKind::Workflow
             | ToolKind::Other => false,
+            ToolKind::SearchModels => true,
         }
     }
 }

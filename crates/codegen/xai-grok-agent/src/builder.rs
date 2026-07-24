@@ -1268,23 +1268,15 @@ fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
 }
 const TASK_MODEL_PARAM: &str = "${{ params.task.model }}";
 fn task_model_guidance(model_slugs: &[String]) -> String {
-    let mut model_slugs = model_slugs.to_vec();
-    model_slugs.sort_unstable();
-    model_slugs.dedup();
-    if model_slugs.is_empty() {
-        return format!(
-            "\n\nNo explicit model slugs are currently available. \
-             Omit `{TASK_MODEL_PARAM}` to inherit the parent model."
-        );
-    }
-    let model_list = model_slugs
-        .into_iter()
-        .map(|slug| format!("- {slug}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Full catalog dumps (hundreds of OpenRouter slugs) bloat the Task
+    // description. Prefer `search_models` for name→slug resolution.
+    let _ = model_slugs;
     format!(
-        "\n\nIf the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-         {model_list}\n\n\
+        "\n\nIf the user explicitly asks for the model of a subagent/task:\n\
+         1. Call `search_models` with their product name or version (e.g. \"GLM 5.2\").\n\
+         2. Pass the returned **slug** exactly as `{TASK_MODEL_PARAM}` (e.g. `openrouter:z-ai/glm-5.2`).\n\
+         3. Do not invent slugs. If search returns nothing useful, omit `{TASK_MODEL_PARAM}` \
+         or ask the user to clarify.\n\n\
          If the user does not explicitly request a model, omit `{TASK_MODEL_PARAM}` to inherit the parent model."
     )
 }
@@ -1482,14 +1474,19 @@ mod tests {
             &subagents,
             &["zeta".to_string(), "alpha".to_string(), "alpha".to_string()],
         );
-        assert!(desc.contains(
-            "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
-             - alpha\n\
-             - zeta"
-        ));
+        assert!(
+            desc.contains("search_models"),
+            "task description must point at search_models for slug resolution"
+        );
+        assert!(
+            desc.contains("openrouter:z-ai/glm-5.2") || desc.contains("slug"),
+            "should document slug usage"
+        );
         assert!(desc.contains(
             "If the user does not explicitly request a model, omit `${{ params.task.model }}` to inherit the parent model."
         ));
+        // Must not dump the injected slug list as a bullet catalog.
+        assert!(!desc.contains("- alpha\n- zeta"));
         assert!(!desc.contains("Available model slugs:"));
         assert!(!desc.contains(concat!("grok", " models")));
     }
@@ -1501,8 +1498,10 @@ mod tests {
             SubagentSource::Builtin(BuiltinAgentName::Explore),
         )];
         let desc = build_task_description(&subagents, &[]);
-        assert!(desc.contains("No explicit model slugs are currently available."));
-        assert!(desc.contains("Omit `${{ params.task.model }}` to inherit the parent model."));
+        assert!(desc.contains("search_models"));
+        assert!(desc.contains("omit `${{ params.task.model }}` to inherit the parent model.")
+            || desc.contains("Omit `${{ params.task.model }}` to inherit the parent model.")
+            || desc.contains("inherit the parent model"));
         assert!(!desc.contains(concat!("grok", " models")));
     }
     #[test]

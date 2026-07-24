@@ -188,6 +188,17 @@ Pass an explicit catalog id with `model="openrouter:<provider>/<model>"`, for ex
 
 Do **not** use `openai:` discovery slugs for subagents. Entries like `openai:<upstream-id>` come from the OpenAI `/v1/models` list, whose response does not prove coding-agent tool support; they are still hard-rejected for subagents even when the picker shows them as selectable for the primary session. Use a curated OpenAI entry or an `openrouter:` id instead.
 
+### Resolving a product name to a slug (`search_models`)
+
+When you (or the agent) only know a product name such as “GLM 5.2” or “gpt-oss-120b”, use the built-in **`search_models`** tool before spawning. It ranks the live catalog with BM25 over name, slug, provider, and description, and returns task-eligible hits with:
+
+- **name** — display label
+- **slug** — exact value for `spawn_subagent` `model=`
+- **provider** — e.g. `openrouter`
+- **call** — example `spawn_subagent model="<slug>"`
+
+Example: `search_models` with query `GLM 5.2` → slug `openrouter:z-ai/glm-5.2`. Pass that slug exactly; do not invent ids. If the user does not name a model, omit `model` and inherit the parent.
+
 ### Rate-limit pacing
 
 OpenRouter's process-level rate-limit pacing — the 429 retry cap (`GROK_OPENROUTER_RATE_LIMIT_RETRIES`), the minimum request interval (`GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS`), and the recovery-requests window (`GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS`) — applies to OpenRouter children exactly as it does to the primary session. A burst of parallel OpenRouter subagents shares the same pacer, so 429 backoff and spacing are honored across the whole task tree. See [Custom Models](11-custom-models.md) for the full list of overrides.

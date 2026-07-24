@@ -97,6 +97,8 @@ pub enum ToolKind {
     ReferenceToVideo,
     DeployApp,
     SearchTool,
+    /// Catalog model discovery for subagent `model=` resolution.
+    SearchModels,
     UseTool,
     Monitor,
     GoalUpdate,

@@ -442,7 +442,7 @@ impl ModelsManager {
     }
 
     /// Does the current credential grant access to OAuth-only models?
-    fn is_session_auth(&self) -> bool {
+    pub(crate) fn is_session_auth(&self) -> bool {
         self.inner
             .auth_manager
             .current_or_expired()

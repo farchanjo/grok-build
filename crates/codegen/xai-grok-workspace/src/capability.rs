@@ -100,6 +100,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::ReferenceToVideo,
     ToolKind::DeployApp,
     ToolKind::SearchTool,
+    ToolKind::SearchModels,
     ToolKind::UseTool,
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
@@ -128,7 +129,9 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
 
     match kind {
         // Meta tools: always allowed.
-        Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | GoalUpdate => true,
+        Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | SearchModels | GoalUpdate => {
+            true
+        }
 
         // Read class.
         Read | MemoryGet | MemorySearch => {

@@ -12,6 +12,7 @@ pub mod folder_trust;
 pub(crate) mod handlers;
 pub mod init;
 pub mod model_providers;
+pub mod model_search;
 pub mod models;
 pub mod mvp_agent;
 pub mod providers;

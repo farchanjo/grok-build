@@ -258,7 +258,9 @@ impl AgentRebuildSpec {
         .with_subagents_enabled(*subagents_enabled)
         .with_subagent_toggle(subagent_toggle.clone())
         .with_background_workflows_enabled(*background_workflows_enabled)
-        .with_task_model_slugs(models_manager.task_eligible_slugs())
+        // Slug discovery moved to `search_models`; keep the Task description
+        // free of full-catalog dumps (OpenRouter can be hundreds of entries).
+        .with_task_model_slugs(Vec::new())
         .with_ask_user_question_enabled(*ask_user_question_enabled)
         .with_persona_summaries(persona_summaries.clone())
         .with_prompt_audience(*prompt_audience)
@@ -313,6 +315,15 @@ impl AgentRebuildSpec {
             .update_resource(TaskModelValidator::new(move |requested| {
                 model_validator.task_model_error(requested)
             }))
+            .await;
+        let model_catalog = models_manager.clone();
+        agent
+            .tool_bridge()
+            .update_resource(
+                xai_grok_tools::implementations::search_models::ModelCatalogSearch::new(
+                    move |query| model_catalog.search_models(query),
+                ),
+            )
             .await;
         if let Some(event_tx) = subagent_event_tx.clone() {
             use xai_grok_tools::implementations::grok_build::task::backend::{
