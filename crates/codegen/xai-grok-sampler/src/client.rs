@@ -422,6 +422,10 @@ struct StreamingChatRequest<'a> {
     /// `model`. Absent for native OpenAI/xAI/Codex requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     models: Option<&'a [String]>,
+    /// OpenRouter extension: native `provider` preferences. Absent for native
+    /// OpenAI/xAI/Codex requests and when no preferences are configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<&'a crate::config::OpenRouterProviderPreferences>,
     stream: bool,
     stream_options: StreamOptions,
 }
@@ -434,6 +438,8 @@ struct ChatRequestWithFallbacks<'a> {
     inner: &'a ChatCompletionRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     models: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<&'a crate::config::OpenRouterProviderPreferences>,
 }
 
 #[derive(Serialize)]
@@ -512,6 +518,7 @@ struct ClientDefaults {
     temperature: Option<f32>,
     top_p: Option<f32>,
     openrouter_fallback_models: Vec<String>,
+    openrouter_provider_preferences: Option<crate::config::OpenRouterProviderPreferences>,
     api_backend: ApiBackend,
     include_message_model_id: bool,
     auth_scheme: AuthScheme,
@@ -727,6 +734,7 @@ impl SamplingClient {
             temperature: config.temperature,
             top_p: config.top_p,
             openrouter_fallback_models: config.openrouter_fallback_models,
+            openrouter_provider_preferences: config.openrouter_provider_preferences,
             api_backend: config.api_backend,
             include_message_model_id: config.include_message_model_id,
             auth_scheme: config.auth_scheme,
@@ -977,6 +985,22 @@ impl SamplingClient {
             .then_some(self.defaults.openrouter_fallback_models.as_slice())
     }
 
+    /// OpenRouter's native `provider` request-body preferences. Only emitted
+    /// when the identity is OpenRouter and the preferences object is non-empty
+    /// (all fields unset). `None` for non-OpenRouter providers and for an
+    /// all-empty object, so the `provider` key is omitted from the wire body.
+    fn openrouter_provider_preferences(
+        &self,
+    ) -> Option<&crate::config::OpenRouterProviderPreferences> {
+        if !self.openrouter_metadata_requested {
+            return None;
+        }
+        self.defaults
+            .openrouter_provider_preferences
+            .as_ref()
+            .filter(|prefs| !prefs.is_empty())
+    }
+
     async fn handle_response(&self, response: reqwest::Response) -> Result<ChatCompletionResponse> {
         let status = response.status();
         let headers = response.headers().clone();
@@ -1059,6 +1083,7 @@ impl SamplingClient {
             .json(&ChatRequestWithFallbacks {
                 inner: &payload,
                 models: self.openrouter_fallback_models(),
+                provider: self.openrouter_provider_preferences(),
             });
 
         let response = http_request.send().await.map_err(|e| {
@@ -1100,6 +1125,7 @@ impl SamplingClient {
         let streaming_request = StreamingChatRequest {
             inner: &payload,
             models: self.openrouter_fallback_models(),
+            provider: self.openrouter_provider_preferences(),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -2254,6 +2280,7 @@ mod tests {
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
             api_backend: ApiBackend::ChatCompletions,
             include_message_model_id: true,
             auth_scheme: AuthScheme::Bearer,
@@ -2312,6 +2339,7 @@ mod tests {
         let wrapper = StreamingChatRequest {
             inner: &request,
             models: None,
+            provider: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -2360,6 +2388,7 @@ mod tests {
         let with_fallbacks = serde_json::to_value(ChatRequestWithFallbacks {
             inner: &request,
             models: Some(&fallbacks),
+            provider: None,
         })
         .unwrap();
         assert_eq!(
@@ -2372,6 +2401,7 @@ mod tests {
         let without_fallbacks = serde_json::to_value(ChatRequestWithFallbacks {
             inner: &request,
             models: None,
+            provider: None,
         })
         .unwrap();
         assert!(
@@ -2398,6 +2428,178 @@ mod tests {
         let mut standard_body = serde_json::json!({ "model": "gpt-5" });
         add_openrouter_fallback_models(&mut standard_body, None);
         assert!(standard_body.get("models").is_none());
+    }
+
+    #[test]
+    fn chat_request_serializes_provider_preferences_when_configured() {
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            sort: Some("latency".to_string()),
+            order: vec!["deepinfra/turbo".to_string()],
+            allow_fallbacks: Some(true),
+            require_parameters: Some(true),
+            data_collection: Some("deny".to_string()),
+            zdr: Some(true),
+            quantizations: vec!["int8".to_string()],
+            max_price: Some(crate::config::OpenRouterMaxPrice {
+                prompt: Some(0.5),
+                completion: Some(2.0),
+            }),
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &request,
+            models: None,
+            provider: Some(&prefs),
+        })
+        .unwrap();
+        let provider = &serialized["provider"];
+        assert_eq!(provider["sort"], serde_json::json!("latency"));
+        assert_eq!(provider["order"], serde_json::json!(["deepinfra/turbo"]));
+        assert_eq!(provider["allow_fallbacks"], serde_json::json!(true));
+        assert_eq!(provider["require_parameters"], serde_json::json!(true));
+        assert_eq!(provider["data_collection"], serde_json::json!("deny"));
+        assert_eq!(provider["zdr"], serde_json::json!(true));
+        assert_eq!(provider["quantizations"], serde_json::json!(["int8"]));
+        assert_eq!(provider["max_price"]["prompt"], serde_json::json!(0.5));
+        assert_eq!(provider["max_price"]["completion"], serde_json::json!(2.0));
+    }
+
+    #[test]
+    fn chat_request_omits_provider_key_when_preferences_empty() {
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        // An all-empty preferences object must not produce a `provider` key.
+        let empty_prefs = crate::config::OpenRouterProviderPreferences::default();
+        assert!(empty_prefs.is_empty());
+
+        let serialized = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &request,
+            models: None,
+            provider: Some(&empty_prefs),
+        })
+        .unwrap();
+        // serde still serializes the object because the field is `Some`, but
+        // the wire path uses `openrouter_provider_preferences()` which filters
+        // empty objects to `None`. Here we verify the `is_empty` gate works:
+        assert!(empty_prefs.is_empty());
+
+        // Now simulate the wire gate: empty prefs produce `None`.
+        let wire_serialized = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &request,
+            models: None,
+            provider: None,
+        })
+        .unwrap();
+        assert!(
+            wire_serialized.get("provider").is_none(),
+            "no `provider` key when preferences are absent"
+        );
+    }
+
+    #[test]
+    fn chat_request_omits_none_fields_and_empty_arrays_in_provider() {
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            sort: Some("latency".to_string()),
+            // only and ignore are empty arrays — must be omitted
+            only: vec![],
+            ignore: vec![],
+            data_collection: Some("deny".to_string()),
+            // allow_fallbacks, require_parameters, zdr, quantizations, max_price are None/empty
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &request,
+            models: None,
+            provider: Some(&prefs),
+        })
+        .unwrap();
+        let provider = &serialized["provider"];
+        assert_eq!(provider["sort"], serde_json::json!("latency"));
+        assert_eq!(provider["data_collection"], serde_json::json!("deny"));
+        assert!(
+            provider.get("only").is_none(),
+            "empty arrays must be omitted"
+        );
+        assert!(
+            provider.get("ignore").is_none(),
+            "empty arrays must be omitted"
+        );
+        assert!(
+            provider.get("allow_fallbacks").is_none(),
+            "None fields must be omitted"
+        );
+        assert!(
+            provider.get("max_price").is_none(),
+            "None fields must be omitted"
+        );
+    }
+
+    #[test]
+    fn client_omits_provider_for_non_openrouter_identity() {
+        // A SamplerConfig with provider_identity = OpenAi must not emit
+        // the `provider` key even when preferences are configured.
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            data_collection: Some("deny".to_string()),
+            ..Default::default()
+        };
+        let cfg = SamplerConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenAi,
+            openrouter_provider_preferences: Some(prefs),
+            ..SamplerConfig::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert!(
+            client.openrouter_provider_preferences().is_none(),
+            "non-OpenRouter identity must suppress provider preferences"
+        );
+    }
+
+    #[test]
+    fn client_supplies_provider_for_openrouter_identity() {
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            data_collection: Some("deny".to_string()),
+            require_parameters: Some(true),
+            ..Default::default()
+        };
+        let cfg = SamplerConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            openrouter_provider_preferences: Some(prefs.clone()),
+            ..SamplerConfig::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let wire_prefs = client
+            .openrouter_provider_preferences()
+            .expect("OpenRouter identity should expose preferences");
+        assert_eq!(wire_prefs.data_collection.as_deref(), Some("deny"));
+        assert_eq!(wire_prefs.require_parameters, Some(true));
+    }
+
+    #[test]
+    fn client_omits_provider_when_preferences_all_empty() {
+        let cfg = SamplerConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            openrouter_provider_preferences: Some(
+                crate::config::OpenRouterProviderPreferences::default(),
+            ),
+            ..SamplerConfig::default()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert!(
+            client.openrouter_provider_preferences().is_none(),
+            "an all-empty preferences object must be omitted from the wire"
+        );
     }
 
     #[test]

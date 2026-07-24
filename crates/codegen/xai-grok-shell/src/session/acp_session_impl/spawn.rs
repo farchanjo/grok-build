@@ -1502,6 +1502,9 @@ pub(crate) async fn spawn_session_actor(
         openrouter_fallback_models: std::cell::RefCell::new(
             sampling_config.openrouter_fallback_models.clone(),
         ),
+        openrouter_provider_preferences: std::cell::RefCell::new(
+            sampling_config.openrouter_provider_preferences.clone(),
+        ),
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config

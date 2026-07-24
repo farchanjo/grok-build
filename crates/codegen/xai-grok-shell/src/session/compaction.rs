@@ -2285,6 +2285,7 @@ mod inline_auto_compact_flow_tests {
             auth_method_id: test_auth_method_id("test-auth"),
             model_auth_memo: std::cell::RefCell::new(None),
             openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
+            openrouter_provider_preferences: std::cell::RefCell::new(None),
             attribution_callback: None,
             auth_manager: None,
             state,

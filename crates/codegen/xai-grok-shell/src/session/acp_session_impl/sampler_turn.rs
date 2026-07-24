@@ -509,6 +509,7 @@ impl SessionActor {
             temperature: cfg.temperature,
             top_p: cfg.top_p,
             openrouter_fallback_models: self.openrouter_fallback_models.borrow().clone(),
+            openrouter_provider_preferences: self.openrouter_provider_preferences.borrow().clone(),
             api_backend: cfg.api_backend,
             include_message_model_id: model_facts.include_message_model_id,
             auth_scheme,

@@ -3412,6 +3412,7 @@ mod tests {
                 id: "openai-test".to_owned(),
                 kind: crate::agent::model_providers::ModelProviderKind::OpenAi,
                 openrouter_fallback_models: Vec::new(),
+                openrouter_provider_preferences: None,
                 command: Vec::new(),
             }),
             api_key: None,

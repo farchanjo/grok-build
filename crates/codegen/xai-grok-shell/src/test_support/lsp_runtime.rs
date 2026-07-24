@@ -46,6 +46,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
             api_backend: Default::default(),
             include_message_model_id: true,
             auth_scheme: Default::default(),

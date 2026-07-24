@@ -961,6 +961,10 @@ async fn read_parent_sampling_config(
                 temperature: cfg.temperature,
                 top_p: cfg.top_p,
                 openrouter_fallback_models: ctx.sampling_config.openrouter_fallback_models.clone(),
+                openrouter_provider_preferences: ctx
+                    .sampling_config
+                    .openrouter_provider_preferences
+                    .clone(),
                 api_backend: cfg.api_backend,
                 include_message_model_id: ctx.sampling_config.include_message_model_id,
                 auth_scheme,

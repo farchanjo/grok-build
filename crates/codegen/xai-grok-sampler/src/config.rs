@@ -51,6 +51,80 @@ pub enum ProviderIdentity {
     Codex,
 }
 
+/// OpenRouter's native `provider` request-body object. All fields are
+/// optional; OpenRouter applies its own defaults when a field is absent. The
+/// sampler omits the entire `provider` key when no preferences are configured,
+/// and omits individual fields when they are `None` or empty so the wire body
+/// never carries an empty object/array (some upstreams reject those).
+///
+/// Owned by the sampler crate (like [`ProviderIdentity`]) so both the shell
+/// TOML layer and the sampler wire layer share one type.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenRouterProviderPreferences {
+    /// Routing sort: `"price"`, `"throughput"`, or `"latency"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    /// Preferred provider slugs, in descending priority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    /// Provider slugs to use exclusively.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+    /// Provider slugs to skip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+    /// Allow fallbacks to other providers when the primary fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+    /// Only use providers supporting the request's parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+    /// `"allow"` or `"deny"` — whether providers may train on the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_collection: Option<String>,
+    /// Zero-data retention override (opt-in).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
+    /// Quantization preferences (e.g. `["int8"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quantizations: Vec<String>,
+    /// Maximum price caps per token kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<OpenRouterMaxPrice>,
+}
+
+/// Per-kind price cap for [`OpenRouterProviderPreferences::max_price`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenRouterMaxPrice {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<f64>,
+}
+
+impl OpenRouterProviderPreferences {
+    /// Returns `true` when every field is unset, so the `provider` key can be
+    /// omitted entirely from the request body.
+    pub fn is_empty(&self) -> bool {
+        self.sort.is_none()
+            && self.order.is_empty()
+            && self.only.is_empty()
+            && self.ignore.is_empty()
+            && self.allow_fallbacks.is_none()
+            && self.require_parameters.is_none()
+            && self.data_collection.is_none()
+            && self.zdr.is_none()
+            && self.quantizations.is_empty()
+            && self
+                .max_price
+                .as_ref()
+                .map(|m| m.prompt.is_none() && m.completion.is_none())
+                .unwrap_or(true)
+    }
+}
+
 impl ProviderIdentity {
     /// Returns `true` only for the first-party xAI provider.
     ///
@@ -122,6 +196,11 @@ pub struct SamplerConfig {
     /// request body for every other provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openrouter_fallback_models: Vec<String>,
+    /// OpenRouter native `provider` request-body preferences. Only serialized
+    /// when the identity is OpenRouter and the object is non-empty; `None` or
+    /// an all-empty object omits the `provider` key entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter_provider_preferences: Option<OpenRouterProviderPreferences>,
     pub api_backend: ApiBackend,
     /// Whether Chat Completions history may include xAI's non-standard
     /// `messages[].model_id` metadata. OpenAI-compatible third-party
@@ -220,6 +299,7 @@ impl Default for SamplerConfig {
             temperature: None,
             top_p: None,
             openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
             api_backend: ApiBackend::default(),
             include_message_model_id: true,
             auth_scheme: AuthScheme::default(),

@@ -437,11 +437,24 @@ impl ProviderManager {
             });
         model_providers
             .entry("grok_build_openrouter".to_owned())
-            .or_insert_with(|| ModelProviderConfig {
-                kind: ModelProviderKind::OpenRouter,
-                base_url: Some("https://openrouter.ai/api/v1".to_owned()),
-                api_backend: Some(ApiBackend::ChatCompletions),
-                ..Default::default()
+            .or_insert_with(|| {
+                use super::model_providers::OpenRouterProviderPreferences;
+                let mut extra_headers = indexmap::IndexMap::<String, String>::new();
+                extra_headers
+                    .entry("X-OpenRouter-Title".to_owned())
+                    .or_insert("Grok Build".to_owned());
+                ModelProviderConfig {
+                    kind: ModelProviderKind::OpenRouter,
+                    base_url: Some("https://openrouter.ai/api/v1".to_owned()),
+                    api_backend: Some(ApiBackend::ChatCompletions),
+                    provider_preferences: Some(OpenRouterProviderPreferences {
+                        data_collection: Some("deny".to_owned()),
+                        require_parameters: Some(true),
+                        ..Default::default()
+                    }),
+                    extra_headers,
+                    ..Default::default()
+                }
             });
         model_providers
             .entry("grok_build_codex".to_owned())

@@ -29,8 +29,12 @@ pub enum ModelProviderKind {
     Codex,
 }
 
+// Re-exported from the sampler crate so the shell TOML layer and the sampler
+// wire layer share one definition (matching the `ProviderIdentity` precedent).
+pub use xai_grok_sampler::{OpenRouterMaxPrice, OpenRouterProviderPreferences};
+
 /// Provider identity retained on a resolved [`super::config::ModelEntry`].
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ResolvedModelProvider {
     pub id: String,
     pub kind: ModelProviderKind,
@@ -39,6 +43,12 @@ pub struct ResolvedModelProvider {
     /// URL, so only an explicit OpenRouter provider can emit the extension.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openrouter_fallback_models: Vec<String>,
+    /// OpenRouter native `provider` request-body preferences. Model-level
+    /// override replaces the provider-level object for that model; absent
+    /// override inherits the provider-level object. Only populated for
+    /// `kind = "openrouter"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter_provider_preferences: Option<OpenRouterProviderPreferences>,
     /// Command used by the Codex app-server provider. The first item is the
     /// executable and the remainder are arguments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -58,6 +68,11 @@ pub struct ModelProviderConfig {
     /// Ignored unless `kind = "openrouter"`.
     #[serde(default)]
     pub openrouter_fallback_models: Vec<String>,
+    /// OpenRouter native `provider` request-body preferences. Ignored unless
+    /// `kind = "openrouter"`. A model-level override replaces this object for
+    /// that model.
+    #[serde(default)]
+    pub provider_preferences: Option<OpenRouterProviderPreferences>,
     pub extra_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
@@ -69,7 +84,12 @@ pub struct ModelProviderConfig {
 }
 
 impl ModelProviderConfig {
-    fn resolved(&self, id: &str, openrouter_fallback_models: Vec<String>) -> ResolvedModelProvider {
+    fn resolved(
+        &self,
+        id: &str,
+        openrouter_fallback_models: Vec<String>,
+        provider_preferences: Option<OpenRouterProviderPreferences>,
+    ) -> ResolvedModelProvider {
         let command = if self.kind == ModelProviderKind::Codex && self.command.is_empty() {
             vec![
                 "codex".to_string(),
@@ -85,6 +105,9 @@ impl ModelProviderConfig {
             openrouter_fallback_models: (self.kind == ModelProviderKind::OpenRouter)
                 .then_some(openrouter_fallback_models)
                 .unwrap_or_default(),
+            openrouter_provider_preferences: (self.kind == ModelProviderKind::OpenRouter)
+                .then_some(provider_preferences)
+                .unwrap_or(None),
             command,
         }
     }
@@ -248,6 +271,7 @@ impl ConfigModelOverride {
             api_key,
             api_backend,
             openrouter_fallback_models,
+            provider_preferences,
             extra_headers,
             auth_provider,
             auth,
@@ -260,8 +284,18 @@ impl ConfigModelOverride {
             .openrouter_fallback_models
             .clone()
             .unwrap_or_else(|| openrouter_fallback_models.clone());
-        merged.resolved_model_provider =
-            Some(provider.resolved(provider_id, effective_openrouter_fallback_models));
+        // Model-level preferences replace the provider-level object for that
+        // model; absent override inherits the provider-level object. Mirrors
+        // the `openrouter_fallback_models` inheritance contract.
+        let effective_provider_preferences = self
+            .provider_preferences
+            .clone()
+            .or_else(|| provider_preferences.clone());
+        merged.resolved_model_provider = Some(provider.resolved(
+            provider_id,
+            effective_openrouter_fallback_models,
+            effective_provider_preferences,
+        ));
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
@@ -1159,6 +1193,235 @@ mod tests {
             sampling.openrouter_fallback_models,
             ["meta-llama/llama-3.3-70b-instruct"],
             "only a resolved OpenRouter provider propagates the extension to sampling"
+        );
+    }
+
+    #[test]
+    fn provider_preferences_parse_and_resolve_for_openrouter() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openrouter]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [model_providers.openrouter.provider_preferences]
+            sort = "latency"
+            order = ["deepinfra/turbo"]
+            only = []
+            ignore = []
+            allow_fallbacks = true
+            require_parameters = true
+            data_collection = "deny"
+            zdr = true
+            quantizations = ["int8"]
+            max_price = { prompt = 0.5, completion = 2.0 }
+
+            [model.inherited]
+            model = "openai/gpt-5.6-sol"
+            model_provider = "openrouter"
+            context_window = 1050000
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let provider = resolved["inherited"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert_eq!(provider.kind, super::ModelProviderKind::OpenRouter);
+        let prefs = provider
+            .openrouter_provider_preferences
+            .as_ref()
+            .expect("preferences should be retained");
+        assert_eq!(prefs.sort.as_deref(), Some("latency"));
+        assert_eq!(prefs.order, ["deepinfra/turbo"]);
+        assert!(prefs.only.is_empty());
+        assert!(prefs.ignore.is_empty());
+        assert_eq!(prefs.allow_fallbacks, Some(true));
+        assert_eq!(prefs.require_parameters, Some(true));
+        assert_eq!(prefs.data_collection.as_deref(), Some("deny"));
+        assert_eq!(prefs.zdr, Some(true));
+        assert_eq!(prefs.quantizations, ["int8"]);
+        let max_price = prefs.max_price.as_ref().expect("max_price retained");
+        assert_eq!(max_price.prompt, Some(0.5));
+        assert_eq!(max_price.completion, Some(2.0));
+
+        let sampling = sampling_config_for_model(
+            &resolved["inherited"],
+            resolve_credentials(&resolved["inherited"], None),
+            None,
+            None,
+            None,
+            None,
+        );
+        let wire_prefs = sampling
+            .openrouter_provider_preferences
+            .as_ref()
+            .expect("preferences thread to SamplerConfig");
+        assert_eq!(wire_prefs.sort.as_deref(), Some("latency"));
+        assert_eq!(wire_prefs.data_collection.as_deref(), Some("deny"));
+    }
+
+    #[test]
+    fn provider_preferences_model_override_replaces_provider_level() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openrouter]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [model_providers.openrouter.provider_preferences]
+            sort = "price"
+            data_collection = "allow"
+
+            [model.inherited]
+            model = "openai/gpt-oss-120b"
+            model_provider = "openrouter"
+
+            [model.overridden]
+            model = "openai/gpt-oss-120b"
+            model_provider = "openrouter"
+
+            [model.overridden.provider_preferences]
+            sort = "throughput"
+            data_collection = "deny"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let inherited = resolved["inherited"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        let inherited_prefs = inherited
+            .openrouter_provider_preferences
+            .as_ref()
+            .expect("inherited preferences");
+        assert_eq!(inherited_prefs.sort.as_deref(), Some("price"));
+        assert_eq!(inherited_prefs.data_collection.as_deref(), Some("allow"));
+
+        let overridden = resolved["overridden"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        let overridden_prefs = overridden
+            .openrouter_provider_preferences
+            .as_ref()
+            .expect("model override replaces provider-level");
+        assert_eq!(overridden_prefs.sort.as_deref(), Some("throughput"));
+        assert_eq!(
+            overridden_prefs.data_collection.as_deref(),
+            Some("deny"),
+            "the model-level object replaces the provider-level object entirely"
+        );
+        // Fields not set on the model override are not inherited from the provider
+        // level — the override replaces the entire object.
+        assert!(overridden_prefs.order.is_empty());
+    }
+
+    #[test]
+    fn provider_preferences_absent_override_inherits_provider_level() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openrouter]
+            kind = "openrouter"
+            base_url = "https://openrouter.ai/api/v1"
+
+            [model_providers.openrouter.provider_preferences]
+            data_collection = "deny"
+            require_parameters = true
+
+            [model.no-override]
+            model = "openai/gpt-oss-120b"
+            model_provider = "openrouter"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let prefs = resolved["no-override"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained")
+            .openrouter_provider_preferences
+            .as_ref()
+            .expect("provider-level preferences inherited");
+        assert_eq!(prefs.data_collection.as_deref(), Some("deny"));
+        assert_eq!(prefs.require_parameters, Some(true));
+    }
+
+    #[test]
+    fn provider_preferences_not_emitted_for_non_openrouter() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openai]
+            kind = "openai"
+            base_url = "https://api.openai.com/v1"
+
+            [model_providers.openai.provider_preferences]
+            sort = "latency"
+
+            [model.via-openai]
+            model = "gpt-5.6"
+            model_provider = "openai"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let provider = resolved["via-openai"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert_eq!(provider.kind, super::ModelProviderKind::OpenAi);
+        assert!(
+            provider.openrouter_provider_preferences.is_none(),
+            "non-OpenRouter providers must never carry preferences"
+        );
+    }
+
+    #[test]
+    fn built_in_openrouter_provider_has_privacy_defaults_and_title_header() {
+        use super::super::providers::ProviderManager;
+        let mut model_providers = indexmap::IndexMap::new();
+        let mut config_models = indexmap::IndexMap::new();
+        ProviderManager::install_model_presets_into(&mut model_providers, &mut config_models);
+
+        let provider = model_providers
+            .get("grok_build_openrouter")
+            .expect("built-in openrouter provider should exist");
+        assert_eq!(provider.kind, super::ModelProviderKind::OpenRouter);
+        let prefs = provider
+            .provider_preferences
+            .as_ref()
+            .expect("built-in openrouter has default preferences");
+        assert_eq!(
+            prefs.data_collection.as_deref(),
+            Some("deny"),
+            "built-in defaults deny data collection"
+        );
+        assert_eq!(
+            prefs.require_parameters,
+            Some(true),
+            "built-in defaults require parameters"
+        );
+        assert!(
+            prefs.zdr.is_none(),
+            "zdr stays opt-in for the built-in default"
+        );
+        assert_eq!(
+            provider
+                .extra_headers
+                .get("X-OpenRouter-Title")
+                .map(String::as_str),
+            Some("Grok Build"),
+            "built-in default adds the X-OpenRouter-Title header"
         );
     }
 }

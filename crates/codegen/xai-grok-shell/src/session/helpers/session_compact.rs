@@ -1638,6 +1638,7 @@ mod reasoning_compaction_regression_tests {
             temperature: Some(0.7),
             top_p: None,
             openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
             api_backend: ApiBackend::ChatCompletions,
             include_message_model_id: true,
             auth_scheme: Default::default(),

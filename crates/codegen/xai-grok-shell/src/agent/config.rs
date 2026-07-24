@@ -3973,6 +3973,11 @@ pub struct ConfigModelOverride {
     /// disables that provider-level fallback list for this one model.
     #[serde(default)]
     pub openrouter_fallback_models: Option<Vec<String>>,
+    /// Per-model override of OpenRouter's native `provider` request-body
+    /// preferences. `None` inherits the provider-level object; `Some` replaces
+    /// it for this model. Ignored unless the provider is `kind = "openrouter"`.
+    #[serde(default)]
+    pub provider_preferences: Option<crate::agent::model_providers::OpenRouterProviderPreferences>,
     #[serde(default)]
     pub extra_headers: IndexMap<String, String>,
     pub context_window: Option<u64>,
@@ -5217,6 +5222,11 @@ pub fn sampling_config_for_model(
         .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
         .map(|provider| provider.openrouter_fallback_models.clone())
         .unwrap_or_default();
+    let openrouter_provider_preferences = model
+        .model_provider
+        .as_ref()
+        .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
+        .and_then(|provider| provider.openrouter_provider_preferences.clone());
     let provider_identity = provider_identity_for_model(model);
     // Wire shaping (H4): when the resolved model explicitly disclaims
     // reasoning-effort support (`supports_reasoning_effort == Some(false)`),
@@ -5244,6 +5254,7 @@ pub fn sampling_config_for_model(
         temperature,
         top_p,
         openrouter_fallback_models,
+        openrouter_provider_preferences,
         api_backend,
         include_message_model_id: !model
             .model_provider
