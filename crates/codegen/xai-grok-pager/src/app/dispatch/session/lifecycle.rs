@@ -23,7 +23,7 @@ use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use std::time::Instant;
-use xai_grok_shell::sampling::types::ReasoningEffort;
+use xai_grok_shell::inference::types::ReasoningEffort;
 /// A deferred model switch to apply once the session exists, plus any effort
 /// error to surface. `switch` is still populated when a `-m` model was stashed
 /// even if the effort token failed, so an invalid effort never drops the CLI
@@ -209,7 +209,7 @@ pub(in crate::app::dispatch) fn open_new_session_question(app: &mut AppView) -> 
 pub(in crate::app::dispatch) fn open_agent_type_mismatch_question(
     app: &mut AppView,
     model_id: acp::ModelId,
-    effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+    effort: Option<xai_grok_shell::inference::types::ReasoningEffort>,
     model_name: &str,
 ) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};

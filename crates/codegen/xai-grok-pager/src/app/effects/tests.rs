@@ -18,7 +18,7 @@ fn format_acp_error_reads_detail_from_wrapped_data() {
 }
 #[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
-    use xai_grok_shell::sampling::error::{
+    use xai_grok_shell::inference::error::{
         FREE_USAGE_USER_MESSAGE, RATE_LIMITED_ERROR_CODE,
         RATE_LIMITED_USER_MESSAGE_API_KEY, RATE_LIMITED_USER_MESSAGE_OAUTH,
     };

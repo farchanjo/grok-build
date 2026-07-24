@@ -55,7 +55,7 @@ pub struct PromptTurnOk {
     /// `Some(Err)` carries a parse/validation error message.
     pub structured_output: Option<Result<serde_json::Value, String>>,
     pub usage: Option<crate::extensions::notification::PromptUsage>,
-    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
+    pub tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
 }
 /// Result of a prompt turn, containing the stop reason, accumulated token count,
 /// and an optional turn-end signals snapshot (for trace metadata enrichment).
@@ -136,13 +136,13 @@ pub enum SessionCommand {
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
     GetToolOverrides {
-        respond_to: oneshot::Sender<Option<xai_grok_sampling_types::ToolOverrides>>,
+        respond_to: oneshot::Sender<Option<xai_grok_inference_types::ToolOverrides>>,
     },
     /// Establish the per-turn tool-overrides state before the first prompt runs. Sent once by
     /// `handle_subagent_request` ahead of the child's first `Prompt`, so a spawned subagent's
     /// inherited cutoff is applied and published (for its own subagents to read) before any turn.
     SetToolOverrides {
-        overrides: xai_grok_sampling_types::ToolOverrides,
+        overrides: xai_grok_inference_types::ToolOverrides,
     },
     Prompt {
         prompt_id: String,
@@ -169,7 +169,7 @@ pub enum SessionCommand {
         send_now: bool,
         /// Actor-authoritative admission and deferred fallback for terminal task wakes.
         admission: Option<TaskWakeAdmission>,
-        tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
+        tool_overrides_update: Option<xai_grok_inference_types::ToolOverridesUpdate>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         /// Optional oneshot fired after the user message has been appended to
         /// chat history and a persistence flush barrier has completed, before
@@ -187,7 +187,7 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<()>,
     },
     SetSessionModel {
-        sampling_config: xai_grok_sampler::SamplerConfig,
+        inference_config: xai_grok_inference::InferenceConfig,
         use_concise: bool,
         /// When `false`, skip the system prompt rewrite (concise/default swap).
         /// Set to `false` for forked sessions so mid-session model switches
@@ -436,7 +436,7 @@ pub enum SessionCommand {
     /// Snapshot the session's resolved tool schema (same list the parent's own turn
     /// sends) so a verbatim-fork child can present a byte-identical tool prefix.
     SnapshotToolDefinitions {
-        respond_to: oneshot::Sender<Vec<xai_grok_sampling_types::ToolSpec>>,
+        respond_to: oneshot::Sender<Vec<xai_grok_inference_types::ToolSpec>>,
     },
     /// Replace the session's client-registered hooks. Sent on `load_session` reconnect to a
     /// live actor so a client can re-register (or clear) its hooks without a fresh session.
@@ -761,7 +761,7 @@ pub enum SessionCommand {
     /// synthetic `task` pairs, uploaded as its own sibling `turn_{N}` artifact.
     TakeHarnessTraceTurns {
         respond_to:
-            oneshot::Sender<Vec<Vec<xai_grok_sampling_types::conversation::ConversationItem>>>,
+            oneshot::Sender<Vec<Vec<xai_grok_inference_types::conversation::ConversationItem>>>,
     },
     /// Take and clear the session actor's out-of-band streaming-turn capture.
     ///

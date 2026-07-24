@@ -4,7 +4,7 @@
 //! these cover only what is unique to the `SessionActor` seam: the end-to-end
 //! swap and the `preserve_inherited_system` skip.
 
-use xai_grok_sampling_types::conversation::ConversationItem;
+use xai_grok_inference_types::conversation::ConversationItem;
 
 use super::support::create_test_actor;
 use super::{PersistenceMsg, SessionActor};

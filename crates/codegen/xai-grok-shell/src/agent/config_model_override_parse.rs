@@ -440,8 +440,8 @@ fn field_parse_error(field: &str, value: &toml::Value) -> Option<toml::de::Error
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampling::ApiBackend;
-    use xai_grok_sampling_types::{
+    use crate::inference::ApiBackend;
+    use xai_grok_inference_types::{
         CompactionAtTokens, CompactionsRemaining, ReasoningEffort, ReasoningEffortOption,
     };
 

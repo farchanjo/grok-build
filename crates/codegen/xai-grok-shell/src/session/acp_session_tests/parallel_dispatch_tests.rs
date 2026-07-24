@@ -297,7 +297,7 @@ fn lock_path_for_args_buckets_grok_build_and_compat_to_same_lock_for_same_file()
 /// Regression: skill-discovery reminders must land after all tool results, not mid-batch.
 #[test]
 fn test_skill_discovery_deferred_during_parallel_batch() {
-    use xai_grok_sampling_types::{ConversationItem, SyntheticReason};
+    use xai_grok_inference_types::{ConversationItem, SyntheticReason};
 
     let mut conversation = vec![ConversationItem::assistant("I'll call 3 tools.")];
     let mut deferred_followups: Vec<ConversationItem> = Vec::new();

@@ -2,10 +2,10 @@ use indexmap::IndexMap;
 
 use super::config::{ConfigModelOverride, EnvKeys};
 use super::config_model_override_parse::{ConfigWarning, ConfigWarningKind};
-use crate::sampling::ApiBackend;
+use crate::inference::ApiBackend;
 
 /// Internal sampler-config marker used to retain native-agent routing identity
-/// after a catalog model is reduced to `SamplerConfig`.
+/// after a catalog model is reduced to `InferenceConfig`.
 pub(crate) const NATIVE_AGENT_PROVIDER_HEADER: &str = "x-grok-native-agent-provider";
 
 /// The upstream represented by a `[model_providers.<id>]` entry.
@@ -31,7 +31,7 @@ pub enum ModelProviderKind {
 
 // Re-exported from the sampler crate so the shell TOML layer and the sampler
 // wire layer share one definition (matching the `ProviderIdentity` precedent).
-pub use xai_grok_sampler::{OpenRouterMaxPrice, OpenRouterPlugin, OpenRouterProviderPreferences};
+pub use xai_grok_inference::{OpenRouterMaxPrice, OpenRouterPlugin, OpenRouterProviderPreferences};
 
 /// Provider identity retained on a resolved [`super::config::ModelEntry`].
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -360,7 +360,7 @@ impl ConfigModelOverride {
 #[cfg(test)]
 mod tests {
     use crate::agent::config::{
-        Config, resolve_credentials, resolve_model_list, sampling_config_for_model,
+        Config, resolve_credentials, resolve_model_list, inference_config_for_model,
     };
     #[test]
     fn model_inherits_provider_connection_defaults() {
@@ -882,7 +882,7 @@ mod tests {
         let model = resolved.get("via-gateway").expect("model should exist");
         assert_eq!(
             model.info.api_backend,
-            crate::sampling::ApiBackend::Responses
+            crate::inference::ApiBackend::Responses
         );
         assert_eq!(
             model.api_base_url.as_deref(),
@@ -1206,7 +1206,7 @@ mod tests {
         );
 
         let model = &resolved["overridden"];
-        let sampling = sampling_config_for_model(
+        let sampling = inference_config_for_model(
             model,
             resolve_credentials(model, None),
             None,
@@ -1273,7 +1273,7 @@ mod tests {
         assert_eq!(max_price.prompt, Some(0.5));
         assert_eq!(max_price.completion, Some(2.0));
 
-        let sampling = sampling_config_for_model(
+        let sampling = inference_config_for_model(
             &resolved["inherited"],
             resolve_credentials(&resolved["inherited"], None),
             None,
@@ -1284,7 +1284,7 @@ mod tests {
         let wire_prefs = sampling
             .openrouter_provider_preferences
             .as_ref()
-            .expect("preferences thread to SamplerConfig");
+            .expect("preferences thread to InferenceConfig");
         assert_eq!(wire_prefs.sort.as_deref(), Some("latency"));
         assert_eq!(wire_prefs.data_collection.as_deref(), Some("deny"));
     }
@@ -1489,7 +1489,7 @@ mod tests {
             Some(&serde_json::json!(3))
         );
 
-        let sampling = sampling_config_for_model(
+        let sampling = inference_config_for_model(
             &resolved["inherited"],
             resolve_credentials(&resolved["inherited"], None),
             None,
@@ -1500,7 +1500,7 @@ mod tests {
         assert_eq!(
             sampling.openrouter_plugins.len(),
             2,
-            "plugins thread to SamplerConfig"
+            "plugins thread to InferenceConfig"
         );
     }
 

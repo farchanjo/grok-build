@@ -283,9 +283,9 @@ impl SessionActor {
     )]
     pub(super) async fn execute_tool_calls(
         &self,
-        tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+        tool_calls: Vec<crate::inference::types::ToolCallResponse>,
     ) -> Result<ToolLoop, acp::Error> {
-        if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
+        if let Some(cfg) = self.chat_state_handle.get_inference_settings().await {
             tracing::Span::current().record("model_id", cfg.model.as_str());
         }
         let mut final_result: Option<ToolLoop> = None;
@@ -753,7 +753,7 @@ impl SessionActor {
     /// Phase 1: pre-flight (MCP, args, hooks, permission, ExitPlanMode).
     pub(crate) async fn prepare_tool_call(
         &self,
-        call: crate::sampling::types::ToolCallResponse,
+        call: crate::inference::types::ToolCallResponse,
         deferred_followups: &mut Vec<ConversationItem>,
     ) -> Result<Result<PreparedToolCall, ToolLoop>, acp::Error> {
         let tool_call_id = acp::ToolCallId::new(Arc::from(call.id.clone()));
@@ -2410,7 +2410,7 @@ impl SessionActor {
         )
         .await;
     }
-    /// Translate one [`xai_grok_sampler::SamplingEvent`] from the
+    /// Translate one [`xai_grok_inference::InferenceEvent`] from the
     /// per-session sampler actor into the corresponding ACP / shell
     /// side-effects (notifications, signal recording, model-metadata
     /// refresh, etc.).
@@ -2424,11 +2424,11 @@ impl SessionActor {
     /// or resubmit.
     pub(crate) async fn handle_sampling_event(
         self: &Arc<Self>,
-        event: xai_grok_sampler::SamplingEvent,
+        event: xai_grok_inference::InferenceEvent,
     ) {
-        use xai_grok_sampler::{SamplingChannel, SamplingEvent};
+        use xai_grok_inference::{InferenceChannel, InferenceEvent};
         match event {
-            SamplingEvent::StreamStarted { timestamp_ms, .. } => {
+            InferenceEvent::StreamStarted { timestamp_ms, .. } => {
                 {
                     let prompt_id = self
                         .current_prompt_id
@@ -2443,16 +2443,16 @@ impl SessionActor {
                 }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
             }
-            SamplingEvent::FirstToken { .. } => {
+            InferenceEvent::FirstToken { .. } => {
                 self.emit_event(crate::session::events::Event::FirstToken);
             }
-            SamplingEvent::ChannelToken {
+            InferenceEvent::ChannelToken {
                 channel,
                 text,
                 chunk_index,
                 ..
             } => match channel {
-                SamplingChannel::Text => {
+                InferenceChannel::Text => {
                     {
                         let mut cap = self.streaming_turn_capture.lock();
                         if cap.prompt_id.is_none() {
@@ -2477,7 +2477,7 @@ impl SessionActor {
                     )
                     .await;
                 }
-                SamplingChannel::Reasoning => {
+                InferenceChannel::Reasoning => {
                     {
                         let mut cap = self.streaming_turn_capture.lock();
                         if cap.prompt_id.is_none() {
@@ -2497,7 +2497,7 @@ impl SessionActor {
                     self.send_thought_chunk(text, chunk_index).await;
                 }
             },
-            SamplingEvent::ToolCallDelta {
+            InferenceEvent::ToolCallDelta {
                 tool_index,
                 id,
                 name,
@@ -2518,7 +2518,7 @@ impl SessionActor {
                 })
                 .await;
             }
-            SamplingEvent::Completed {
+            InferenceEvent::Completed {
                 response, metrics, ..
             } => {
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
@@ -2555,10 +2555,10 @@ impl SessionActor {
                 self.record_api_request_time();
                 self.signals_handle().record_inference_metrics(metrics);
             }
-            SamplingEvent::ModelMetadata { metadata, .. } => {
+            InferenceEvent::ModelMetadata { metadata, .. } => {
                 self.handle_model_metadata_update(metadata).await;
             }
-            SamplingEvent::Retrying {
+            InferenceEvent::Retrying {
                 request_id,
                 attempt,
                 max_retries,
@@ -2569,14 +2569,14 @@ impl SessionActor {
                 backoff_ms,
                 diagnostics,
             } => {
-                let is_rate_limited = kind == xai_grok_sampler::SamplingErrorKind::RateLimited;
+                let is_rate_limited = kind == xai_grok_inference::InferenceErrorKind::RateLimited;
                 let provider_name = diagnostics
                     .as_ref()
                     .and_then(|value| value.provider_name.clone());
                 let provider_code = diagnostics
                     .as_ref()
                     .and_then(|value| value.provider_code.clone());
-                if kind == xai_grok_sampler::SamplingErrorKind::DoomLoopDetected {
+                if kind == xai_grok_inference::InferenceErrorKind::DoomLoopDetected {
                     let triggers = doom_loop_triggers.unwrap_or_default();
                     let attempt_number = {
                         let mut tally = self.doom_loop_turn_tally.lock();
@@ -2627,7 +2627,7 @@ impl SessionActor {
                 ))
                 .await;
             }
-            SamplingEvent::Failed { request_id, error } => {
+            InferenceEvent::Failed { request_id, error } => {
                 xai_grok_telemetry::unified_log::error(
                     "shell.turn.inference_failed",
                     Some(self.session_info.id.0.as_ref()),
@@ -2659,7 +2659,7 @@ impl SessionActor {
                     );
                 }
             }
-            SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
+            InferenceEvent::BackendToolCallStarted { call_id, name, .. } => {
                 self.signals_handle().record_tool_call(&name);
                 let (title, kind, raw_input) = backend_tool_display(&name);
                 self.send_update(
@@ -2679,7 +2679,7 @@ impl SessionActor {
                 )
                 .await;
             }
-            SamplingEvent::BackendToolCallCompleted {
+            InferenceEvent::BackendToolCallCompleted {
                 call_id,
                 name,
                 result,

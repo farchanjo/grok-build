@@ -24,7 +24,7 @@ fn tool_overrides_capability() -> serde_json::Value {
 }
 async fn read_applied_tool_overrides(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
-) -> Option<xai_grok_sampling_types::ToolOverrides> {
+) -> Option<xai_grok_inference_types::ToolOverrides> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     if cmd_tx
         .send(SessionCommand::GetToolOverrides {
@@ -45,7 +45,7 @@ async fn read_applied_tool_overrides(
 }
 fn insert_applied_tool_overrides(
     meta: &mut serde_json::Map<String, serde_json::Value>,
-    echo: Option<&xai_grok_sampling_types::ToolOverrides>,
+    echo: Option<&xai_grok_inference_types::ToolOverrides>,
 ) {
     if let Some(overrides) = echo {
         meta.insert(
@@ -581,10 +581,10 @@ impl acp::Agent for MvpAgent {
                             .data("API-key auth is disabled by your administrator."),
                     );
                 }
-                let mut sampling_config = self.sampling_config.borrow_mut();
-                if sampling_config.api_key.is_none() {
+                let mut inference_config = self.inference_config.borrow_mut();
+                if inference_config.api_key.is_none() {
                     if let Ok(api_key) = auth_method::read_xai_api_key_env() {
-                        sampling_config.api_key = Some(api_key.clone());
+                        inference_config.api_key = Some(api_key.clone());
                         if let Err(e) = crate::auth::store_api_key(
                             &crate::util::grok_home::grok_home(),
                             &api_key,
@@ -746,8 +746,8 @@ impl acp::Agent for MvpAgent {
                 self.enforce_grok_code_access(&auth).await;
                 self.maybe_sync_bundle_in_background(false);
                 {
-                    let mut sampling_config = self.sampling_config.borrow_mut();
-                    sampling_config.api_key = Some(auth.key);
+                    let mut inference_config = self.inference_config.borrow_mut();
+                    inference_config.api_key = Some(auth.key);
                     tracing::debug!("auth: cached_token handler set api_key (SessionToken)");
                     xai_grok_telemetry::unified_log::debug(
                         "auth: cached_token handler set api_key (SessionToken)",
@@ -880,8 +880,8 @@ impl acp::Agent for MvpAgent {
                         err
                     })?;
                 {
-                    let mut sampling_config = self.sampling_config.borrow_mut();
-                    sampling_config.api_key = Some(auth.key.clone());
+                    let mut inference_config = self.inference_config.borrow_mut();
+                    inference_config.api_key = Some(auth.key.clone());
                     tracing::debug!("auth: grok.com/oidc handler set api_key (SessionToken)");
                     xai_grok_telemetry::unified_log::debug(
                         "auth: grok.com/oidc handler set api_key (SessionToken)",
@@ -932,7 +932,7 @@ impl acp::Agent for MvpAgent {
         &self,
         arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
-        tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
+        tracing::debug!(config = ?self.inference_config, "Received new session request {arguments:?}");
         let init = self
             .initialize_request
             .get()
@@ -1021,7 +1021,7 @@ impl acp::Agent for MvpAgent {
             cwd: cwd.as_str().to_owned(),
         };
         let mut model_agent_type: Option<String> = None;
-        let mut session_sampling_override: Option<SamplingConfig> = None;
+        let mut session_inference_override: Option<InferenceConfig> = None;
         let mut disallowed_custom: Option<String> = None;
         let session_initial_model = chat_initial_model(is_chat_kind, custom_model_id);
         let build_custom_model_id = if is_chat_kind { None } else { custom_model_id };
@@ -1033,8 +1033,8 @@ impl acp::Agent for MvpAgent {
                     model_agent_type = Some(model.info().agent_type.clone());
                     let origin_client = self
                         .origin_client_info_from_meta(arguments.meta.as_ref());
-                    session_sampling_override = Some(
-                        self.prepare_sampling_config_for_model(&model, origin_client),
+                    session_inference_override = Some(
+                        self.prepare_inference_config_for_model(&model, origin_client),
                     );
                     Some(custom_model)
                 }
@@ -1069,10 +1069,10 @@ impl acp::Agent for MvpAgent {
             );
         }
         let origin_client = self.origin_client_info_from_meta(arguments.meta.as_ref());
-        let mut session_sampling = session_sampling_override
+        let mut session_sampling = session_inference_override
             .unwrap_or_else(|| {
                 self
-                    .resolve_sampling_config_for_model(
+                    .resolve_inference_config_for_model(
                         &self.models_manager.current_model_id(),
                         origin_client.clone(),
                     )
@@ -1423,7 +1423,7 @@ impl acp::Agent for MvpAgent {
         }
         let origin_client = self.origin_client_info_from_meta(request_meta.as_ref());
         let load_session_sampling = self
-            .resolve_sampling_config_for_model(
+            .resolve_inference_config_for_model(
                 &self.models_manager.current_model_id(),
                 origin_client.clone(),
             );
@@ -2291,7 +2291,7 @@ impl acp::Agent for MvpAgent {
             });
         let (model, native_provider) = model_rx
             .await
-            .unwrap_or_else(|_| (self.sampling_config.borrow().model.clone(), None));
+            .unwrap_or_else(|_| (self.inference_config.borrow().model.clone(), None));
         if native_provider.is_none()
             && let Some(entry) =
                 crate::agent::config::find_model_by_id(&self.models_manager.models(), &model)
@@ -2471,7 +2471,7 @@ impl acp::Agent for MvpAgent {
         {
             None => None,
             Some(value) => {
-                match xai_grok_sampling_types::ToolOverridesUpdate::parse(value) {
+                match xai_grok_inference_types::ToolOverridesUpdate::parse(value) {
                     Ok(update) => Some(update),
                     Err(reason) => {
                         return Err(
@@ -2567,7 +2567,7 @@ impl acp::Agent for MvpAgent {
                 .as_ref()
                 .map(|ok| ok.stop_reason)
                 .map_err(Clone::clone);
-            let (stop_reason_value, agent_result_value) = crate::sampling::error::prompt_complete_fields(
+            let (stop_reason_value, agent_result_value) = crate::inference::error::prompt_complete_fields(
                 &mapped,
             );
             let turn_id = arguments
@@ -3132,12 +3132,12 @@ impl acp::Agent for MvpAgent {
                 if let Some(ctx) = trace_context.clone() {
                     let request_id = prompt_id.clone();
                     let err_str = format!("{err:?}");
-                    let stop_reason = crate::sampling::error::stop_reason_for_turn_error(
+                    let stop_reason = crate::inference::error::stop_reason_for_turn_error(
                             &err,
                         )
                         .to_string();
                     let upload_unified = matches!(
-                        crate::sampling::error::http_status_from_error(&err),
+                        crate::inference::error::http_status_from_error(&err),
                         Some(401 | 404),
                     );
                     let upload_deadline = block_for_upload
@@ -3227,7 +3227,7 @@ impl acp::Agent for MvpAgent {
                         );
                     }
                 }
-                let err = if crate::sampling::error::prompt_usage_from_error(&err)
+                let err = if crate::inference::error::prompt_usage_from_error(&err)
                     .is_some()
                 {
                     err
@@ -3250,7 +3250,7 @@ impl acp::Agent for MvpAgent {
                     } else {
                         None
                     };
-                    crate::sampling::error::attach_prompt_usage(err, usage)
+                    crate::inference::error::attach_prompt_usage(err, usage)
                 };
                 Err(err)
             }

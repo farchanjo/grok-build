@@ -174,7 +174,7 @@
 
     #[test]
     fn retry_exhausted_rate_limited_empty_reason_uses_oauth_fallback() {
-        use xai_grok_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_OAUTH;
+        use xai_grok_shell::inference::error::RATE_LIMITED_USER_MESSAGE_OAUTH;
 
         let empty = RetryState::Exhausted {
             attempts: 3,
@@ -193,7 +193,7 @@
         }
     }
 
-    /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s
+    /// Production `RetryState::Exhausted.reason` is `InferenceError::Api`'s
     /// Display: `API error (status 429 Too Many Requests): …`.
     #[test]
     fn retry_exhausted_rate_limited_surfaces_server_detail() {
@@ -219,7 +219,7 @@
 
     #[test]
     fn retry_exhausted_api_key_rewrites_consumer_subscription_upsell() {
-        use xai_grok_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_API_KEY;
+        use xai_grok_shell::inference::error::RATE_LIMITED_USER_MESSAGE_API_KEY;
 
         let rpm = RetryState::Exhausted {
             attempts: 2,
@@ -492,7 +492,7 @@
     }
 
     /// A 401 reported with a non-auth `error_type` but an "Unauthorized
-    /// (401)" message (the `SamplingErrorKind::Api` path) also prompts.
+    /// (401)" message (the `InferenceErrorKind::Api` path) also prompts.
     #[test]
     fn apply_retry_state_401_message_without_auth_type_prompts_reauth() {
         let mut session = make_session(Some("s1"));

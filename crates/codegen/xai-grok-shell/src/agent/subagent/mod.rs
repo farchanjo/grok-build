@@ -150,10 +150,10 @@ pub(crate) struct SubagentSpawnContext {
     /// connection. Empty when the parent has none. Filled by the coordinator after the
     /// context is built (an async snapshot from the parent session actor).
     pub client_hooks: crate::extensions::hooks::ClientHooks,
-    pub sampling_config: xai_grok_sampler::SamplerConfig,
+    pub inference_config: xai_grok_inference::InferenceConfig,
     pub managed_mcp_proxy_base_url: String,
     /// The staging auth header value propagated from the parent. Used
-    /// when materialising subagent `SamplerConfig`s for auth-flow tracking
+    /// when materialising subagent `InferenceConfig`s for auth-flow tracking
     /// and for `inject_url_derived_headers` in the construction helpers.
     pub alpha_test_key: Option<String>,
     pub auth_method_id: acp::AuthMethodId,
@@ -167,7 +167,7 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_cwd: PathBuf,
     pub parent_session_id: String,
     /// The parent's cutoff at spawn, applied to the child's first turn. `None` if unset.
-    pub inherited_tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
+    pub inherited_tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
     pub yolo_mode: bool,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
@@ -180,7 +180,7 @@ pub(crate) struct SubagentSpawnContext {
     /// we want the resolver's per-model
     /// tiers to be looked up against the SUBAGENT's model, not the
     /// parent's. Call [`Self::resolve_auto_compact_threshold_percent`]
-    /// once the subagent's `effective_sampling_config.model` is known.
+    /// once the subagent's `effective_inference_config.model` is known.
     pub auto_compact_threshold_tiers: AutoCompactThresholdTiers,
     /// Parent's hunk tracker handle — cheap Clone, backed by an mpsc channel
     /// to the parent's HunkTrackerActor. Subagent edits are attributed to
@@ -216,7 +216,7 @@ pub(crate) struct SubagentSpawnContext {
     /// cross-session memory store.
     pub memory_config: Option<crate::config::MemoryConfig>,
     /// Resolved sampling config for web_search.
-    pub web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    pub web_search_inference_config: Option<xai_grok_inference::InferenceConfig>,
     /// Resolved config for web fetch.
     pub web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     /// Image generation config (parent-inherited).
@@ -315,11 +315,11 @@ pub(crate) struct SubagentSpawnContext {
     /// with the parent's live `AuthManager`.
     ///
     /// Note: this is the load-bearing source of the inherited
-    /// callback. Reading from `ctx.sampling_config.attribution_callback`
-    /// would not work because the baseline `MvpAgent.sampling_config`
-    /// goes through `agent/config.rs::sampling_config_for_model`
+    /// callback. Reading from `ctx.inference_config.attribution_callback`
+    /// would not work because the baseline `MvpAgent.inference_config`
+    /// goes through `agent/config.rs::inference_config_for_model`
     /// which always sets that field to `None`.
-    pub attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback>,
+    pub attribution_callback: Option<xai_grok_inference::SharedAttributionCallback>,
     /// Parent session's agent name (e.g. "grok-build").
     pub parent_agent_name: Option<String>,
     /// `agent_type` of the parent's current model — the harness-flavor fallback
@@ -341,7 +341,7 @@ pub(crate) struct SubagentSpawnContext {
     /// Snapshot of the parent session's resolved tool schema at spawn time.
     /// `Some` only when a fork parent's actor answered; threaded to the child so a
     /// verbatim mirror-fork sends the parent's exact tool prefix for cache reuse.
-    pub parent_tool_snapshot: Option<Vec<xai_grok_sampling_types::ToolSpec>>,
+    pub parent_tool_snapshot: Option<Vec<xai_grok_inference_types::ToolSpec>>,
     /// Pre-discovered skills from the parent session, captured at spawn time.
     pub parent_skills: Option<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>>,
     /// Parent's skills config for the child's SkillManager.
@@ -376,13 +376,13 @@ impl SubagentSpawnContext {
         self.subagent_toggle.get(name).copied().unwrap_or(true)
     }
     /// Resolve `auto_compact_threshold_percent` for the subagent's actual
-    /// model id (the one selected by `resolve_subagent_sampling_config`,
+    /// model id (the one selected by `resolve_subagent_inference_config`,
     /// not the parent's). Walks the same precedence as the main session's
     /// resolver: env > user [model.<id>] > user [session] > GB per-model
     /// > GB global > 85.
     ///
     /// The GB per-model tier is read from `available_models` (the same
-    /// catalog used to pick the subagent's `SamplerConfig`); user TOML and
+    /// catalog used to pick the subagent's `InferenceConfig`); user TOML and
     /// GB global tiers are sourced from the parent's snapshot captured at
     /// spawn-context build time.
     pub fn resolve_auto_compact_threshold_percent(&self, subagent_model_id: &str) -> u8 {
@@ -824,13 +824,13 @@ use xai_grok_subagent_resolution::resolve_effective_overrides;
 /// intentionally ignored. Subagent prompt/toolset is always determined by
 /// the `AgentDefinition`, not the model. See design spec
 /// "Behavioral Rules section 3".
-async fn resolve_subagent_sampling_config(
+async fn resolve_subagent_inference_config(
     agent_name: &str,
     agent_model: &xai_grok_agent::config::ModelOverride,
     ctx: &SubagentSpawnContext,
-) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
+) -> (xai_grok_inference::InferenceConfig, acp::ModelId) {
     use xai_grok_agent::config::ModelOverride;
-    let (parent_config, parent_mid) = read_parent_sampling_config(ctx).await;
+    let (parent_config, parent_mid) = read_parent_inference_config(ctx).await;
     let try_pin = |model_id: &str, source: &'static str, unknown_msg: &'static str| {
         match resolve_model_override_to_config(model_id, ctx) {
             Some((config, canonical_id)) => {
@@ -881,7 +881,7 @@ async fn resolve_subagent_sampling_config(
 ///
 /// An explicit `runtime_override_model` — the goal role model or a persona
 /// override carried on `effective_runtime.model` — is resolved HERE, BEFORE
-/// [`resolve_subagent_sampling_config`] (where the user `[subagents.models]`
+/// [`resolve_subagent_inference_config`] (where the user `[subagents.models]`
 /// pin and `AgentDefinition.model` apply). So a goal/persona override WINS
 /// over a user per-agent pin. An override that does not resolve to a known
 /// model warns and falls through to the pin path; `None` (inherit) hands
@@ -894,7 +894,7 @@ async fn resolve_effective_model_config(
     subagent_type: &str,
     definition_model: &xai_grok_agent::config::ModelOverride,
     ctx: &SubagentSpawnContext,
-) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
+) -> (xai_grok_inference::InferenceConfig, acp::ModelId) {
     if let Some(model_id) = runtime_override_model {
         if let Some(resolved) = resolve_model_override_to_config(model_id, ctx) {
             return resolved;
@@ -904,16 +904,16 @@ async fn resolve_effective_model_config(
             "Runtime model override references unknown model, falling through"
         );
     }
-    resolve_subagent_sampling_config(subagent_type, definition_model, ctx).await
+    resolve_subagent_inference_config(subagent_type, definition_model, ctx).await
 }
 /// Emit a unified log entry recording which model and credentials a subagent
 /// resolved to, and how they compare to the parent's.
 fn log_subagent_model_resolution(
     agent_name: &str,
     priority: &str,
-    resolved: &xai_grok_sampler::SamplerConfig,
+    resolved: &xai_grok_inference::InferenceConfig,
     resolved_id: &acp::ModelId,
-    parent: &xai_grok_sampler::SamplerConfig,
+    parent: &xai_grok_inference::InferenceConfig,
 ) {
     let keys_match = resolved.api_key == parent.api_key;
     xai_grok_telemetry::unified_log::debug(
@@ -938,18 +938,18 @@ fn log_subagent_model_resolution(
 /// to the baseline on `SubagentSpawnContext` if the actor is unavailable.
 /// The returned [`acp::ModelId`] is the parent session catalog id (`ctx.model_id`),
 /// not the process-global default or chat-state routing slug.
-async fn read_parent_sampling_config(
+async fn read_parent_inference_config(
     ctx: &SubagentSpawnContext,
-) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
+) -> (xai_grok_inference::InferenceConfig, acp::ModelId) {
     if let Some(ref chat_state) = ctx.parent_chat_state {
-        if let Some(cfg) = chat_state.get_sampling_config().await {
+        if let Some(cfg) = chat_state.get_inference_settings().await {
             let creds = chat_state.get_credentials().await;
             let model_id = ctx.model_id.clone();
 
             // Resolve the parent catalog entry so provider identity, OpenRouter
             // extensions, auth_scheme, and include_message_model_id come from the
-            // same source that `sampling_config_for_model` would produce. The
-            // chat-state `SamplingConfig` carries no provider-scoped fields, and
+            // same source that `inference_config_for_model` would produce. The
+            // chat-state `InferenceConfig` carries no provider-scoped fields, and
             // `cfg.model` is the routing slug (not the catalog id), so resolving
             // auth_scheme through `try_resolve_model_credentials(&cfg.model, …)`
             // is unreliable for BYOK providers.
@@ -962,18 +962,18 @@ async fn read_parent_sampling_config(
                 // auth_scheme survive for BYOK providers.
                 let mut canonical_creds = crate::agent::config::resolve_credentials(entry, None);
                 canonical_creds.auth_type = subagent_auth_type(Some(entry), &ctx.auth_method_id);
-                let mut base = crate::agent::config::sampling_config_for_model(
+                let mut base = crate::agent::config::inference_config_for_model(
                     entry,
                     canonical_creds,
                     ctx.alpha_test_key.clone(),
-                    ctx.sampling_config.client_version.clone(),
-                    ctx.sampling_config.deployment_id.clone(),
-                    ctx.sampling_config.user_id.clone(),
+                    ctx.inference_config.client_version.clone(),
+                    ctx.inference_config.deployment_id.clone(),
+                    ctx.inference_config.user_id.clone(),
                 );
 
                 // Overlay live chat-state values so mid-session tweaks win,
                 // but never overwrite provider-scoped identity fields that
-                // `sampling_config_for_model` set correctly.
+                // `inference_config_for_model` set correctly.
                 base.api_key = creds.api_key;
                 base.base_url = cfg.base_url.clone();
                 base.model = cfg.model.clone();
@@ -999,17 +999,17 @@ async fn read_parent_sampling_config(
                 // Preserve max_retries from the spawn-context baseline (the
                 // parent's resolved config at spawn time), falling back to the
                 // catalog default. Never hardcode None.
-                base.max_retries = ctx.sampling_config.max_retries.or(base.max_retries);
+                base.max_retries = ctx.inference_config.max_retries.or(base.max_retries);
 
                 // Keep spawn-context client identity / attribution / injector.
-                base.client_identifier = ctx.sampling_config.client_identifier.clone();
-                base.origin_client = ctx.sampling_config.origin_client.clone();
-                base.deployment_id = ctx.sampling_config.deployment_id.clone();
-                base.user_id = ctx.sampling_config.user_id.clone();
+                base.client_identifier = ctx.inference_config.client_identifier.clone();
+                base.origin_client = ctx.inference_config.origin_client.clone();
+                base.deployment_id = ctx.inference_config.deployment_id.clone();
+                base.user_id = ctx.inference_config.user_id.clone();
                 base.client_version = creds.client_version.clone();
                 base.attribution_callback = ctx.attribution_callback.clone();
-                base.header_injector = ctx.sampling_config.header_injector.clone();
-                base.doom_loop_recovery = ctx.sampling_config.doom_loop_recovery;
+                base.header_injector = ctx.inference_config.header_injector.clone();
+                base.doom_loop_recovery = ctx.inference_config.doom_loop_recovery;
                 base.bearer_resolver = None;
                 base.force_http1 = false;
                 base.idle_timeout_secs = None;
@@ -1040,7 +1040,7 @@ async fn read_parent_sampling_config(
                 )
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
-                xai_grok_sampler::SamplerConfig {
+                xai_grok_inference::InferenceConfig {
                     api_key: creds.api_key,
                     base_url: cfg.base_url.clone(),
                     model: cfg.model.clone(),
@@ -1048,29 +1048,29 @@ async fn read_parent_sampling_config(
                     temperature: cfg.temperature,
                     top_p: cfg.top_p,
                     openrouter_fallback_models: ctx
-                        .sampling_config
+                        .inference_config
                         .openrouter_fallback_models
                         .clone(),
                     openrouter_provider_preferences: ctx
-                        .sampling_config
+                        .inference_config
                         .openrouter_provider_preferences
                         .clone(),
-                    openrouter_plugins: ctx.sampling_config.openrouter_plugins.clone(),
+                    openrouter_plugins: ctx.inference_config.openrouter_plugins.clone(),
                     api_backend: cfg.api_backend,
-                    include_message_model_id: ctx.sampling_config.include_message_model_id,
+                    include_message_model_id: ctx.inference_config.include_message_model_id,
                     auth_scheme,
                     extra_headers,
                     context_window: cfg.context_window.get(),
                     client_version: creds.client_version,
                     reasoning_effort: cfg.reasoning_effort,
                     force_http1: false,
-                    max_retries: ctx.sampling_config.max_retries,
+                    max_retries: ctx.inference_config.max_retries,
                     stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
                     idle_timeout_secs: None,
-                    client_identifier: ctx.sampling_config.client_identifier.clone(),
-                    deployment_id: ctx.sampling_config.deployment_id.clone(),
-                    user_id: ctx.sampling_config.user_id.clone(),
-                    origin_client: ctx.sampling_config.origin_client.clone(),
+                    client_identifier: ctx.inference_config.client_identifier.clone(),
+                    deployment_id: ctx.inference_config.deployment_id.clone(),
+                    user_id: ctx.inference_config.user_id.clone(),
+                    origin_client: ctx.inference_config.origin_client.clone(),
                     attribution_callback: ctx.attribution_callback.clone(),
                     bearer_resolver: None,
                     supports_backend_search: ctx
@@ -1082,9 +1082,9 @@ async fn read_parent_sampling_config(
                     compaction_at_tokens: ctx
                         .models_manager
                         .model_compaction_at_tokens(ctx.model_id.0.as_ref()),
-                    doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
-                    header_injector: ctx.sampling_config.header_injector.clone(),
-                    provider_identity: ctx.sampling_config.provider_identity,
+                    doom_loop_recovery: ctx.inference_config.doom_loop_recovery,
+                    header_injector: ctx.inference_config.header_injector.clone(),
+                    provider_identity: ctx.inference_config.provider_identity,
                 }
             };
 
@@ -1112,14 +1112,14 @@ async fn read_parent_sampling_config(
         "subagent read parent config (fallback)",
         None,
         Some(serde_json::json!({
-            "parent_model": &ctx.sampling_config.model,
-            "parent_base_url": &ctx.sampling_config.base_url,
-            "parent_has_api_key": ctx.sampling_config.api_key.is_some(),
+            "parent_model": &ctx.inference_config.model,
+            "parent_base_url": &ctx.inference_config.base_url,
+            "parent_has_api_key": ctx.inference_config.api_key.is_some(),
             "source": "spawn_context_baseline",
             "has_chat_state": ctx.parent_chat_state.is_some(),
         })),
     );
-    let mut fallback = ctx.sampling_config.clone();
+    let mut fallback = ctx.inference_config.clone();
     fallback.supports_backend_search = ctx
         .models_manager
         .model_supports_backend_search(ctx.model_id.0.as_ref());
@@ -1169,12 +1169,12 @@ fn subagent_auth_type(
     }
 }
 /// Resolve a model override string (config key or model ID) to a
-/// `(SamplerConfig, ModelId)` pair.
+/// `(InferenceConfig, ModelId)` pair.
 fn resolve_model_override_to_config(
     model_id: &str,
     ctx: &SubagentSpawnContext,
-) -> Option<(xai_grok_sampler::SamplerConfig, acp::ModelId)> {
-    use crate::agent::config::{resolve_credentials, sampling_config_for_model};
+) -> Option<(xai_grok_inference::InferenceConfig, acp::ModelId)> {
+    use crate::agent::config::{resolve_credentials, inference_config_for_model};
     let entry = crate::agent::config::find_model_by_id(&ctx.available_models, model_id).cloned()?;
     let canonical_model_id = if ctx.available_models.contains_key(model_id) {
         acp::ModelId::new(model_id)
@@ -1219,13 +1219,13 @@ fn resolve_model_override_to_config(
         );
         return None;
     }
-    let config = sampling_config_for_model(
+    let config = inference_config_for_model(
         &entry,
         credentials,
         ctx.alpha_test_key.clone(),
-        ctx.sampling_config.client_version.clone(),
-        ctx.sampling_config.deployment_id.clone(),
-        ctx.sampling_config.user_id.clone(),
+        ctx.inference_config.client_version.clone(),
+        ctx.inference_config.deployment_id.clone(),
+        ctx.inference_config.user_id.clone(),
     );
     xai_grok_telemetry::unified_log::debug(
         "subagent resolve_model_override_to_config",
@@ -1248,9 +1248,9 @@ fn resolve_model_override_to_config(
 /// resumed body (the child's own work) stays compactable. Returns 0 when there's no
 /// leading System; the spawn path then inserts one and bumps the prefix to 1.
 pub(crate) fn resume_inherited_prefix_len(
-    conversation: &[xai_grok_sampling_types::conversation::ConversationItem],
+    conversation: &[xai_grok_inference_types::conversation::ConversationItem],
 ) -> usize {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     conversation
         .iter()
         .take_while(|i| matches!(i, ConversationItem::System(_)))
@@ -1261,7 +1261,7 @@ struct InitialContext {
     source: InitialContextSource,
     copy_error: Option<String>,
     prefix_len: Option<usize>,
-    conversation: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
+    conversation: Vec<xai_grok_inference_types::conversation::ConversationItem>,
     /// True only for a verbatim mirror-fork (parent items copied byte-for-byte).
     /// Gates sending the parent tool snapshot so the child's full request prefix
     /// matches the parent. A summarized-fork fallback leaves this false.
@@ -1269,7 +1269,7 @@ struct InitialContext {
 }
 /// Resume bootstrap: preserve only the System head (see `resume_inherited_prefix_len`).
 fn resume_initial_context(
-    conversation: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
+    conversation: Vec<xai_grok_inference_types::conversation::ConversationItem>,
 ) -> InitialContext {
     InitialContext {
         source: InitialContextSource::Resumed,
@@ -1282,7 +1282,7 @@ fn resume_initial_context(
 /// Apply `fork_filter_chat` then normalize; empty or System-only input (no
 /// `<background_context>` produced) fails open to `New`.
 fn forked_initial_context(
-    mut items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
+    mut items: Vec<xai_grok_inference_types::conversation::ConversationItem>,
 ) -> InitialContext {
     crate::session::storage::jsonl::fork_filter_chat(&mut items);
     if items.is_empty() {
@@ -1319,9 +1319,9 @@ fn forked_initial_context(
 /// user/reasoning means the prefix would be incoherent, so the caller falls back
 /// to the summarized path instead of partial-trimming.
 fn conversation_tail_is_complete(
-    items: &[xai_grok_sampling_types::conversation::ConversationItem],
+    items: &[xai_grok_inference_types::conversation::ConversationItem],
 ) -> bool {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     matches!(
         items.last(),
         Some(ConversationItem::Assistant(a)) if a.tool_calls.is_empty()
@@ -1347,10 +1347,10 @@ fn conversation_tail_is_complete(
 /// Input that is empty or only `System` item(s) — before OR after filtering —
 /// inherited nothing, so it fails open to `New` rather than a hollow fork.
 fn verbatim_or_normalize_fork(
-    items: Vec<xai_grok_sampling_types::conversation::ConversationItem>,
+    items: Vec<xai_grok_inference_types::conversation::ConversationItem>,
     child_context_window: u64,
 ) -> InitialContext {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     if !items
         .iter()
         .any(|i| !matches!(i, ConversationItem::System(_)))

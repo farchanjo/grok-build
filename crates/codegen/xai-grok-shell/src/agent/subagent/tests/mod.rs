@@ -1966,7 +1966,7 @@ fn initial_context_source_forked_distinct_from_new_and_resumed() {
 }
 #[test]
 fn forked_initial_context_normalizes_parent_history() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![
             ConversationItem::system("parent system"),
             ConversationItem::user("UNIQUE_FORK_MARKER_abc123 implement multi-repo fix"),
@@ -1982,7 +1982,7 @@ fn forked_initial_context_normalizes_parent_history() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -1999,11 +1999,11 @@ fn forked_initial_context_normalizes_parent_history() {
 }
 #[test]
 fn forked_initial_context_inherits_parent_across_reasoning() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![
             ConversationItem::system("parent system"),
             ConversationItem::user("remember UNIQUE_FORK_MARKER_TEST"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "deliberating",
             )),
             ConversationItem::assistant("ack"),
@@ -2017,7 +2017,7 @@ fn forked_initial_context_inherits_parent_across_reasoning() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -2044,7 +2044,7 @@ fn forked_initial_context_empty_fails_open_to_new() {
 }
 #[test]
 fn resume_vs_fork_helper_shapes_differ() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let resume_items = vec![
             ConversationItem::system("child system"),
             ConversationItem::user("prior subagent work"),
@@ -2060,14 +2060,14 @@ fn resume_vs_fork_helper_shapes_differ() {
             Some(ConversationItem::User(u))
                 if u.content.iter().any(|p| matches!(
                     p,
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text }
+                    xai_grok_inference_types::conversation::ContentPart::Text { text }
                         if text.contains("<background_context>")
                 ))
         ));
 }
 #[test]
 fn forked_initial_context_applies_fork_filter_before_normalize() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("complete user"),
@@ -2081,7 +2081,7 @@ fn forked_initial_context_applies_fork_filter_before_normalize() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -2098,7 +2098,7 @@ fn forked_initial_context_applies_fork_filter_before_normalize() {
 }
 #[test]
 fn verbatim_fork_keeps_items_byte_for_byte_when_small() {
-    use xai_grok_sampling_types::conversation::{
+    use xai_grok_inference_types::conversation::{
         ContentPart, ConversationItem, SyntheticReason, UserItem,
     };
     let items = vec![
@@ -2111,7 +2111,7 @@ fn verbatim_fork_keeps_items_byte_for_byte_when_small() {
                 synthetic_reason: Some(SyntheticReason::SystemReminder),
                 ..Default::default()
             }),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "thinking",
             )),
             ConversationItem::assistant("ack"),
@@ -2160,7 +2160,7 @@ fn verbatim_fork_keeps_items_byte_for_byte_when_small() {
 }
 #[test]
 fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
-    use xai_grok_sampling_types::conversation::{
+    use xai_grok_inference_types::conversation::{
         AssistantItem, ContentPart, ConversationItem, ToolCall,
     };
     let items = vec![
@@ -2199,7 +2199,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
 }
 #[test]
 fn summarized_fork_is_not_a_verbatim_mirror() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![
             ConversationItem::system("parent system prompt"),
             ConversationItem::user("turn one UNIQUE_FORK_MARKER_TEST"),
@@ -2217,7 +2217,7 @@ fn summarized_fork_is_not_a_verbatim_mirror() {
 }
 #[test]
 fn verbatim_fork_falls_back_to_summary_when_oversize() {
-    use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem};
+    use xai_grok_inference_types::conversation::{ContentPart, ConversationItem};
     let items = vec![
             ConversationItem::system("parent system"),
             ConversationItem::user("turn one UNIQUE_FORK_MARKER_TEST with some text"),
@@ -2245,7 +2245,7 @@ fn verbatim_fork_falls_back_to_summary_when_oversize() {
 }
 #[test]
 fn verbatim_fork_empty_after_filter_fails_open_to_new() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![ConversationItem::user("/goal do the thing")];
     let ctx = verbatim_or_normalize_fork(items, 256_000);
     assert_eq!(ctx.source, InitialContextSource::New);
@@ -2254,7 +2254,7 @@ fn verbatim_fork_empty_after_filter_fails_open_to_new() {
 }
 #[test]
 fn verbatim_or_normalize_fork_system_only_fails_open_to_new() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     for items in [
         vec![ConversationItem::system("sys")],
         vec![ConversationItem::system("a"), ConversationItem::system("b")],
@@ -2271,7 +2271,7 @@ fn verbatim_or_normalize_fork_system_only_fails_open_to_new() {
 }
 #[test]
 fn forked_initial_context_system_only_fails_open_to_new() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let ctx = forked_initial_context(vec![ConversationItem::system("sys")]);
     assert_eq!(ctx.source, InitialContextSource::New);
     assert!(!ctx.verbatim_fork);
@@ -2293,7 +2293,7 @@ fn fork_context_normalized_only_for_summarized() {
             &InitialContextSource::Resumed,
             false
         ));
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let verbatim = verbatim_or_normalize_fork(
         vec![
                 ConversationItem::system("sys"),
@@ -2401,7 +2401,7 @@ async fn bootstrap_fork_without_parent_fails_open() {
 }
 #[tokio::test]
 async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     const MARKER: &str = "UNIQUE_LIVE_FORK_MARKER_xyz789";
     let req = bootstrap_test_request(true);
     let mut ctx = ctx_with_toggle(HashMap::new());
@@ -2452,7 +2452,7 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
                                 .content
                                 .iter()
                                 .filter_map(|p| match p {
-                                    xai_grok_sampling_types::conversation::ContentPart::Text {
+                                    xai_grok_inference_types::conversation::ContentPart::Text {
                                         text,
                                     } => Some(text.as_ref()),
                                     _ => None,
@@ -2477,7 +2477,7 @@ async fn bootstrap_fork_live_parent_chat_state_is_forked_with_marker() {
 }
 #[tokio::test]
 async fn copy_session_data_preserves_parent_chat_history() {
-    use crate::sampling::ConversationItem;
+    use crate::inference::ConversationItem;
     use crate::session::storage::StorageAdapter;
     use crate::session::storage::jsonl::JsonlStorageAdapter;
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3909,7 +3909,7 @@ fn harness_model_override_keeps_internal_fallback_behavior() {
 }
 #[test]
 fn normalize_forked_context_empty_parent() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![ConversationItem::system("sys prompt")];
     let (conv, prefix_len) = xai_grok_subagent_resolution::context::normalize_forked_context(
         items,
@@ -3920,7 +3920,7 @@ fn normalize_forked_context_empty_parent() {
 }
 #[test]
 fn normalize_forked_context_short_conversation() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("hello"),
@@ -3937,7 +3937,7 @@ fn normalize_forked_context_short_conversation() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -3959,9 +3959,9 @@ fn normalize_forked_context_short_conversation() {
         panic!("expected User message at position 1");
     }
 }
-fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingConfig {
+fn test_inference_settings(model_slug: &str) -> xai_grok_inference_types::InferenceSettings {
     use std::num::NonZeroU64;
-    xai_grok_sampling_types::SamplingConfig {
+    xai_grok_inference_types::InferenceSettings {
         base_url: "https://api.test/v1".to_string(),
         model: model_slug.to_string(),
         max_completion_tokens: None,
@@ -3980,7 +3980,7 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHa
     let token = tokio_util::sync::CancellationToken::new();
     xai_chat_state::ChatStateActor::spawn(
         vec![],
-        test_sampling_config(model_slug),
+        test_inference_settings(model_slug),
         Box::new(mock),
         event_tx,
         token,

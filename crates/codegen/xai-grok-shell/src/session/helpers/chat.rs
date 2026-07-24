@@ -1,6 +1,6 @@
-use crate::sampling::Client as OaiCompatClient;
-use crate::sampling::types::ChatRequestMessage;
-use crate::sampling::{ConversationItem, ConversationRequest, Role};
+use crate::inference::Client as OaiCompatClient;
+use crate::inference::types::ChatRequestMessage;
+use crate::inference::{ConversationItem, ConversationRequest, Role};
 use anyhow::Result;
 
 pub fn build_transcript(messages: &[ConversationItem]) -> String {

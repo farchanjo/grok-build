@@ -46,7 +46,7 @@ async fn create_test_actor(
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
-        xai_grok_sampling_types::SamplingConfig {
+        xai_grok_inference_types::InferenceSettings {
             base_url: "http://localhost".to_string(),
             model: "test".to_string(),
             max_completion_tokens: None,
@@ -238,7 +238,7 @@ async fn create_test_actor(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
-        sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -314,10 +314,10 @@ async fn test_context_window_override_affects_auto_compact() {
             let actor = create_test_actor(86_000, 100_000, 85, gateway_tx, persistence_tx).await;
             let result = actor.check_auto_compact_needed().await;
             assert!(result.is_some(), "Should trigger at 86% of 100K window");
-            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+            if let Some(mut cfg) = actor.chat_state_handle.get_inference_settings().await {
                 cfg.model = "larger-model".to_string();
                 cfg.context_window = std::num::NonZeroU64::new(200_000).unwrap();
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
             }
             let result = actor.check_auto_compact_needed().await;
             assert!(
@@ -340,10 +340,10 @@ async fn test_context_window_override_to_smaller_triggers_compact() {
             let actor = create_test_actor(86_000, 200_000, 85, gateway_tx, persistence_tx).await;
             let result = actor.check_auto_compact_needed().await;
             assert!(result.is_none(), "Should NOT trigger at 43% of 200K window");
-            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+            if let Some(mut cfg) = actor.chat_state_handle.get_inference_settings().await {
                 cfg.model = "smaller-model".to_string();
                 cfg.context_window = std::num::NonZeroU64::new(100_000).unwrap();
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
             }
             let result = actor.check_auto_compact_needed().await;
             assert!(
@@ -365,29 +365,29 @@ async fn test_response_header_context_window_downgrade_rejected() {
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(200_000, 500_000, 85, gateway_tx, persistence_tx).await;
-            let cfg_before = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(cfg_before.context_window.get(), 500_000);
             actor
-                .handle_model_metadata_update(crate::sampling::ResponseModelMetadata {
+                .handle_model_metadata_update(crate::inference::ResponseModelMetadata {
                     context_window: Some(256_000),
                     max_completion_tokens: None,
                     models_etag: None,
                 })
                 .await;
-            let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_after.context_window.get(),
                 500_000,
                 "context_window must NOT be downgraded by response header"
             );
             actor
-                .handle_model_metadata_update(crate::sampling::ResponseModelMetadata {
+                .handle_model_metadata_update(crate::inference::ResponseModelMetadata {
                     context_window: Some(1_000_000),
                     max_completion_tokens: None,
                     models_etag: None,
                 })
                 .await;
-            let cfg_upgraded = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_upgraded = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_upgraded.context_window.get(),
                 1_000_000,
@@ -487,7 +487,7 @@ async fn create_test_actor_with_memory(
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
-        xai_grok_sampling_types::SamplingConfig {
+        xai_grok_inference_types::InferenceSettings {
             base_url: "http://localhost".to_string(),
             model: "test".to_string(),
             max_completion_tokens: None,
@@ -693,7 +693,7 @@ async fn create_test_actor_with_memory(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
-        sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -1145,14 +1145,14 @@ async fn test_idle_flush_conversation_len_reset_after_compaction() {
         })
         .await;
 }
-fn api_error_with_context_window(context_window: u64) -> xai_grok_sampler::SamplingErrorInfo {
-    xai_grok_sampler::SamplingErrorInfo {
-        kind: xai_grok_sampler::SamplingErrorKind::Api,
+fn api_error_with_context_window(context_window: u64) -> xai_grok_inference::InferenceErrorInfo {
+    xai_grok_inference::InferenceErrorInfo {
+        kind: xai_grok_inference::InferenceErrorKind::Api,
         status_code: Some(400),
         message: "prompt is too long".into(),
         is_retryable: false,
         retry_after_secs: None,
-        model_metadata: Some(crate::sampling::ResponseModelMetadata {
+        model_metadata: Some(crate::inference::ResponseModelMetadata {
             context_window: Some(context_window),
             max_completion_tokens: None,
             models_etag: None,
@@ -1255,7 +1255,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
                 vec![],
-                xai_grok_sampling_types::SamplingConfig {
+                xai_grok_inference_types::InferenceSettings {
                     base_url: mock_url,
                     model: "test-model".to_string(),
                     max_completion_tokens: Some(8192),
@@ -1472,7 +1472,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 attribution_callback: None,
-                sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+                sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
@@ -1485,7 +1485,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             actor
                 .last_api_request_at
                 .store(eleven_minutes_ago_ms, std::sync::atomic::Ordering::Relaxed);
-            let cfg_before = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_before.context_window,
                 std::num::NonZeroU64::new(200_000).unwrap()
@@ -1493,7 +1493,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             assert_eq!(cfg_before.max_completion_tokens, Some(8192));
             actor.maybe_refresh_model_metadata_on_resume().await;
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_after.context_window,
                 std::num::NonZeroU64::new(300_000).unwrap(),
@@ -1520,9 +1520,9 @@ async fn test_idle_resume_noop_when_not_idle_enough() {
             actor
                 .last_api_request_at
                 .store(five_minutes_ago_ms, std::sync::atomic::Ordering::Relaxed);
-            let cfg_before = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
             actor.maybe_refresh_model_metadata_on_resume().await;
-            let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_before.context_window, cfg_after.context_window,
                 "config should not change when idle < 10 min"
@@ -1540,8 +1540,8 @@ async fn test_compact_on_error_noop_without_model_metadata() {
             let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
-            let err = xai_grok_sampler::SamplingErrorInfo {
-                kind: xai_grok_sampler::SamplingErrorKind::Api,
+            let err = xai_grok_inference::InferenceErrorInfo {
+                kind: xai_grok_inference::InferenceErrorKind::Api,
                 status_code: Some(400),
                 message: "prompt is too long".into(),
                 is_retryable: false,
@@ -1560,7 +1560,7 @@ async fn test_compact_on_error_noop_without_model_metadata() {
 /// reflects a compaction, the next reconstructed config emits `0`.
 #[tokio::test(flavor = "current_thread")]
 async fn compactions_remaining_header_flips_after_compaction() {
-    use xai_grok_sampling_types::CompactionsRemaining;
+    use xai_grok_inference_types::CompactionsRemaining;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1600,7 +1600,7 @@ async fn compactions_remaining_header_flips_after_compaction() {
 /// across a compaction, unlike the dynamic 1->0 variant.
 #[tokio::test(flavor = "current_thread")]
 async fn compactions_remaining_fixed_does_not_flip_after_compaction() {
-    use xai_grok_sampling_types::CompactionsRemaining;
+    use xai_grok_inference_types::CompactionsRemaining;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1641,7 +1641,7 @@ async fn compactions_remaining_fixed_does_not_flip_after_compaction() {
 /// chat-state reflects a compaction, the next reconstructed config drops it.
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_at_tokens_header_flips_after_compaction() {
-    use xai_grok_sampling_types::CompactionAtTokens;
+    use xai_grok_inference_types::CompactionAtTokens;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1678,7 +1678,7 @@ async fn compaction_at_tokens_header_flips_after_compaction() {
 /// `Fixed(n)` sends the exact constant; the default (`None`) never emits the header.
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_at_tokens_fixed_and_disabled() {
-    use xai_grok_sampling_types::CompactionAtTokens;
+    use xai_grok_inference_types::CompactionAtTokens;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {

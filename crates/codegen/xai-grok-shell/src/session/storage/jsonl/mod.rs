@@ -1,6 +1,6 @@
 use super::{PersistedData, SessionUpdateEnvelope, StorageAdapter, updates_truncate_for_prompt};
-use crate::sampling::types::ChatRequestMessage;
-use crate::sampling::{
+use crate::inference::types::ChatRequestMessage;
+use crate::inference::{
     ContentPart, ConversationItem, conversation_truncate_for_prompt, transform_conversation_cwd,
 };
 use crate::session::info::Info;
@@ -790,7 +790,7 @@ impl JsonlStorageAdapter {
     /// backend-search sessions, as `AssistantItem.raw_output: Vec<Value>`.
     /// Newer sessions don't have those fields on `AssistantItem` so serde
     /// would silently drop them. We pre-extract them via
-    /// [`xai_grok_sampling_types::upgrade_legacy_reasoning`] and emit
+    /// [`xai_grok_inference_types::upgrade_legacy_reasoning`] and emit
     /// sibling `Reasoning` / `BackendToolCall` items *before* the
     /// corresponding assistant — matching the order
     /// `response_to_conversation_items` would produce. The file on disk
@@ -856,7 +856,7 @@ impl JsonlStorageAdapter {
                 }
             };
             let siblings =
-                xai_grok_sampling_types::upgrade_legacy_reasoning(&raw, &mut sibling_btc_ids_seen);
+                xai_grok_inference_types::upgrade_legacy_reasoning(&raw, &mut sibling_btc_ids_seen);
             for sib in siblings {
                 match &sib {
                     ConversationItem::Reasoning(_) => upgraded_reasoning_count += 1,
@@ -1464,7 +1464,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         model_id: &acp::ModelId,
         agent_name: Option<&str>,
-        reasoning_effort: Option<Option<xai_grok_sampling_types::ReasoningEffort>>,
+        reasoning_effort: Option<Option<xai_grok_inference_types::ReasoningEffort>>,
     ) -> io::Result<()> {
         self.apply_summary_patch(
             info,

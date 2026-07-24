@@ -850,7 +850,7 @@ pub(crate) async fn handle_subagent_request(
     if request.fork_context {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
-    let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
+    let (mut effective_inference_config, mut effective_model_id) = resolve_effective_model_config(
             effective_runtime.model.as_deref(),
             &request.subagent_type,
             &definition.model,
@@ -862,12 +862,12 @@ pub(crate) async fn handle_subagent_request(
         ctx.parent_max_turns,
     );
     {
-        let model_str = &effective_sampling_config.model;
+        let model_str = &effective_inference_config.model;
         let model_unknown = !model_str.is_empty() && !ctx.available_models.is_empty()
             && !ctx.available_models.contains_key(model_str)
             && !ctx.available_models.values().any(|e| e.info().model == *model_str);
         if model_unknown {
-            let (parent_config, parent_mid) = read_parent_sampling_config(&ctx).await;
+            let (parent_config, parent_mid) = read_parent_inference_config(&ctx).await;
             tracing::warn!(
                 subagent_id = %request.id,
                 resolved_model = %model_str,
@@ -875,7 +875,7 @@ pub(crate) async fn handle_subagent_request(
                 "Resolved subagent model not found in available models — \
                  falling back to parent model"
             );
-            effective_sampling_config = parent_config;
+            effective_inference_config = parent_config;
             effective_model_id = parent_mid;
         }
     }
@@ -890,7 +890,7 @@ pub(crate) async fn handle_subagent_request(
                 source_model = source_model,
                 "Pinning resumed child to source model"
             );
-            effective_sampling_config = resolved.0;
+            effective_inference_config = resolved.0;
             effective_model_id = resolved.1;
         } else {
             let msg = format!(
@@ -907,9 +907,9 @@ pub(crate) async fn handle_subagent_request(
             .models_manager
             .model_supports_reasoning_effort(effective_model_id.0.as_ref())
     {
-        use xai_grok_sampling_types::ReasoningEffort;
+        use xai_grok_inference_types::ReasoningEffort;
         match raw.parse::<ReasoningEffort>() {
-            Ok(eff) => effective_sampling_config.reasoning_effort = Some(eff),
+            Ok(eff) => effective_inference_config.reasoning_effort = Some(eff),
             Err(err) => {
                 tracing::warn!(
                 value = raw,
@@ -972,7 +972,7 @@ pub(crate) async fn handle_subagent_request(
         );
 
         let mut codex_request = crate::agent::codex_app_server::CodexRunRequest::new(
-            effective_sampling_config.model.clone(),
+            effective_inference_config.model.clone(),
             PathBuf::from(&effective_cwd),
             request.prompt.clone(),
         );
@@ -1362,7 +1362,7 @@ pub(crate) async fn handle_subagent_request(
             &child_session_info,
             &child_session_dir,
             effective_model_id.0.as_ref(),
-            effective_sampling_config.context_window,
+            effective_inference_config.context_window,
         )
         .await
     {
@@ -1387,7 +1387,7 @@ pub(crate) async fn handle_subagent_request(
     if context_source != InitialContextSource::Resumed && !verbatim_mirror_fork
         && let Some(ref pi) = effective_runtime.persona_instructions
     {
-        let reminder = xai_grok_sampling_types::conversation::ConversationItem::system_reminder(
+        let reminder = xai_grok_inference_types::conversation::ConversationItem::system_reminder(
             format!("<system-reminder>\n{pi}\n</system-reminder>"),
         );
         let insert_at = inherited_prefix_len.min(forked_conversation.len());
@@ -1509,8 +1509,8 @@ pub(crate) async fn handle_subagent_request(
         depth: 0,
         auth_manager: ctx.auth_manager.clone(),
     };
-    let sampling_client = match crate::sampling::Client::new(
-        effective_sampling_config.clone(),
+    let sampling_client = match crate::inference::Client::new(
+        effective_inference_config.clone(),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -1536,7 +1536,7 @@ pub(crate) async fn handle_subagent_request(
             child_session_dir.clone(),
             effective_model_id.clone(),
             sampling_client,
-            effective_sampling_config.model.clone(),
+            effective_inference_config.model.clone(),
         )
         .await
     {
@@ -1614,10 +1614,10 @@ pub(crate) async fn handle_subagent_request(
         .is_some_and(|entry| entry.has_own_credentials());
     let inherited_auth_type = subagent_auth_type(model_entry, &ctx.auth_method_id);
     let credentials = xai_chat_state::Credentials {
-        api_key: effective_sampling_config.api_key.clone(),
+        api_key: effective_inference_config.api_key.clone(),
         auth_type: inherited_auth_type,
         alpha_test_key: ctx.alpha_test_key.clone(),
-        client_version: effective_sampling_config.client_version.clone(),
+        client_version: effective_inference_config.client_version.clone(),
     };
     xai_grok_telemetry::unified_log::info(
         "subagent spawn credentials",
@@ -1627,19 +1627,19 @@ pub(crate) async fn handle_subagent_request(
             "subagent_id": &request.id,
             "subagent_type": &request.subagent_type,
             "effective_model": effective_model_id.0.as_ref(),
-            "effective_model_raw": &effective_sampling_config.model,
-            "base_url": &effective_sampling_config.base_url,
-            "has_api_key": effective_sampling_config.api_key.is_some(),
+            "effective_model_raw": &effective_inference_config.model,
+            "base_url": &effective_inference_config.base_url,
+            "has_api_key": effective_inference_config.api_key.is_some(),
             "auth_type": format!("{:?}", inherited_auth_type),
             "model_has_own_creds": model_has_own_creds,
             "auth_method_id": ctx.auth_method_id.0.as_ref(),
             "parent_model": ctx.model_id.0.as_ref(),
-            "parent_has_api_key": ctx.sampling_config.api_key.is_some(),
-            "context_window": effective_sampling_config.context_window,
+            "parent_has_api_key": ctx.inference_config.api_key.is_some(),
+            "context_window": effective_inference_config.context_window,
         }),
         ),
     );
-    let attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback> = effective_sampling_config
+    let attribution_callback: Option<xai_grok_inference::SharedAttributionCallback> = effective_inference_config
         .attribution_callback
         .clone();
     let tracker_color = definition.color;
@@ -1815,13 +1815,13 @@ pub(crate) async fn handle_subagent_request(
         skills_inherited_count,
     });
     let subagent_session_default_agent_profile = Some(definition.name.clone());
-    let subagent_model_id = effective_sampling_config.model.clone();
+    let subagent_model_id = effective_inference_config.model.clone();
     let _ = persistence
         .tx
         .send(crate::session::persistence::PersistenceMsg::CurrentModel {
             model_id: effective_model_id.clone(),
             agent_name: Some(definition.name.clone()),
-            reasoning_effort: Some(effective_sampling_config.reasoning_effort),
+            reasoning_effort: Some(effective_inference_config.reasoning_effort),
         });
     let forked_tool_override = if verbatim_mirror_fork && !request.owner.is_workflow() {
         ctx.parent_tool_snapshot.clone()
@@ -1831,7 +1831,7 @@ pub(crate) async fn handle_subagent_request(
     let spawn_result = session::spawn_session_on_thread(
             child_session_info,
             gateway.clone(),
-            effective_sampling_config,
+            effective_inference_config,
             credentials,
             crate::agent::auth_method::new_shared_auth_method_id(
                 Some(ctx.auth_method_id.clone()),
@@ -1930,7 +1930,7 @@ pub(crate) async fn handle_subagent_request(
             None,
             ctx.inference_idle_timeout_secs,
             None,
-            ctx.web_search_sampling_config.clone(),
+            ctx.web_search_inference_config.clone(),
             ctx.web_fetch_config.clone(),
             ctx.image_gen_config.clone(),
             ctx.video_gen_config.clone(),
@@ -2552,7 +2552,7 @@ pub(crate) async fn handle_subagent_request(
             user_email: subagent_auth.as_ref().and_then(|a| a.email.clone()),
             team_id: subagent_auth.as_ref().and_then(|a| a.team_id.clone()),
             client_source: Some("subagent".to_string()),
-            client_version: ctx.sampling_config.client_version.clone(),
+            client_version: ctx.inference_config.client_version.clone(),
             model: gcs_upload_ctx.model_id.clone().unwrap_or_default(),
             reasoning_effort: child_handle
                 .reasoning_effort

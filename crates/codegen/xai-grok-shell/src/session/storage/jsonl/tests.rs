@@ -37,7 +37,7 @@ fn create_test_plan_state() -> TodoState {
 #[tokio::test]
 async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
     use crate::extensions::notification::CompactionSegmentFile;
-    use xai_grok_sampling_types::ConversationItem;
+    use xai_grok_inference_types::ConversationItem;
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let seg = |summary: &str| CompactionSegmentFile {
@@ -73,7 +73,7 @@ async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
 }
 #[tokio::test]
 async fn update_current_model_persists_leaves_and_clears_reasoning_effort() {
-    use xai_grok_sampling_types::ReasoningEffort;
+    use xai_grok_inference_types::ReasoningEffort;
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
@@ -696,7 +696,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
 #[tokio::test]
 async fn copy_session_data_copies_compaction_segments_when_enabled() {
     use crate::extensions::notification::CompactionSegmentFile;
-    use xai_grok_sampling_types::ConversationItem;
+    use xai_grok_inference_types::ConversationItem;
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let source_info = Info {
@@ -2026,7 +2026,7 @@ async fn copy_tool_state_false_skips_tool_state() {
 }
 #[test]
 fn fork_filter_removes_synthetic_user_messages() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::system("system prompt"),
             ConversationItem::user("real question"),
@@ -2082,7 +2082,7 @@ fn fork_filter_handles_consecutive_user_messages() {
 }
 #[test]
 fn fork_filter_consecutive_users_with_tool_calls() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("prefix"),
@@ -2112,7 +2112,7 @@ fn fork_filter_consecutive_users_with_tool_calls() {
 }
 #[test]
 fn fork_filter_preserves_complete_tool_turn() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::user("q"),
             ConversationItem::Assistant(AssistantItem {
@@ -2134,7 +2134,7 @@ fn fork_filter_preserves_complete_tool_turn() {
 }
 #[test]
 fn fork_filter_strips_incomplete_tool_turn() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::user("q1"),
             ConversationItem::assistant("a1"),
@@ -2323,11 +2323,11 @@ fn fork_filter_empty_input_produces_empty() {
 }
 #[test]
 fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("q"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "thinking",
             )),
             ConversationItem::assistant("a"),
@@ -2342,11 +2342,11 @@ fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
 }
 #[test]
 fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("q"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "plan",
             )),
             ConversationItem::Assistant(AssistantItem {
@@ -2362,7 +2362,7 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
             reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "output"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "reflect",
             )),
             ConversationItem::assistant("final text"),
@@ -2382,11 +2382,11 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
 }
 #[test]
 fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("q"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "plan",
             )),
             ConversationItem::Assistant(AssistantItem {
@@ -2409,9 +2409,9 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
             reasoning_details: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "out1"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item("mid")),
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item("mid")),
             ConversationItem::tool_result("tc2", "out2"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "reflect",
             )),
             ConversationItem::assistant("final"),
@@ -2429,11 +2429,11 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
 }
 #[test]
 fn fork_filter_drops_trailing_incomplete_goal_turn_after_reasoning() {
-    use xai_grok_sampling_types::conversation::*;
+    use xai_grok_inference_types::conversation::*;
     let mut items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("q"),
-            ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(
+            ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
                 "thinking",
             )),
             ConversationItem::assistant("a"),
@@ -2971,7 +2971,7 @@ fn strip_invalid_images_below_pixel_floor_stripped() {
 /// Write a chat_history.jsonl with the given lines into a fresh
 /// session dir, then call `read_chat_history_sync` and return the
 /// resulting `ConversationItem`s. Exercises the real on-read upgrade
-/// path end-to-end (loader + serde + xai_grok_sampling_types::
+/// path end-to-end (loader + serde + xai_grok_inference_types::
 /// upgrade_legacy_reasoning).
 fn load_lines(lines: &[&str]) -> Vec<ConversationItem> {
     let temp_dir = TempDir::new().unwrap();
@@ -3006,7 +3006,7 @@ fn read_chat_history_upgrades_legacy_singular_reasoning_to_sibling() {
         ConversationItem::Reasoning(r) => {
             assert_eq!(r.id, "rs_legacy");
             assert_eq!(r.encrypted_content.as_deref(), Some("enc-blob"));
-            let xai_grok_sampling_types::rs::SummaryPart::SummaryText(s) = &r.summary[0];
+            let xai_grok_inference_types::rs::SummaryPart::SummaryText(s) = &r.summary[0];
             assert_eq!(s.text, "the results are about cats");
         }
         other => panic!("expected reconstructed Reasoning at index 3, got {other:?}"),
@@ -3146,7 +3146,7 @@ fn read_chat_history_handles_hybrid_legacy_and_post_pr_lines() {
     };
     assert_eq!(reconstructed.id, "rs_legacy");
     assert_eq!(reconstructed.encrypted_content.as_deref(), Some("enc"));
-    let xai_grok_sampling_types::rs::SummaryPart::SummaryText(s) = &reconstructed
+    let xai_grok_inference_types::rs::SummaryPart::SummaryText(s) = &reconstructed
         .summary[0];
     assert_eq!(s.text, "legacy thinking");
 }
@@ -3493,7 +3493,7 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let chat = xai_chat_state::ChatStateActor::spawn(
         vec![],
-        xai_grok_sampling_types::SamplingConfig {
+        xai_grok_inference_types::InferenceSettings {
             base_url: String::new(),
             model: String::new(),
             max_completion_tokens: None,

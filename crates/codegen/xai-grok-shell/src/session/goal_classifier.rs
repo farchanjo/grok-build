@@ -228,11 +228,11 @@ pub(crate) trait GoalClassifierSpawner: Send + Sync {
 #[derive(Debug)]
 pub(crate) enum SpawnError {
     /// Subagent coordinator was unreachable (channel closed, no
-    /// `subagent_event_tx` plumbed). Maps to `SamplerError`.
+    /// `subagent_event_tx` plumbed). Maps to `InferenceError`.
     Transport(String),
     /// Subagent ran but reported failure. `cancelled: true` maps to
     /// [`GoalClassifierFailOpenReason::Aborted`]; `cancelled: false`
-    /// maps to [`GoalClassifierFailOpenReason::SamplerError`].
+    /// maps to [`GoalClassifierFailOpenReason::InferenceError`].
     Runtime { message: String, cancelled: bool },
 }
 
@@ -454,8 +454,8 @@ pub(crate) fn build_subagent_trace_items(
     description: &str,
     prompt: &str,
     output: &str,
-) -> Vec<xai_grok_sampling_types::conversation::ConversationItem> {
-    use xai_grok_sampling_types::conversation::{ConversationItem, ToolCall};
+) -> Vec<xai_grok_inference_types::conversation::ConversationItem> {
+    use xai_grok_inference_types::conversation::{ConversationItem, ToolCall};
     let arguments = serde_json::json!({
         "description": description,
         "subagent_type": subagent_type,
@@ -2613,7 +2613,7 @@ mod tests {
 
     #[test]
     fn build_subagent_trace_items_shapes_a_task_call_pair() {
-        use xai_grok_sampling_types::conversation::ConversationItem;
+        use xai_grok_inference_types::conversation::ConversationItem;
 
         let items = build_subagent_trace_items(
             "spawn_subagent",
@@ -6554,7 +6554,7 @@ mod tests {
         super::super::goal_tracker::ensure_goal_scratch_root(&vid).unwrap();
         let (_log, emit) = collect_events();
         let _ = record_fail_open(
-            GoalClassifierFailOpenReason::SamplerError,
+            GoalClassifierFailOpenReason::InferenceError,
             1,
             std::time::Instant::now(),
             &emit,

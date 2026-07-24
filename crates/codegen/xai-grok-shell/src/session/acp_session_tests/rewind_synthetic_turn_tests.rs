@@ -8,7 +8,7 @@
 
 use super::support::create_test_actor;
 
-use crate::sampling::ConversationItem;
+use crate::inference::ConversationItem;
 use crate::session::{RewindMode, RewindRequest};
 
 /// Build the canonical bugged-session shape:

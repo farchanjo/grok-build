@@ -15,7 +15,7 @@
 //! (`handle_suggest_prompt`).
 
 use crate::config::PromptSuggestModelPin;
-use crate::sampling::ConversationItem;
+use crate::inference::ConversationItem;
 use crate::session::helpers::chat::floor_char_boundary;
 
 /// Model used for suggestion calls when nothing pins one (no env /
@@ -516,7 +516,7 @@ mod tests {
     fn repeat_filter_ignores_synthetic_user_messages() {
         let mut synthetic = user("please review the changes now");
         if let ConversationItem::User(u) = &mut synthetic {
-            u.synthetic_reason = Some(crate::sampling::SyntheticReason::SystemReminder);
+            u.synthetic_reason = Some(crate::inference::SyntheticReason::SystemReminder);
         }
         let conv = vec![synthetic, assistant("done")];
         assert!(!is_repeat_of_user_message(
@@ -547,7 +547,7 @@ mod tests {
     fn transcript_skips_synthetic_user_messages() {
         let mut synthetic = ConversationItem::user("synthetic reminder".to_owned());
         if let ConversationItem::User(u) = &mut synthetic {
-            u.synthetic_reason = Some(crate::sampling::SyntheticReason::SystemReminder);
+            u.synthetic_reason = Some(crate::inference::SyntheticReason::SystemReminder);
         }
         let conv = vec![user("real question"), synthetic, assistant("answer")];
         let t = build_transcript(&conv).unwrap();

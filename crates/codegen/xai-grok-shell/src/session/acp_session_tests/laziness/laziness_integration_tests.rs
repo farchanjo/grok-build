@@ -6,7 +6,7 @@
 //! per-test `events.jsonl`.
 //!
 //! Tests that depend on a *successful* classifier response are
-//! out of scope here — they'd require a real `SamplerActor`
+//! out of scope here — they'd require a real `InferenceActor`
 //! responding with a stubbed verdict, which is heavyweight. The
 //! happy-path classifier→nudge dispatch is covered by the unit
 //! tests on `evaluate_laziness` and `build_laziness_nudge`. The
@@ -256,7 +256,7 @@ async fn sampler_error_aborts_with_classifier_error() {
     // After the idle wait expires, the test fixture's
     // `prepare_chat_completion(false).await?.conversation_collect(...)`
     // call hits a non-listening `http://localhost` — the resulting
-    // connection failure surfaces as `SamplingError`, exercising
+    // connection failure surfaces as `InferenceError`, exercising
     // the classifier-error abort arm of the unified path.
     let local = tokio::task::LocalSet::new();
     local

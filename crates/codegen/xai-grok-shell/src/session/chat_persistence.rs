@@ -7,7 +7,7 @@ use std::io;
 
 use tokio::sync::{mpsc, oneshot};
 use xai_chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError};
-use xai_grok_sampling_types::ConversationItem;
+use xai_grok_inference_types::ConversationItem;
 
 use super::persistence::PersistenceMsg;
 

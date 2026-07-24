@@ -6,7 +6,7 @@
 //! calls [`SummaryGenerator::update`] — all state transitions are internal.
 
 use crate::extensions::notification::{SessionNotification, SessionUpdate as XaiSessionUpdate};
-use crate::sampling::Client as OaiCompatClient;
+use crate::inference::Client as OaiCompatClient;
 use crate::session::helpers::session_summary::generate_session_summary;
 use crate::session::info::Info;
 use crate::session::persistence::PersistenceMsg;

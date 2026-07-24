@@ -96,7 +96,7 @@ async fn create_test_actor_with_memory(
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
-        xai_grok_sampling_types::SamplingConfig {
+        xai_grok_inference_types::InferenceSettings {
             base_url: "http://localhost".to_string(),
             model: "test".to_string(),
             max_completion_tokens: None,
@@ -298,7 +298,7 @@ async fn create_test_actor_with_memory(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
-        sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
@@ -485,7 +485,7 @@ async fn test_memory_storage_created_when_enabled() {
 /// idempotency guard alone is what suppresses re-injection.
 #[allow(clippy::field_reassign_with_default)]
 async fn create_injection_ready_actor(
-    initial_conversation: Vec<xai_grok_sampling_types::ConversationItem>,
+    initial_conversation: Vec<xai_grok_inference_types::ConversationItem>,
 ) -> SessionActor {
     let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
@@ -546,8 +546,8 @@ async fn test_first_turn_reminder_injects_without_persisted_block() {
     local
         .run_until(async {
             let actor = create_injection_ready_actor(vec![
-                xai_grok_sampling_types::ConversationItem::system("You are a helpful assistant."),
-                xai_grok_sampling_types::ConversationItem::user(
+                xai_grok_inference_types::ConversationItem::system("You are a helpful assistant."),
+                xai_grok_inference_types::ConversationItem::user(
                     "tell me about rust backend services conventions",
                 ),
             ])
@@ -591,10 +591,10 @@ async fn test_first_turn_reminder_skips_when_block_persisted() {
                 ])
                 .unwrap();
             let actor = create_injection_ready_actor(vec![
-                xai_grok_sampling_types::ConversationItem::system(format!(
+                xai_grok_inference_types::ConversationItem::system(format!(
                     "You are a helpful assistant.\n\n{persisted_block}"
                 )),
-                xai_grok_sampling_types::ConversationItem::user(
+                xai_grok_inference_types::ConversationItem::user(
                     "tell me about rust backend services conventions",
                 ),
             ])

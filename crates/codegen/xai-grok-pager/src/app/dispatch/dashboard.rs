@@ -1537,7 +1537,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
 fn stage_dashboard_model(
     app: &mut AppView,
     model_id: acp::ModelId,
-    effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+    effort: Option<xai_grok_shell::inference::types::ReasoningEffort>,
 ) {
     let display = app
         .models

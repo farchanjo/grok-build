@@ -48,7 +48,7 @@ pub enum CompactionSampleError {
     /// Classification is asymmetric for pre-migration parity: the *inter*
     /// retry policy ([`Self::is_deterministic`]) treats it as deterministic
     /// (no retry), while the *intra* orchestrator maps it to
-    /// `IntraCompactionError::SamplerStart` which its retry loop treats as
+    /// `IntraCompactionError::InferenceStart` which its retry loop treats as
     /// transient.
     Start(String),
     /// The model produced no response-channel content. Transient.
@@ -141,7 +141,7 @@ mod tests {
 
     /// Pins the inter-compaction retry classification for every variant —
     /// `Start` is intentionally deterministic here (no inter retry) even
-    /// though the intra orchestrator retries its `SamplerStart` mapping.
+    /// though the intra orchestrator retries its `InferenceStart` mapping.
     /// See the doc on [`CompactionSampleError::Start`] before "fixing" this.
     #[test]
     fn is_deterministic_classification() {

@@ -1034,7 +1034,7 @@ fn agent_type_mismatch_cancel_is_noop() {
 }
 #[test]
 fn agent_type_mismatch_with_effort_stashes_deferred_switch() {
-    use xai_grok_shell::sampling::types::ReasoningEffort;
+    use xai_grok_shell::inference::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let model_id = acp::ModelId::new(std::sync::Arc::from("cursor-reasoning"));
     let effort = Some(ReasoningEffort::High);

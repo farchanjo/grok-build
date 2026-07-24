@@ -81,7 +81,7 @@ async fn drain_interjection_with_images_attaches_image_parts() {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
+                    xai_grok_inference_types::ContentPart::Image { url } => Some(url.as_ref()),
                     _ => None,
                 })
                 .collect();
@@ -238,7 +238,7 @@ async fn drain_interjection_truncation_never_touches_image_data() {
                 .content
                 .iter()
                 .find_map(|p| match p {
-                    xai_grok_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
+                    xai_grok_inference_types::ContentPart::Image { url } => Some(url.as_ref()),
                     _ => None,
                 })
                 .expect("image part must survive truncation");

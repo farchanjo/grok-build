@@ -60,7 +60,7 @@ async fn handle_session_usage(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 mod tests {
     use super::*;
     use xai_chat_state::UsageLedger;
-    use xai_grok_sampling_types::TokenUsage;
+    use xai_grok_inference_types::TokenUsage;
 
     fn usage(prompt: u32, completion: u32) -> TokenUsage {
         TokenUsage {

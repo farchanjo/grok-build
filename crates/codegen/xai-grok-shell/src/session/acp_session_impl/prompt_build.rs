@@ -238,7 +238,7 @@ pub(super) fn install_system_prompt(
 #[cfg(test)]
 mod install_system_prompt_tests {
     use super::install_system_prompt;
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     fn system_text(item: &ConversationItem) -> &str {
         match item {
             ConversationItem::System(s) => s.content.as_ref(),
@@ -459,7 +459,7 @@ impl SessionActor {
                     item,
                     ConversationItem::User(u)
                         if u.synthetic_reason
-                            == Some(xai_grok_sampling_types::SyntheticReason::SystemReminder)
+                            == Some(xai_grok_inference_types::SyntheticReason::SystemReminder)
                 )
             });
         }
@@ -842,16 +842,16 @@ impl SessionActor {
         );
         let active_session_config = self.reconstruct_full_config().await;
         let resolved_describe = self
-            .resolve_aux_sampler_config(&self.image_description_model)
+            .resolve_aux_inference_config(&self.image_description_model)
             .await;
         let (describe_model, sampler_config) =
-            crate::agent::config::finalize_image_describe_sampler_config(
+            crate::agent::config::finalize_image_describe_inference_config(
                 resolved_describe,
                 &active_session_config,
                 self.client_identifier.clone(),
                 Some(self.max_retries),
             );
-        let client = xai_grok_sampler::SamplingClient::new(sampler_config).map_err(|e| {
+        let client = xai_grok_inference::InferenceClient::new(sampler_config).map_err(|e| {
             acp::Error::internal_error().data(format!(
                 "failed to build image-describe sampling client: {e}"
             ))

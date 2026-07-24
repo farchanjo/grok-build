@@ -112,7 +112,7 @@ fn is_auth_tool_error_classification() {
             ),
         ),
         // Negative: 403 Forbidden must NOT trigger a refresh. Mirrors
-        // the inference path's gate in xai-grok-sampling-types/src/error.rs:
+        // the inference path's gate in xai-grok-inference-types/src/error.rs:
         // 403 means "authenticated but not permitted" (content safety,
         // ZDR, remote settings gates) and refreshing the token is a no-op
         // that surfaces as a spurious auth_required teardown.

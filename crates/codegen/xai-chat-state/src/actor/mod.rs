@@ -23,7 +23,7 @@ use crate::persistence::ChatPersistence;
 use crate::types::{PruningConfig, TurnCapture};
 
 use state::ChatState;
-use xai_grok_sampling_types::{ConversationItem, SamplingConfig};
+use xai_grok_inference_types::{ConversationItem, InferenceSettings};
 
 /// The actor that owns all chat state.
 /// Runs in a dedicated tokio task and processes commands sequentially.
@@ -53,14 +53,14 @@ impl ChatStateActor {
     /// Spawn the actor and return a handle to communicate with it.
     pub fn spawn(
         initial_conversation: Vec<ConversationItem>,
-        sampling_config: SamplingConfig,
+        inference_settings: InferenceSettings,
         persistence: Box<dyn ChatPersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
         Self::spawn_with_pruning(
             initial_conversation,
-            sampling_config,
+            inference_settings,
             PruningConfig::default(),
             persistence,
             event_tx,
@@ -71,7 +71,7 @@ impl ChatStateActor {
     /// Spawn the actor with a custom pruning config.
     pub fn spawn_with_pruning(
         initial_conversation: Vec<ConversationItem>,
-        sampling_config: SamplingConfig,
+        inference_settings: InferenceSettings,
         pruning_config: PruningConfig,
         persistence: Box<dyn ChatPersistence>,
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
@@ -80,7 +80,7 @@ impl ChatStateActor {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let actor = ChatStateActor {
-            state: ChatState::new(initial_conversation, sampling_config),
+            state: ChatState::new(initial_conversation, inference_settings),
             pruning_config,
             persistence,
             cmd_rx,
@@ -203,8 +203,8 @@ impl ChatStateActor {
             ChatStateCommand::IncrementPromptIndex => {
                 self.increment_prompt_index();
             }
-            ChatStateCommand::UpdateSamplingConfig { config } => {
-                self.state.sampling_config = config;
+            ChatStateCommand::UpdateInferenceSettings { config } => {
+                self.state.inference_settings = config;
             }
             ChatStateCommand::RecordAgentEditedPath { path } => {
                 self.state.agent_edited_paths.insert(path);
@@ -331,8 +331,8 @@ impl ChatStateActor {
                 let _ =
                     reply.send(self.state.total_tokens + self.state.estimated_tokens_since_model);
             }
-            ChatStateCommand::GetSamplingConfig { reply } => {
-                let _ = reply.send(self.state.sampling_config.clone());
+            ChatStateCommand::GetInferenceSettings { reply } => {
+                let _ = reply.send(self.state.inference_settings.clone());
             }
             ChatStateCommand::GetAgentEditedPaths { reply } => {
                 let _ = reply.send(self.state.agent_edited_paths.clone());

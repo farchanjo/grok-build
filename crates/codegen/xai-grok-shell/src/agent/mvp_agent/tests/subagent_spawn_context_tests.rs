@@ -138,10 +138,10 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
 async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
     let agent = build_minimal_agent_for_tests();
 
-    let cutoff = xai_grok_sampling_types::ToolOverrides {
-        x_search: Some(xai_grok_sampling_types::XSearchOptions {
+    let cutoff = xai_grok_inference_types::ToolOverrides {
+        x_search: Some(xai_grok_inference_types::XSearchOptions {
             date_bound: Some(
-                xai_grok_sampling_types::SearchDateBound::new(None, Some("2020-01-01".to_string()))
+                xai_grok_inference_types::SearchDateBound::new(None, Some("2020-01-01".to_string()))
                     .unwrap(),
             ),
         }),

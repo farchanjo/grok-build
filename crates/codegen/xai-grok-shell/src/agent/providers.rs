@@ -438,7 +438,7 @@ impl ProviderManager {
     ) {
         use super::config::ConfigModelOverride;
         use super::model_providers::ModelProviderConfig;
-        use crate::sampling::ApiBackend;
+        use crate::inference::ApiBackend;
 
         model_providers
             .entry("grok_build_openai".to_owned())
@@ -1826,12 +1826,12 @@ fn clear_openrouter_catalog_cache(grok_home: &Path) -> std::io::Result<()> {
 fn reasoning_effort_options(
     efforts: &[String],
     default: Option<&str>,
-) -> Vec<xai_grok_sampling_types::ReasoningEffortOption> {
+) -> Vec<xai_grok_inference_types::ReasoningEffortOption> {
     efforts
         .iter()
         .filter_map(|id| {
             let value = id.parse().ok()?;
-            Some(xai_grok_sampling_types::ReasoningEffortOption {
+            Some(xai_grok_inference_types::ReasoningEffortOption {
                 id: id.clone(),
                 value,
                 label: match id.as_str() {
@@ -2510,9 +2510,9 @@ mod tests {
         );
         assert_eq!(
             model.info.api_backend,
-            crate::sampling::ApiBackend::ChatCompletions
+            crate::inference::ApiBackend::ChatCompletions
         );
-        let sampling = super::super::config::sampling_config_for_model(
+        let sampling = super::super::config::inference_config_for_model(
             model,
             super::super::config::resolve_credentials(model, None),
             None,
@@ -2556,7 +2556,7 @@ mod tests {
         assert!(!models["codex-subscription"].info.hidden);
         assert_eq!(models["codex-subscription"].info.model, "gpt-5.6-sol");
         let codex = &models["codex-subscription"];
-        let sampling = super::super::config::sampling_config_for_model(
+        let sampling = super::super::config::inference_config_for_model(
             codex,
             super::super::config::resolve_credentials(codex, None),
             None,
@@ -2620,7 +2620,7 @@ mod tests {
         );
         assert_eq!(
             terra.reasoning_effort,
-            Some(xai_grok_sampling_types::ReasoningEffort::Medium)
+            Some(xai_grok_inference_types::ReasoningEffort::Medium)
         );
         assert_eq!(terra.reasoning_efforts.len(), 2);
         // Ultra is advertised by Codex but is not yet a scalar effort in the

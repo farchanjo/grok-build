@@ -817,7 +817,7 @@ pub struct AgentDefinition {
     #[serde(default)]
     pub completion_requirement: Option<CompletionRequirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
+    pub tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
     /// Subagent types this agent can spawn (derived by builder from `tools`).
     /// `None` = unrestricted, `Some([t1])` = restricted, `Some([])` = blocked.
     #[serde(skip)]

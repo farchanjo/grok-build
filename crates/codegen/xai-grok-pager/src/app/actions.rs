@@ -9,7 +9,7 @@
 use super::agent::AgentId;
 use crate::scrollback::entry::EntryId;
 use agent_client_protocol as acp;
-use xai_grok_shell::sampling::types::ReasoningEffort;
+use xai_grok_shell::inference::types::ReasoningEffort;
 /// Typed error for model switch failures. Replaces the raw `String` in
 /// `TaskResult::SwitchModelComplete` so dispatch can match on the variant
 /// instead of parsing strings.

@@ -19,7 +19,7 @@ use std::path::Path;
 use agent_client_protocol as acp;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_inference_types::ReasoningEffort;
 
 use crate::session::persistence::Summary;
 

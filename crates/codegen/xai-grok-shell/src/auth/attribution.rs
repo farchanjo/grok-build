@@ -33,11 +33,11 @@
 //!
 //! # Cross-crate plumbing
 //!
-//! [`xai_grok_sampler`] is intentionally decoupled from this crate. It
-//! invokes the trait [`xai_grok_sampler::Auth401AttributionCallback`] at
+//! [`xai_grok_inference`] is intentionally decoupled from this crate. It
+//! invokes the trait [`xai_grok_inference::Auth401AttributionCallback`] at
 //! its six 401 arms; this module provides [`ShellAttribution`], the
 //! concrete impl that the shell wires into
-//! [`xai_grok_sampler::SamplerConfig::attribution_callback`] at every
+//! [`xai_grok_inference::InferenceConfig::attribution_callback`] at every
 //! sampler-construction site. Non-sampler sites (storage / feedback /
 //! registry / idle-resume) call [`record_consumer_401`]
 //! directly with their `(consumer_kind, op)` pair.
@@ -45,7 +45,7 @@
 use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
-use xai_grok_sampler::{Auth401AttributionCallback, SamplingConsumer};
+use xai_grok_inference::{Auth401AttributionCallback, InferenceConsumer};
 use xai_grok_tools::{Auth401AttributionCallback as ToolAuth401AttributionCallback, ToolConsumer};
 
 use crate::auth::{AuthManager, TOKEN_TTL, token_suffix};
@@ -75,7 +75,7 @@ pub(crate) fn reset_test_emit_count() {
 /// Concrete implementation of [`Auth401AttributionCallback`] for the
 /// sampler crate's six 401 arms.
 ///
-/// One instance is constructed per `SamplerConfig` and cloned cheaply
+/// One instance is constructed per `InferenceConfig` and cloned cheaply
 /// (the struct holds an `Arc` and an `Option<String>`). The
 /// `session_id` is captured at construction time and used for the
 /// `unified_log::warn` `sid` field; non-session callers may pass
@@ -103,10 +103,10 @@ impl ShellAttribution {
     /// Construct a shareable attribution callback wired to the given
     /// [`AuthManager`]. Returns `Arc<dyn Trait>` for the sampler
     /// trait so callers can drop the value directly into
-    /// [`xai_grok_sampler::SamplerConfig::attribution_callback`].
+    /// [`xai_grok_inference::InferenceConfig::attribution_callback`].
     ///
     /// (Returns `Arc<dyn Trait>` rather than `Self` because the
-    /// `xai_grok_sampler::SamplerConfig` field expects exactly that;
+    /// `xai_grok_inference::InferenceConfig` field expects exactly that;
     /// keeping the boundary in one place avoids `as Arc<dyn _>`
     /// coercions at every call site.)
     #[allow(clippy::new_ret_no_self)]
@@ -126,7 +126,7 @@ impl ShellAttribution {
     /// client (`ImageGenClient`, `VideoGenClient`, `WebSearchClient`).
     /// The two callbacks share the same underlying impl and emit the
     /// same `auth_401_attribution` event format -- only the trait
-    /// signature differs (`SamplingConsumer` vs. `ToolConsumer`).
+    /// signature differs (`InferenceConsumer` vs. `ToolConsumer`).
     pub fn new_tool_callback(
         auth_manager: Arc<AuthManager>,
         session_id: Option<String>,
@@ -139,11 +139,11 @@ impl ShellAttribution {
 }
 
 impl Auth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: SamplingConsumer, sent_bearer_prefix: Option<&str>) {
+    fn record_401(&self, consumer: InferenceConsumer, sent_bearer_prefix: Option<&str>) {
         // The sampler crate has already truncated `sent_bearer_prefix`
-        // to `xai_grok_sampler::SENT_BEARER_PREFIX_LEN` characters
+        // to `xai_grok_inference::SENT_BEARER_PREFIX_LEN` characters
         // before this trait method fires (see
-        // `SamplingClient::extract_sent_bearer`); the truncation
+        // `InferenceClient::extract_sent_bearer`); the truncation
         // inside `compute_attribution_payload` (via `token_suffix`)
         // is therefore idempotent for this code path. The doubled
         // truncation is intentional belt-and-suspenders -- the
@@ -195,7 +195,7 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ConsumerKind {
     /// Sampler-side OpenAI-compat / Anthropic Messages emit. The op
-    /// string is the [`SamplingConsumer::as_endpoint`] return value.
+    /// string is the [`InferenceConsumer::as_endpoint`] return value.
     OaiCompatClient,
     /// Storage upload / batch / check sites in `upload/storage_client.rs`.
     StorageClient,
@@ -879,12 +879,12 @@ mod tests {
     }
 
     /// The SubagentSpawnContext-borne callback flows through
-    /// `read_parent_sampling_config` into the inherited
-    /// `SamplerConfig.attribution_callback`. We can't drive the full
+    /// `read_parent_inference_config` into the inherited
+    /// `InferenceConfig.attribution_callback`. We can't drive the full
     /// subagent path here (requires SessionActor + chat-state
     /// scaffolding), but we can assert the structural property: the
     /// callback the parent constructs is the one any later
-    /// `SamplerConfig` clone carries forward unchanged.
+    /// `InferenceConfig` clone carries forward unchanged.
     #[test]
     #[serial_test::serial(attribution_emit_count)]
     fn parent_callback_flows_through_arc_clone() {
@@ -895,23 +895,23 @@ mod tests {
 
         // Simulate the inheritance hand-off: the parent callback flows
         // through SessionHandle -> SubagentSpawnContext ->
-        // SamplerConfig.attribution_callback as plain Arc clones.
+        // InferenceConfig.attribution_callback as plain Arc clones.
         let inherited_cb = parent_cb.clone();
 
         // Drive the inherited callback. The `record_401` should bump
         // the same global counter the parent callback would, proving
         // they refer to the same underlying impl.
-        inherited_cb.record_401(SamplingConsumer::ChatCompletionsStream, Some("bearer"));
+        inherited_cb.record_401(InferenceConsumer::ChatCompletionsStream, Some("bearer"));
         assert_eq!(test_emit_count(), 1);
 
         // Sanity: the parent_cb still works too (it's the same Arc).
-        parent_cb.record_401(SamplingConsumer::Messages, Some("bearer"));
+        parent_cb.record_401(InferenceConsumer::Messages, Some("bearer"));
         assert_eq!(test_emit_count(), 2);
     }
 
     /// End-to-end: the trait impl wraps `consumer.as_endpoint()` in
     /// `"OaiCompatClient.<endpoint>"` and delegates to
-    /// `record_consumer_401` for every variant of `SamplingConsumer`.
+    /// `record_consumer_401` for every variant of `InferenceConsumer`.
     /// We assert one bump per variant via the test counter, plus the
     /// rendered `consumer` string for one variant via a payload
     /// recompute (the trait does not return the payload, so we
@@ -924,12 +924,12 @@ mod tests {
         let am_arc = Arc::new(am);
         let cb = ShellAttribution::new(am_arc.clone(), Some("sid-shell".into()));
         let variants = [
-            SamplingConsumer::ChatCompletionsStream,
-            SamplingConsumer::ChatCompletions,
-            SamplingConsumer::ResponsesStream,
-            SamplingConsumer::Responses,
-            SamplingConsumer::MessagesStream,
-            SamplingConsumer::Messages,
+            InferenceConsumer::ChatCompletionsStream,
+            InferenceConsumer::ChatCompletions,
+            InferenceConsumer::ResponsesStream,
+            InferenceConsumer::Responses,
+            InferenceConsumer::MessagesStream,
+            InferenceConsumer::Messages,
         ];
         for consumer in variants {
             cb.record_401(consumer, Some("test-bearer"));
@@ -942,7 +942,7 @@ mod tests {
             am_arc.as_ref(),
             &format_consumer(
                 ConsumerKind::OaiCompatClient,
-                SamplingConsumer::MessagesStream.as_endpoint(),
+                InferenceConsumer::MessagesStream.as_endpoint(),
             ),
             Some("test-bearer"),
         );

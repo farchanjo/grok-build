@@ -38,7 +38,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 id: acp::SessionId::new("test-persist-ack"),
                 cwd: cwd.as_str().to_string(),
             };
-            let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
+            let sampling_client = crate::inference::Client::new(xai_grok_inference::InferenceConfig {
                 api_key: Some("test-key".to_string()),
                 base_url: "http://localhost".to_string(),
                 model: "test".to_string(),
@@ -91,7 +91,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
             let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
             let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
                 vec![],
-                xai_grok_sampling_types::SamplingConfig {
+                xai_grok_inference_types::InferenceSettings {
                     base_url: "http://localhost".to_string(),
                     model: "test".to_string(),
                     max_completion_tokens: None,
@@ -292,7 +292,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
-                sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+                sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
@@ -353,7 +353,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 id: acp::SessionId::new("persist-memory"),
                 cwd: session_dir.path().to_string_lossy().to_string(),
             };
-            let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
+            let sampling_client = crate::inference::Client::new(xai_grok_inference::InferenceConfig {
                     api_key: Some("test-key".to_string()),
                     base_url: "http://localhost".to_string(),
                     model: "test-model".to_string(),
@@ -409,7 +409,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                         ConversationItem::system("sys"),
                         ConversationItem::user("<user_info>OS Version: macos</user_info>"),
                     ],
-                xai_grok_sampling_types::SamplingConfig {
+                xai_grok_inference_types::InferenceSettings {
                     base_url: "http://localhost".to_string(),
                     model: "test".to_string(),
                     max_completion_tokens: None,
@@ -488,7 +488,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             );
             let tool_context =
                 ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
-            let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
+            let sampling_client = crate::inference::Client::new(xai_grok_inference::InferenceConfig {
                 api_key: Some("test-key".to_string()),
                 base_url: "http://localhost".to_string(),
                 model: "test-model".to_string(),
@@ -546,7 +546,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             ];
             let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
                 initial_conversation.clone(),
-                xai_grok_sampling_types::SamplingConfig {
+                xai_grok_inference_types::InferenceSettings {
                     base_url: "http://localhost".to_string(),
                     model: "test".to_string(),
                     max_completion_tokens: None,
@@ -766,7 +766,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
-                sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+                sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
@@ -1069,7 +1069,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     StreamingTurnCapture::default(),
                 ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
-                sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+                sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
@@ -1307,7 +1307,7 @@ async fn cancel_with_dangling_tool_call_skips_interrupt_reminder() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.chat_state_handle.push_assistant_response(
-                ConversationItem::assistant_tool_calls(vec![xai_grok_sampling_types::ToolCall {
+                ConversationItem::assistant_tool_calls(vec![xai_grok_inference_types::ToolCall {
                     id: "call-1".into(),
                     name: "run_terminal_cmd".into(),
                     arguments: "{}".into(),
@@ -2002,7 +2002,7 @@ async fn cancel_resolves_front_when_running_task_is_none() {
         .await;
 }
 /// Regression: aborting `running_task` must propagate
-/// cancellation to the `SamplerHandle` so the sampler stops emitting.
+/// cancellation to the `InferenceHandle` so the sampler stops emitting.
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
     use axum::Router;
@@ -2036,7 +2036,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             let server_task = tokio::spawn(async move {
                 let _ = axum::serve(listener, app).await;
             });
-            let cfg = xai_grok_sampler::SamplerConfig {
+            let cfg = xai_grok_inference::InferenceConfig {
                 api_key: Some("test-key".to_string()),
                 base_url: format!("http://{addr}/v1"),
                 model: "test-model".to_string(),
@@ -2046,7 +2046,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 openrouter_fallback_models: Vec::new(),
                 openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
-                api_backend: xai_grok_sampler::ApiBackend::Responses,
+                api_backend: xai_grok_inference::ApiBackend::Responses,
                 include_message_model_id: true,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
@@ -2071,11 +2071,11 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 provider_identity: Default::default(),
             };
             let (sampler_event_tx, _sampler_event_rx) = tokio::sync::mpsc::unbounded_channel::<
-                xai_grok_sampler::SamplingEvent,
+                xai_grok_inference::InferenceEvent,
             >();
-            let sampler_handle = xai_grok_sampler::SamplerActor::spawn(
+            let sampler_handle = xai_grok_inference::InferenceActor::spawn(
                 cfg,
-                xai_grok_sampler::RetryPolicy::default(),
+                xai_grok_inference::RetryPolicy::default(),
                 sampler_event_tx,
             );
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -2340,13 +2340,13 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
                 trace_config_template: std::cell::RefCell::new(None),
             };
-            let request_id = xai_grok_sampler::RequestId::random();
+            let request_id = xai_grok_inference::RequestId::random();
             let request_id_for_task = request_id.clone();
             let sampler_for_task = sampler_handle.clone();
             let request = ConversationRequest {
                 items: vec![ConversationItem::User(
-                        xai_grok_sampling_types::UserItem {
-                            content: vec![xai_grok_sampling_types::ContentPart::Text {
+                        xai_grok_inference_types::UserItem {
+                            content: vec![xai_grok_inference_types::ContentPart::Text {
                                 text: "hi".into(),
                             }],
                             synthetic_reason: None,
@@ -2411,7 +2411,7 @@ async fn skill_reminder_deferred_while_turn_running_flushed_when_idle() {
             .filter(|item| {
                 matches!(item, ConversationItem::User(u) if u.content.iter().any(|p| matches!(
                     p,
-                    xai_grok_sampling_types::ContentPart::Text { text } if text.contains("pdf-tools")
+                    xai_grok_inference_types::ContentPart::Text { text } if text.contains("pdf-tools")
                 )))
             })
             .count()

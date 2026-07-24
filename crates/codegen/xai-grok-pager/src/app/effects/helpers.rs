@@ -6,7 +6,7 @@ use xai_acp_lib::{AcpAgentTx, acp_send};
 use super::actions::{PermissionModePersist, SubagentKillOutcome, TaskResult};
 use super::agent::AgentId;
 use crate::unified_log as ulog;
-use xai_grok_shell::sampling::error::{
+use xai_grok_shell::inference::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
 };
 use xai_grok_shell::session::ExtMethodResult;
@@ -401,7 +401,7 @@ pub(super) fn extract_first_user_prompt(
 /// Synthetic user messages (auto-continue, doom-loop) are excluded.
 pub(super) fn count_chat_history_stats(history_path: &Path) -> (usize, usize) {
     use std::io::BufRead;
-    use xai_grok_shell::sampling::{AssistantItem, ConversationItem, UserItem};
+    use xai_grok_shell::inference::{AssistantItem, ConversationItem, UserItem};
     let mut turn_count = 0usize;
     let mut tool_call_count = 0usize;
     let Ok(file) = std::fs::File::open(history_path) else {

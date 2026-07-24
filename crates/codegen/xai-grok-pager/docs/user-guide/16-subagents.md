@@ -172,7 +172,7 @@ OpenRouter is a first-class subagent provider: it uses the same `spawn_subagent`
 
 ### Inherit the parent model (recommended)
 
-When the parent session is already running an OpenRouter model, **omit `model`** on `spawn_subagent`. The child inherits the parent's resolved model *and* its full OpenRouter sampling configuration:
+When the parent session is already running an OpenRouter model, **omit `model`** on `spawn_subagent`. The child inherits the parent's resolved model *and* its full OpenRouter inference configuration:
 
 - the same `openrouter:<provider>/<model>` catalog id
 - `provider_preferences` (privacy routing, sort, price caps)

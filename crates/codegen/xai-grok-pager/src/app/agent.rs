@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use xai_acp_lib::AcpAgentTx;
 use xai_grok_shell::extensions::notification::GoalClassifierVerdict;
-use xai_grok_shell::sampling::types::ReasoningEffort;
+use xai_grok_shell::inference::types::ReasoningEffort;
 /// Unique local identifier for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub usize);

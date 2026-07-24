@@ -51,7 +51,7 @@ async fn handle_get_bearer_token(agent: &MvpAgent) -> ExtResult {
     let token = match agent.auth_manager.get_valid_token().await {
         Ok(token) => Some(token),
         Err(_) => agent
-            .sampling_config
+            .inference_config
             .borrow()
             .api_key
             .clone()

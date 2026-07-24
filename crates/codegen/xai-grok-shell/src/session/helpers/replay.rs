@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::extensions::notification::{
     CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as XaiSessionUpdate,
 };
-use crate::sampling::ConversationItem;
+use crate::inference::ConversationItem;
 use crate::session::storage::{SessionUpdate, UpdatesIterator};
 
 /// Result of replaying updates.jsonl up to a target prompt index.
@@ -151,7 +151,7 @@ pub fn replay_to_prompt(
         } else {
             let truncate_at = state.truncate_target(target_prompt_index);
             let keep =
-                crate::sampling::conversation_truncate_for_prompt(&state.conversation, truncate_at);
+                crate::inference::conversation_truncate_for_prompt(&state.conversation, truncate_at);
             state.conversation.truncate(keep);
         }
         state.prompt_counter = target_prompt_index;
@@ -494,12 +494,12 @@ impl ReplayState {
             self.checkpoint_active = false;
             let truncate_at = self.truncate_target(marker_target);
             let keep =
-                crate::sampling::conversation_truncate_for_prompt(&self.conversation, truncate_at);
+                crate::inference::conversation_truncate_for_prompt(&self.conversation, truncate_at);
             self.conversation.truncate(keep);
         } else {
             let truncate_at = self.truncate_target(marker_target);
             let keep =
-                crate::sampling::conversation_truncate_for_prompt(&self.conversation, truncate_at);
+                crate::inference::conversation_truncate_for_prompt(&self.conversation, truncate_at);
             self.conversation.truncate(keep);
         }
 
@@ -1027,7 +1027,7 @@ mod tests {
         };
         assert!(
             u.content.iter().all(|p| match p {
-                crate::sampling::ContentPart::Image { url } => !url.starts_with("data:"),
+                crate::inference::ContentPart::Image { url } => !url.starts_with("data:"),
                 _ => true,
             }),
             "below-floor image must be stripped from the checkpoint splice"

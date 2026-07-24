@@ -519,11 +519,11 @@ impl SessionActor {
         let runtime_state = format_runtime_state_line(backing_task_count, turn_elapsed_seconds);
 
         let items = vec![
-            ConversationItem::System(xai_grok_sampling_types::SystemItem {
+            ConversationItem::System(xai_grok_inference_types::SystemItem {
                 content: std::sync::Arc::<str>::from(LAZINESS_CLASSIFIER_PROMPT),
             }),
-            ConversationItem::User(xai_grok_sampling_types::UserItem {
-                content: vec![xai_grok_sampling_types::ContentPart::Text {
+            ConversationItem::User(xai_grok_inference_types::UserItem {
+                content: vec![xai_grok_inference_types::ContentPart::Text {
                     text: std::sync::Arc::<str>::from(format!(
                         "{LAZINESS_USER_PREAMBLE}\
                          === BEGIN TRANSCRIPT ===\n\
@@ -564,7 +564,7 @@ impl SessionActor {
             ..ConversationRequest::default()
         };
 
-        // Invisibility-critical: build a fresh `SamplingClient` via
+        // Invisibility-critical: build a fresh `InferenceClient` via
         // `prepare_chat_completion` and call `conversation_collect`
         // directly. This is the same side-channel pattern
         // `run_memory_flush`, `run_dream_model_call`, and

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use xai_grok_sampling_types::conversation::ConversationItem;
+use xai_grok_inference_types::conversation::ConversationItem;
 
 /// Equal after trimming trailing `\n`/`\r` from both sides. Used for attach
 /// idempotency so a stored head that differs from a client override only by a

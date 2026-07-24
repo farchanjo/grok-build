@@ -1,5 +1,5 @@
 use super::*;
-use xai_grok_shell::sampling::error::format_rate_limited_user_message;
+use xai_grok_shell::inference::error::format_rate_limited_user_message;
 /// Stash a live stop/stop_failure batch under `stash_pid` for the turn marker
 /// to fold. `merge_same_name` merges a same-name repeat instead of standalone.
 pub(super) fn stash_live_stop_batch(
@@ -833,7 +833,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 );
                 return false;
             }
-            use xai_grok_shell::sampling::types::ReasoningEffort;
+            use xai_grok_shell::inference::types::ReasoningEffort;
             let new_model_id = acp::ModelId::new(model_id.clone());
             if !agent.session.models.available.contains_key(&new_model_id) {
                 if xai_grok_shell::agent::chat_modes::process_chat_mode_enabled() {
@@ -1277,7 +1277,7 @@ pub(super) fn apply_retry_state(
             }
             is_credit_limit = super::super::dispatch::is_credit_limit_error(None, reason);
             let is_free_usage = *rate_limited
-                && xai_grok_shell::sampling::error::is_free_usage_exhausted_error(reason);
+                && xai_grok_shell::inference::error::is_free_usage_exhausted_error(reason);
             if is_credit_limit {
                 session.credit_limit_blocked = true;
             } else if is_free_usage {

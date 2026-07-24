@@ -47,7 +47,7 @@ pub(crate) const LAZINESS_MAX_OUTPUT_TOKENS: u32 = 150;
 
 /// Wall-clock cap on the classifier's sampler call. Past this we emit
 /// `LAZINESS_ABORT_TIMEOUT` and drop the request via the
-/// `SamplerHandle::submit_and_collect` RAII guard. Chosen as a coarse
+/// `InferenceHandle::submit_and_collect` RAII guard. Chosen as a coarse
 /// upper bound — the prompt is small and `reasoning_effort: None`, so
 /// in practice the call completes well under 10s; the budget exists
 /// to surface stuck calls in telemetry rather than silently hang.
@@ -354,7 +354,7 @@ pub(crate) fn flatten_transcript_for_classifier(
             ConversationItem::User(user) => {
                 let mut text = String::new();
                 for part in &user.content {
-                    if let xai_grok_sampling_types::ContentPart::Text { text: t } = part {
+                    if let xai_grok_inference_types::ContentPart::Text { text: t } = part {
                         if !text.is_empty() {
                             text.push(' ');
                         }
@@ -389,7 +389,7 @@ pub(crate) fn flatten_transcript_for_classifier(
             }
             ConversationItem::Reasoning(r) => {
                 if include_reasoning {
-                    let text = xai_grok_sampling_types::reasoning_item_text(r);
+                    let text = xai_grok_inference_types::reasoning_item_text(r);
                     if !text.trim().is_empty() {
                         let _ = writeln!(
                             out,

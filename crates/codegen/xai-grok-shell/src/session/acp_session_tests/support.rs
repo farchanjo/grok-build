@@ -25,7 +25,7 @@ pub(crate) async fn test_agent_default() -> xai_grok_agent::Agent {
 }
 #[cfg(test)]
 pub(crate) async fn test_agent_backend_search(
-    hosted_tools: Vec<xai_grok_sampling_types::HostedTool>,
+    hosted_tools: Vec<xai_grok_inference_types::HostedTool>,
 ) -> xai_grok_agent::Agent {
     let base = test_agent_default().await;
     xai_grok_agent::Agent::new(
@@ -211,7 +211,7 @@ pub(crate) async fn create_test_actor_ex(
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
         vec![],
-        xai_grok_sampling_types::SamplingConfig {
+        xai_grok_inference_types::InferenceSettings {
             base_url: "http://localhost".to_string(),
             model: "test".to_string(),
             max_completion_tokens: None,
@@ -399,7 +399,7 @@ pub(crate) async fn create_test_actor_ex(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
-        sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),

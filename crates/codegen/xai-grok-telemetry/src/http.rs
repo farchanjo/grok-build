@@ -1,11 +1,11 @@
 //! Origin/client identification used by the telemetry engine.
 //!
-//! [`OriginClientInfo`] is owned by `xai-grok-sampler` (so `SamplerConfig`
+//! [`OriginClientInfo`] is owned by `xai-grok-inference` (so `InferenceConfig`
 //! can use it without depending on shell). Re-exported here so the telemetry
 //! engine can label events without depending on shell or sampler internals
 //! beyond the type itself.
 
-pub use xai_grok_sampler::OriginClientInfo;
+pub use xai_grok_inference::OriginClientInfo;
 
 /// Construct an [`OriginClientInfo`] from `GROK_CLIENT_NAME` /
 /// `GROK_CLIENT_VERSION` env vars. Returns `None` when `GROK_CLIENT_NAME`

@@ -95,11 +95,11 @@ mod cli_catchall_drop_tests {
 pub(crate) async fn spawn_session_actor(
     session_info: SessionInfo,
     gateway: GatewaySender,
-    sampling_config: SamplingConfig,
+    inference_config: InferenceConfig,
     credentials: xai_chat_state::Credentials,
     auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     auth_manager: Option<Arc<AuthManager>>,
-    attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback>,
+    attribution_callback: Option<xai_grok_inference::SharedAttributionCallback>,
     mut tool_context: ToolContext,
     mcp_servers: Vec<acp::McpServer>,
     initial_client_mcp_servers: Vec<acp::McpServer>,
@@ -159,7 +159,7 @@ pub(crate) async fn spawn_session_actor(
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
-    web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    web_search_inference_config: Option<xai_grok_inference::InferenceConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -366,10 +366,10 @@ pub(crate) async fn spawn_session_actor(
         } else {
             (0, Vec::new(), Vec::new())
         };
-    let primary_model_id = sampling_config.model.clone();
+    let primary_model_id = inference_config.model.clone();
     let web_search_config = if disable_web_search {
         xai_grok_tools::implementations::WebSearchConfig::Disabled
-    } else if let Some(cfg) = web_search_sampling_config {
+    } else if let Some(cfg) = web_search_inference_config {
         if let Some(api_key) = cfg.api_key {
             xai_grok_tools::implementations::WebSearchConfig::Enabled {
                 api_key,
@@ -386,8 +386,8 @@ pub(crate) async fn spawn_session_actor(
         tracing::warn!("web_search disabled: configured model could not be resolved");
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     };
-    let embed_base_url = sampling_config.base_url.clone();
-    let embed_api_key = sampling_config.api_key.clone();
+    let embed_base_url = inference_config.base_url.clone();
+    let embed_api_key = inference_config.api_key.clone();
     let session_pruning_config: crate::config::PruningConfig = memory_config.as_ref().map_or_else(
         || crate::config::PruningConfig {
             enabled: false,
@@ -399,7 +399,7 @@ pub(crate) async fn spawn_session_actor(
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .and_then(std::num::NonZeroU64::new);
-    let baseline_context_window = std::num::NonZeroU64::new(sampling_config.context_window)
+    let baseline_context_window = std::num::NonZeroU64::new(inference_config.context_window)
         .unwrap_or_else(|| {
             std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
                 .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
@@ -411,17 +411,17 @@ pub(crate) async fn spawn_session_actor(
             "GROK_DEBUG_CONTEXT_WINDOW override active"
         );
     }
-    let chat_state_sampling_config = xai_grok_sampling_types::SamplingConfig {
-        base_url: sampling_config.base_url.clone(),
-        model: sampling_config.model.clone(),
-        max_completion_tokens: sampling_config.max_completion_tokens,
-        temperature: sampling_config.temperature,
-        top_p: sampling_config.top_p,
-        api_backend: sampling_config.api_backend.clone(),
-        extra_headers: sampling_config.extra_headers.clone(),
+    let chat_state_inference_settings = xai_grok_inference_types::InferenceSettings {
+        base_url: inference_config.base_url.clone(),
+        model: inference_config.model.clone(),
+        max_completion_tokens: inference_config.max_completion_tokens,
+        temperature: inference_config.temperature,
+        top_p: inference_config.top_p,
+        api_backend: inference_config.api_backend.clone(),
+        extra_headers: inference_config.extra_headers.clone(),
         context_window: context_window_override.unwrap_or(baseline_context_window),
-        reasoning_effort: sampling_config.reasoning_effort,
-        stream_tool_calls: Some(sampling_config.stream_tool_calls),
+        reasoning_effort: inference_config.reasoning_effort,
+        stream_tool_calls: Some(inference_config.stream_tool_calls),
     };
     let actor_pruning_config = xai_chat_state::PruningConfig {
         enabled: session_pruning_config.enabled,
@@ -434,7 +434,7 @@ pub(crate) async fn spawn_session_actor(
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn_with_pruning(
         conversation.clone(),
-        chat_state_sampling_config,
+        chat_state_inference_settings,
         actor_pruning_config,
         Box::new(super::chat_persistence::ChannelChatPersistence::new(
             persistence.tx.clone(),
@@ -807,7 +807,7 @@ pub(crate) async fn spawn_session_actor(
     };
     let context_window_tokens = context_window_override
         .map(|c| c.get())
-        .unwrap_or(sampling_config.context_window);
+        .unwrap_or(inference_config.context_window);
     let managed_gateway_tool_client = auth_manager.as_ref().map(|am| {
         xai_grok_tools::types::resources::ManagedGatewayToolClient(Arc::new(
             ShellManagedGatewayToolClient {
@@ -1088,23 +1088,23 @@ pub(crate) async fn spawn_session_actor(
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let permissions_for_handle = permissions.clone();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let mut sampler_config_initial = sampling_config.clone();
-    sampler_config_initial.idle_timeout_secs = Some(inference_idle_timeout_secs);
+    let mut inference_config_initial = inference_config.clone();
+    inference_config_initial.idle_timeout_secs = Some(inference_idle_timeout_secs);
     let task_output_budgeted = tool_context.task_output_token_budget.is_some();
     let retry_only_before_output =
         task_output_budgeted || tool_context.sampler_retry_only_before_output;
     if retry_only_before_output {
-        sampler_config_initial.doom_loop_recovery = None;
+        inference_config_initial.doom_loop_recovery = None;
     }
-    let sampler_retry_policy = xai_grok_sampler::RetryPolicy {
+    let sampler_retry_policy = xai_grok_inference::RetryPolicy {
         max_retries: max_retries.unwrap_or(5),
         rate_limit_retry_threshold: 2,
         retry_only_before_output,
     };
     let (sampler_event_tx, sampler_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<xai_grok_sampler::SamplingEvent>();
-    let sampler_handle = xai_grok_sampler::SamplerActor::spawn(
-        sampler_config_initial,
+        tokio::sync::mpsc::unbounded_channel::<xai_grok_inference::InferenceEvent>();
+    let sampler_handle = xai_grok_inference::InferenceActor::spawn(
+        inference_config_initial,
         sampler_retry_policy,
         sampler_event_tx,
     );
@@ -1414,7 +1414,7 @@ pub(crate) async fn spawn_session_actor(
     };
     let doom_loop_recovery = effective_config.resolve_doom_loop_recovery();
     let resolved_tool_overrides: std::sync::Arc<
-        arc_swap::ArcSwapOption<xai_grok_sampling_types::ToolOverrides>,
+        arc_swap::ArcSwapOption<xai_grok_inference_types::ToolOverrides>,
     > = std::sync::Arc::new(arc_swap::ArcSwapOption::empty());
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
@@ -1439,11 +1439,11 @@ pub(crate) async fn spawn_session_actor(
         current_prompt_id: current_prompt_id.clone(),
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,
-        supports_backend_search: std::cell::Cell::new(sampling_config.supports_backend_search),
+        supports_backend_search: std::cell::Cell::new(inference_config.supports_backend_search),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: resolved_tool_overrides.clone(),
-        compactions_remaining: std::cell::Cell::new(sampling_config.compactions_remaining),
-        compaction_at_tokens: std::cell::Cell::new(sampling_config.compaction_at_tokens),
+        compactions_remaining: std::cell::Cell::new(inference_config.compactions_remaining),
+        compaction_at_tokens: std::cell::Cell::new(inference_config.compaction_at_tokens),
         doom_loop_recovery,
         doom_loop_turn_tally: Default::default(),
         file_state_tracker,
@@ -1498,14 +1498,14 @@ pub(crate) async fn spawn_session_actor(
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(inference_idle_timeout_secs),
         max_turns,
-        max_retries: xai_grok_sampler::resolve_max_retries(max_retries),
+        max_retries: xai_grok_inference::resolve_max_retries(max_retries),
         openrouter_fallback_models: std::cell::RefCell::new(
-            sampling_config.openrouter_fallback_models.clone(),
+            inference_config.openrouter_fallback_models.clone(),
         ),
         openrouter_provider_preferences: std::cell::RefCell::new(
-            sampling_config.openrouter_provider_preferences.clone(),
+            inference_config.openrouter_provider_preferences.clone(),
         ),
-        openrouter_plugins: std::cell::RefCell::new(sampling_config.openrouter_plugins.clone()),
+        openrouter_plugins: std::cell::RefCell::new(inference_config.openrouter_plugins.clone()),
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
@@ -1975,7 +1975,7 @@ pub(crate) async fn spawn_session_actor(
             upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
-            reasoning_effort: sampling_config.reasoning_effort,
+            reasoning_effort: inference_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
             origin_client: origin_client.clone(),
             code_nav_enabled,
@@ -2034,11 +2034,11 @@ struct SessionInitResult {
 pub(crate) async fn spawn_session_on_thread(
     session_info: SessionInfo,
     gateway: GatewaySender,
-    sampling_config: SamplingConfig,
+    inference_config: InferenceConfig,
     credentials: xai_chat_state::Credentials,
     auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     auth_manager: Option<Arc<AuthManager>>,
-    attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback>,
+    attribution_callback: Option<xai_grok_inference::SharedAttributionCallback>,
     tool_context: ToolContext,
     mcp_servers: Vec<acp::McpServer>,
     initial_client_mcp_servers: Vec<acp::McpServer>,
@@ -2096,7 +2096,7 @@ pub(crate) async fn spawn_session_on_thread(
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
-    web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    web_search_inference_config: Option<xai_grok_inference::InferenceConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -2197,7 +2197,7 @@ pub(crate) async fn spawn_session_on_thread(
                     match spawn_session_actor(
                         session_info,
                         gateway,
-                        sampling_config,
+                        inference_config,
                         credentials,
                         auth_method_id,
                         auth_manager,
@@ -2261,7 +2261,7 @@ pub(crate) async fn spawn_session_on_thread(
                         session_client_identifier,
                         inference_idle_timeout_secs,
                         max_retries,
-                        web_search_sampling_config,
+                        web_search_inference_config,
                         web_fetch_config,
                         image_gen_config,
                         video_gen_config,
@@ -2438,7 +2438,7 @@ fn resumed_prefix_carries_fallback_date(
             u.content.iter().any(|part| {
                 matches!(
                     part,
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text }
+                    xai_grok_inference_types::conversation::ContentPart::Text { text }
                         if text.contains(needle)
                 )
             })
@@ -2450,7 +2450,7 @@ fn resumed_prefix_carries_fallback_date(
 mod resumed_prefix_fallback_tests {
     use super::resumed_prefix_carries_fallback_date;
     use crate::session::user_message::USER_INFO_DATE_MARKER;
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     #[test]
     fn resumed_prefix_fallback_detection_is_fail_safe() {
         let with_date = vec![ConversationItem::user(format!(

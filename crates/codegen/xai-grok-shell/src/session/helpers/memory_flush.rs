@@ -19,7 +19,7 @@
 //! 6. Setting `is_flushing = false`
 
 use crate::config::MemoryFlushConfig;
-use crate::sampling::{ChatRequestMessage, Role};
+use crate::inference::{ChatRequestMessage, Role};
 // Pure text helpers moved into the memory subsystem (breaks the
 // dream <-> memory_flush module cycle).
 use crate::session::memory::text_utils::{has_markdown_headers, is_no_reply};

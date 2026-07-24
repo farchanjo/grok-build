@@ -1546,7 +1546,7 @@ impl AppView {
         &self,
     ) -> Option<(
         acp::ModelId,
-        Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+        Option<xai_grok_shell::inference::types::ReasoningEffort>,
     )> {
         Some((self.cli_model_override.clone()?, None))
     }

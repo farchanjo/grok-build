@@ -847,7 +847,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
-            effort: Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+            effort: Some(xai_grok_shell::inference::types::ReasoningEffort::High),
             display: "Grok 4.5".to_string(),
         });
         d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
@@ -874,7 +874,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
         agent.session.deferred_model_switch,
         Some((
             model_id,
-            Some(xai_grok_shell::sampling::types::ReasoningEffort::High)
+            Some(xai_grok_shell::inference::types::ReasoningEffort::High)
         )),
         "effort must be stashed for the shell",
     );
@@ -1987,7 +1987,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
-            effort: Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+            effort: Some(xai_grok_shell::inference::types::ReasoningEffort::High),
             display: "Grok 4.5".to_string(),
         });
         d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
@@ -2004,7 +2004,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
         agent.session.deferred_model_switch,
         Some((
             model_id,
-            Some(xai_grok_shell::sampling::types::ReasoningEffort::High)
+            Some(xai_grok_shell::inference::types::ReasoningEffort::High)
         )),
         "effort must be stashed for the shell"
     );
@@ -2028,7 +2028,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     if let Some(d) = app.dashboard.as_mut() {
         d.pending_model = Some(crate::views::dashboard::PendingDispatchModel {
             id: model_id.clone(),
-            effort: Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+            effort: Some(xai_grok_shell::inference::types::ReasoningEffort::High),
             display: "Grok 4.5".to_string(),
         });
         d.pending_mode = crate::views::dashboard::DashboardDispatchMode::Plan;
@@ -2045,7 +2045,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
         agent.session.deferred_model_switch,
         Some((
             model_id,
-            Some(xai_grok_shell::sampling::types::ReasoningEffort::High)
+            Some(xai_grok_shell::inference::types::ReasoningEffort::High)
         )),
         "effort must be stashed for the shell"
     );

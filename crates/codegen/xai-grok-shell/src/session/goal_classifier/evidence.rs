@@ -42,7 +42,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
-use xai_grok_sampling_types::ConversationItem;
+use xai_grok_inference_types::ConversationItem;
 
 use crate::util::subprocess::git_bin;
 
@@ -1127,7 +1127,7 @@ pub(crate) fn sanitize_final_response(text: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_sampling_types::{AssistantItem, UserItem};
+    use xai_grok_inference_types::{AssistantItem, UserItem};
 
     fn assistant(text: &str) -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
@@ -1143,7 +1143,7 @@ mod tests {
     fn assistant_tool_call_only() -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
             content: "".into(),
-            tool_calls: vec![xai_grok_sampling_types::ToolCall {
+            tool_calls: vec![xai_grok_inference_types::ToolCall {
                 id: "call_1".into(),
                 name: "read_file".to_string(),
                 arguments: "{\"target_file\":\"x\"}".into(),
@@ -1157,7 +1157,7 @@ mod tests {
 
     fn user(text: &str) -> ConversationItem {
         ConversationItem::User(UserItem {
-            content: vec![xai_grok_sampling_types::ContentPart::Text { text: text.into() }],
+            content: vec![xai_grok_inference_types::ContentPart::Text { text: text.into() }],
             synthetic_reason: None,
             ..Default::default()
         })

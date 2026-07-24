@@ -675,8 +675,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
@@ -684,8 +684,8 @@ pub(super) async fn run_session(
                             let _ = responds_to.send(outcome);
                         }
                         SessionCommand::OverrideModelName { model_name, extra_headers, context_window } => {
-                            // Update the actor's SamplingConfig model + headers + context window.
-                            if let Some(mut cfg) = session.chat_state_handle.get_sampling_config().await {
+                            // Update the actor's InferenceConfig model + headers + context window.
+                            if let Some(mut cfg) = session.chat_state_handle.get_inference_settings().await {
                                 tracing::info!(
                                     target: SESSION_LOG,
                                     session_id = %session.session_info.id,
@@ -708,7 +708,7 @@ pub(super) async fn run_session(
                                 {
                                     cfg.context_window = cw;
                                 }
-                                session.chat_state_handle.update_sampling_config(cfg);
+                                session.chat_state_handle.update_inference_settings(cfg);
 
                                 let existing = session.chat_state_handle.get_credentials().await;
                                 if let Some(r) = crate::agent::config::try_resolve_model_credentials(model_name.as_str(), existing.api_key.as_deref()) {
@@ -724,7 +724,7 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionCommand::GetCurrentModel { responds_to } => {
-                            let model = session.chat_state_handle.get_sampling_config().await
+                            let model = session.chat_state_handle.get_inference_settings().await
                                 .map(|c| c.model)
                                 .unwrap_or_default();
                             let _ = responds_to.send(model);
@@ -732,7 +732,7 @@ pub(super) async fn run_session(
                         SessionCommand::GetCurrentModelRoute { responds_to } => {
                             let (model, native_provider) = session
                                 .chat_state_handle
-                                .get_sampling_config()
+                                .get_inference_settings()
                                 .await
                                 .map(|config| {
                                     let provider = config
@@ -2228,10 +2228,10 @@ pub(super) async fn run_session(
 /// the `GetFeedbackContext` handler when a client supplies a `turn_number`
 /// (per-turn thumbs button on a specific assistant message).
 pub(super) fn turn_texts_for_feedback(
-    conversation: &[xai_grok_sampling_types::ConversationItem],
+    conversation: &[xai_grok_inference_types::ConversationItem],
     turn_number: usize,
 ) -> (Option<String>, Option<String>) {
-    use xai_grok_sampling_types::ConversationItem;
+    use xai_grok_inference_types::ConversationItem;
     let Some(start) = conversation
         .iter()
         .enumerate()

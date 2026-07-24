@@ -125,7 +125,7 @@ pub enum LocalQuestionKind {
     /// answer handler can create a new session with it.
     AgentTypeMismatch {
         model_id: agent_client_protocol::ModelId,
-        effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+        effort: Option<xai_grok_shell::inference::types::ReasoningEffort>,
     },
     DoctorFix {
         target: crate::app::actions::DoctorFixTarget,

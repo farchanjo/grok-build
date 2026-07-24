@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 use serde::Serialize;
-use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortOption};
 
 use crate::session::unified_list::SessionKind;
 

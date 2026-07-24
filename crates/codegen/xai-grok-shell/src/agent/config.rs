@@ -5,7 +5,7 @@ use crate::agent::model_providers::{
 };
 use crate::auth::{AuthManager, GrokComConfig, OidcAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
-use crate::{config::StorageMode, sampling::ApiBackend, tools::config::ShellToolsetConfig};
+use crate::{config::StorageMode, inference::ApiBackend, tools::config::ShellToolsetConfig};
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,9 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
-use xai_grok_sampler::config::ProviderIdentity;
-use xai_grok_sampler::{AuthScheme, SamplerConfig};
-use xai_grok_sampling_types::{
+use xai_grok_inference::config::ProviderIdentity;
+use xai_grok_inference::{AuthScheme, InferenceConfig};
+use xai_grok_inference_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
     REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
     reasoning_effort_meta_value, reasoning_efforts_meta_value,
@@ -2405,8 +2405,8 @@ impl Config {
     /// source (the `resolve_reminder_policy` pattern).
     pub(crate) fn resolve_doom_loop_recovery(
         &self,
-    ) -> Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy> {
-        use xai_grok_sampling_types::DoomLoopRecoveryPolicy as Policy;
+    ) -> Option<xai_grok_inference_types::DoomLoopRecoveryPolicy> {
+        use xai_grok_inference_types::DoomLoopRecoveryPolicy as Policy;
         let remote = self
             .remote_settings
             .as_ref()
@@ -2796,7 +2796,7 @@ impl Config {
     /// kill-switch reads env).
     ///
     /// An `Explicit` pair is applied as `runtime_overrides.model`, resolved before
-    /// `resolve_subagent_sampling_config`, so it wins over a user
+    /// `resolve_subagent_inference_config`, so it wins over a user
     /// `[subagents.models]` pin; `InheritCurrent` hands precedence back to that pin.
     pub(crate) fn resolve_goal_planner_model(
         &self,
@@ -4578,7 +4578,7 @@ pub struct AutoModeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_type: Option<xai_grok_workspace::permission::ClassifierPromptType>,
     /// Routing slug for a dedicated classifier model. `None` ⇒ inherit the
-    /// session model. Resolved via `resolve_aux_model_sampling_config`.
+    /// session model. Resolved via `resolve_aux_model_inference_config`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub classifier_model: Option<String>,
     /// Classifier side-query duration in milliseconds; resolved with bounded defaults.
@@ -5016,11 +5016,11 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
     let models = resolve_model_list(&cfg, None);
     f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
 }
-/// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image
+/// Resolve a standalone `InferenceConfig` for an auxiliary model slug (image
 /// description, session summary, ...), resolved through the catalog so a
 /// `[model.*]` override redirects it to its own endpoint, credentials, and
 /// routing `model`. `None` → caller falls back to the active session's model.
-pub fn resolve_aux_model_sampling_config(
+pub fn resolve_aux_model_inference_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
     endpoints: &EndpointsConfig,
@@ -5028,11 +5028,11 @@ pub fn resolve_aux_model_sampling_config(
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
     client_version: Option<String>,
-) -> Option<SamplerConfig> {
+) -> Option<InferenceConfig> {
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
         let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
-        let sampler = sampling_config_for_model(
+        let sampler = inference_config_for_model(
             entry,
             credentials,
             alpha_test_key.clone(),
@@ -5099,7 +5099,7 @@ pub fn resolve_aux_model_sampling_config(
             api_base_url: None,
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-        let sampler = sampling_config_for_model(
+        let sampler = inference_config_for_model(
             &entry,
             credentials,
             alpha_test_key,
@@ -5116,7 +5116,7 @@ pub fn resolve_aux_model_sampling_config(
     None
 }
 /// Stamp the session-local fields (client id, attribution, bearer resolver,
-/// retries) from the active session onto a routed aux `SamplerConfig` so a
+/// retries) from the active session onto a routed aux `InferenceConfig` so a
 /// helper model keeps the session's auth/attribution. Shared by image-describe
 /// and the auto-mode classifier so the two can't drift.
 ///
@@ -5124,8 +5124,8 @@ pub fn resolve_aux_model_sampling_config(
 /// a session-token deployment on a custom `models_base_url` loses aux-sampler
 /// refresh, rather than risk the session bearer on a third-party endpoint.
 pub fn stamp_session_local_sampler_fields(
-    cfg: &mut SamplerConfig,
-    active_session_config: &SamplerConfig,
+    cfg: &mut InferenceConfig,
+    active_session_config: &InferenceConfig,
     client_identifier: Option<String>,
     max_retries: Option<u32>,
 ) {
@@ -5144,12 +5144,12 @@ pub fn stamp_session_local_sampler_fields(
 /// On `None`, fall back to the active session model and full config (not
 /// forcing `image_description_model` onto the agent endpoint, which 404s on
 /// BYOK / non-proxy routes for internal slugs like `grok-build`).
-pub fn finalize_image_describe_sampler_config(
-    resolved_aux: Option<SamplerConfig>,
-    active_session_config: &SamplerConfig,
+pub fn finalize_image_describe_inference_config(
+    resolved_aux: Option<InferenceConfig>,
+    active_session_config: &InferenceConfig,
     client_identifier: Option<String>,
     max_retries: Option<u32>,
-) -> (String, SamplerConfig) {
+) -> (String, InferenceConfig) {
     match resolved_aux {
         Some(mut describe_cfg) => {
             stamp_session_local_sampler_fields(
@@ -5185,9 +5185,9 @@ pub fn resolve_chat_state_auth_type(
 /// their first-party `x-grok-*` request header behavior. Models with an
 /// explicit provider derive identity from the provider kind.
 ///
-/// Shared by [`sampling_config_for_model`] (initial construction) and the
+/// Shared by [`inference_config_for_model`] (initial construction) and the
 /// per-turn [`SessionActor::reconstruct_full_config`] (in
-/// `session::acp_session_impl::sampler_turn`) so the two cannot drift.
+/// `session::acp_session_impl::inference_turn`) so the two cannot drift.
 pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
     match model.model_provider.as_ref().map(|provider| provider.kind) {
         None => ProviderIdentity::Xai,
@@ -5199,14 +5199,14 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
     }
 }
 
-pub fn sampling_config_for_model(
+pub fn inference_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     deployment_id: Option<String>,
     user_id: Option<String>,
-) -> SamplerConfig {
+) -> InferenceConfig {
     let info = model.info();
     let model_name = info.model.clone();
     let max_completion_tokens = info.max_completion_tokens;
@@ -5277,7 +5277,7 @@ pub fn sampling_config_for_model(
         }
         (effort, _) => effort,
     };
-    SamplerConfig {
+    InferenceConfig {
         api_key: credentials.api_key,
         model: model_name,
         base_url: credentials.base_url,
@@ -5324,7 +5324,7 @@ pub fn sampling_config_for_model(
 ///
 /// * cli-chat-proxy bases get `X-XAI-Token-Auth` and
 ///   `x-authenticateresponse` headers (mirrors the inline match in the legacy
-///   `sampling::Client::new` on `is_cli_chat_proxy_url`).
+///   `inference::Client::new` on `is_cli_chat_proxy_url`).
 /// * With the optional non-production feature, matching first-party hosts may
 ///   get an extra access header from the corresponding key argument.
 ///
@@ -5347,19 +5347,19 @@ pub fn inject_url_derived_headers(
     }
     let _ = (alpha_test_key, base_url);
 }
-pub fn resolve_model_to_sampling_config(
+pub fn resolve_model_to_inference_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
     session_key: Option<&str>,
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     fallback_entry: Option<ModelEntry>,
-) -> Option<SamplerConfig> {
+) -> Option<InferenceConfig> {
     let entry = find_model_by_id(models, model_id)
         .cloned()
         .or(fallback_entry)?;
     let credentials = resolve_credentials(&entry, session_key);
-    Some(sampling_config_for_model(
+    Some(inference_config_for_model(
         &entry,
         credentials,
         alpha_test_key,
@@ -5368,14 +5368,14 @@ pub fn resolve_model_to_sampling_config(
         None,
     ))
 }
-fn resolve_hidden_default_web_search_sampling_config(
+fn resolve_hidden_default_web_search_inference_config(
     model_id: &str,
     session_key: Option<&str>,
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
-) -> SamplerConfig {
+) -> InferenceConfig {
     let entry = ModelEntry {
         info: ModelInfo {
             id: None,
@@ -5417,7 +5417,7 @@ fn resolve_hidden_default_web_search_sampling_config(
         api_base_url: None,
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-    sampling_config_for_model(
+    inference_config_for_model(
         &entry,
         credentials,
         alpha_test_key,
@@ -5426,7 +5426,7 @@ fn resolve_hidden_default_web_search_sampling_config(
         None,
     )
 }
-pub fn resolve_web_search_sampling_config(
+pub fn resolve_web_search_inference_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
     session_key: Option<&str>,
@@ -5434,7 +5434,7 @@ pub fn resolve_web_search_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
-) -> Option<SamplerConfig> {
+) -> Option<InferenceConfig> {
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         if credentials.api_key.is_none() && entry.effective_auth_provider().is_some() {
@@ -5444,7 +5444,7 @@ pub fn resolve_web_search_sampling_config(
             );
             return None;
         }
-        Some(sampling_config_for_model(
+        Some(inference_config_for_model(
             &entry,
             credentials,
             alpha_test_key,
@@ -5453,7 +5453,7 @@ pub fn resolve_web_search_sampling_config(
             None,
         ))
     } else if model_id == crate::models::default_web_search_model() {
-        Some(resolve_hidden_default_web_search_sampling_config(
+        Some(resolve_hidden_default_web_search_inference_config(
             model_id,
             session_key,
             disable_api_key_auth,
@@ -5470,7 +5470,7 @@ pub fn resolve_web_search_sampling_config(
             "configured web_search model not found; disabling web search"
         );
     }
-    resolved.map(crate::tools::config::web_search_sampling_config)
+    resolved.map(crate::tools::config::web_search_inference_config)
 }
 pub fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
@@ -5920,7 +5920,7 @@ reasoning_effort = "low"
     #[test]
     fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
         let endpoints = EndpointsConfig::default();
-        let resolved = resolve_web_search_sampling_config(
+        let resolved = resolve_web_search_inference_config(
             crate::models::default_web_search_model(),
             &IndexMap::new(),
             Some("session-token"),
@@ -5941,27 +5941,27 @@ reasoning_effort = "low"
     }
     #[test]
     fn finalize_image_describe_sampler_none_uses_active_session_model_not_forced_helper() {
-        let active = SamplerConfig {
+        let active = InferenceConfig {
             model: "composer-session-model".into(),
             ..Default::default()
         };
-        let (model, cfg) = finalize_image_describe_sampler_config(None, &active, None, Some(3));
+        let (model, cfg) = finalize_image_describe_inference_config(None, &active, None, Some(3));
         assert_eq!(model, "composer-session-model");
         assert_eq!(cfg.model, "composer-session-model");
         assert_ne!(cfg.model, "grok-build");
     }
     #[test]
     fn finalize_image_describe_sampler_some_stamps_session_fields() {
-        let active = SamplerConfig {
+        let active = InferenceConfig {
             model: "composer-session-model".into(),
             ..Default::default()
         };
-        let aux = SamplerConfig {
+        let aux = InferenceConfig {
             model: "grok-build".into(),
             ..Default::default()
         };
         let (model, cfg) =
-            finalize_image_describe_sampler_config(Some(aux), &active, Some("cli".into()), Some(7));
+            finalize_image_describe_inference_config(Some(aux), &active, Some("cli".into()), Some(7));
         assert_eq!(model, "grok-build");
         assert_eq!(cfg.model, "grok-build");
         assert_eq!(cfg.client_identifier.as_deref(), Some("cli"));
@@ -5981,7 +5981,7 @@ reasoning_effort = "low"
                 None,
             ),
         );
-        let resolved = resolve_aux_model_sampling_config(
+        let resolved = resolve_aux_model_inference_config(
             "grok-build",
             &catalog,
             &endpoints,
@@ -6014,7 +6014,7 @@ reasoning_effort = "low"
         let mut catalog = IndexMap::new();
         catalog.insert("proxied-aux".to_string(), entry);
         assert!(
-            resolve_aux_model_sampling_config(
+            resolve_aux_model_inference_config(
                 "proxied-aux",
                 &catalog,
                 &endpoints,
@@ -6027,7 +6027,7 @@ reasoning_effort = "low"
             "cold provider cache must not reroute the aux model through the xAI proxy"
         );
         let _ = provider.ensure_fresh_token(None).await;
-        let resolved = resolve_aux_model_sampling_config(
+        let resolved = resolve_aux_model_inference_config(
             "proxied-aux",
             &catalog,
             &endpoints,
@@ -6047,27 +6047,27 @@ reasoning_effort = "low"
     fn session_resolver_is_not_stamped_onto_third_party_samplers() {
         #[derive(Debug)]
         struct SessionResolver;
-        impl xai_grok_sampler::BearerResolver for SessionResolver {
+        impl xai_grok_inference::BearerResolver for SessionResolver {
             fn current_bearer(&self) -> Option<String> {
                 Some("session-jwt".into())
             }
         }
-        let session_cfg = SamplerConfig {
+        let session_cfg = InferenceConfig {
             bearer_resolver: Some(std::sync::Arc::new(SessionResolver)),
-            ..SamplerConfig::default()
+            ..InferenceConfig::default()
         };
-        let mut third_party = SamplerConfig {
+        let mut third_party = InferenceConfig {
             base_url: "https://litellm.corp.example/v1".into(),
-            ..SamplerConfig::default()
+            ..InferenceConfig::default()
         };
         stamp_session_local_sampler_fields(&mut third_party, &session_cfg, None, None);
         assert!(
             third_party.bearer_resolver.is_none(),
             "a third-party endpoint must keep its resolved credential"
         );
-        let mut first_party = SamplerConfig {
+        let mut first_party = InferenceConfig {
             base_url: EndpointsConfig::default().resolve_inference_base_url(),
-            ..SamplerConfig::default()
+            ..InferenceConfig::default()
         };
         stamp_session_local_sampler_fields(&mut first_party, &session_cfg, None, None);
         assert!(
@@ -6094,7 +6094,7 @@ reasoning_effort = "low"
         let mut catalog = IndexMap::new();
         catalog.insert("proxied-search".to_string(), entry);
         assert!(
-            resolve_web_search_sampling_config(
+            resolve_web_search_inference_config(
                 "proxied-search",
                 &catalog,
                 Some("session-jwt"),
@@ -6107,7 +6107,7 @@ reasoning_effort = "low"
             "a cold provider cache must disable web search, not send an unauthenticated request"
         );
         let _ = provider.ensure_fresh_token(None).await;
-        let resolved = resolve_web_search_sampling_config(
+        let resolved = resolve_web_search_inference_config(
             "proxied-search",
             &catalog,
             Some("session-jwt"),
@@ -6258,7 +6258,7 @@ reasoning_effort = "low"
                 None,
             ),
         );
-        let resolved = resolve_web_search_sampling_config(
+        let resolved = resolve_web_search_inference_config(
             "ws-model",
             &models,
             Some("session-token"),
@@ -6586,7 +6586,7 @@ reasoning_effort = "low"
         assert!(!effective_classifier_supports_re(None, "missing", &models));
     }
     #[test]
-    fn sampling_config_uses_model_api_key_over_fallback() {
+    fn inference_config_uses_model_api_key_over_fallback() {
         let model = test_model_entry(
             "test-model",
             "https://test.api/v1",
@@ -6594,7 +6594,7 @@ reasoning_effort = "low"
             None,
             None,
         );
-        let sampling_config = sampling_config_for_model(
+        let inference_config = inference_config_for_model(
             &model,
             resolve_credentials(&model, None),
             None,
@@ -6603,15 +6603,15 @@ reasoning_effort = "low"
             None,
         );
         assert_eq!(
-            sampling_config.api_key,
+            inference_config.api_key,
             Some("model-specific-key".to_string())
         );
-        assert_eq!(sampling_config.base_url, "https://test.api/v1");
+        assert_eq!(inference_config.base_url, "https://test.api/v1");
     }
     #[test]
-    fn sampling_config_uses_fallback_when_no_model_api_key() {
+    fn inference_config_uses_fallback_when_no_model_api_key() {
         let model = test_model_entry("test-model", "https://test.api/v1", None, None, None);
-        let sampling_config = sampling_config_for_model(
+        let inference_config = inference_config_for_model(
             &model,
             ResolvedCredentials {
                 api_key: Some("fallback-key".to_string()),
@@ -6624,7 +6624,7 @@ reasoning_effort = "low"
             None,
             None,
         );
-        assert_eq!(sampling_config.api_key, Some("fallback-key".to_string()));
+        assert_eq!(inference_config.api_key, Some("fallback-key".to_string()));
     }
     #[test]
     fn default_models_dual_endpoint_routing() {
@@ -6897,7 +6897,7 @@ reasoning_effort = "low"
             None,
         );
         model.info.api_backend = ApiBackend::Messages;
-        let config = sampling_config_for_model(
+        let config = inference_config_for_model(
             &model,
             resolve_credentials(&model, Some("tok")),
             None,
@@ -7018,10 +7018,10 @@ reasoning_effort = "low"
         assert_eq!(creds.auth_scheme, AuthScheme::XApiKey);
         assert_eq!(creds.auth_type, xai_chat_state::AuthType::ApiKey);
         assert_eq!(creds.api_key, Some("sk-ant-test-key".to_string()));
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(config.auth_scheme, AuthScheme::XApiKey);
         assert_eq!(config.api_backend, ApiBackend::Messages);
-        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+        let client = xai_grok_inference::InferenceClient::new(config).expect("client should build");
         let info = client.auth_info();
         assert_eq!(info.auth_type, "x-api-key");
     }
@@ -7037,9 +7037,9 @@ reasoning_effort = "low"
         assert_eq!(model.info.auth_scheme, AuthScheme::Bearer);
         let creds = resolve_credentials(&model, None);
         assert_eq!(creds.auth_scheme, AuthScheme::Bearer);
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(config.auth_scheme, AuthScheme::Bearer);
-        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+        let client = xai_grok_inference::InferenceClient::new(config).expect("client should build");
         let info = client.auth_info();
         assert_eq!(info.auth_type, "bearer");
     }
@@ -7048,8 +7048,8 @@ reasoning_effort = "low"
     /// `reasoning_effort` stripped before the request body is built, even when
     /// an effort was stamped onto the model config by a default or UI state.
     #[test]
-    fn sampling_config_strips_reasoning_effort_when_support_explicitly_false() {
-        use xai_grok_sampling_types::ReasoningEffort;
+    fn inference_config_strips_reasoning_effort_when_support_explicitly_false() {
+        use xai_grok_inference_types::ReasoningEffort;
         let mut model = test_model_entry(
             "or-no-reason",
             "https://openrouter.example/v1",
@@ -7060,7 +7060,7 @@ reasoning_effort = "low"
         model.info.reasoning_effort = Some(ReasoningEffort::High);
         model.info.supports_reasoning_effort = Some(false);
         let creds = resolve_credentials(&model, None);
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(
             config.reasoning_effort, None,
             "Some(false) must strip reasoning_effort before the wire",
@@ -7068,13 +7068,13 @@ reasoning_effort = "low"
     }
     /// H4 wire shaping: `Some(true)` keeps the effort serialized as before.
     #[test]
-    fn sampling_config_keeps_reasoning_effort_when_support_explicitly_true() {
-        use xai_grok_sampling_types::ReasoningEffort;
+    fn inference_config_keeps_reasoning_effort_when_support_explicitly_true() {
+        use xai_grok_inference_types::ReasoningEffort;
         let mut model = test_model_entry("grok-4.5", "https://api.x.ai/v1", None, None, None);
         model.info.reasoning_effort = Some(ReasoningEffort::High);
         model.info.supports_reasoning_effort = Some(true);
         let creds = resolve_credentials(&model, None);
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(
             config.reasoning_effort,
             Some(ReasoningEffort::High),
@@ -7085,8 +7085,8 @@ reasoning_effort = "low"
     /// `supports_reasoning_effort`) must honor an explicit `reasoning_effort`
     /// as before — an explicit user setting is an explicit statement.
     #[test]
-    fn sampling_config_honors_reasoning_effort_when_support_unknown() {
-        use xai_grok_sampling_types::ReasoningEffort;
+    fn inference_config_honors_reasoning_effort_when_support_unknown() {
+        use xai_grok_inference_types::ReasoningEffort;
         let mut model = test_model_entry(
             "manual-toml",
             "https://api.example.com/v1",
@@ -7097,7 +7097,7 @@ reasoning_effort = "low"
         model.info.reasoning_effort = Some(ReasoningEffort::Low);
         model.info.supports_reasoning_effort = None;
         let creds = resolve_credentials(&model, None);
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(
             config.reasoning_effort,
             Some(ReasoningEffort::Low),
@@ -7107,7 +7107,7 @@ reasoning_effort = "low"
     /// H4 wire shaping: when there is no `reasoning_effort` to begin with, the
     /// `Some(false)` strip is a no-op (no spurious field on the wire).
     #[test]
-    fn sampling_config_no_reasoning_effort_with_false_support_stays_none() {
+    fn inference_config_no_reasoning_effort_with_false_support_stays_none() {
         let mut model = test_model_entry(
             "or-plain",
             "https://openrouter.example/v1",
@@ -7118,7 +7118,7 @@ reasoning_effort = "low"
         model.info.reasoning_effort = None;
         model.info.supports_reasoning_effort = Some(false);
         let creds = resolve_credentials(&model, None);
-        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(config.reasoning_effort, None);
     }
     #[test]
@@ -7230,7 +7230,7 @@ reasoning_effort = "low"
     }
     #[test]
     fn user_override_parses_compaction_at_tokens_from_toml() {
-        use xai_grok_sampling_types::CompactionAtTokens;
+        use xai_grok_inference_types::CompactionAtTokens;
         let dm = crate::models::default_model();
         let raw_config: toml::Value = toml::from_str(&format!(
             r#"
@@ -7267,7 +7267,7 @@ reasoning_effort = "low"
     }
     #[test]
     fn user_override_parses_compactions_remaining_from_toml() {
-        use xai_grok_sampling_types::CompactionsRemaining;
+        use xai_grok_inference_types::CompactionsRemaining;
         let dm = crate::models::default_model();
         let raw_config: toml::Value = toml::from_str(&format!(
             r#"
@@ -7428,9 +7428,9 @@ reasoning_effort = "low"
         assert_eq!(model.info.context_window, NonZeroU64::new(256_000).unwrap());
     }
     #[test]
-    fn sampling_config_context_window_from_entry_or_default() {
+    fn inference_config_context_window_from_entry_or_default() {
         let model = test_model_entry("any-model", "https://api.x.ai/v1", None, None, None);
-        let config = sampling_config_for_model(
+        let config = inference_config_for_model(
             &model,
             resolve_credentials(&model, None),
             None,
@@ -7441,7 +7441,7 @@ reasoning_effort = "low"
         assert_eq!(config.context_window, 200_000);
         let mut model = test_model_entry("any-model", "https://api.x.ai/v1", None, None, None);
         model.info.context_window = NonZeroU64::new(256_000).unwrap();
-        let config = sampling_config_for_model(
+        let config = inference_config_for_model(
             &model,
             resolve_credentials(&model, None),
             None,
@@ -7573,11 +7573,11 @@ reasoning_effort = "low"
         assert_eq!(model.info.api_backend, ApiBackend::ChatCompletions);
     }
     #[test]
-    fn sampling_config_uses_model_api_backend() {
+    fn inference_config_uses_model_api_backend() {
         let mut model =
             test_model_entry("test-model", "https://api.example.com/v1", None, None, None);
         model.info.api_backend = ApiBackend::Responses;
-        let sampling_config = sampling_config_for_model(
+        let inference_config = inference_config_for_model(
             &model,
             resolve_credentials(&model, None),
             None,
@@ -7585,7 +7585,7 @@ reasoning_effort = "low"
             None,
             None,
         );
-        assert_eq!(sampling_config.api_backend, ApiBackend::Responses);
+        assert_eq!(inference_config.api_backend, ApiBackend::Responses);
     }
     #[test]
     fn parses_model_use_concise_true() {
@@ -8459,9 +8459,9 @@ reasoning_effort = "low"
         let resolved = resolve_model_list(&cfg, prefetched);
         (cfg, resolved)
     }
-    fn resolve_sampling(model: &ModelEntry, session_key: Option<&str>) -> SamplerConfig {
+    fn resolve_sampling(model: &ModelEntry, session_key: Option<&str>) -> InferenceConfig {
         let credentials = resolve_credentials(model, session_key);
-        sampling_config_for_model(model, credentials, None, None, None, None)
+        inference_config_for_model(model, credentials, None, None, None, None)
     }
     #[test]
     #[serial]

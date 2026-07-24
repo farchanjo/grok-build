@@ -11,7 +11,7 @@
 //! model's output; the actual model call lives on the `SessionActor`
 //! (`handle_recap`).
 
-use crate::sampling::ConversationItem;
+use crate::inference::ConversationItem;
 use crate::session::helpers::chat::floor_char_boundary;
 use xai_chat_state::{compaction_utils, estimate_conversation_tokens, estimate_item_tokens};
 
@@ -283,7 +283,7 @@ pub(crate) fn clean_recap_text(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampling::ConversationItem;
+    use crate::inference::ConversationItem;
 
     #[test]
     fn clean_collapses_whitespace_and_newlines() {
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn main_turn_count_counts_real_users_only() {
         use std::sync::Arc;
-        use xai_grok_sampling_types::{ContentPart, SyntheticReason, ToolCall, UserItem};
+        use xai_grok_inference_types::{ContentPart, SyntheticReason, ToolCall, UserItem};
 
         let conv = vec![
             ConversationItem::system("sys".to_string()),
@@ -533,7 +533,7 @@ mod tests {
     }
 
     fn mk_reasoning(id: &str) -> ConversationItem {
-        use crate::sampling::rs;
+        use crate::inference::rs;
         ConversationItem::Reasoning(rs::ReasoningItem {
             id: id.to_string(),
             summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
@@ -545,9 +545,9 @@ mod tests {
         })
     }
 
-    fn mk_tool_call(id: &str, args: &str) -> xai_grok_sampling_types::ToolCall {
+    fn mk_tool_call(id: &str, args: &str) -> xai_grok_inference_types::ToolCall {
         use std::sync::Arc;
-        xai_grok_sampling_types::ToolCall {
+        xai_grok_inference_types::ToolCall {
             id: Arc::from(id),
             name: "read_file".into(),
             arguments: Arc::from(args),
@@ -664,7 +664,7 @@ mod tests {
                 i,
                 ConversationItem::User(u) if u.content.iter().any(|p| matches!(
                     p,
-                    xai_grok_sampling_types::ContentPart::Text { text }
+                    xai_grok_inference_types::ContentPart::Text { text }
                         if text.contains("what changed in the parser?")
                 ))
             )),

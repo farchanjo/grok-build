@@ -6,7 +6,7 @@
 //! call sites in this crate keep compiling unchanged.
 //!
 //! Only `hooks` stays here: it is session glue (depends on
-//! `crate::sampling` and `crate::session::helpers::session_compact`) and is
+//! `crate::inference` and `crate::session::helpers::session_compact`) and is
 //! not part of the relocatable core engine.
 
 pub mod hooks;

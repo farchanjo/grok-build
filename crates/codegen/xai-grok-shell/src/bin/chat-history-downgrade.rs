@@ -28,8 +28,8 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
-use xai_grok_shell::sampling::conversation::{ConversationItem, conversation_item_to_chat_message};
-use xai_grok_shell::sampling::types::{ChatRequestMessage, Role};
+use xai_grok_shell::inference::conversation::{ConversationItem, conversation_item_to_chat_message};
+use xai_grok_shell::inference::types::{ChatRequestMessage, Role};
 
 /// normalize chat_history.jsonl, convert any v1 (ConversationItem) to v0 (ChatRequestMessage) format.
 #[derive(Parser)]

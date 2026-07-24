@@ -1,6 +1,6 @@
 //! Shared helpers for xai-grok-shell integration tests.
 
-use xai_grok_shell::sampling::{ApiBackend, Client, SamplerConfig};
+use xai_grok_shell::inference::{ApiBackend, Client, InferenceConfig};
 
 #[cfg(unix)]
 pub mod leader {
@@ -293,14 +293,14 @@ pub mod leader {
 }
 
 /// Create a sampling client configured for a mock server. Shared by the
-/// integration tests so the ~30-field `SamplerConfig` literal lives in one
-/// place (`SamplerConfig` has no `Default`).
+/// integration tests so the ~30-field `InferenceConfig` literal lives in one
+/// place (`InferenceConfig` has no `Default`).
 #[allow(dead_code)]
 pub fn create_test_client(base_url: &str, api_backend: ApiBackend) -> Client {
     create_test_client_with_extra_headers(base_url, api_backend, &[])
 }
 
-/// Like [`create_test_client`] but seeds `SamplerConfig::extra_headers`, so a
+/// Like [`create_test_client`] but seeds `InferenceConfig::extra_headers`, so a
 /// test can assert that session-injected headers reach the wire.
 #[allow(dead_code)]
 pub fn create_test_client_with_extra_headers(
@@ -308,21 +308,21 @@ pub fn create_test_client_with_extra_headers(
     api_backend: ApiBackend,
     extra_headers: &[(&str, &str)],
 ) -> Client {
-    Client::new(test_sampler_config(base_url, api_backend, extra_headers)).unwrap()
+    Client::new(test_inference_config(base_url, api_backend, extra_headers)).unwrap()
 }
 
-/// The shared mock-server `SamplerConfig`; tests needing a non-default field
+/// The shared mock-server `InferenceConfig`; tests needing a non-default field
 /// (e.g. `doom_loop_recovery`) mutate the returned value before building the
 /// client themselves.
 #[allow(dead_code)]
-pub fn test_sampler_config(
+pub fn test_inference_config(
     base_url: &str,
     api_backend: ApiBackend,
     extra_headers: &[(&str, &str)],
-) -> SamplerConfig {
-    // Shell `Client` is `xai_grok_sampler::SamplingClient`, which takes a
-    // `SamplerConfig` directly. Construct one inline here.
-    SamplerConfig {
+) -> InferenceConfig {
+    // Shell `Client` is `xai_grok_inference::InferenceClient`, which takes a
+    // `InferenceConfig` directly. Construct one inline here.
+    InferenceConfig {
         api_key: Some("test-api-key".to_string()),
         base_url: base_url.to_string(),
         model: "test-model".to_string(),

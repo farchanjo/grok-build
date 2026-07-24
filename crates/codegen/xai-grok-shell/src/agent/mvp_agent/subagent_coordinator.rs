@@ -554,7 +554,7 @@ impl MvpAgent {
             lsp: parent_lsp,
             gateway: self.gateway.clone(),
             client_hooks: Default::default(),
-            sampling_config: self.sampling_config.borrow().clone(),
+            inference_config: self.inference_config.borrow().clone(),
             managed_mcp_proxy_base_url: parent_managed_mcp_proxy_base_url
                 .unwrap_or_else(|| self.cli_chat_proxy_base_url()),
             alpha_test_key: self.alpha_test_key(),
@@ -582,7 +582,7 @@ impl MvpAgent {
             terminal,
             session_env,
             memory_config: self.memory_config.clone(),
-            web_search_sampling_config: self.prepare_web_search_sampling_config(),
+            web_search_inference_config: self.prepare_web_search_inference_config(),
             web_fetch_config: self.prepare_web_fetch_config(),
             image_gen_config: self.prepare_image_gen_config(),
             video_gen_config: self.prepare_video_gen_config(),

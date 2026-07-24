@@ -5,13 +5,13 @@
 //! `_x.ai/session/update` rail so a viewer that re-attaches mid-turn finalizes
 //! the turn from replay instead of stranding on "Waiting…". The
 //! `(stop_reason, agent_result)` pair is the SAME pair `prompt_complete`
-//! carries (from [`crate::sampling::error::prompt_complete_fields`]), so the
+//! carries (from [`crate::inference::error::prompt_complete_fields`]), so the
 //! two signals never disagree.
 
 use crate::extensions::notification::SessionUpdate;
 
 /// Build a `TurnCompleted` from a prompt id and the `(stop_reason, agent_result)`
-/// JSON pair produced by [`crate::sampling::error::prompt_complete_fields`].
+/// JSON pair produced by [`crate::inference::error::prompt_complete_fields`].
 /// `stop_reason` is always a JSON string; `agent_result` is a string or null.
 /// Non-string inputs fall back to their JSON text so a terminal is never
 /// dropped for a shape mismatch.

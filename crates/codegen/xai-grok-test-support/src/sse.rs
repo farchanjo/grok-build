@@ -462,7 +462,7 @@ pub fn responses_api_reasoning_and_text_events(
 }
 
 /// SSE `event:` name and payload `type` of the non-standard doom-loop check
-/// event (`xai_grok_sampling_types::DOOM_LOOP_CHECK_EVENT_TYPE`). Hardcoded
+/// event (`xai_grok_inference_types::DOOM_LOOP_CHECK_EVENT_TYPE`). Hardcoded
 /// like every other wire string in this file; the shell integration tests
 /// pin the two spellings against each other by absorbing built frames
 /// through the real client.

@@ -1074,7 +1074,7 @@ impl SessionActor {
 
         let model_id = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
@@ -1254,7 +1254,7 @@ impl SessionActor {
 
         let model_id = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
@@ -1366,7 +1366,7 @@ impl SessionActor {
         let session_traces_dir = crate::session::persistence::session_dir(&self.session_info);
         let model_id = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();

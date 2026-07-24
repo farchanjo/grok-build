@@ -1068,7 +1068,7 @@ pub struct SessionSignalsActor {
 /// Fold `new` trigger labels into `current`, keeping the tightest
 /// (lowest-threshold) raw label overall. Labels only — telemetry-safe.
 pub(crate) fn merge_tightest_trigger(current: Option<String>, new: &[String]) -> Option<String> {
-    xai_grok_sampling_types::doom_loop::DoomLoopSignal::tightest(
+    xai_grok_inference_types::doom_loop::DoomLoopSignal::tightest(
         current
             .iter()
             .map(String::as_str)

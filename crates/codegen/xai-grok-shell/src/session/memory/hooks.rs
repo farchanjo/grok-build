@@ -23,7 +23,7 @@
 //! - **`save_on_end` config gate:** Skipped when `[memory.session].save_on_end = false`.
 //! - **SIGTERM:** Triggered via `SessionCommand::Shutdown` handler
 
-use crate::sampling::ConversationItem;
+use crate::inference::ConversationItem;
 use crate::session::memory::storage::{MemoryStorage, slugify};
 
 /// Minimum number of *real* user prompts required to save a session summary.
@@ -194,7 +194,7 @@ pub(crate) fn generate_metadata_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampling::conversation::{AssistantItem, ContentPart, ToolResultItem, UserItem};
+    use crate::inference::conversation::{AssistantItem, ContentPart, ToolResultItem, UserItem};
     use tempfile::TempDir;
 
     fn make_user(text: &str) -> ConversationItem {

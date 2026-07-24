@@ -286,7 +286,7 @@ impl SessionActor {
             let usage = match &result {
                 Ok(ok) => ok.usage.clone(),
                 Err(err) => {
-                    if let Some(u) = crate::sampling::error::prompt_usage_from_error(err) {
+                    if let Some(u) = crate::inference::error::prompt_usage_from_error(err) {
                         Some(u)
                     } else {
                         self.error_path_usage_fallback(&prompt_id).await
@@ -325,7 +325,7 @@ impl SessionActor {
         usage: Option<crate::extensions::notification::PromptUsage>,
         cancel_trigger: Option<&str>,
     ) {
-        let (stop_reason, agent_result) = crate::sampling::error::prompt_complete_fields(mapped);
+        let (stop_reason, agent_result) = crate::inference::error::prompt_complete_fields(mapped);
         let extra_meta = cancel_trigger.map(|t| {
             [("cancelTrigger".to_string(), serde_json::json!(t))]
                 .into_iter()
@@ -365,14 +365,14 @@ impl SessionActor {
         err: &acp::Error,
     ) -> xai_grok_hooks::event::StopFailureKind {
         use xai_grok_hooks::event::StopFailureKind as K;
-        if crate::sampling::error::stop_reason_for_turn_error(err) == "MaxTokens" {
+        if crate::inference::error::stop_reason_for_turn_error(err) == "MaxTokens" {
             return K::MaxOutputTokens;
         }
         // The data-carried HTTP status discriminates over the JSON-RPC code. 403
         // is content-safety, not auth: it folds into `invalid_request` on the turn
         // path (carries `http_status: 403`) and `server_error` on the setup path
         // (no status, so `-32603` below).
-        match crate::sampling::error::http_status_from_error(err) {
+        match crate::inference::error::http_status_from_error(err) {
             Some(401) => return K::AuthenticationFailed,
             Some(429) | Some(503) | Some(529) => return K::RateLimit,
             Some(s) if (400..500).contains(&s) => return K::InvalidRequest,
@@ -380,7 +380,7 @@ impl SessionActor {
             _ => {}
         }
         match i32::from(err.code) {
-            crate::sampling::error::RATE_LIMITED_ERROR_CODE => K::RateLimit,
+            crate::inference::error::RATE_LIMITED_ERROR_CODE => K::RateLimit,
             -32000 => K::AuthenticationFailed,
             -32002 | -32600 | -32602 => K::InvalidRequest,
             -32603 => K::ServerError,
@@ -394,7 +394,7 @@ impl SessionActor {
     pub(super) fn is_infra_turn_error(err: &acp::Error) -> bool {
         matches!(
             i32::from(err.code),
-            crate::sampling::error::RATE_LIMITED_ERROR_CODE | -32000 | -32603
+            crate::inference::error::RATE_LIMITED_ERROR_CODE | -32000 | -32603
         )
     }
 
@@ -447,7 +447,7 @@ impl SessionActor {
     pub(super) fn turn_error_detail(err: &acp::Error) -> Option<String> {
         err.data
             .as_ref()
-            .and_then(crate::sampling::error::error_detail_from_data)
+            .and_then(crate::inference::error::error_detail_from_data)
             .or_else(|| {
                 if !err.message.is_empty() {
                     Some(err.message.clone())

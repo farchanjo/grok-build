@@ -9,12 +9,12 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use indexmap::IndexMap;
 
-use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_config_for_model};
+use crate::agent::config::{self, ModelEntry, resolve_credentials, inference_config_for_model};
 use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
 use crate::remote::{FetchModelsResult, fetch_models_blocking};
-use crate::sampling::SamplerConfig as SamplingConfig;
+use crate::inference::InferenceConfig;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortOption};
 
 // ── Auth method for model fetching ──────────────────────────────────────────
 
@@ -589,7 +589,7 @@ impl ModelsManager {
     pub fn model_compactions_remaining(
         &self,
         model_id: &str,
-    ) -> Option<xai_grok_sampling_types::CompactionsRemaining> {
+    ) -> Option<xai_grok_inference_types::CompactionsRemaining> {
         self.inner
             .models
             .read()
@@ -600,7 +600,7 @@ impl ModelsManager {
     pub fn model_compaction_at_tokens(
         &self,
         model_id: &str,
-    ) -> Option<xai_grok_sampling_types::CompactionAtTokens> {
+    ) -> Option<xai_grok_inference_types::CompactionAtTokens> {
         self.inner
             .models
             .read()
@@ -1024,8 +1024,8 @@ impl ModelsManager {
             .store(false, Ordering::Relaxed);
     }
 
-    /// Build a `SamplingConfig` from the current model + auth state.
-    pub fn sampling_config(&self) -> SamplingConfig {
+    /// Build a `InferenceConfig` from the current model + auth state.
+    pub fn inference_config(&self) -> InferenceConfig {
         let config = self.inner.cfg.read().clone();
         let auth_manager = self.inner.auth_manager.as_ref();
         let current_model_id = self.current_model_id();
@@ -1048,7 +1048,7 @@ impl ModelsManager {
         let credentials =
             resolve_credentials(current_model, session_auth.as_ref().map(|a| a.key.as_str()));
 
-        sampling_config_for_model(
+        inference_config_for_model(
             current_model,
             credentials,
             config.endpoints.alpha_test_key.clone(),
@@ -2415,7 +2415,7 @@ mod tests {
     #[test]
     fn reasoning_effort_override_skips_models_that_do_not_offer_level() {
         use indexmap::IndexMap;
-        use xai_grok_sampling_types::ReasoningEffortOption;
+        use xai_grok_inference_types::ReasoningEffortOption;
 
         let cfg = config::Config {
             reasoning_effort_override: Some(ReasoningEffort::None),

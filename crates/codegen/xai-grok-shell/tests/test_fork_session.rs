@@ -7,7 +7,7 @@
 
 use agent_client_protocol as acp;
 use tempfile::TempDir;
-use xai_grok_shell::sampling::ConversationItem;
+use xai_grok_shell::inference::ConversationItem;
 use xai_grok_shell::session::info::Info;
 use xai_grok_shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
 

@@ -222,10 +222,10 @@ async fn real_exit_plan_mode_disconnect_keeps_awaiting_persisted() {
                 }
             });
 
-            let call = crate::sampling::types::ToolCallResponse {
+            let call = crate::inference::types::ToolCallResponse {
                 id: "call-exit".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new("exit_plan_mode", "{}"),
+                function: crate::inference::types::ToolCallFunction::new("exit_plan_mode", "{}"),
             };
             let mut deferred = Vec::new();
             let outcome = actor
@@ -278,10 +278,10 @@ async fn real_exit_plan_mode_no_client_executes_tool() {
                 tracker.activate_from_tool();
             }
 
-            let call = crate::sampling::types::ToolCallResponse {
+            let call = crate::inference::types::ToolCallResponse {
                 id: "call-exit-headless".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new("exit_plan_mode", "{}"),
+                function: crate::inference::types::ToolCallFunction::new("exit_plan_mode", "{}"),
             };
             let mut deferred = Vec::new();
             let outcome = actor

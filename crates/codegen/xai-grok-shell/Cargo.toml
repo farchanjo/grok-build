@@ -131,10 +131,10 @@ xai-interjection-core = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
 xai-chat-state = { path = "../xai-chat-state" }
 xai-grok-compaction = { path = "../../common/xai-grok-compaction" }
-xai-grok-sampler = { path = "../xai-grok-sampler" }
+xai-grok-inference = { path = "../xai-grok-inference" }
 xai-sqlite-journal = { workspace = true }
 xai-token-estimation = { workspace = true }
-xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
+xai-grok-inference-types = { path = "../xai-grok-inference-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
 xai-tty-utils = { workspace = true }
 xai-workflow = { path = "../xai-workflow" }

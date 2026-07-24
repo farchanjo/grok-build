@@ -60,7 +60,7 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
     let agent_cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config).unwrap();
     let models = crate::agent::config::resolve_model_list(&agent_cfg, None);
     let entry = models.get(web_search_model.as_str()).unwrap();
-    let resolved = crate::agent::config::sampling_config_for_model(
+    let resolved = crate::agent::config::inference_config_for_model(
         entry,
         crate::agent::config::resolve_credentials(entry, None),
         None,
@@ -68,7 +68,7 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
         None,
         None,
     );
-    let web_search_sampling = crate::tools::config::web_search_sampling_config(resolved);
+    let web_search_sampling = crate::tools::config::web_search_inference_config(resolved);
 
     let builder = crate::tools::bridge::ToolBridge::get_builder();
     let config = ToolServerConfig {
@@ -104,7 +104,7 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
             model: web_search_sampling.model.clone(),
             extra_headers: web_search_sampling.extra_headers.clone(),
             // The optional extra access key is no longer carried on
-            // `SamplerConfig`. The shell-level value flows in via
+            // `InferenceConfig`. The shell-level value flows in via
             // `Credentials` at session-spawn time; in this self-contained
             // test fixture there's no extra access key in scope.
             alpha_test_key: None,

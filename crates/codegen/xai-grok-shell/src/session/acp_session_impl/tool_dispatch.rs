@@ -344,7 +344,7 @@ impl SessionActor {
 
 // ── Tool argument error formatting ─────────────────────────────────────
 
-// Re-use the UTF-8-safe truncation helper from xai-grok-sampling-types rather
+// Re-use the UTF-8-safe truncation helper from xai-grok-inference-types rather
 // than duplicating it here (R3).
 
 /// Maximum bytes of `raw_arguments` included in a parse-error tool_result.

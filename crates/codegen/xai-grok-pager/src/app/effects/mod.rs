@@ -29,7 +29,7 @@ use actions::PermissionModePersist;
 #[cfg(test)]
 use agent::AgentId;
 use crate::unified_log as ulog;
-use xai_grok_shell::sampling::error::http_status_from_error;
+use xai_grok_shell::inference::error::http_status_from_error;
 use xai_grok_shell::session::{ExtMethodResult, SessionInfoResponse};
 pub(crate) fn execute(
     effect: Effect,
@@ -1684,7 +1684,7 @@ pub(crate) fn execute(
                 .spawn(async move {
                     let meta = effort
                         .map(|eff| {
-                            use xai_grok_shell::sampling::types::{
+                            use xai_grok_shell::inference::types::{
                                 REASONING_EFFORT_META_KEY, reasoning_effort_meta_value,
                             };
                             let mut m = acp::Meta::new();

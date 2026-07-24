@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use tokio::sync::oneshot;
-use xai_grok_sampling_types::{
-    ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
+use xai_grok_inference_types::{
+    ConversationItem, ConversationRequest, DanglingToolCallReason, InferenceSettings, TokenUsage,
     ToolSpec, TraceContext,
 };
 
@@ -119,7 +119,7 @@ pub enum ChatStateCommand {
     IncrementPromptIndex,
 
     /// Update the sampling config (e.g., model switch).
-    UpdateSamplingConfig { config: SamplingConfig },
+    UpdateInferenceSettings { config: InferenceSettings },
 
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },
@@ -253,8 +253,8 @@ pub enum ChatStateCommand {
     GetEstimatedMessagesTokens { reply: oneshot::Sender<u64> },
 
     /// Get sampling config.
-    GetSamplingConfig {
-        reply: oneshot::Sender<SamplingConfig>,
+    GetInferenceSettings {
+        reply: oneshot::Sender<InferenceSettings>,
     },
 
     /// Get the set of agent-edited file paths.
@@ -400,8 +400,8 @@ mod tests {
         };
         let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
         let _ = ChatStateCommand::IncrementPromptIndex;
-        let _ = ChatStateCommand::UpdateSamplingConfig {
-            config: SamplingConfig {
+        let _ = ChatStateCommand::UpdateInferenceSettings {
+            config: InferenceSettings {
                 base_url: String::new(),
                 model: String::new(),
                 max_completion_tokens: None,
@@ -450,7 +450,7 @@ mod tests {
         let _ = ChatStateCommand::GetEstimatedTotalTokens { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
-        let _ = ChatStateCommand::GetSamplingConfig { reply: tx };
+        let _ = ChatStateCommand::GetInferenceSettings { reply: tx };
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetAgentEditedPaths { reply: tx };

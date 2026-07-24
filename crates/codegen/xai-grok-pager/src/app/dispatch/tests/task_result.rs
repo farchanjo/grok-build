@@ -1026,7 +1026,7 @@ fn switch_model_complete_skips_message_and_persist_when_unchanged() {
 
 #[test]
 fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
-    use xai_grok_shell::sampling::types::ReasoningEffort;
+    use xai_grok_shell::inference::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let model_id = acp::ModelId::new(std::sync::Arc::from("byok-model-47"));
@@ -1093,7 +1093,7 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
 
 #[test]
 fn switch_to_non_reasoning_model_clears_persisted_effort() {
-    use xai_grok_shell::sampling::types::ReasoningEffort;
+    use xai_grok_shell::inference::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let model_id = acp::ModelId::new(std::sync::Arc::from("grok-4.5"));

@@ -1242,7 +1242,7 @@ pub(super) fn handle_prompt_response(
             || result
                 .as_ref()
                 .err()
-                .is_some_and(|e| xai_grok_shell::sampling::error::is_free_usage_exhausted_error(e));
+                .is_some_and(|e| xai_grok_shell::inference::error::is_free_usage_exhausted_error(e));
         let model_incompatible = agent.session.model_incompatible;
         // Context overflow: the RetryState handler already pushed the actionable
         // block, so the generic TurnFailed + error toast are redundant. Derived

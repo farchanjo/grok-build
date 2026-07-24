@@ -17,10 +17,10 @@ use xai_acp_lib::{AcpAgentTx, AcpClientMessageBox, AcpClientRx, acp_send};
 use xai_grok_shell::agent::auth_method::AuthMethodKind;
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::extensions::task::{CancelSubagentRequest, KillTaskRequest};
-use xai_grok_shell::sampling::error::{
+use xai_grok_shell::inference::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
 };
-use xai_grok_shell::sampling::types::{
+use xai_grok_shell::inference::types::{
     REASONING_EFFORT_META_KEY, parse_canonical_effort_token, reasoning_effort_meta_value,
 };
 use xai_grok_shell::util::config as cli_config;
@@ -1294,7 +1294,7 @@ pub async fn run_single_turn(
             } else {
                 err.to_string()
             };
-            if let Some(usage) = xai_grok_shell::sampling::error::prompt_usage_from_error(&err)
+            if let Some(usage) = xai_grok_shell::inference::error::prompt_usage_from_error(&err)
                 && let Ok(v) = serde_json::to_value(&usage)
             {
                 emitter.usage = Some(v);

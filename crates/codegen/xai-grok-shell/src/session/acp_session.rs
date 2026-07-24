@@ -19,10 +19,10 @@ use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
 use crate::extensions::notification::{
     RetryState, SessionNotification as XaiSessionNotification, is_reauthable_failure,
 };
-use crate::sampling::error::map_sampling_err_to_acp;
-use crate::sampling::types::{ChatRequestMessage, ToolCallResponse, ToolDefinition};
-use crate::sampling::{
-    ContentPart, ConversationItem, ConversationRequest, ConversationResponse, SamplingError,
+use crate::inference::error::map_sampling_err_to_acp;
+use crate::inference::types::{ChatRequestMessage, ToolCallResponse, ToolDefinition};
+use crate::inference::{
+    ContentPart, ConversationItem, ConversationRequest, ConversationResponse, InferenceError,
     SyntheticReason, ToolSpec, conversation_truncate_for_prompt,
 };
 use crate::session::ClientFsConfig;
@@ -68,8 +68,8 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_agent::AgentDefinition;
 use xai_grok_agent::prompt::agents_md::LEGACY_AGENTS_MD_REMINDER_PREFIX;
 use xai_grok_agent::prompt::skills::SkillsConfig;
-use xai_grok_sampler::SamplerConfig as SamplingConfig;
-use xai_grok_sampling_types::truncate_bytes;
+use xai_grok_inference::InferenceConfig;
+use xai_grok_inference_types::truncate_bytes;
 use xai_grok_tools::computer::local::LocalTerminalBackend;
 use xai_grok_tools::implementations::BashToolInput;
 use xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig;
@@ -129,9 +129,9 @@ use prompt_build::*;
 #[path = "acp_session_impl/session_mode.rs"]
 mod session_mode;
 use session_mode::*;
-#[path = "acp_session_impl/sampler_turn.rs"]
-mod sampler_turn;
-use sampler_turn::*;
+#[path = "acp_session_impl/inference_turn.rs"]
+mod inference_turn;
+use inference_turn::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
@@ -204,7 +204,7 @@ pub(crate) struct InputItem {
     /// Typed deferred completion retained while an admitted task wake is queued.
     /// Consumed by Ctrl+C if it removes the wake before the turn starts.
     pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
-    pub(crate) tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
+    pub(crate) tool_overrides_update: Option<xai_grok_inference_types::ToolOverridesUpdate>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
     /// Fired after the user message is in chat history and a persistence flush
     /// barrier has completed (see `SessionCommand::Prompt::persist_ack`).
@@ -275,7 +275,7 @@ struct GoalContinuationPlan {
 /// Task scheduling state — the only fields that remain behind `TokioMutex`.
 ///
 /// All chat state (conversation, tokens, timing, prompt_index, prompt_texts,
-/// agent_edited_paths, last_compaction_prompt_index, sampling_config) has been
+/// agent_edited_paths, last_compaction_prompt_index, inference_config) has been
 /// fully migrated to `ChatStateActor` via `chat_state_handle`.
 /// Credentials (api_key, optional extra access key, client_version) live in
 /// the `credentials` sync mutex on `SessionActor`.
@@ -600,11 +600,11 @@ pub(crate) struct SessionActor {
     /// 401-attribution callback. Joined with the bearer the
     /// sampler sends on the wire to emit an `auth 401 attribution`
     /// event at each of the six `OaiCompatClient` 401 arms in
-    /// `xai-grok-sampler`. Threaded into every `SamplerConfig`
+    /// `xai-grok-inference`. Threaded into every `InferenceConfig`
     /// reconstructed by `reconstruct_full_config`. `None` when the
     /// session was spawned without an `AuthManager` (BYOK direct
     /// mode, test fixtures).
-    pub(crate) attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback>,
+    pub(crate) attribution_callback: Option<xai_grok_inference::SharedAttributionCallback>,
     /// Auth manager. Owns the token refresher internally (via
     /// `configure_refresher()`) and is also used for non-sampler
     /// 401 attribution sites: the sampler-side path goes through
@@ -644,19 +644,19 @@ pub(crate) struct SessionActor {
     pub(crate) telemetry_enabled: bool,
     pub(crate) supports_backend_search: std::cell::Cell<bool>,
     /// Per-turn override, set at promotion. Not persisted; a reload reverts to the definition seed.
-    pub(crate) tool_overrides: std::cell::RefCell<Option<xai_grok_sampling_types::ToolOverrides>>,
+    pub(crate) tool_overrides: std::cell::RefCell<Option<xai_grok_inference_types::ToolOverrides>>,
     /// Configured cutoff a subagent inherits, read off the `SessionHandle` without an actor round-trip.
     pub(crate) resolved_tool_overrides:
-        std::sync::Arc<arc_swap::ArcSwapOption<xai_grok_sampling_types::ToolOverrides>>,
+        std::sync::Arc<arc_swap::ArcSwapOption<xai_grok_inference_types::ToolOverrides>>,
     pub(crate) compactions_remaining:
-        std::cell::Cell<Option<xai_grok_sampling_types::CompactionsRemaining>>,
+        std::cell::Cell<Option<xai_grok_inference_types::CompactionsRemaining>>,
     pub(crate) compaction_at_tokens:
-        std::cell::Cell<Option<xai_grok_sampling_types::CompactionAtTokens>>,
+        std::cell::Cell<Option<xai_grok_inference_types::CompactionAtTokens>>,
     /// Server-side doom-loop check policy, resolved once at spawn by
     /// `Config::resolve_doom_loop_recovery`; `None` = disabled.
     /// `reconstruct_full_config` threads it into the sampler config, and the
     /// sampler itself sends the matching `x-grok-doom-loop-check` header.
-    pub(crate) doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    pub(crate) doom_loop_recovery: Option<xai_grok_inference_types::DoomLoopRecoveryPolicy>,
     /// Telemetry-only per-turn doom-loop recovery tally (attempts, whether a
     /// budget-spent accept happened, tightest trigger label). Accumulated by
     /// the event drainer, taken at turn end for the per-turn analytics event.
@@ -693,11 +693,11 @@ pub(crate) struct SessionActor {
     /// model. Kept outside chat-state because it is provider transport
     /// configuration, not conversation state.
     pub(crate) openrouter_provider_preferences:
-        std::cell::RefCell<Option<xai_grok_sampler::OpenRouterProviderPreferences>>,
+        std::cell::RefCell<Option<xai_grok_inference::OpenRouterProviderPreferences>>,
     /// OpenRouter native `plugins` request-body array for the active model.
     /// Kept outside chat-state because it is provider transport configuration,
     /// not conversation state.
-    pub(crate) openrouter_plugins: std::cell::RefCell<Vec<xai_grok_sampler::OpenRouterPlugin>>,
+    pub(crate) openrouter_plugins: std::cell::RefCell<Vec<xai_grok_inference::OpenRouterPlugin>>,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,
     /// Pending mid-turn interjections from the user (Ctrl+Enter).
@@ -982,7 +982,7 @@ pub(crate) struct SessionActor {
     pub(crate) session_turn_active: Arc<std::sync::atomic::AtomicBool>,
     /// Per-turn accumulator for the model's streamed generations, populated by
     /// `handle_sampling_event` while the sampler is streaming. Each
-    /// `SamplingEvent::Completed` discards the in-progress generation (committed
+    /// `InferenceEvent::Completed` discards the in-progress generation (committed
     /// to `afterStateHistory`) without wiping the capture, so a same-turn
     /// doomloop retry's earlier uncommitted generations are preserved.
     ///
@@ -1023,15 +1023,15 @@ pub(crate) struct SessionActor {
     /// To keep all of a turn's `eventId`s in stream order, `run_turn_via_sampler`
     /// installs a sender here before submitting and awaits the receiver after the
     /// response arrives; the drainer fires it the moment it processes the
-    /// terminal `SamplingEvent::Completed` (every text/thought chunk has been
+    /// terminal `InferenceEvent::Completed` (every text/thought chunk has been
     /// `send_update`d by then). `None` between turns.
     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    /// Handle to the per-session `xai-grok-sampler` actor.
+    /// Handle to the per-session `xai-grok-inference` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;
-    /// tests and other constructor sites use `SamplerHandle::noop()`.
+    /// tests and other constructor sites use `InferenceHandle::noop()`.
     /// All inference flows through this handle.
-    pub(crate) sampler_handle: xai_grok_sampler::SamplerHandle,
+    pub(crate) sampler_handle: xai_grok_inference::InferenceHandle,
     /// Cached recipe for constructing this session's [`xai_grok_agent::Agent`].
     ///
     /// Populated once at session spawn and then reused by
@@ -1124,7 +1124,7 @@ impl SessionActor {
     /// Returns "unknown" if no sampling config is set.
     async fn current_model_id(&self) -> String {
         self.chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .filter(|m| !m.is_empty())
@@ -1672,11 +1672,11 @@ mod tool_meta_stamp_tests {
     use xai_grok_tools::registry::types::ToolConfig;
     use xai_grok_tools::tool_taxonomy::TOOL_META_KEY;
     use xai_grok_workspace::permission::PermissionCommand;
-    fn read_file_call() -> crate::sampling::types::ToolCallResponse {
-        crate::sampling::types::ToolCallResponse {
+    fn read_file_call() -> crate::inference::types::ToolCallResponse {
+        crate::inference::types::ToolCallResponse {
             id: "call-stamp-1".to_string(),
             kind: "function".to_string(),
-            function: crate::sampling::types::ToolCallFunction {
+            function: crate::inference::types::ToolCallFunction {
                 name: "read_file".to_string(),
                 arguments: r#"{"target_file":"/tmp/stamp.txt"}"#.to_string(),
             },

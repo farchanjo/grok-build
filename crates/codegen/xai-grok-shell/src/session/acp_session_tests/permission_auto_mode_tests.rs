@@ -247,7 +247,7 @@ fn build_classifier_turns_captures_tool_use_excludes_text_and_results() {
         super::ConversationItem::user("please build"),
         super::ConversationItem::assistant("sure, running it"),
         super::ConversationItem::assistant_tool_calls(vec![
-            xai_grok_sampling_types::conversation::ToolCall {
+            xai_grok_inference_types::conversation::ToolCall {
                 id: std::sync::Arc::from("tc1"),
                 name: "run_terminal_command".into(),
                 arguments: std::sync::Arc::from(r#"{ "command": "cargo build" }"#),
@@ -319,7 +319,7 @@ fn build_classifier_turns_filters_synthetic_users() {
 fn build_classifier_turns_neutralizes_malformed_tool_args() {
     use xai_grok_workspace::permission::ClassifierTurn;
     let conv = vec![super::ConversationItem::assistant_tool_calls(vec![
-        xai_grok_sampling_types::conversation::ToolCall {
+        xai_grok_inference_types::conversation::ToolCall {
             id: std::sync::Arc::from("tc1"),
             name: "run_terminal_command".into(),
             // Not valid JSON → raw fallback; embeds a newline + a forged role line.
@@ -343,12 +343,12 @@ fn build_classifier_turns_neutralizes_malformed_tool_args() {
 fn build_classifier_turns_one_turn_per_tool_call() {
     use xai_grok_workspace::permission::ClassifierTurn;
     let conv = vec![super::ConversationItem::assistant_tool_calls(vec![
-        xai_grok_sampling_types::conversation::ToolCall {
+        xai_grok_inference_types::conversation::ToolCall {
             id: std::sync::Arc::from("tc1"),
             name: "read_file".into(),
             arguments: std::sync::Arc::from(r#"{"path":"a.rs"}"#),
         },
-        xai_grok_sampling_types::conversation::ToolCall {
+        xai_grok_inference_types::conversation::ToolCall {
             id: std::sync::Arc::from("tc2"),
             name: "read_file".into(),
             arguments: std::sync::Arc::from(r#"{"path":"b.rs"}"#),

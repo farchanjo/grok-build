@@ -5,7 +5,7 @@ use crate::test_support::lsp_runtime::{
 };
 #[test]
 fn normalize_forked_context_strips_project_layout() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let big_layout = "<project_layout>\nline1\nline2\nline3\n</project_layout>";
     let items = vec![
             ConversationItem::system("sys"),
@@ -20,7 +20,7 @@ fn normalize_forked_context_strips_project_layout() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -37,7 +37,7 @@ fn normalize_forked_context_strips_project_layout() {
 }
 #[test]
 fn normalize_forked_context_consecutive_users() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let items = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("prefix"),
@@ -53,7 +53,7 @@ fn normalize_forked_context_consecutive_users() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -81,7 +81,7 @@ fn normalize_forked_context_consecutive_users() {
 /// [System(child's), BackgroundContext, Task].
 #[test]
 fn end_to_end_normalized_conversation_shape() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let parent_conv = vec![
             ConversationItem::system("parent system prompt"),
             ConversationItem::user("user prefix with project info"),
@@ -109,7 +109,7 @@ fn end_to_end_normalized_conversation_shape() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -131,7 +131,7 @@ fn end_to_end_normalized_conversation_shape() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -146,7 +146,7 @@ fn end_to_end_normalized_conversation_shape() {
 /// cached prompt text in the session pipeline.
 #[test]
 fn cached_prompt_text_is_task_not_background() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let parent_conv = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("parent query"),
@@ -159,7 +159,7 @@ fn cached_prompt_text_is_task_not_background() {
         u.content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -182,7 +182,7 @@ fn cached_prompt_text_is_task_not_background() {
 /// Verify extract_last_real_user_query would return the task.
 #[test]
 fn last_user_message_is_task_after_normalization() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let parent_conv = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("parent context"),
@@ -202,7 +202,7 @@ fn last_user_message_is_task_after_normalization() {
                     .content
                     .iter()
                     .filter_map(|p| match p {
-                        xai_grok_sampling_types::conversation::ContentPart::Text {
+                        xai_grok_inference_types::conversation::ContentPart::Text {
                             text,
                         } => Some(text.as_ref()),
                         _ => None,
@@ -226,7 +226,7 @@ fn last_user_message_is_task_after_normalization() {
 /// [System(inherited), BackgroundContext(inherited), UserPrefix(compacted), Summary, ...]
 #[test]
 fn compaction_preserves_inherited_prefix() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let parent_conv = vec![
             ConversationItem::system("parent sys"),
             ConversationItem::user("parent question"),
@@ -265,7 +265,7 @@ fn compaction_preserves_inherited_prefix() {
             .content
             .iter()
             .filter_map(|p| match p {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     Some(text.as_ref())
                 }
                 _ => None,
@@ -296,7 +296,7 @@ fn compaction_preserves_inherited_prefix() {
                     .any(|p| {
                         matches!(
                     p,
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } if text.contains("<background_context>")
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } if text.contains("<background_context>")
                 )
                     })
             } else {
@@ -312,7 +312,7 @@ fn compaction_preserves_inherited_prefix() {
 /// Verify that compaction with prefix_len=0 (non-forked) passes through unchanged.
 #[test]
 fn compaction_no_prefix_passes_through() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let compacted = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("summary"),
@@ -1326,7 +1326,7 @@ fn session_metadata_session_kind_for_resumed() {
 /// transcript through intact — a whole-transcript prefix is what pinned compaction.
 #[test]
 fn resume_initial_context_preserves_head_only() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let mut conversation = vec![ConversationItem::system("sys")];
     for i in 0..8 {
         conversation.push(ConversationItem::user(format!("u{i}")));
@@ -1349,7 +1349,7 @@ fn resume_initial_context_preserves_head_only() {
 }
 #[test]
 fn resume_prefix_len_is_system_head_only() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let mut conversation = vec![ConversationItem::system("sys")];
     for i in 0..6 {
         conversation.push(ConversationItem::user(format!("u{i}")));
@@ -1359,7 +1359,7 @@ fn resume_prefix_len_is_system_head_only() {
 }
 #[test]
 fn resume_prefix_len_is_zero_without_system_head() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let conversation = vec![
             ConversationItem::user("task"),
             ConversationItem::assistant("done"),
@@ -1368,7 +1368,7 @@ fn resume_prefix_len_is_zero_without_system_head() {
 }
 #[test]
 fn resume_prefix_len_counts_consecutive_system_head() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let conversation = vec![
             ConversationItem::system("sys a"),
             ConversationItem::system("sys b"),
@@ -1536,7 +1536,7 @@ fn resumable_source_rejects_cross_session_lookup() {
 }
 #[test]
 fn resumed_session_uses_current_runtime_contract() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let mut conversation = [
         ConversationItem::system("old source system prompt"),
         ConversationItem::user("task 1"),
@@ -1557,7 +1557,7 @@ fn resumed_session_uses_current_runtime_contract() {
 }
 #[test]
 fn token_estimation_for_window_safety() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let conversation = vec![
             ConversationItem::system("You are a helpful assistant."),
             ConversationItem::user("Hello, how are you?"),
@@ -1573,7 +1573,7 @@ fn token_estimation_for_window_safety() {
 }
 #[test]
 fn token_estimation_accounts_for_images() {
-    use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem, UserItem};
+    use xai_grok_inference_types::conversation::{ContentPart, ConversationItem, UserItem};
     let text_only = vec![ConversationItem::User(UserItem {
             content: vec![ContentPart::Text {
                 text: "describe this".into(),
@@ -2733,31 +2733,31 @@ fn ctx_with_parent_chat_state(
     ctx
 }
 #[tokio::test]
-async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
+async fn read_parent_inference_config_keeps_auto_catalog_id_with_routing_slug() {
     let mut models = indexmap::IndexMap::new();
     models.insert("auto".to_string(), test_model_entry("grok-4.5"));
     let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "composer-2-fast", models);
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
 }
 #[tokio::test]
-async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {
+async fn read_parent_inference_config_keeps_auto_when_catalog_has_slug_key_only() {
     let mut models = indexmap::IndexMap::new();
     models.insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
     let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
 }
 #[tokio::test]
-async fn read_parent_sampling_config_fallback_uses_session_model_id() {
+async fn read_parent_inference_config_fallback_uses_session_model_id() {
     let mut models = indexmap::IndexMap::new();
     models.insert("composer-2-fast".to_string(), test_model_entry("composer-2-fast"));
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new("composer-2-fast");
     ctx.parent_chat_state = None;
-    ctx.sampling_config.model = "composer-2-fast".to_string();
+    ctx.inference_config.model = "composer-2-fast".to_string();
     ctx.available_models = models;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         None,
@@ -2766,13 +2766,13 @@ async fn read_parent_sampling_config_fallback_uses_session_model_id() {
         ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(config.model, "composer-2-fast");
     assert_eq!(model_id.0.as_ref(), "composer-2-fast");
     assert_ne!(model_id.0.as_ref(), "auto");
 }
 #[tokio::test]
-async fn read_parent_sampling_config_ignores_global_default() {
+async fn read_parent_inference_config_ignores_global_default() {
     let mut models = indexmap::IndexMap::new();
     models.insert("composer-2-fast".to_string(), test_model_entry("composer-2-fast"));
     let ctx = ctx_with_parent_chat_state(
@@ -2781,7 +2781,7 @@ async fn read_parent_sampling_config_ignores_global_default() {
         "auto",
         models,
     );
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(config.model, "composer-2-fast");
     assert_eq!(model_id.0.as_ref(), "composer-2-fast");
     assert_ne!(
@@ -2790,21 +2790,21 @@ async fn read_parent_sampling_config_ignores_global_default() {
         );
 }
 #[tokio::test]
-async fn read_parent_sampling_config_resolves_backend_search_from_catalog() {
+async fn read_parent_inference_config_resolves_backend_search_from_catalog() {
     let mut entry = test_model_entry("grok-4.5");
     entry.info.supports_backend_search = true;
     let mut models = indexmap::IndexMap::new();
     models.insert("auto".to_string(), entry);
     let mut ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
-    ctx.sampling_config.supports_backend_search = false;
-    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
+    ctx.inference_config.supports_backend_search = false;
+    let (config, _model_id) = read_parent_inference_config(&ctx).await;
     assert!(
             config.supports_backend_search,
             "subagent should inherit backend-tools capability from the live model catalog"
         );
 }
 #[tokio::test]
-async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catalog() {
+async fn read_parent_inference_config_fallback_resolves_backend_search_from_catalog() {
     let mut entry = test_model_entry("composer-2-fast");
     entry.info.supports_backend_search = true;
     let mut models = indexmap::IndexMap::new();
@@ -2812,8 +2812,8 @@ async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catal
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new("composer-2-fast");
     ctx.parent_chat_state = None;
-    ctx.sampling_config.model = "composer-2-fast".to_string();
-    ctx.sampling_config.supports_backend_search = false;
+    ctx.inference_config.model = "composer-2-fast".to_string();
+    ctx.inference_config.supports_backend_search = false;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         None,
         models,
@@ -2821,7 +2821,7 @@ async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catal
         ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(model_id.0.as_ref(), "composer-2-fast");
     assert!(
             config.supports_backend_search,
@@ -2829,15 +2829,15 @@ async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catal
         );
 }
 #[tokio::test]
-async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog() {
-    use xai_grok_sampling_types::CompactionsRemaining;
+async fn read_parent_inference_config_resolves_compactions_remaining_from_catalog() {
+    use xai_grok_inference_types::CompactionsRemaining;
     let mut entry = test_model_entry("grok-4.5");
     entry.info.compactions_remaining = Some(CompactionsRemaining::Dynamic(true));
     let mut models = indexmap::IndexMap::new();
     models.insert("auto".to_string(), entry);
     let mut ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
-    ctx.sampling_config.compactions_remaining = None;
-    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
+    ctx.inference_config.compactions_remaining = None;
+    let (config, _model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(
             config.compactions_remaining,
             Some(CompactionsRemaining::Dynamic(true)),
@@ -2845,8 +2845,8 @@ async fn read_parent_sampling_config_resolves_compactions_remaining_from_catalog
         );
 }
 #[tokio::test]
-async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_from_catalog() {
-    use xai_grok_sampling_types::CompactionsRemaining;
+async fn read_parent_inference_config_fallback_resolves_compactions_remaining_from_catalog() {
+    use xai_grok_inference_types::CompactionsRemaining;
     let mut entry = test_model_entry("composer-2-fast");
     entry.info.compactions_remaining = Some(CompactionsRemaining::Dynamic(true));
     let mut models = indexmap::IndexMap::new();
@@ -2854,8 +2854,8 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new("composer-2-fast");
     ctx.parent_chat_state = None;
-    ctx.sampling_config.model = "composer-2-fast".to_string();
-    ctx.sampling_config.compactions_remaining = None;
+    ctx.inference_config.model = "composer-2-fast".to_string();
+    ctx.inference_config.compactions_remaining = None;
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         None,
         models,
@@ -2863,7 +2863,7 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
         ctx.auth_manager.clone(),
         crate::agent::config::Config::default(),
     );
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(model_id.0.as_ref(), "composer-2-fast");
     assert_eq!(
             config.compactions_remaining,
@@ -2873,12 +2873,12 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
 }
 
 #[tokio::test]
-async fn read_parent_sampling_config_openrouter_preserves_identity_and_model_id_flag() {
-    use xai_grok_sampler::config::ProviderIdentity;
-    // Parent catalog entry is OpenRouter. The chat-state SamplingConfig has no
+async fn read_parent_inference_config_openrouter_preserves_identity_and_model_id_flag() {
+    use xai_grok_inference::config::ProviderIdentity;
+    // Parent catalog entry is OpenRouter. The chat-state InferenceConfig has no
     // provider-scoped fields, so the inherit path must derive provider_identity,
     // openrouter_fallback_models, and include_message_model_id from the catalog
-    // entry (via sampling_config_for_model), not from the chat-state slug.
+    // entry (via inference_config_for_model), not from the chat-state slug.
     let mut entry = openrouter_model_entry("anthropic/claude-3.5-sonnet");
     entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
     let mut models = indexmap::IndexMap::new();
@@ -2889,7 +2889,7 @@ async fn read_parent_sampling_config_openrouter_preserves_identity_and_model_id_
         "or/claude",
         models,
     );
-    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(model_id.0.as_ref(), "or/claude");
     assert_eq!(
         config.provider_identity,
@@ -2908,16 +2908,16 @@ async fn read_parent_sampling_config_openrouter_preserves_identity_and_model_id_
 }
 
 #[tokio::test]
-async fn read_parent_sampling_config_preserves_max_retries_from_spawn_context() {
-    // max_retries must be preserved from ctx.sampling_config.max_retries
+async fn read_parent_inference_config_preserves_max_retries_from_spawn_context() {
+    // max_retries must be preserved from ctx.inference_config.max_retries
     // (the parent's resolved config at spawn time), not wiped to None.
     let mut entry = test_model_entry("grok-4.5");
     entry.info.max_retries = Some(7);
     let mut models = indexmap::IndexMap::new();
     models.insert("auto".to_string(), entry);
     let mut ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
-    ctx.sampling_config.max_retries = Some(3);
-    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
+    ctx.inference_config.max_retries = Some(3);
+    let (config, _model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(
         config.max_retries,
         Some(3),
@@ -2926,15 +2926,15 @@ async fn read_parent_sampling_config_preserves_max_retries_from_spawn_context() 
 }
 
 #[tokio::test]
-async fn read_parent_sampling_config_max_retries_falls_back_to_catalog_default() {
-    // When ctx.sampling_config.max_retries is None, the catalog entry's
-    // max_retries (set via sampling_config_for_model) should win.
+async fn read_parent_inference_config_max_retries_falls_back_to_catalog_default() {
+    // When ctx.inference_config.max_retries is None, the catalog entry's
+    // max_retries (set via inference_config_for_model) should win.
     let mut entry = test_model_entry("grok-4.5");
     entry.info.max_retries = Some(9);
     let mut models = indexmap::IndexMap::new();
     models.insert("auto".to_string(), entry);
     let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "auto", models);
-    let (config, _model_id) = read_parent_sampling_config(&ctx).await;
+    let (config, _model_id) = read_parent_inference_config(&ctx).await;
     assert_eq!(
         config.max_retries,
         Some(9),
@@ -3012,7 +3012,7 @@ async fn fork_context_pins_parent_model_over_overrides() {
     use xai_grok_agent::config::ModelOverride;
     let build_ctx = || {
         let mut ctx = ctx_with_toggle(HashMap::new());
-        ctx.sampling_config.model = "parent-model".to_string();
+        ctx.inference_config.model = "parent-model".to_string();
         ctx.model_id = acp::ModelId::new("parent-model");
         ctx.available_models
             .insert("parent-model".to_string(), test_model_entry("parent-model"));
@@ -3065,9 +3065,9 @@ async fn resolve_subagent_inherits_parent_model_without_pins() {
     use xai_grok_agent::config::ModelOverride;
     for parent_model in ["grok-4.5", "composer-2-fast", "my-custom-byok-model"] {
         let mut ctx = ctx_with_toggle(HashMap::new());
-        ctx.sampling_config.model = parent_model.to_string();
+        ctx.inference_config.model = parent_model.to_string();
         ctx.model_id = acp::ModelId::new(parent_model);
-        let (config, model_id) = resolve_subagent_sampling_config(
+        let (config, model_id) = resolve_subagent_inference_config(
                 "explore",
                 &ModelOverride::Inherit,
                 &ctx,
@@ -3089,13 +3089,13 @@ async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
     use xai_grok_agent::config::ModelOverride;
     for parent_model in ["grok-4.5", "composer-2-fast"] {
         let mut ctx = ctx_with_toggle(HashMap::new());
-        ctx.sampling_config.model = parent_model.to_string();
+        ctx.inference_config.model = parent_model.to_string();
         ctx.model_id = acp::ModelId::new(parent_model);
         ctx.available_models
             .insert("pinned-model".to_string(), test_model_entry("pinned-model"));
         ctx.subagent_model_overrides
             .insert("explore".to_string(), "pinned-model".to_string());
-        let (config, model_id) = resolve_subagent_sampling_config(
+        let (config, model_id) = resolve_subagent_inference_config(
                 "explore",
                 &ModelOverride::Inherit,
                 &ctx,
@@ -3114,12 +3114,12 @@ async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
 async fn resolve_subagent_agent_definition_pin_applies_for_light_parent() {
     use xai_grok_agent::config::ModelOverride;
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.inference_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     ctx.available_models
         .insert("pinned-model".to_string(), test_model_entry("pinned-model"));
     let agent_model = ModelOverride::Override("pinned-model".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config(
+    let (config, model_id) = resolve_subagent_inference_config(
             "explore",
             &agent_model,
             &ctx,
@@ -3134,7 +3134,7 @@ async fn resolve_subagent_agent_definition_pin_applies_for_light_parent() {
 async fn resolve_subagent_config_override_wins_over_agent_definition() {
     use xai_grok_agent::config::ModelOverride;
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.inference_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     ctx.available_models
         .insert("config-pin".to_string(), test_model_entry("config-pin"));
@@ -3142,7 +3142,7 @@ async fn resolve_subagent_config_override_wins_over_agent_definition() {
         .insert("agentdef-pin".to_string(), test_model_entry("agentdef-pin"));
     ctx.subagent_model_overrides.insert("explore".to_string(), "config-pin".to_string());
     let agent_model = ModelOverride::Override("agentdef-pin".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config(
+    let (config, model_id) = resolve_subagent_inference_config(
             "explore",
             &agent_model,
             &ctx,
@@ -3157,11 +3157,11 @@ async fn resolve_subagent_config_override_wins_over_agent_definition() {
 async fn resolve_subagent_config_override_unknown_model_falls_through_to_inherit() {
     use xai_grok_agent::config::ModelOverride;
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.inference_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     ctx.subagent_model_overrides
         .insert("explore".to_string(), "does-not-exist".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config(
+    let (config, model_id) = resolve_subagent_inference_config(
             "explore",
             &ModelOverride::Inherit,
             &ctx,
@@ -3176,10 +3176,10 @@ async fn resolve_subagent_config_override_unknown_model_falls_through_to_inherit
 async fn resolve_subagent_agent_definition_unknown_model_falls_through_to_inherit() {
     use xai_grok_agent::config::ModelOverride;
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.inference_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     let agent_model = ModelOverride::Override("does-not-exist".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config(
+    let (config, model_id) = resolve_subagent_inference_config(
             "explore",
             &agent_model,
             &ctx,
@@ -3215,12 +3215,12 @@ async fn resolve_model_override_openrouter_without_key_fails_closed() {
     let mut models = indexmap::IndexMap::new();
     models.insert("or/claude".to_string(), entry);
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.inference_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     ctx.available_models = models;
     ctx.subagent_model_overrides
         .insert("explore".to_string(), "or/claude".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config(
+    let (config, model_id) = resolve_subagent_inference_config(
             "explore",
             &ModelOverride::Inherit,
             &ctx,
@@ -3252,7 +3252,7 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     let mut models = indexmap::IndexMap::new();
     models.insert("proxied".to_string(), entry);
     let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.inference_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     ctx.available_models = models;
     ctx.auth = Some(crate::auth::GrokAuth {
@@ -3260,7 +3260,7 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
         ..Default::default()
     });
     ctx.subagent_model_overrides.insert("explore".to_string(), "proxied".to_string());
-    let (config, model_id) = resolve_subagent_sampling_config(
+    let (config, model_id) = resolve_subagent_inference_config(
             "explore",
             &ModelOverride::Inherit,
             &ctx,
@@ -3272,7 +3272,7 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
             "a cold cache spawns with no key, never the parent session key"
         );
     provider.ensure_fresh_token(None).await.rotated().unwrap();
-    let (config, _) = resolve_subagent_sampling_config(
+    let (config, _) = resolve_subagent_inference_config(
             "explore",
             &ModelOverride::Inherit,
             &ctx,
@@ -3327,7 +3327,7 @@ fn codex_subagent_instructions_keep_task_separate_from_role_and_persona() {
 }
 #[test]
 fn non_cursor_persona_injected_as_system_reminder() {
-    use xai_grok_sampling_types::conversation::{ConversationItem, SyntheticReason};
+    use xai_grok_inference_types::conversation::{ConversationItem, SyntheticReason};
     let persona = "You are a pragmatic implementer.";
     let mut conv = vec![
             ConversationItem::system("sys"),
@@ -3350,7 +3350,7 @@ fn non_cursor_persona_injected_as_system_reminder() {
             .content
             .first()
             .map(|c| match c {
-                xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                     text.as_ref()
                 }
                 _ => "",
@@ -3369,7 +3369,7 @@ fn non_cursor_persona_injected_as_system_reminder() {
 }
 #[test]
 fn persona_injection_skipped_for_resumed() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let persona_instructions = Some("Be thorough.".to_string());
     let context_source = InitialContextSource::Resumed;
     let mut conv = vec![
@@ -3399,7 +3399,7 @@ fn persona_injection_skipped_for_resumed() {
 }
 #[test]
 fn persona_injection_into_empty_conversation() {
-    use xai_grok_sampling_types::conversation::ConversationItem;
+    use xai_grok_inference_types::conversation::ConversationItem;
     let mut conv: Vec<ConversationItem> = vec![];
     let mut prefix_len: usize = 0;
     let reminder = ConversationItem::system_reminder(

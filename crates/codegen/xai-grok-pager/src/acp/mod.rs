@@ -17,7 +17,7 @@ use agent_client_protocol as acp;
 use xai_acp_lib::{AcpAgentTx, AcpClientRx, acp_send};
 use xai_grok_shell::agent::auth_method::AuthMethodKind;
 use xai_grok_shell::agent::config::Config as AgentConfig;
-use xai_grok_shell::sampling::types::ReasoningEffort;
+use xai_grok_shell::inference::types::ReasoningEffort;
 
 pub use model_state::ModelState;
 

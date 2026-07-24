@@ -45,7 +45,7 @@ fn search_replace_call(id: &str, path: &str) -> ToolCallResponse {
     ToolCallResponse {
         id: id.to_string(),
         kind: "function".to_string(),
-        function: crate::sampling::types::ToolCallFunction::new(
+        function: crate::inference::types::ToolCallFunction::new(
             "search_replace",
             format!(r#"{{"file_path":"{path}","old_string":"a","new_string":"b"}}"#),
         ),
@@ -70,7 +70,7 @@ async fn tool_result_text(actor: &SessionActor, call_id: &str) -> String {
     conv.iter()
         .rev()
         .find_map(|item| match item {
-            xai_grok_sampling_types::ConversationItem::ToolResult(tr)
+            xai_grok_inference_types::ConversationItem::ToolResult(tr)
                 if tr.tool_call_id == call_id =>
             {
                 Some(tr.content.to_string())

@@ -1,5 +1,5 @@
 use super::turn_texts_for_feedback;
-use xai_grok_sampling_types::ConversationItem;
+use xai_grok_inference_types::ConversationItem;
 
 #[test]
 fn empty_conversation_returns_none() {

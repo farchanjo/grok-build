@@ -62,7 +62,7 @@ impl MvpAgent {
     }
     pub(super) fn build_summary_client(
         &self,
-        primary: &SamplingConfig,
+        primary: &InferenceConfig,
     ) -> Result<(OaiCompatClient, String), acp::Error> {
         let slug = self.resolve_session_summary_model();
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
@@ -76,7 +76,7 @@ impl MvpAgent {
                 cfg.client_version.clone(),
             )
         };
-        let config = match crate::agent::config::resolve_aux_model_sampling_config(
+        let config = match crate::agent::config::resolve_aux_model_inference_config(
             &slug,
             &models,
             &endpoints,
@@ -121,7 +121,7 @@ impl MvpAgent {
         self.auth_method_id.store(Some(std::sync::Arc::new(id)));
     }
     /// Publish model-owned credentials for voice/tools static fallthrough.
-    /// Only [`ModelEntry::own_credential`] — not `sampling_config.api_key` (may be a session JWT).
+    /// Only [`ModelEntry::own_credential`] — not `inference_config.api_key` (may be a session JWT).
     pub(crate) fn sync_process_static_api_key(&self, preferred_model_id: Option<&str>) {
         if self.cfg.borrow().grok_com_config.api_key_auth_disabled() {
             self.auth_manager.set_process_static_api_key(None);
@@ -1145,11 +1145,11 @@ impl MvpAgent {
         );
         Ok(entry.clone())
     }
-    pub(crate) fn prepare_sampling_config_for_model(
+    pub(crate) fn prepare_inference_config_for_model(
         &self,
         model: &ModelEntry,
         origin_client: Option<crate::http::OriginClientInfo>,
-    ) -> SamplingConfig {
+    ) -> InferenceConfig {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let session = match preferred {
             Some(crate::auth::PreferredAuthMethod::ApiKey) => None,
@@ -1192,10 +1192,10 @@ impl MvpAgent {
                 model = model.info().model.as_str(),
                 is_expired = self.auth_manager.is_expired(),
                 auth_type = ?credentials.auth_type,
-                "auth: prepare_sampling_config has no session key",
+                "auth: prepare_inference_config has no session key",
             );
             xai_grok_telemetry::unified_log::warn(
-                "auth: prepare_sampling_config has no session key",
+                "auth: prepare_inference_config has no session key",
                 None,
                 Some(
                     serde_json::json!({
@@ -1218,7 +1218,7 @@ impl MvpAgent {
             .current_or_expired()
             .filter(|a| a.is_xai_auth())
             .map(|a| a.user_id);
-        let mut config = crate::agent::config::sampling_config_for_model(
+        let mut config = crate::agent::config::inference_config_for_model(
             model,
             credentials,
             alpha_test_key,
@@ -1233,15 +1233,15 @@ impl MvpAgent {
     /// default on resolution failure. This ensures API-key auth routes to
     /// the public API (via resolve_credentials) instead of the global config's
     /// cli-chat-proxy base_url.
-    pub(super) fn resolve_sampling_config_for_model(
+    pub(super) fn resolve_inference_config_for_model(
         &self,
         model_id: &acp::ModelId,
         origin_client: Option<crate::http::OriginClientInfo>,
-    ) -> SamplingConfig {
+    ) -> InferenceConfig {
         if let Ok(model) = self.resolve_model_id(model_id) {
-            self.prepare_sampling_config_for_model(&model, origin_client.clone())
+            self.prepare_inference_config_for_model(&model, origin_client.clone())
         } else {
-            let mut c = self.sampling_config.borrow().clone();
+            let mut c = self.inference_config.borrow().clone();
             c.origin_client = origin_client;
             c
         }
@@ -1256,13 +1256,13 @@ impl MvpAgent {
         &self,
         pinned_model: Option<&(acp::ModelId, ModelEntry)>,
         default_model_id: acp::ModelId,
-        default_sampling: SamplingConfig,
+        default_inference_settings: InferenceConfig,
         origin_client: Option<crate::http::OriginClientInfo>,
-    ) -> (acp::ModelId, SamplingConfig) {
+    ) -> (acp::ModelId, InferenceConfig) {
         let Some((id, model)) = pinned_model else {
-            return (default_model_id, default_sampling);
+            return (default_model_id, default_inference_settings);
         };
-        let new_config = self.prepare_sampling_config_for_model(model, origin_client);
+        let new_config = self.prepare_inference_config_for_model(model, origin_client);
         tracing::info!(
             model = %id.0,
             "agent profile model override applied to parent session"
@@ -1305,15 +1305,15 @@ impl MvpAgent {
     /// Build image generation config.
     ///
     /// Both BYOK and session (OAuth) users go direct to `xai_api_base_url`.
-    /// `sampling_config.api_key` carries the OAuth bearer for session users (the
+    /// `inference_config.api_key` carries the OAuth bearer for session users (the
     /// `api_key_provider` refreshes it per request), so IC authenticates and
     /// meters Imagine usage per-user.
     pub(super) fn prepare_image_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
-        let sampling_config = self.sampling_config.borrow();
-        let Some(ref api_key) = sampling_config.api_key else {
+        let inference_config = self.inference_config.borrow();
+        let Some(ref api_key) = inference_config.api_key else {
             return ImageGenConfig::Disabled;
         };
         let tier_restricted = self.is_tier_restricted_capability();
@@ -1358,7 +1358,7 @@ impl MvpAgent {
         if !cfg.resolve_video_gen().value {
             return VideoGenConfig::Disabled;
         }
-        let Some(api_key) = self.sampling_config.borrow().api_key.clone() else {
+        let Some(api_key) = self.inference_config.borrow().api_key.clone() else {
             return VideoGenConfig::Disabled;
         };
         let tier_restricted = self.is_tier_restricted_capability();
@@ -1393,13 +1393,13 @@ impl MvpAgent {
             tier_restricted,
         }
     }
-    pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
+    pub(super) fn prepare_web_search_inference_config(&self) -> Option<InferenceConfig> {
         let model_id = self.cfg.borrow().web_search_model.clone();
         let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
         let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
         let client_version = self.cfg.borrow().client_version.clone();
-        let mut cfg = config::resolve_web_search_sampling_config(
+        let mut cfg = config::resolve_web_search_inference_config(
             &model_id,
             &models,
             session.as_ref().map(|a| a.key.as_str()),
@@ -1453,7 +1453,7 @@ impl MvpAgent {
         if !enabled.value {
             return WebFetchConfig::Disabled;
         }
-        let context_window = Some(self.sampling_config.borrow().context_window);
+        let context_window = Some(self.inference_config.borrow().context_window);
         let params = cfg
             .toolset
             .web_fetch
@@ -1478,7 +1478,7 @@ impl MvpAgent {
         models_manager: crate::agent::models::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
-        let sampling_config = models_manager.sampling_config();
+        let inference_config = models_manager.inference_config();
         if !cfg.grok_com_config.api_key_auth_disabled() {
             let models = models_manager.models();
             let current = models_manager.current_model_id();
@@ -1565,7 +1565,7 @@ impl MvpAgent {
             },
             cfg: RefCell::new(cfg.clone()),
             auth_method_id: crate::agent::auth_method::new_shared_auth_method_id(None),
-            sampling_config: RefCell::new(sampling_config),
+            inference_config: RefCell::new(inference_config),
             auth_manager,
             interactive_auth: Default::default(),
             client_type: RefCell::new(ClientType::default()),
@@ -2414,10 +2414,10 @@ impl MvpAgent {
     /// cross-client contamination in leader mode (where `current_model_id` is
     /// shared mutable state).
     pub(super) fn seed_client_config_auth_if_available(&self) {
-        let mut sampling_config = self.sampling_config.borrow_mut();
-        if sampling_config.api_key.is_none() {
+        let mut inference_config = self.inference_config.borrow_mut();
+        if inference_config.api_key.is_none() {
             if let Some(auth) = self.auth_manager.current_or_expired() {
-                sampling_config.api_key = Some(auth.key);
+                inference_config.api_key = Some(auth.key);
                 tracing::debug!("auth: seed_client_config set auth (SessionToken)");
                 xai_grok_telemetry::unified_log::debug(
                     "auth: seed_client_config set auth (SessionToken)",
@@ -2522,7 +2522,7 @@ impl MvpAgent {
         info: &crate::session::info::Info,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
         model: &str,
-        turns: Vec<Vec<xai_grok_sampling_types::conversation::ConversationItem>>,
+        turns: Vec<Vec<xai_grok_inference_types::conversation::ConversationItem>>,
     ) {
         use crate::upload::manifest::{
             build_manifest, resolve_upload_method, write_upload_manifest,
@@ -2575,7 +2575,7 @@ impl MvpAgent {
         info: &crate::session::info::Info,
         model: &str,
         base: u64,
-        turns: Vec<Vec<xai_grok_sampling_types::conversation::ConversationItem>>,
+        turns: Vec<Vec<xai_grok_inference_types::conversation::ConversationItem>>,
     ) -> Vec<(PromptTraceContext, PromptMetadata, xai_chat_state::TurnCapture)> {
         let mut uploads = Vec::with_capacity(turns.len());
         for (offset, items) in turns.into_iter().enumerate() {
@@ -3173,8 +3173,8 @@ impl MvpAgent {
         let support_permission = self.cfg.borrow().features.support_permission;
         let telemetry_enabled = self.product_analytics_enabled();
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
-        let sampling_config = self
-            .resolve_sampling_config_for_model(&session_model_id, origin_client.clone());
+        let inference_config = self
+            .resolve_inference_config_for_model(&session_model_id, origin_client.clone());
         if self.auth_method_id.load().is_none() {
             return Err(acp::Error::auth_required().data("no auth method id provided"));
         }
@@ -3290,11 +3290,11 @@ impl MvpAgent {
             );
             agent_definition.user_message_template = template;
         }
-        let (session_model_id, sampling_config) = self
+        let (session_model_id, inference_config) = self
             .apply_agent_model_override(
                 pinned_model.as_ref(),
                 session_model_id,
-                sampling_config,
+                inference_config,
                 origin_client.clone(),
             );
         let max_turns = {
@@ -3387,7 +3387,7 @@ impl MvpAgent {
             let cfg = self.cfg.borrow();
             resolve_inference_idle_timeout_secs(
                 &models,
-                &sampling_config.model,
+                &inference_config.model,
                 cfg.remote_settings.as_ref(),
             )
         };
@@ -3395,10 +3395,10 @@ impl MvpAgent {
             .models_manager
             .models()
             .values()
-            .find(|entry| entry.info.model == sampling_config.model)
+            .find(|entry| entry.info.model == inference_config.model)
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
-        let web_search_sampling_config = self.prepare_web_search_sampling_config();
+        let web_search_inference_config = self.prepare_web_search_inference_config();
         let image_gen_config = self.prepare_image_gen_config();
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
@@ -3484,17 +3484,17 @@ impl MvpAgent {
             let _timer = crate::instrumentation_timer!("session.spawn_actor_call");
             let session_key = self.auth_manager.current_or_expired().map(|a| a.key);
             let credentials = xai_chat_state::Credentials {
-                api_key: sampling_config.api_key.clone(),
+                api_key: inference_config.api_key.clone(),
                 auth_type: crate::agent::config::resolve_chat_state_auth_type(
-                    sampling_config.model.as_str(),
+                    inference_config.model.as_str(),
                     session_key.as_deref(),
                     self.auth_type(),
                 ),
                 alpha_test_key: self.alpha_test_key(),
-                client_version: sampling_config.client_version.clone(),
+                client_version: inference_config.client_version.clone(),
             };
             let attribution_callback: Option<
-                xai_grok_sampler::SharedAttributionCallback,
+                xai_grok_inference::SharedAttributionCallback,
             > = Some(
                 crate::auth::attribution::ShellAttribution::new(
                     self.auth_manager.clone(),
@@ -3542,7 +3542,7 @@ impl MvpAgent {
                 });
             let initial_reasoning_effort = chat_history
                 .is_empty()
-                .then_some(sampling_config.reasoning_effort);
+                .then_some(inference_config.reasoning_effort);
             let _ = persistence
                 .tx
                 .send(crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -3569,7 +3569,7 @@ impl MvpAgent {
             spawn_session_on_thread(
                     session_info.clone(),
                     self.gateway.clone(),
-                    sampling_config,
+                    inference_config,
                     credentials,
                     auth_method_id,
                     auth_manager,
@@ -3631,7 +3631,7 @@ impl MvpAgent {
                     origin_client.as_ref().map(|o| o.product.clone()),
                     inference_idle_timeout_secs,
                     model_max_retries,
-                    web_search_sampling_config,
+                    web_search_inference_config,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

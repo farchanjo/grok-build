@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use xai_grok_sampling_types::conversation::ConversationItem;
+use xai_grok_inference_types::conversation::ConversationItem;
 
 /// Maximum number of complete turns to render verbatim in the background
 /// context. Turns beyond this threshold (counting from the end) are
@@ -286,7 +286,7 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                         Some(text.as_ref())
                     }
                     _ => None,
@@ -381,7 +381,7 @@ fn truncate_str(s: &str, max_chars: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_sampling_types::conversation::{ConversationItem, ToolCall, ToolResultItem};
+    use xai_grok_inference_types::conversation::{ConversationItem, ToolCall, ToolResultItem};
 
     fn user_item(text: &str) -> ConversationItem {
         ConversationItem::user(text)
@@ -419,7 +419,7 @@ mod tests {
     }
 
     fn reasoning_item(text: &str) -> ConversationItem {
-        ConversationItem::Reasoning(xai_grok_sampling_types::synthesized_reasoning_item(text))
+        ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(text))
     }
 
     fn extract_background_text(item: &ConversationItem) -> String {
@@ -428,7 +428,7 @@ mod tests {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                         Some(text.as_ref())
                     }
                     _ => None,
@@ -465,7 +465,7 @@ mod tests {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                         Some(text.as_ref())
                     }
                     _ => None,
@@ -502,7 +502,7 @@ mod tests {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                         Some(text.as_ref())
                     }
                     _ => None,
@@ -543,7 +543,7 @@ mod tests {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                         Some(text.as_ref())
                     }
                     _ => None,
@@ -632,7 +632,7 @@ mod tests {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                         Some(text.as_ref())
                     }
                     _ => None,
@@ -685,7 +685,7 @@ mod tests {
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    xai_grok_sampling_types::conversation::ContentPart::Text { text } => {
+                    xai_grok_inference_types::conversation::ContentPart::Text { text } => {
                         Some(text.as_ref())
                     }
                     _ => None,

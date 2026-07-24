@@ -384,7 +384,7 @@ async fn planner_records_own_harness_trace_turn_with_footer() {
             assert!(
                 matches!(
                     &items[0],
-                    crate::sampling::ConversationItem::Assistant(a) if !a.tool_calls.is_empty()
+                    crate::inference::ConversationItem::Assistant(a) if !a.tool_calls.is_empty()
                 ),
                 "first item is the synthetic task call",
             );

@@ -9,7 +9,7 @@ use agent_client_protocol as acp;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
 use xai_file_utils::queue::UploadQueue;
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_inference_types::ReasoningEffort;
 use xai_hunk_tracker::HunkTrackerHandle;
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///
@@ -60,7 +60,7 @@ pub struct SessionHandle {
     pub max_turns: Option<usize>,
     /// Configured cutoff a subagent inherits, published by the session actor. `None` when unset.
     pub resolved_tool_overrides:
-        std::sync::Arc<arc_swap::ArcSwapOption<xai_grok_sampling_types::ToolOverrides>>,
+        std::sync::Arc<arc_swap::ArcSwapOption<xai_grok_inference_types::ToolOverrides>>,
     /// Handle to the hunk tracker for this session
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Actor-based chat state handle — lets callers inspect final conversation state.
@@ -142,7 +142,7 @@ pub struct SessionHandle {
     /// spawn context, so subagents inherit the parent's callback
     /// rather than getting a fresh one (preserving the parent's
     /// session_id on the child's emits).
-    pub attribution_callback: Option<xai_grok_sampler::SharedAttributionCallback>,
+    pub attribution_callback: Option<xai_grok_inference::SharedAttributionCallback>,
     /// The agent definition name for this session.
     pub agent_name: String,
     pub managed_mcp_proxy_base_url: String,
@@ -354,7 +354,7 @@ impl SessionHandle {
     /// Snapshot the session's resolved tool schema for verbatim-fork inheritance.
     /// A dead actor or dropped reply fails open to an empty list (child then builds
     /// its own toolset, same as a non-fork spawn).
-    pub(crate) async fn snapshot_tool_definitions(&self) -> Vec<xai_grok_sampling_types::ToolSpec> {
+    pub(crate) async fn snapshot_tool_definitions(&self) -> Vec<xai_grok_inference_types::ToolSpec> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use xai_grok_sampling_types::{
+use xai_grok_inference_types::{
     ContentPart, ConversationItem, ConversationRequest, SystemItem, UserItem,
 };
 
@@ -523,20 +523,20 @@ pub trait ClassifierClient: Send + Sync {
 }
 
 /// Production sampler-backed [`ClassifierClient`] used by the CLI
-/// binary. Wraps a `xai_grok_sampler::SamplingClient` and pulls the
+/// binary. Wraps a `xai_grok_inference::InferenceClient` and pulls the
 /// text content out of the response.
-pub struct SamplerClassifierClient {
-    inner: xai_grok_sampler::SamplingClient,
+pub struct InferenceClassifierClient {
+    inner: xai_grok_inference::InferenceClient,
 }
 
-impl SamplerClassifierClient {
-    pub fn new(inner: xai_grok_sampler::SamplingClient) -> Self {
+impl InferenceClassifierClient {
+    pub fn new(inner: xai_grok_inference::InferenceClient) -> Self {
         Self { inner }
     }
 }
 
 #[async_trait::async_trait]
-impl ClassifierClient for SamplerClassifierClient {
+impl ClassifierClient for InferenceClassifierClient {
     async fn run(&self, request: ConversationRequest) -> Result<String, String> {
         self.inner
             .conversation_collect(request)
@@ -1104,14 +1104,14 @@ async fn non_interactive_auth_key(grok_home: &Path) -> Result<Option<String>> {
 
 /// Resolve the API key and build the sampler client. Crate-internal:
 /// the only caller is [`run`], which has already destructured
-/// `RunArgs` so the owned strings can move into `SamplerConfig`
+/// `RunArgs` so the owned strings can move into `InferenceConfig`
 /// instead of being cloned.
 async fn build_sampler_client(
     base_url: String,
     model: String,
     api_key: Option<&str>,
     grok_home: Option<&Path>,
-) -> Result<xai_grok_sampler::SamplingClient> {
+) -> Result<xai_grok_inference::InferenceClient> {
     let default_home;
     let grok_home_path: &Path = match grok_home {
         Some(p) => p,
@@ -1121,14 +1121,14 @@ async fn build_sampler_client(
         }
     };
     let resolved = resolve_api_key(api_key, grok_home_path).await?;
-    let config = xai_grok_sampler::SamplerConfig {
+    let config = xai_grok_inference::InferenceConfig {
         api_key: Some(resolved),
         base_url,
         model,
         max_completion_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
-        ..xai_grok_sampler::SamplerConfig::default()
+        ..xai_grok_inference::InferenceConfig::default()
     };
-    xai_grok_sampler::SamplingClient::new(config).map_err(|e| anyhow!("build SamplingClient: {e}"))
+    xai_grok_inference::InferenceClient::new(config).map_err(|e| anyhow!("build InferenceClient: {e}"))
 }
 
 /// End-to-end entry point used by the binary. Writes one JSONL line
@@ -1176,7 +1176,7 @@ pub async fn run(args: RunArgs) -> Result<Summary> {
         grok_home.as_deref(),
     )
     .await?;
-    let client = SamplerClassifierClient::new(sampling_client);
+    let client = InferenceClassifierClient::new(sampling_client);
     let min_confidence = min_confidence.unwrap_or(LAZINESS_DEFAULT_MIN_CONFIDENCE);
     let include_reasoning = include_reasoning.unwrap_or(LAZINESS_INCLUDE_REASONING);
     run_with_client(
@@ -1270,7 +1270,7 @@ pub async fn run_with_writer<W: std::io::Write + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_sampling_types::{AssistantItem, ToolCall, ToolResultItem};
+    use xai_grok_inference_types::{AssistantItem, ToolCall, ToolResultItem};
 
     /// Tiny synthetic 4-turn fixture so the end-to-end tests can run
     /// in CI without external trace artifacts. (F16)
@@ -1791,7 +1791,7 @@ mod tests {
     // F17 — fidelity test. Capture site for the most-recent
     // `ConversationRequest`. `RefCell` would be the natural pick for
     // a single-threaded test, but the `ClassifierClient` trait is
-    // `Send + Sync` (so production `SamplingClient` callers can hold
+    // `Send + Sync` (so production `InferenceClient` callers can hold
     // it via `Arc<dyn ClassifierClient>` across threads) and
     // `RefCell: !Sync`. `std::sync::Mutex<T>` is the minimal Sync
     // interior-mutability primitive — the lock is always uncontended

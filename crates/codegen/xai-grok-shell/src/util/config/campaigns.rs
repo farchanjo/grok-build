@@ -392,7 +392,7 @@ pub async fn persist_user_choice(
 /// `models.default`. `None` clears the field.
 pub async fn persist_models_default(
     value: Option<String>,
-    reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+    reasoning_effort: Option<xai_grok_inference_types::ReasoningEffort>,
 ) -> anyhow::Result<()> {
     let s = value.unwrap_or_default();
     if s.len() > super::settings_writes::MAX_DEFAULT_MODEL_LEN {

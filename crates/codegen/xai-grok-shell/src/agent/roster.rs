@@ -13,7 +13,7 @@
 //! fold or materialized snapshot is required (the snapshot is deferred).
 
 use serde::{Deserialize, Serialize};
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_inference_types::ReasoningEffort;
 
 use crate::session::persistence::Summary;
 

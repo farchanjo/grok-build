@@ -11,7 +11,7 @@
 //! │   build_req)   │                  │                                      │
 //! └────────────────┘                  │  State (no locks needed):            │
 //!                                     │  - conversation: Vec<ConversationItem>│
-//! ┌────────────────┐                  │  - sampling_config: SamplingConfig   │
+//! ┌────────────────┐                  │  - inference_settings: InferenceSettings   │
 //! │   Query (e.g.  │ ── Cmd+Oneshot ─▶│  - prompt_index: usize              │
 //! │  get_conv)     │ ◀── Response ────│  - total_tokens: u64                │
 //! └────────────────┘                  │                                      │

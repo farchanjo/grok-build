@@ -86,15 +86,15 @@ pub enum IntraCompactionError {
 
     /// LLM sampler construction failed.
     #[error("compaction sampler build failed: {0}")]
-    SamplerBuild(String),
+    InferenceBuild(String),
 
     /// LLM sampler call could not be started.
     #[error("compaction sampler start failed: {0}")]
-    SamplerStart(String),
+    InferenceStart(String),
 
     /// LLM sampler emitted an error mid-stream.
     #[error("compaction sampler error: {0}")]
-    SamplerStream(String),
+    InferenceStream(String),
 
     /// `apply_steps_compaction` failed for a parser-specific reason
     /// (e.g. SglangEngine rebuild error).

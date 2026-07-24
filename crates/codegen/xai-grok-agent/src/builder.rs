@@ -517,7 +517,7 @@ impl AgentBuilder {
     /// event with `consumer` of `"ImageGen"` / `"VideoGen.start"` /
     /// `"VideoGen.poll"` / `"WebSearch"`. Callers should pass the
     /// same `ShellAttribution` instance they wire into
-    /// `xai_grok_sampler::SamplerConfig::attribution_callback` so
+    /// `xai_grok_inference::InferenceConfig::attribution_callback` so
     /// all 401s share the same `AuthManager` reference and land in
     /// the same Axiom dataset.
     pub fn with_attribution_callback(
@@ -1190,12 +1190,12 @@ impl AgentBuilder {
         let mut hosted_tools = Vec::new();
         if use_backend_search {
             if web_search_enabled && definition.hosted_tool_allowed("web_search") {
-                hosted_tools.push(xai_grok_sampling_types::HostedTool::WebSearch { options: None });
+                hosted_tools.push(xai_grok_inference_types::HostedTool::WebSearch { options: None });
             }
             if definition.hosted_tool_allowed("x_search") {
-                hosted_tools.push(xai_grok_sampling_types::HostedTool::XSearch { options: None });
+                hosted_tools.push(xai_grok_inference_types::HostedTool::XSearch { options: None });
             }
-            xai_grok_sampling_types::apply_tool_overrides(
+            xai_grok_inference_types::apply_tool_overrides(
                 &mut hosted_tools,
                 definition.tool_overrides.as_ref(),
             );
@@ -2308,7 +2308,7 @@ mod tests {
         web_search_enabled: bool,
         backend_search_enabled: bool,
         disallowed_tools: &[&str],
-        tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
+        tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
     ) -> crate::agent::Agent {
         use xai_grok_tools::computer::local::LocalTerminalBackend;
         use xai_grok_tools::implementations::web_search::WebSearchConfig;
@@ -2346,13 +2346,13 @@ mod tests {
         assert!(
             !hosted
                 .iter()
-                .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::WebSearch { .. })),
+                .any(|t| matches!(t, xai_grok_inference_types::HostedTool::WebSearch { .. })),
             "hosted WebSearch must be removed when web_search is disallowed, got: {hosted:?}"
         );
         assert!(
             hosted
                 .iter()
-                .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::XSearch { .. })),
+                .any(|t| matches!(t, xai_grok_inference_types::HostedTool::XSearch { .. })),
             "XSearch must remain when only web_search is disallowed, got: {hosted:?}"
         );
         let has_web_search_fn = agent
@@ -2375,13 +2375,13 @@ mod tests {
         assert!(
             hosted
                 .iter()
-                .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::WebSearch { .. })),
+                .any(|t| matches!(t, xai_grok_inference_types::HostedTool::WebSearch { .. })),
             "expected WebSearch hosted tool, got: {hosted:?}"
         );
         assert!(
             hosted
                 .iter()
-                .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::XSearch { .. })),
+                .any(|t| matches!(t, xai_grok_inference_types::HostedTool::XSearch { .. })),
             "expected XSearch hosted tool, got: {hosted:?}"
         );
     }
@@ -2394,13 +2394,13 @@ mod tests {
         assert!(
             !hosted
                 .iter()
-                .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::WebSearch { .. })),
+                .any(|t| matches!(t, xai_grok_inference_types::HostedTool::WebSearch { .. })),
             "WebSearch must NOT appear when web_search is disabled, got: {hosted:?}"
         );
         assert!(
             hosted
                 .iter()
-                .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::XSearch { .. })),
+                .any(|t| matches!(t, xai_grok_inference_types::HostedTool::XSearch { .. })),
             "expected XSearch hosted tool, got: {hosted:?}"
         );
     }
@@ -2414,9 +2414,9 @@ mod tests {
     }
     #[tokio::test]
     async fn hosted_tools_bake_definition_tool_overrides_into_options() {
-        let x_search = xai_grok_sampling_types::XSearchOptions {
+        let x_search = xai_grok_inference_types::XSearchOptions {
             date_bound: Some(
-                xai_grok_sampling_types::SearchDateBound::new(None, Some("2024-03-15".into()))
+                xai_grok_inference_types::SearchDateBound::new(None, Some("2024-03-15".into()))
                     .unwrap(),
             ),
         };
@@ -2424,7 +2424,7 @@ mod tests {
             true,
             true,
             &[],
-            Some(xai_grok_sampling_types::ToolOverrides {
+            Some(xai_grok_inference_types::ToolOverrides {
                 x_search: Some(x_search.clone()),
                 web_search: None,
             }),
@@ -2433,7 +2433,7 @@ mod tests {
         assert!(
             agent
                 .hosted_tools()
-                .contains(&xai_grok_sampling_types::HostedTool::XSearch {
+                .contains(&xai_grok_inference_types::HostedTool::XSearch {
                     options: Some(x_search),
                 }),
             "definition tool_overrides must be applied to HostedTool options"

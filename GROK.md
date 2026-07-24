@@ -20,7 +20,7 @@ workspace. It supports:
 - single-turn and headless automation;
 - stdio integration through the Agent Client Protocol;
 - shared leader processes for reconnecting and multi-client sessions;
-- model sampling and tool calling;
+- model inference and tool calling;
 - filesystem, shell, VCS, search, MCP, and media tools;
 - session persistence, worktrees, checkpoints, memory, and compaction;
 - permission policies and operating-system sandboxing.
@@ -36,7 +36,7 @@ The composition-root package is `xai-grok-pager-bin`. It builds the
 | --- | --- |
 | `crates/codegen/xai-grok-pager-bin` | Process startup, CLI dispatch, crash handling, sandbox startup, leader connection, and top-level composition |
 | `crates/codegen/xai-grok-pager` | TUI state, input, rendering, scrollback, commands, and user interaction |
-| `crates/codegen/xai-grok-shell` | Agent runtime, sessions, sampling, tools bridge, stdio/headless/serve/leader modes, memory, and orchestration |
+| `crates/codegen/xai-grok-shell` | Agent runtime, sessions, inference, tools bridge, stdio/headless/serve/leader modes, memory, and orchestration |
 | `crates/codegen/xai-grok-tools` | Built-in tool descriptions, registry, dispatch, persistence, and implementations |
 | `crates/codegen/xai-grok-workspace` | Filesystem and VCS abstraction, execution, permissions, checkpoints, worktrees, and workspace services |
 
@@ -85,7 +85,7 @@ main
      -> WebSocket serve
      -> shared leader
   -> agent session
-  -> model sampling
+  -> model inference
   -> tool selection and dispatch
   -> permission gate
   -> workspace or external operation

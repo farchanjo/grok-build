@@ -81,7 +81,7 @@ impl SessionActor {
 
         let model = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
@@ -216,19 +216,19 @@ impl SessionActor {
         // provider's prefix KV cache stays warm. Mirrors compaction's
         // `summary_strips_reasoning`.
         let strip_reasoning =
-            sampling_client.api_backend() == crate::sampling::ApiBackend::Messages;
+            sampling_client.api_backend() == crate::inference::ApiBackend::Messages;
 
         // Budget off the recap model's context window (today the session model).
         // One read serves both the window and the model.
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_config
+        let inference_config = self.chat_state_handle.get_inference_settings().await;
+        let context_window = inference_config
             .as_ref()
             .map(|c| c.context_window.get())
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
         let items =
             session_recap::budget_recap_items(conversation, tag, strip_reasoning, context_window);
 
-        let model = sampling_config.map(|c| c.model).unwrap_or_default();
+        let model = inference_config.map(|c| c.model).unwrap_or_default();
 
         // Leave BOTH temperature and max_output_tokens unset: the cli-chat-proxy
         // layer may inject a `thinking` budget for thinking-enabled models
@@ -526,47 +526,47 @@ impl SessionActor {
             ..Default::default()
         };
 
-        let request_id = xai_grok_sampler::RequestId::random();
+        let request_id = xai_grok_inference::RequestId::random();
         let idle_timeout = std::time::Duration::from_secs(5);
 
         let result = match sampling_client.api_backend() {
-            crate::sampling::ApiBackend::ChatCompletions => {
+            crate::inference::ApiBackend::ChatCompletions => {
                 let (raw, meta) = sampling_client.conversation_stream(request).await.ok()?;
-                let events = xai_grok_sampler::stream_chat_completions(
+                let events = xai_grok_inference::stream_chat_completions(
                     raw,
                     meta,
                     request_id,
                     idle_timeout,
                     Some(sampling_client.model()),
                     if sampling_client.is_openrouter() {
-                        xai_grok_sampler::config::ProviderIdentity::OpenRouter
+                        xai_grok_inference::config::ProviderIdentity::OpenRouter
                     } else {
-                        xai_grok_sampler::config::ProviderIdentity::Custom
+                        xai_grok_inference::config::ProviderIdentity::Custom
                     },
                 );
-                xai_grok_sampler::collect_response(events).await
+                xai_grok_inference::collect_response(events).await
             }
-            crate::sampling::ApiBackend::Responses => {
+            crate::inference::ApiBackend::Responses => {
                 let (raw, meta, doom_loop) = sampling_client
                     .conversation_stream_responses(request)
                     .await
                     .ok()?;
-                let events = xai_grok_sampler::stream_responses(
+                let events = xai_grok_inference::stream_responses(
                     raw,
                     meta,
                     request_id,
                     idle_timeout,
                     doom_loop,
                 );
-                xai_grok_sampler::collect_response(events).await
+                xai_grok_inference::collect_response(events).await
             }
-            crate::sampling::ApiBackend::Messages => {
+            crate::inference::ApiBackend::Messages => {
                 let (raw, meta) = sampling_client
                     .conversation_stream_messages(request)
                     .await
                     .ok()?;
-                let events = xai_grok_sampler::stream_messages(raw, meta, request_id, idle_timeout);
-                xai_grok_sampler::collect_response(events).await
+                let events = xai_grok_inference::stream_messages(raw, meta, request_id, idle_timeout);
+                xai_grok_inference::collect_response(events).await
             }
         };
 

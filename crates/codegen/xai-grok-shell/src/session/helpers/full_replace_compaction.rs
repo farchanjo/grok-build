@@ -29,15 +29,15 @@ use xai_grok_compaction::{
     CompactionPrompt, CompactionSampleError, CompactionSampler, FullReplaceAttemptOutcome,
     FullReplaceObserver, LlmCompactionOutput,
 };
-use xai_grok_sampler::SamplerConfig as SamplingConfig;
-use xai_grok_sampling_types::{ConversationItem, HostedTool, ToolSpec};
+use xai_grok_inference::InferenceConfig;
+use xai_grok_inference_types::{ConversationItem, HostedTool, ToolSpec};
 use xai_grok_telemetry::events::{CompactionRetryDegraded, CompactionTrigger};
 
 use xai_chat_state::compaction_utils::{
     CompactionAttempt, MAX_CAPTURED_SUMMARY_CHARS, bound_captured_output,
 };
 
-use crate::sampling::Client as OaiCompatClient;
+use crate::inference::Client as OaiCompatClient;
 use crate::session::helpers::session_compact::{
     CompactFailure, CompactOutput, build_compaction_chat_history, generate_session_compact,
 };
@@ -63,7 +63,7 @@ pub(crate) struct ShellCompactionSampler {
     hosted_tools: Vec<HostedTool>,
     client: OaiCompatClient,
     session_id: acp::SessionId,
-    sampling_config: SamplingConfig,
+    inference_config: InferenceConfig,
     /// Per-chunk idle timeout forwarded to `generate_session_compact`: a stalled
     /// summarizer stream (no model-output chunk for this long) fails instead of
     /// hanging.
@@ -85,7 +85,7 @@ impl ShellCompactionSampler {
         hosted_tools: Vec<HostedTool>,
         client: OaiCompatClient,
         session_id: acp::SessionId,
-        sampling_config: SamplingConfig,
+        inference_config: InferenceConfig,
         idle_timeout: Duration,
         wall_clock_budget_secs: u64,
         tool_choice: crate::util::config::CompactionToolChoice,
@@ -97,7 +97,7 @@ impl ShellCompactionSampler {
             hosted_tools,
             client,
             session_id,
-            sampling_config,
+            inference_config,
             idle_timeout,
             wall_clock_budget_secs,
             tool_choice,
@@ -136,7 +136,7 @@ impl CompactionSampler for ShellCompactionSampler {
             self.hosted_tools.clone(),
             self.client.clone(),
             self.session_id.clone(),
-            &self.sampling_config,
+            &self.inference_config,
             self.idle_timeout,
             self.wall_clock_budget_secs,
             self.tool_choice,

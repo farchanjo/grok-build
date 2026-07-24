@@ -4,15 +4,15 @@ use xai_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
     pub(super) async fn handle_set_session_model(
         &self,
-        sampling_config: xai_grok_sampler::SamplerConfig,
+        inference_config: xai_grok_inference::InferenceConfig,
         use_concise: bool,
         apply_prompt_override: bool,
         skip_prompt_rewrite: bool,
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
-        let model_id = acp::ModelId::new(sampling_config.model.clone());
+        let model_id = acp::ModelId::new(inference_config.model.clone());
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
-            std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
+            std::num::NonZeroU64::new(inference_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
                     .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
             })
@@ -21,7 +21,7 @@ impl SessionActor {
         if prev_threshold != auto_compact_threshold_percent {
             tracing::info!(
                 session_id = %self.session_info.id.0,
-                new_model = %sampling_config.model,
+                new_model = %inference_config.model,
                 old_threshold = prev_threshold,
                 new_threshold = auto_compact_threshold_percent,
                 "auto_compact_threshold_percent updated for model switch"
@@ -31,38 +31,38 @@ impl SessionActor {
             .threshold_percent
             .set(auto_compact_threshold_percent);
         self.supports_backend_search
-            .set(sampling_config.supports_backend_search);
+            .set(inference_config.supports_backend_search);
         self.compactions_remaining
-            .set(sampling_config.compactions_remaining);
+            .set(inference_config.compactions_remaining);
         self.compaction_at_tokens
-            .set(sampling_config.compaction_at_tokens);
+            .set(inference_config.compaction_at_tokens);
         self.openrouter_fallback_models
-            .replace(sampling_config.openrouter_fallback_models.clone());
+            .replace(inference_config.openrouter_fallback_models.clone());
         self.openrouter_provider_preferences
-            .replace(sampling_config.openrouter_provider_preferences.clone());
+            .replace(inference_config.openrouter_provider_preferences.clone());
         self.openrouter_plugins
-            .replace(sampling_config.openrouter_plugins.clone());
+            .replace(inference_config.openrouter_plugins.clone());
         xai_grok_telemetry::unified_log::info(
             "backend_search: model switch",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
-                "new_model": &sampling_config.model,
-                "api_backend": format!("{:?}", sampling_config.api_backend),
-                "supports_backend_search": sampling_config.supports_backend_search,
+                "new_model": &inference_config.model,
+                "api_backend": format!("{:?}", inference_config.api_backend),
+                "supports_backend_search": inference_config.supports_backend_search,
             })),
         );
         self.chat_state_handle
-            .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
-                base_url: sampling_config.base_url.clone(),
-                model: sampling_config.model.clone(),
-                max_completion_tokens: sampling_config.max_completion_tokens,
-                temperature: sampling_config.temperature,
-                top_p: sampling_config.top_p,
-                api_backend: sampling_config.api_backend.clone(),
-                extra_headers: sampling_config.extra_headers.clone(),
+            .update_inference_settings(xai_grok_inference_types::InferenceSettings {
+                base_url: inference_config.base_url.clone(),
+                model: inference_config.model.clone(),
+                max_completion_tokens: inference_config.max_completion_tokens,
+                temperature: inference_config.temperature,
+                top_p: inference_config.top_p,
+                api_backend: inference_config.api_backend.clone(),
+                extra_headers: inference_config.extra_headers.clone(),
                 context_window: new_context_window,
-                reasoning_effort: sampling_config.reasoning_effort,
-                stream_tool_calls: Some(sampling_config.stream_tool_calls),
+                reasoning_effort: inference_config.reasoning_effort,
+                stream_tool_calls: Some(inference_config.stream_tool_calls),
             });
         let existing = self.chat_state_handle.get_credentials().await;
         let session_key = self
@@ -71,18 +71,18 @@ impl SessionActor {
             .and_then(|am| am.current_or_expired().map(|a| a.key));
         self.chat_state_handle
             .update_credentials(xai_chat_state::Credentials {
-                api_key: sampling_config.api_key.clone(),
+                api_key: inference_config.api_key.clone(),
                 auth_type: crate::agent::config::resolve_chat_state_auth_type(
-                    sampling_config.model.as_str(),
+                    inference_config.model.as_str(),
                     session_key.as_deref(),
                     existing.auth_type,
                 ),
                 alpha_test_key: existing.alpha_test_key,
-                client_version: sampling_config.client_version.clone(),
+                client_version: inference_config.client_version.clone(),
             });
         self.invalidate_model_auth_memo();
         self.signals_handle()
-            .record_model_usage(&sampling_config.model);
+            .record_model_usage(&inference_config.model);
         if apply_prompt_override && !skip_prompt_rewrite {
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
@@ -119,7 +119,7 @@ impl SessionActor {
             .send(PersistenceMsg::CurrentModel {
                 model_id: model_id.clone(),
                 agent_name: Some(agent_name),
-                reasoning_effort: Some(sampling_config.reasoning_effort),
+                reasoning_effort: Some(inference_config.reasoning_effort),
             });
         Ok(model_id)
     }

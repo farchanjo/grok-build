@@ -130,8 +130,8 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
 
                 (model_id, model_metadata)
             } else {
-                let sampling_config = agent.sampling_config.borrow().clone();
-                (Some(sampling_config.model.clone()), Default::default())
+                let inference_config = agent.inference_config.borrow().clone();
+                (Some(inference_config.model.clone()), Default::default())
             };
 
             let turn_number = feedback_input.turn_number.or_else(|| {

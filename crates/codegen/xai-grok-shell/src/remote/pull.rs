@@ -322,7 +322,7 @@ mod tests {
         super::hydrate::write_to_dir(tmp.path(), &data).unwrap();
 
         let chat = std::fs::read_to_string(tmp.path().join("chat_history.jsonl")).unwrap();
-        let items: Vec<crate::sampling::ConversationItem> = chat
+        let items: Vec<crate::inference::ConversationItem> = chat
             .lines()
             .filter(|l| !l.is_empty())
             .filter_map(|l| serde_json::from_str(l).ok())
@@ -331,18 +331,18 @@ mod tests {
         assert_eq!(items.len(), 2, "should have 1 user + 1 agent item");
         assert!(matches!(
             &items[0],
-            crate::sampling::ConversationItem::User(_)
+            crate::inference::ConversationItem::User(_)
         ));
         assert!(matches!(
             &items[1],
-            crate::sampling::ConversationItem::Assistant(_)
+            crate::inference::ConversationItem::Assistant(_)
         ));
-        if let crate::sampling::ConversationItem::User(u) = &items[0] {
+        if let crate::inference::ConversationItem::User(u) = &items[0] {
             let text: String = u
                 .content
                 .iter()
                 .filter_map(|p| match p {
-                    crate::sampling::ContentPart::Text { text } => Some(text.as_ref()),
+                    crate::inference::ContentPart::Text { text } => Some(text.as_ref()),
                     _ => None,
                 })
                 .collect();
@@ -406,22 +406,22 @@ mod tests {
         super::hydrate::write_to_dir(tmp.path(), &data).unwrap();
 
         let chat = std::fs::read_to_string(tmp.path().join("chat_history.jsonl")).unwrap();
-        let items: Vec<crate::sampling::ConversationItem> = chat
+        let items: Vec<crate::inference::ConversationItem> = chat
             .lines()
             .filter(|l| !l.is_empty())
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
 
         assert_eq!(items.len(), 2);
-        if let crate::sampling::ConversationItem::User(u) = &items[0] {
+        if let crate::inference::ConversationItem::User(u) = &items[0] {
             assert_eq!(u.content.len(), 2, "should have text + image parts");
             assert!(matches!(
                 &u.content[0],
-                crate::sampling::ContentPart::Text { .. }
+                crate::inference::ContentPart::Text { .. }
             ));
             assert!(matches!(
                 &u.content[1],
-                crate::sampling::ContentPart::Image { .. }
+                crate::inference::ContentPart::Image { .. }
             ));
         } else {
             panic!("expected User item");

@@ -323,7 +323,7 @@ impl SessionActor {
         let sampling_client = self.prepare_chat_completion(false).await?;
         let model = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
@@ -429,7 +429,7 @@ impl SessionActor {
 
             let model = match self.memory.flush_config.flush_model.clone() {
                 Some(m) => m,
-                None => self.chat_state_handle.get_sampling_config().await
+                None => self.chat_state_handle.get_inference_settings().await
                     .map(|c| c.model)
                     .unwrap_or_default(),
             };
@@ -650,7 +650,7 @@ impl SessionActor {
             self.chat_state_handle.get_conversation_counts(),
             self.chat_state_handle.get_conversation(),
         );
-        let chat_history = crate::sampling::conversation_to_chat_messages(
+        let chat_history = crate::inference::conversation_to_chat_messages(
             xai_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation),
         );
         MemoryFlushSnapshot {
@@ -713,50 +713,50 @@ impl SessionActor {
             ..Default::default()
         };
 
-        let request_id = xai_grok_sampler::RequestId::random();
+        let request_id = xai_grok_inference::RequestId::random();
         let idle_timeout = std::time::Duration::from_secs(15);
 
         let result = match sampling_client.api_backend() {
-            crate::sampling::ApiBackend::ChatCompletions => {
+            crate::inference::ApiBackend::ChatCompletions => {
                 let (raw, meta) = sampling_client
                     .conversation_stream(request)
                     .await
                     .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = xai_grok_sampler::stream_chat_completions(
+                let events = xai_grok_inference::stream_chat_completions(
                     raw,
                     meta,
                     request_id,
                     idle_timeout,
                     Some(sampling_client.model()),
                     if sampling_client.is_openrouter() {
-                        xai_grok_sampler::config::ProviderIdentity::OpenRouter
+                        xai_grok_inference::config::ProviderIdentity::OpenRouter
                     } else {
-                        xai_grok_sampler::config::ProviderIdentity::Custom
+                        xai_grok_inference::config::ProviderIdentity::Custom
                     },
                 );
-                xai_grok_sampler::collect_response(events).await
+                xai_grok_inference::collect_response(events).await
             }
-            crate::sampling::ApiBackend::Responses => {
+            crate::inference::ApiBackend::Responses => {
                 let (raw, meta, doom_loop) = sampling_client
                     .conversation_stream_responses(request)
                     .await
                     .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = xai_grok_sampler::stream_responses(
+                let events = xai_grok_inference::stream_responses(
                     raw,
                     meta,
                     request_id,
                     idle_timeout,
                     doom_loop,
                 );
-                xai_grok_sampler::collect_response(events).await
+                xai_grok_inference::collect_response(events).await
             }
-            crate::sampling::ApiBackend::Messages => {
+            crate::inference::ApiBackend::Messages => {
                 let (raw, meta) = sampling_client
                     .conversation_stream_messages(request)
                     .await
                     .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = xai_grok_sampler::stream_messages(raw, meta, request_id, idle_timeout);
-                xai_grok_sampler::collect_response(events).await
+                let events = xai_grok_inference::stream_messages(raw, meta, request_id, idle_timeout);
+                xai_grok_inference::collect_response(events).await
             }
         };
 

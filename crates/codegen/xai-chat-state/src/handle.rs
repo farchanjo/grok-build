@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use tokio::sync::{mpsc, oneshot};
-use xai_grok_sampling_types::{
-    ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
+use xai_grok_inference_types::{
+    ConversationItem, ConversationRequest, DanglingToolCallReason, InferenceSettings, TokenUsage,
     ToolSpec, TraceContext,
 };
 
@@ -164,10 +164,10 @@ impl ChatStateHandle {
     }
 
     /// Update the sampling config (e.g., model switch).
-    pub fn update_sampling_config(&self, config: SamplingConfig) {
+    pub fn update_inference_settings(&self, config: InferenceSettings) {
         let _ = self
             .cmd_tx
-            .send(ChatStateCommand::UpdateSamplingConfig { config });
+            .send(ChatStateCommand::UpdateInferenceSettings { config });
     }
 
     /// Track that the agent edited a file path.
@@ -443,9 +443,9 @@ impl ChatStateHandle {
     }
 
     /// Get sampling config.
-    pub async fn get_sampling_config(&self) -> Option<SamplingConfig> {
-        self.query("GetSamplingConfig", |reply| {
-            ChatStateCommand::GetSamplingConfig { reply }
+    pub async fn get_inference_settings(&self) -> Option<InferenceSettings> {
+        self.query("GetInferenceSettings", |reply| {
+            ChatStateCommand::GetInferenceSettings { reply }
         })
         .await
     }

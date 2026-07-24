@@ -27,7 +27,7 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         send_now: bool,
         task_wake_fallback: Option<TaskWakeFallback>,
-        tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
+        tool_overrides_update: Option<xai_grok_inference_types::ToolOverridesUpdate>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,

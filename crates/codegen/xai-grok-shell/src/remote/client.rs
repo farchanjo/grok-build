@@ -820,9 +820,9 @@ pub fn parse_remote_model_value(
     let api_backend = get_string(obj, "apiBackend")
         .or_else(|| get_string(obj, "api_backend"))
         .and_then(|s| match s.as_str() {
-            "responses" => Some(crate::sampling::ApiBackend::Responses),
-            "chat_completions" => Some(crate::sampling::ApiBackend::ChatCompletions),
-            "messages" => Some(crate::sampling::ApiBackend::Messages),
+            "responses" => Some(crate::inference::ApiBackend::Responses),
+            "chat_completions" => Some(crate::inference::ApiBackend::ChatCompletions),
+            "messages" => Some(crate::inference::ApiBackend::Messages),
             _ => None,
         })
         .unwrap_or_default();
@@ -888,7 +888,7 @@ pub fn parse_remote_model_value(
             .or_else(|| obj.get("reasoning_efforts"))
             .or_else(|| meta.and_then(|m| m.get("reasoningEfforts")))
             .and_then(|v| v.as_array())
-            .map(|arr| xai_grok_sampling_types::parse_reasoning_effort_options(arr))
+            .map(|arr| xai_grok_inference_types::parse_reasoning_effort_options(arr))
             .unwrap_or_default(),
         supports_backend_search: obj
             .get("supportsBackendSearch")
@@ -907,7 +907,7 @@ pub fn parse_remote_model_value(
                     .or_else(|| obj.get("send_compactions_remaining"))
                     .or_else(|| meta.and_then(|m| m.get("sendCompactionsRemaining")))
                     .and_then(|v| v.as_bool())
-                    .map(xai_grok_sampling_types::CompactionsRemaining::Dynamic)
+                    .map(xai_grok_inference_types::CompactionsRemaining::Dynamic)
             }),
         compaction_at_tokens: obj
             .get("compactionAtTokens")
@@ -977,16 +977,16 @@ fn get_env_keys(
 }
 fn parse_compaction_at_tokens(
     v: &serde_json::Value,
-) -> Option<xai_grok_sampling_types::CompactionAtTokens> {
-    use xai_grok_sampling_types::CompactionAtTokens;
+) -> Option<xai_grok_inference_types::CompactionAtTokens> {
+    use xai_grok_inference_types::CompactionAtTokens;
     v.as_bool()
         .map(CompactionAtTokens::Enabled)
         .or_else(|| v.as_u64().map(CompactionAtTokens::Fixed))
 }
 fn parse_compactions_remaining(
     v: &serde_json::Value,
-) -> Option<xai_grok_sampling_types::CompactionsRemaining> {
-    use xai_grok_sampling_types::CompactionsRemaining;
+) -> Option<xai_grok_inference_types::CompactionsRemaining> {
+    use xai_grok_inference_types::CompactionsRemaining;
     v.as_bool().map(CompactionsRemaining::Dynamic).or_else(|| {
         v.as_u64()
             .and_then(|n| u8::try_from(n).ok())
@@ -1427,7 +1427,7 @@ mod tests {
     }
     #[test]
     fn parse_reads_reasoning_effort_fields() {
-        use xai_grok_sampling_types::ReasoningEffort;
+        use xai_grok_inference_types::ReasoningEffort;
         let value = serde_json::json!({
             "model": "grok-4.5",
             "context_window": 1_000_000,
@@ -1453,7 +1453,7 @@ mod tests {
     }
     #[test]
     fn parse_reads_reasoning_efforts_list() {
-        use xai_grok_sampling_types::ReasoningEffort;
+        use xai_grok_inference_types::ReasoningEffort;
         let value = serde_json::json!({
             "model": "grok-4.5",
             "context_window": 1_000_000,

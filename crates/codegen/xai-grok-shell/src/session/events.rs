@@ -202,8 +202,8 @@ const _: () = assert!(
 /// never cancels a turn — so it is mapped directly at the drain site.)
 pub(crate) fn prior_turn_interrupt_from_cancellation(
     category: CancellationCategory,
-) -> Option<xai_grok_sampling_types::PriorTurnInterrupt> {
-    use xai_grok_sampling_types::PriorTurnInterrupt;
+) -> Option<xai_grok_inference_types::PriorTurnInterrupt> {
+    use xai_grok_inference_types::PriorTurnInterrupt;
     match category {
         CancellationCategory::MidTurnAbort => Some(PriorTurnInterrupt::MidTurnAbort),
         CancellationCategory::PermissionRejected => Some(PriorTurnInterrupt::PermissionRejected),
@@ -227,7 +227,7 @@ pub const GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT: &str = "timeout";
 
 /// Fail-open — the subagent spawn returned an error (channel closed,
 /// coordinator rejected, etc.). INFRA-class.
-pub const GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR: &str = "sampler_error";
+pub const GOAL_CLASSIFIER_FAIL_OPEN_INFERENCE_ERROR: &str = "sampler_error";
 
 /// Fail-open — the user aborted the run mid-classification.
 pub const GOAL_CLASSIFIER_FAIL_OPEN_ABORTED: &str = "aborted";
@@ -255,7 +255,7 @@ pub const GOAL_CLASSIFIER_FAIL_CLOSED_PENDING_QUEUE_FULL: &str = "pending_queue_
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(
     !GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT.is_empty()
-        && !GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR.is_empty()
+        && !GOAL_CLASSIFIER_FAIL_OPEN_INFERENCE_ERROR.is_empty()
         && !GOAL_CLASSIFIER_FAIL_OPEN_ABORTED.is_empty()
         && !GOAL_CLASSIFIER_FAIL_OPEN_FILE_WRITE_FAILED.is_empty()
         && !GOAL_CLASSIFIER_FAIL_OPEN_GOAL_NOT_ACTIVE.is_empty()
@@ -281,7 +281,7 @@ pub(crate) enum GoalClassifierFailOpenReason {
         )
     )]
     Timeout,
-    SamplerError,
+    InferenceError,
     /// Retained for wire/dashboard compatibility; no emitter today.
     #[expect(dead_code, reason = "wire vocabulary; no production emitter today")]
     Aborted,
@@ -293,7 +293,7 @@ impl GoalClassifierFailOpenReason {
     pub(crate) fn as_const_str(self) -> &'static str {
         match self {
             Self::Timeout => GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT,
-            Self::SamplerError => GOAL_CLASSIFIER_FAIL_OPEN_SAMPLER_ERROR,
+            Self::InferenceError => GOAL_CLASSIFIER_FAIL_OPEN_INFERENCE_ERROR,
             Self::Aborted => GOAL_CLASSIFIER_FAIL_OPEN_ABORTED,
             Self::FileWriteFailed => GOAL_CLASSIFIER_FAIL_OPEN_FILE_WRITE_FAILED,
             Self::GoalNotActiveAtResolve => GOAL_CLASSIFIER_FAIL_OPEN_GOAL_NOT_ACTIVE,
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn prior_turn_interrupt_from_cancellation_maps_user_interrupts_only() {
-        use xai_grok_sampling_types::PriorTurnInterrupt;
+        use xai_grok_inference_types::PriorTurnInterrupt;
         // The three user-interrupt causes map to a marker.
         assert_eq!(
             prior_turn_interrupt_from_cancellation(CancellationCategory::MidTurnAbort),

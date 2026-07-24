@@ -583,7 +583,7 @@ impl SessionActor {
                 {
                     let model_id = self
                         .chat_state_handle
-                        .get_sampling_config()
+                        .get_inference_settings()
                         .await
                         .map(|c| c.model)
                         .unwrap_or_default();

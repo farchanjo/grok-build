@@ -1,5 +1,5 @@
 use super::{LEGACY_AGENTS_MD_REMINDER_PREFIX, conversation_has_project_instructions};
-use xai_grok_sampling_types::{ContentPart, ConversationItem, SyntheticReason, UserItem};
+use xai_grok_inference_types::{ContentPart, ConversationItem, SyntheticReason, UserItem};
 
 /// A `User` item tagged `ProjectInstructions` is the canonical
 /// post-Task-1 representation and must be detected.

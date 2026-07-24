@@ -57,7 +57,7 @@ use crate::agent::feedback_client::FeedbackClient;
 use crate::agent::folder_trust;
 use crate::agent::models::{resolve_catalog_key, selectable_catalog_key_for_persisted};
 use crate::agent::session_config;
-use xai_grok_sampling_types::{
+use xai_grok_inference_types::{
     REASONING_EFFORT_META_KEY, ReasoningEffortOption, reasoning_effort_meta_value,
     supports_reasoning_effort_meta,
 };
@@ -69,10 +69,10 @@ use xai_grok_telemetry::id::{agent_id, agent_instance_id};
 use xai_grok_telemetry::session_ctx::log_event;
 use xai_grok_workspace::file_system::{AcpSessionFs, CodebaseIndexManager, LocalFs};
 use xai_grok_workspace::permission::{ClientType, PermissionEvent};
-use crate::sampling::Client as OaiCompatClient;
-use crate::sampling::error::map_sampling_err_to_acp;
+use crate::inference::Client as OaiCompatClient;
+use crate::inference::error::map_sampling_err_to_acp;
 use crate::session::mcp_servers::{McpMetaConfigMap, parse_mcp_meta_config};
-use xai_grok_sampler::SamplerConfig as SamplingConfig;
+use xai_grok_inference::InferenceConfig;
 use crate::session::persistence::PersistenceHandle;
 use crate::session::worktree::BackgroundCopyContext;
 use crate::session::{
@@ -191,7 +191,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub initial_client_mcp_servers: Vec<acp::McpServer>,
     pub mcp_meta_config_map: McpMetaConfigMap,
     pub persistence: PersistenceHandle,
-    pub chat_history: Vec<crate::sampling::ConversationItem>,
+    pub chat_history: Vec<crate::inference::ConversationItem>,
     pub rewind_points_file_path: Option<std::path::PathBuf>,
     pub initial_total_tokens: u64,
     pub origin_client: Option<crate::http::OriginClientInfo>,
@@ -428,7 +428,7 @@ pub(crate) struct PromptResponseMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
+    pub tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
 }
 /// Inputs for [`build_prompt_response_meta`]. A struct (not positional args)
 /// so call sites are self-documenting and adding a field can't silently
@@ -438,12 +438,12 @@ pub(crate) struct PromptResponseMetaArgs<'a> {
     pub prompt_id: &'a str,
     pub total_tokens: u64,
     pub model_id: &'a str,
-    pub last_turn_usage: Option<&'a xai_grok_sampling_types::TokenUsage>,
+    pub last_turn_usage: Option<&'a xai_grok_inference_types::TokenUsage>,
     pub prompt_usage: Option<crate::extensions::notification::PromptUsage>,
     pub cancellation_category: Option<String>,
     pub cancel_trigger: Option<String>,
     pub structured_output: Option<Result<serde_json::Value, String>>,
-    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
+    pub tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
 }
 /// Build the `_meta` JSON for `PromptResponse`. Includes baseline
 /// session/prompt/model identifiers plus optional per-turn token counts
@@ -653,7 +653,7 @@ pub struct MvpAgent {
     /// Global sampling config (API key + default base_url). LEADER-SAFE(shared):
     /// only api_key is written here (same for all clients). Per-session base_url
     /// is resolved at session creation time in `new_session` / `load_session`.
-    pub(crate) sampling_config: RefCell<SamplingConfig>,
+    pub(crate) inference_config: RefCell<InferenceConfig>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: crate::agent::models::ModelsManager,
     /// grok.com chat-product catalog (`/rest/modes`) for chat sessions; distinct

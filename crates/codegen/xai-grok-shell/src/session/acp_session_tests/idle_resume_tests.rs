@@ -102,7 +102,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
                 vec![],
-                xai_grok_sampling_types::SamplingConfig {
+                xai_grok_inference_types::InferenceSettings {
                     base_url: mock_url,
                     model: "test-model".to_string(),
                     max_completion_tokens: Some(8192),
@@ -315,7 +315,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
-                sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+                sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
@@ -329,7 +329,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             actor
                 .last_api_request_at
                 .store(eleven_minutes_ago_ms, std::sync::atomic::Ordering::Relaxed);
-            let cfg_before = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_before.context_window,
                 std::num::NonZeroU64::new(200_000).unwrap()
@@ -337,7 +337,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             assert_eq!(cfg_before.max_completion_tokens, Some(8192));
             actor.maybe_refresh_model_metadata_on_resume().await;
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_after.context_window,
                 std::num::NonZeroU64::new(300_000).unwrap(),
@@ -364,9 +364,9 @@ async fn test_idle_resume_noop_when_not_idle_enough() {
             actor
                 .last_api_request_at
                 .store(five_minutes_ago_ms, std::sync::atomic::Ordering::Relaxed);
-            let cfg_before = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
             actor.maybe_refresh_model_metadata_on_resume().await;
-            let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
             assert_eq!(
                 cfg_before.context_window, cfg_after.context_window,
                 "config should not change when idle < 10 min"

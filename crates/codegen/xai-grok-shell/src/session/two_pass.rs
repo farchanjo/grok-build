@@ -5,7 +5,7 @@
 //! Sampling lives in [`super::compaction`]; this module has no I/O.
 
 use xai_chat_state::estimate_item_tokens;
-use xai_grok_sampling_types::ConversationItem;
+use xai_grok_inference_types::ConversationItem;
 
 /// Default history fraction covered by pass1; the remainder is the blocking
 /// pass2 tail, so keep it small (prod pass2 latency is dominated by tail prefill).
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn split_does_not_sever_tool_pairs() {
-        use xai_grok_sampling_types::ToolCall;
+        use xai_grok_inference_types::ToolCall;
         let mut assistant = ConversationItem::assistant("call");
         if let ConversationItem::Assistant(a) = &mut assistant {
             a.tool_calls.push(ToolCall {

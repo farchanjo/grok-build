@@ -4,7 +4,7 @@ use crate::extensions::notification::{
     CompactionCheckpointFile, CompactionCheckpointInfo, SessionNotification as XaiNotification,
     SessionUpdate as XaiSessionUpdate,
 };
-use crate::sampling::ConversationItem;
+use crate::inference::ConversationItem;
 use crate::session::storage::{SessionUpdate, SessionUpdateEnvelope};
 use crate::session::{RewindMode, RewindRequest};
 use agent_client_protocol as acp;
@@ -281,7 +281,7 @@ async fn rewind_before_compaction_clears_stale_compaction_marker() {
 }
 
 async fn run_clears_marker_scenario() {
-    use xai_grok_sampling_types::CompactionsRemaining;
+    use xai_grok_inference_types::CompactionsRemaining;
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;

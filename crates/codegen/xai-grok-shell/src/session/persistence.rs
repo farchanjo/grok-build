@@ -7,8 +7,8 @@ use crate::config::StorageMode;
 
 use crate::remote::RemoteSync;
 
-use crate::sampling::Client as OaiCompatClient;
-use crate::sampling::ConversationItem;
+use crate::inference::Client as OaiCompatClient;
+use crate::inference::ConversationItem;
 use crate::session::export::ExportedMetadata;
 use xai_grok_workspace::session::file_state::RewindPoint;
 
@@ -19,7 +19,7 @@ use crate::tools::todo::TodoState;
 use crate::util::grok_home::grok_home;
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_inference_types::ReasoningEffort;
 
 use crate::session::info::Info;
 use tokio::sync::mpsc;

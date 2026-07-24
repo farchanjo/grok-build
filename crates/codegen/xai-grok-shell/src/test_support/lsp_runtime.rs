@@ -38,7 +38,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_max_turns: None,
         gateway: test_gateway(),
         client_hooks: Default::default(),
-        sampling_config: xai_grok_sampler::SamplerConfig {
+        inference_config: xai_grok_inference::InferenceConfig {
             api_key: None,
             base_url: String::new(),
             model: String::new(),
@@ -93,7 +93,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         )),
         session_env: Arc::new(HashMap::new()),
         memory_config: None,
-        web_search_sampling_config: None,
+        web_search_inference_config: None,
         web_fetch_config: Default::default(),
         image_gen_config: Default::default(),
         video_gen_config: Default::default(),

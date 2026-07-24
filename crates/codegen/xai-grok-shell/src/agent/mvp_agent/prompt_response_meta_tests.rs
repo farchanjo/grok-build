@@ -1,5 +1,5 @@
 use super::{PromptResponseMetaArgs, build_prompt_response_meta};
-use xai_grok_sampling_types::TokenUsage;
+use xai_grok_inference_types::TokenUsage;
 
 /// Baseline args with no usage, cancellation, or structured output.
 fn args<'a>(
@@ -122,10 +122,10 @@ fn cancel_trigger_lands_as_camelcase_meta_key() {
 
 #[test]
 fn tool_overrides_land_as_camelcase_meta_key() {
-    let overrides = xai_grok_sampling_types::ToolOverrides {
-        x_search: Some(xai_grok_sampling_types::XSearchOptions {
+    let overrides = xai_grok_inference_types::ToolOverrides {
+        x_search: Some(xai_grok_inference_types::XSearchOptions {
             date_bound: Some(
-                xai_grok_sampling_types::SearchDateBound::new(None, Some("2024-03-15".to_string()))
+                xai_grok_inference_types::SearchDateBound::new(None, Some("2024-03-15".to_string()))
                     .unwrap(),
             ),
         }),

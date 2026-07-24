@@ -196,11 +196,11 @@ fn combine_front_skips_edit_hold() {
     assert!(rx2.try_recv().is_err(), "held row must stay queued");
 }
 
-fn x_search_cutoff_update() -> xai_grok_sampling_types::ToolOverridesUpdate {
-    xai_grok_sampling_types::ToolOverridesUpdate {
-        x_search: Some(Some(xai_grok_sampling_types::XSearchOptions {
+fn x_search_cutoff_update() -> xai_grok_inference_types::ToolOverridesUpdate {
+    xai_grok_inference_types::ToolOverridesUpdate {
+        x_search: Some(Some(xai_grok_inference_types::XSearchOptions {
             date_bound: Some(
-                xai_grok_sampling_types::SearchDateBound::new(None, Some("2024-03-15".to_string()))
+                xai_grok_inference_types::SearchDateBound::new(None, Some("2024-03-15".to_string()))
                     .unwrap(),
             ),
         })),
@@ -1785,9 +1785,9 @@ async fn tool_overrides_update_applies_at_promotion_never_at_enqueue() {
     local
         .run_until(async {
             let (actor, _rx) = build_actor().await;
-            let options = xai_grok_sampling_types::XSearchOptions {
+            let options = xai_grok_inference_types::XSearchOptions {
                 date_bound: Some(
-                    xai_grok_sampling_types::SearchDateBound::new(
+                    xai_grok_inference_types::SearchDateBound::new(
                         None,
                         Some("2024-03-15".to_string()),
                     )
@@ -1795,11 +1795,11 @@ async fn tool_overrides_update_applies_at_promotion_never_at_enqueue() {
                 ),
             };
             // A per-turn update that SETS the x_search override to `options`.
-            let set_update = || xai_grok_sampling_types::ToolOverridesUpdate {
+            let set_update = || xai_grok_inference_types::ToolOverridesUpdate {
                 x_search: Some(Some(options.clone())),
                 web_search: None,
             };
-            let expected = xai_grok_sampling_types::ToolOverrides {
+            let expected = xai_grok_inference_types::ToolOverrides {
                 x_search: Some(options.clone()),
                 web_search: None,
             };
@@ -1863,7 +1863,7 @@ async fn tool_overrides_update_applies_at_promotion_never_at_enqueue() {
                 Some(&expected),
                 "a prompt with no update leaves the sticky override in place"
             );
-            actor.apply_tool_overrides_update(Some(xai_grok_sampling_types::ToolOverridesUpdate {
+            actor.apply_tool_overrides_update(Some(xai_grok_inference_types::ToolOverridesUpdate {
                 x_search: Some(None),
                 web_search: None,
             }));
@@ -1888,7 +1888,7 @@ async fn effective_tool_overrides_echoes_and_gates_on_backend_search() {
             let (actor, _rx) = build_actor().await;
             // Backend search on, with a bare (unbounded) x_search hosted tool.
             *actor.agent.borrow_mut() =
-                test_agent_backend_search(vec![xai_grok_sampling_types::HostedTool::XSearch {
+                test_agent_backend_search(vec![xai_grok_inference_types::HostedTool::XSearch {
                     options: None,
                 }])
                 .await;
@@ -1899,16 +1899,16 @@ async fn effective_tool_overrides_echoes_and_gates_on_backend_search() {
             );
 
             // A standing per-turn cutoff (toDate only).
-            let options = xai_grok_sampling_types::XSearchOptions {
+            let options = xai_grok_inference_types::XSearchOptions {
                 date_bound: Some(
-                    xai_grok_sampling_types::SearchDateBound::new(
+                    xai_grok_inference_types::SearchDateBound::new(
                         None,
                         Some("2024-03-15".to_string()),
                     )
                     .unwrap(),
                 ),
             };
-            let expected = xai_grok_sampling_types::ToolOverrides {
+            let expected = xai_grok_inference_types::ToolOverrides {
                 x_search: Some(options.clone()),
                 web_search: None,
             };
@@ -1921,7 +1921,7 @@ async fn effective_tool_overrides_echoes_and_gates_on_backend_search() {
             );
             assert_eq!(
                 actor.effective_hosted_tools(),
-                vec![xai_grok_sampling_types::HostedTool::XSearch {
+                vec![xai_grok_inference_types::HostedTool::XSearch {
                     options: Some(options.clone()),
                 }],
                 "the wire's XSearch entry carries exactly the bound the echo attests (wire == echo)"
@@ -1959,10 +1959,10 @@ async fn agent_rebuild_republishes_the_configured_cutoff() {
                 "the default definition seeds no cutoff",
             );
 
-            let seed = xai_grok_sampling_types::ToolOverrides {
-                x_search: Some(xai_grok_sampling_types::XSearchOptions {
+            let seed = xai_grok_inference_types::ToolOverrides {
+                x_search: Some(xai_grok_inference_types::XSearchOptions {
                     date_bound: Some(
-                        xai_grok_sampling_types::SearchDateBound::new(
+                        xai_grok_inference_types::SearchDateBound::new(
                             None,
                             Some("2020-01-01".to_string()),
                         )
@@ -2011,10 +2011,10 @@ async fn set_tool_overrides_publishes_the_inheritance_cell_before_any_turn() {
         .run_until(async {
             let (actor, _rx) = build_actor().await;
             assert!(actor.resolved_tool_overrides.load().is_none());
-            let cutoff = xai_grok_sampling_types::ToolOverrides {
-                x_search: Some(xai_grok_sampling_types::XSearchOptions {
+            let cutoff = xai_grok_inference_types::ToolOverrides {
+                x_search: Some(xai_grok_inference_types::XSearchOptions {
                     date_bound: Some(
-                        xai_grok_sampling_types::SearchDateBound::new(
+                        xai_grok_inference_types::SearchDateBound::new(
                             None,
                             Some("2020-01-01".to_string()),
                         )

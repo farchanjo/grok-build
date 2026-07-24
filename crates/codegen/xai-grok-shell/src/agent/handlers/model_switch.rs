@@ -8,7 +8,7 @@ use crate::agent::mvp_agent::{
 use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
 use tokio::sync::oneshot;
-use xai_grok_sampling_types::parse_reasoning_effort_meta;
+use xai_grok_inference_types::parse_reasoning_effort_meta;
 /// Apply a model switch to a session (no gate — `set_session_model` gates first).
 pub(crate) async fn apply(
     agent: &MvpAgent,
@@ -123,7 +123,7 @@ pub(crate) async fn apply(
         }
     }
     let mut model_sampling =
-        agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
+        agent.prepare_inference_config_for_model(&model, handle.origin_client.clone());
     if let Some(eff) = effort_override {
         if agent
             .models_manager
@@ -207,7 +207,7 @@ pub(crate) async fn apply(
     };
     let (tx, rx) = oneshot::channel();
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
-        sampling_config: model_sampling,
+        inference_config: model_sampling,
         use_concise,
         apply_prompt_override,
         skip_prompt_rewrite: did_rebuild || model_unchanged,

@@ -142,9 +142,9 @@ impl SessionActor {
         &self,
     ) -> Option<(
         crate::agent::model_providers::ResolvedModelProvider,
-        xai_grok_sampling_types::SamplingConfig,
+        xai_grok_inference_types::InferenceSettings,
     )> {
-        let sampling = self.chat_state_handle.get_sampling_config().await?;
+        let sampling = self.chat_state_handle.get_inference_settings().await?;
         let provider_id = sampling
             .extra_headers
             .get(crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER)?;
@@ -163,7 +163,7 @@ impl SessionActor {
     async fn run_primary_codex_turn(
         &self,
         provider: crate::agent::model_providers::ResolvedModelProvider,
-        sampling: xai_grok_sampling_types::SamplingConfig,
+        sampling: xai_grok_inference_types::InferenceSettings,
         prompt: String,
         prompt_mode: PromptMode,
         json_schema: Option<serde_json::Value>,
@@ -377,7 +377,7 @@ impl SessionActor {
 
         if result.usage.total_tokens > 0 {
             let clamp = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
-            let usage = xai_grok_sampling_types::TokenUsage {
+            let usage = xai_grok_inference_types::TokenUsage {
                 prompt_tokens: clamp(result.usage.input_tokens),
                 completion_tokens: clamp(
                     result
@@ -1101,7 +1101,7 @@ impl SessionActor {
             )));
         let model_id = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
@@ -1500,7 +1500,7 @@ impl SessionActor {
                         duration_ms: Some(turn_duration_ms),
                         // Phase 8: additive provider diagnostics. The turn
                         // error path does not currently surface OpenRouter
-                        // diagnostics from the `SamplingError` here; left as
+                        // diagnostics from the `InferenceError` here; left as
                         // None (the field is additive, so xAI errors are
                         // unaffected). A follow-up can thread diagnostics
                         // through if the error carries them.
@@ -1653,7 +1653,7 @@ impl SessionActor {
             Err(e) => {
                 let usage = self.freeze_prompt_usage(prompt_id).await;
                 drop(turn_scope_guard);
-                Err(crate::sampling::error::attach_prompt_usage(e, usage))
+                Err(crate::inference::error::attach_prompt_usage(e, usage))
             }
         }
     }
@@ -2143,7 +2143,7 @@ impl SessionActor {
     /// bumps `retries` on a non-conforming retry.
     async fn handle_structured_output_tool_call(
         &self,
-        tool_calls: &mut Vec<xai_grok_sampling_types::conversation::ToolCall>,
+        tool_calls: &mut Vec<xai_grok_inference_types::conversation::ToolCall>,
         validator: &Result<jsonschema::Validator, String>,
         retries: &mut u32,
     ) -> StructuredOutputStep {
@@ -2298,7 +2298,7 @@ impl SessionActor {
                 span.record("parent_agent_id", parent);
             }
         }
-        if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
+        if let Some(cfg) = self.chat_state_handle.get_inference_settings().await {
             let span = tracing::Span::current();
             span.record("model_id", cfg.model.as_str());
             if let Some(effort) = cfg.reasoning_effort {
@@ -2353,7 +2353,7 @@ impl SessionActor {
         });
         let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
         let native_backend = if json_schema.is_some() {
-            match self.chat_state_handle.get_sampling_config().await {
+            match self.chat_state_handle.get_inference_settings().await {
                 Some(c) => c.api_backend.supports_native_schema(),
                 None => {
                     tracing::warn!(
@@ -2487,8 +2487,8 @@ impl SessionActor {
                     self.memory.is_enabled(),
                     trace_gcs_config
                         .clone()
-                        .map(|cfg| -> Box<dyn crate::sampling::TraceContext> {
-                            Box::new(crate::sampling::ConversationRequestTrace {
+                        .map(|cfg| -> Box<dyn crate::inference::TraceContext> {
+                            Box::new(crate::inference::ConversationRequestTrace {
                                 gcs_config: cfg,
                                 artifact_tracker: artifact_tracker.cloned(),
                             })
@@ -2544,16 +2544,16 @@ impl SessionActor {
             );
             let model_timer = std::time::Instant::now();
             let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
-                Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
+                Ok(InferenceTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
                 }
-                Ok(SamplerTurnOutcome::CompactAndResubmit) => {
+                Ok(InferenceTurnOutcome::CompactAndResubmit) => {
                     auth_retry_schedule.reset();
                     continue;
                 }
-                Ok(SamplerTurnOutcome::RefreshAuthAndResubmit) => {
+                Ok(InferenceTurnOutcome::RefreshAuthAndResubmit) => {
                     if let Some((attempt, delay)) = auth_retry_schedule.next_delay() {
                         let delay_ms = delay.as_millis() as u64;
                         tracing::warn!(
@@ -2593,7 +2593,7 @@ impl SessionActor {
                     );
                     tracing::error!(msg);
                     return Err(acp::Error::internal_error().data(
-                        crate::sampling::error::error_data_with_status(msg, Some(401)),
+                        crate::inference::error::error_data_with_status(msg, Some(401)),
                     ));
                 }
             };
@@ -2749,12 +2749,12 @@ impl SessionActor {
             let stop_reason = response.stop_reason;
             let response_is_empty = response.is_empty();
             let turn_refused =
-                stop_reason == Some(xai_grok_sampling_types::StopReason::ContentFilter);
+                stop_reason == Some(xai_grok_inference_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
             for item in response.items {
                 match item {
-                    xai_grok_sampling_types::ConversationItem::Assistant(_) => {
+                    xai_grok_inference_types::ConversationItem::Assistant(_) => {
                         self.record_assistant_response(item).await;
                     }
                     _ => {
@@ -2969,7 +2969,7 @@ impl SessionActor {
                 .map(|tc| ToolCallResponse {
                     id: tc.id.as_ref().to_owned(),
                     kind: "function".to_string(),
-                    function: crate::sampling::types::ToolCallFunction {
+                    function: crate::inference::types::ToolCallFunction {
                         name: tc.name,
                         arguments: tc.arguments.as_ref().to_owned(),
                     },

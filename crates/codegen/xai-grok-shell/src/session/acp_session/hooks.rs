@@ -28,7 +28,7 @@ use super::{SessionActor, ToolLoop};
 use crate::extensions::hooks::{
     ClientHookDecision, ClientHookDispatch, ClientHookGroup, ClientHookResponse,
 };
-use crate::sampling::types::ToolCallResponse;
+use crate::inference::types::ToolCallResponse;
 
 const HOOK_EVENT_METHOD: &str = "x.ai/hooks/event";
 const HOOK_RUN_METHOD: &str = "x.ai/hooks/run";

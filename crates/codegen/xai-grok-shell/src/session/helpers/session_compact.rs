@@ -1,8 +1,8 @@
 //! Compacts the current conversation and generates a summary of the conversation which
 //! gets passed to the next turn of the model
-use crate::sampling::{
+use crate::inference::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
-    ConversationItem, ConversationRequest, ConversationToolChoice, HostedTool, SamplingError,
+    ConversationItem, ConversationRequest, ConversationToolChoice, HostedTool, InferenceError,
     ToolChoice, ToolDefinition, ToolSpec, conversation_to_chat_messages,
 };
 use agent_client_protocol as acp;
@@ -13,7 +13,7 @@ pub use xai_chat_state::compaction_utils::{
     AUTO_CONTINUE_PROMPT, extract_last_real_user_query, extract_last_user_query,
     extract_messages_since_last_user, extract_real_user_queries, is_synthetic_extracted_query,
 };
-use xai_grok_sampler::SamplerConfig as SamplingConfig;
+use xai_grok_inference::InferenceConfig;
 /// Short, self-narrating compaction prompt used by the short-prompt harness only.
 /// Frames the call as "summarize for a successor assistant who only sees
 /// the user's original query plus this summary." Wrapped in
@@ -46,8 +46,8 @@ pub(crate) enum CompactFailure {
     /// N-attempt + backoff loop.
     Transient(acp::Error),
 }
-pub(crate) use xai_grok_sampling_types::is_context_length_error;
-/// Classify an upstream `SamplingError` for the compaction retry loop.
+pub(crate) use xai_grok_inference_types::is_context_length_error;
+/// Classify an upstream `InferenceError` for the compaction retry loop.
 ///
 /// `Auth`, `InvalidConfiguration`, `Serialization` and
 /// `IdleTimeout` are all deterministic by construction (re-issuing the same
@@ -55,14 +55,14 @@ pub(crate) use xai_grok_sampling_types::is_context_length_error;
 /// and stuck-model conditions all persist). 4xx API responses other than
 /// 408 (timeout) and 429 (rate limit) are likewise deterministic. Network
 /// transport errors, stream-level blips, and 5xx responses are transient.
-fn classify_sampling_error(err: SamplingError) -> CompactFailure {
+fn classify_sampling_error(err: InferenceError) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(format!("compact failed: {err}"));
     let deterministic = match &err {
-        SamplingError::Auth(_)
-        | SamplingError::InvalidConfiguration(_)
-        | SamplingError::Serialization(_)
-        | SamplingError::IdleTimeout { .. } => true,
-        SamplingError::Api {
+        InferenceError::Auth(_)
+        | InferenceError::InvalidConfiguration(_)
+        | InferenceError::Serialization(_)
+        | InferenceError::IdleTimeout { .. } => true,
+        InferenceError::Api {
             status, message, ..
         } => {
             is_context_length_error(message)
@@ -70,12 +70,12 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
                     && *status != StatusCode::REQUEST_TIMEOUT
                     && *status != StatusCode::TOO_MANY_REQUESTS)
         }
-        SamplingError::MaxTokensTruncation => true,
-        SamplingError::Http(_)
-        | SamplingError::EventStreamError(_)
-        | SamplingError::StreamError { .. }
-        | SamplingError::EmptyResponse { .. }
-        | SamplingError::DoomLoopDetected { .. } => false,
+        InferenceError::MaxTokensTruncation => true,
+        InferenceError::Http(_)
+        | InferenceError::EventStreamError(_)
+        | InferenceError::StreamError { .. }
+        | InferenceError::EmptyResponse { .. }
+        | InferenceError::DoomLoopDetected { .. } => false,
     };
     if deterministic {
         CompactFailure::Deterministic(acp_err)
@@ -351,7 +351,7 @@ pub(crate) async fn generate_session_compact(
     hosted_tools: Vec<HostedTool>,
     client: OaiCompatClient,
     session_id: acp::SessionId,
-    sampling_config: &SamplingConfig,
+    inference_config: &InferenceConfig,
     idle_timeout: std::time::Duration,
     wall_clock_budget_secs: u64,
     tool_choice: crate::util::config::CompactionToolChoice,
@@ -365,12 +365,12 @@ pub(crate) async fn generate_session_compact(
         crate::util::config::CompactionToolChoice::Auto => ConversationToolChoice::Auto,
         crate::util::config::CompactionToolChoice::None => ConversationToolChoice::None,
     };
-    let output = match sampling_config.api_backend {
+    let output = match inference_config.api_backend {
         ApiBackend::ChatCompletions => {
             let chat_messages: Vec<ChatRequestMessage> =
                 conversation_to_chat_messages(chat_history);
             let mut message =
-                ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages)
+                ChatCompletionRequest::new(inference_config.model.to_owned(), chat_messages)
                     .with_temperature(1.0);
             if !tools.is_empty() {
                 message = message
@@ -388,7 +388,7 @@ pub(crate) async fn generate_session_compact(
             message.x_grok_session_id = Some(sid);
             message.x_grok_agent_id = Some(xai_grok_telemetry::id::agent_id());
             tracing::info!(
-                compact_model = %sampling_config.model,
+                compact_model = %inference_config.model,
                 num_messages = num_messages,
                 "Sending compact request (streaming)"
             );
@@ -452,9 +452,9 @@ pub(crate) async fn generate_session_compact(
                                 content.push_str(delta_content);
                             }
                             if let Some(fr) = choice.finish_reason {
-                                let sr = xai_grok_sampling_types::StopReason::from(fr);
+                                let sr = xai_grok_inference_types::StopReason::from(fr);
                                 truncated =
-                                    matches!(sr, xai_grok_sampling_types::StopReason::Length);
+                                    matches!(sr, xai_grok_inference_types::StopReason::Length);
                                 stop_reason = Some(sr.as_str().to_string());
                             }
                         }
@@ -478,7 +478,7 @@ pub(crate) async fn generate_session_compact(
                 tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
                 tools,
                 hosted_tools,
-                model: Some(sampling_config.model.to_owned()),
+                model: Some(inference_config.model.to_owned()),
                 temperature: Some(1.0),
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
@@ -603,7 +603,7 @@ pub(crate) async fn generate_session_compact(
                 items: chat_history,
                 tools,
                 hosted_tools,
-                model: Some(sampling_config.model.to_owned()),
+                model: Some(inference_config.model.to_owned()),
                 temperature: Some(1.0),
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
@@ -656,13 +656,13 @@ pub(crate) async fn generate_session_compact(
                     Ok(event) => {
                         if !matches!(
                             &event,
-                            xai_grok_sampling_types::messages::MessageStreamEvent::Ping
+                            xai_grok_inference_types::messages::MessageStreamEvent::Ping
                         ) {
                             last_progress_at = std::time::Instant::now();
                         }
                         match event {
-                            xai_grok_sampling_types::messages::MessageStreamEvent::ContentBlockDelta {
-                                delta: xai_grok_sampling_types::messages::StreamDelta::TextDelta {
+                            xai_grok_inference_types::messages::MessageStreamEvent::ContentBlockDelta {
+                                delta: xai_grok_inference_types::messages::StreamDelta::TextDelta {
                                     text,
                                 },
                                 ..
@@ -670,40 +670,40 @@ pub(crate) async fn generate_session_compact(
                                 timing.record_delta();
                                 content.push_str(&text);
                             }
-                            xai_grok_sampling_types::messages::MessageStreamEvent::MessageDelta {
+                            xai_grok_inference_types::messages::MessageStreamEvent::MessageDelta {
                                 delta,
                                 ..
                             } => {
                                 if let Some(sr) = delta.stop_reason {
                                     truncated = matches!(
                                     sr,
-                                    xai_grok_sampling_types::messages::StopReason::MaxTokens
-                                        | xai_grok_sampling_types::messages::StopReason::ModelContextWindowExceeded
+                                    xai_grok_inference_types::messages::StopReason::MaxTokens
+                                        | xai_grok_inference_types::messages::StopReason::ModelContextWindowExceeded
                                 );
                                     stop_reason = Some(
                                         match sr {
-                                            xai_grok_sampling_types::messages::StopReason::EndTurn => {
+                                            xai_grok_inference_types::messages::StopReason::EndTurn => {
                                                 "end_turn".to_string()
                                             }
-                                            xai_grok_sampling_types::messages::StopReason::MaxTokens => {
+                                            xai_grok_inference_types::messages::StopReason::MaxTokens => {
                                                 "max_tokens".to_string()
                                             }
-                                            xai_grok_sampling_types::messages::StopReason::ToolUse => {
+                                            xai_grok_inference_types::messages::StopReason::ToolUse => {
                                                 "tool_use".to_string()
                                             }
-                                            xai_grok_sampling_types::messages::StopReason::StopSequence => {
+                                            xai_grok_inference_types::messages::StopReason::StopSequence => {
                                                 "stop_sequence".to_string()
                                             }
-                                            xai_grok_sampling_types::messages::StopReason::Refusal => {
+                                            xai_grok_inference_types::messages::StopReason::Refusal => {
                                                 "refusal".to_string()
                                             }
-                                            xai_grok_sampling_types::messages::StopReason::PauseTurn => {
+                                            xai_grok_inference_types::messages::StopReason::PauseTurn => {
                                                 "pause_turn".to_string()
                                             }
-                                            xai_grok_sampling_types::messages::StopReason::ModelContextWindowExceeded => {
+                                            xai_grok_inference_types::messages::StopReason::ModelContextWindowExceeded => {
                                                 "model_context_window_exceeded".to_string()
                                             }
-                                            xai_grok_sampling_types::messages::StopReason::Unknown(
+                                            xai_grok_inference_types::messages::StopReason::Unknown(
                                                 s,
                                             ) => s,
                                         },
@@ -736,7 +736,7 @@ pub(crate) async fn generate_session_compact(
     }
 }
 /// Tests for `classify_sampling_error` and `classify_response_event_error`.
-/// Pin the deterministic-vs-transient mapping for every `SamplingError`
+/// Pin the deterministic-vs-transient mapping for every `InferenceError`
 /// variant and for the meaningful branches of the response-event classifier
 /// (numeric code, `invalid_request_error` marker in code or message, and
 /// the default-to-transient fallback for unknown / missing codes).
@@ -750,7 +750,7 @@ mod classify_tests {
     #[test]
     fn sampling_api_4xx_is_deterministic_except_408_and_429() {
         let det = |s: StatusCode| {
-            is_det(&classify_sampling_error(SamplingError::Api {
+            is_det(&classify_sampling_error(InferenceError::Api {
                 status: s,
                 message: "test".into(),
                 model_metadata: None,
@@ -772,20 +772,20 @@ mod classify_tests {
     }
     #[test]
     fn sampling_non_api_variants_classify_correctly() {
-        assert!(is_det(&classify_sampling_error(SamplingError::Auth(
+        assert!(is_det(&classify_sampling_error(InferenceError::Auth(
             "expired".into()
         ))));
         assert!(is_det(&classify_sampling_error(
-            SamplingError::InvalidConfiguration("missing key")
+            InferenceError::InvalidConfiguration("missing key")
         )));
         assert!(is_det(&classify_sampling_error(
-            SamplingError::IdleTimeout { elapsed_secs: 60 }
+            InferenceError::IdleTimeout { elapsed_secs: 60 }
         )));
         assert!(!is_det(&classify_sampling_error(
-            SamplingError::EventStreamError("conn reset".into())
+            InferenceError::EventStreamError("conn reset".into())
         )));
         assert!(!is_det(&classify_sampling_error(
-            SamplingError::StreamError {
+            InferenceError::StreamError {
                 error_type: "overloaded_error".into(),
                 message: "try again".into(),
             }
@@ -842,7 +842,7 @@ mod classify_tests {
     }
     #[test]
     fn sampling_api_500_with_context_length_message_is_deterministic() {
-        assert!(is_det(&classify_sampling_error(SamplingError::Api {
+        assert!(is_det(&classify_sampling_error(InferenceError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "API error (status 500 Internal Server Error): \
                       The prompt is too long for this model's context window."
@@ -862,7 +862,7 @@ mod classify_tests {
         let http_err = rt
             .block_on(reqwest::get("http://127.0.0.1:0"))
             .expect_err("connecting to port 0 must fail");
-        assert!(!is_det(&classify_sampling_error(SamplingError::Http(
+        assert!(!is_det(&classify_sampling_error(InferenceError::Http(
             http_err
         ))));
     }
@@ -870,12 +870,12 @@ mod classify_tests {
     fn sampling_serialization_is_deterministic() {
         let serde_err = serde_json::from_str::<u32>("not a number").unwrap_err();
         assert!(is_det(&classify_sampling_error(
-            SamplingError::Serialization(serde_err)
+            InferenceError::Serialization(serde_err)
         )));
     }
     #[test]
     fn classifier_preserves_acp_error_data() {
-        let CompactFailure::Deterministic(err) = classify_sampling_error(SamplingError::Api {
+        let CompactFailure::Deterministic(err) = classify_sampling_error(InferenceError::Api {
             status: StatusCode::BAD_REQUEST,
             message: "bad payload".into(),
             model_metadata: None,
@@ -888,7 +888,7 @@ mod classify_tests {
         let data = err.data.as_ref().and_then(|d| d.as_str()).unwrap();
         assert!(data.contains("compact failed"));
         assert!(data.contains("bad payload"));
-        let CompactFailure::Transient(err) = classify_sampling_error(SamplingError::Api {
+        let CompactFailure::Transient(err) = classify_sampling_error(InferenceError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "upstream blip".into(),
             model_metadata: None,
@@ -938,7 +938,7 @@ mod classify_tests {
 #[cfg(test)]
 mod compacted_history_shape_tests {
     use super::*;
-    use crate::sampling::{AssistantItem, Role, ToolCall};
+    use crate::inference::{AssistantItem, Role, ToolCall};
     use crate::session::helpers::compaction_context::{
         BackgroundTaskSummary, CompactionInputs, CompactionStateContext, RunningSubagentSummary,
         SubagentToolNames, to_system_reminder_sync,
@@ -1519,7 +1519,7 @@ mod compacted_history_shape_tests {
 #[cfg(test)]
 mod reasoning_compaction_regression_tests {
     use super::*;
-    use crate::sampling::{Client, SamplerConfig, rs};
+    use crate::inference::{Client, InferenceConfig, rs};
     use axum::Router;
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::routing::post;
@@ -1632,8 +1632,8 @@ mod reasoning_compaction_regression_tests {
         assert_eq!(output.content, "<summary>ok</summary>");
         let _ = shutdown_tx.send(());
     }
-    fn test_config(base_url: &str) -> SamplerConfig {
-        SamplerConfig {
+    fn test_config(base_url: &str) -> InferenceConfig {
+        InferenceConfig {
             api_key: Some("test-api-key".to_string()),
             base_url: base_url.to_string(),
             model: "test-model".to_string(),
@@ -1868,7 +1868,7 @@ mod reasoning_compaction_regression_tests {
             ),
         ]
     }
-    fn test_config_responses(base_url: &str) -> SamplerConfig {
+    fn test_config_responses(base_url: &str) -> InferenceConfig {
         let mut config = test_config(base_url);
         config.api_backend = ApiBackend::Responses;
         config

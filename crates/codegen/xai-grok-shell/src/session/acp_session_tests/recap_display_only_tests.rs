@@ -7,7 +7,7 @@
 
 use super::support::*;
 use super::*;
-use xai_grok_sampling_types::ConversationItem;
+use xai_grok_inference_types::ConversationItem;
 
 #[tokio::test(flavor = "current_thread")]
 async fn new_prompt_cancels_in_flight_recap_epoch() {
@@ -543,8 +543,8 @@ async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() 
 #[test]
 fn over_budget_recap_serializes_to_well_formed_messages_request() {
     use crate::session::helpers::session_recap;
-    use xai_grok_sampling_types::messages::{ContentBlock, MessageContent, MessageRole};
-    use xai_grok_sampling_types::{ConversationRequest, ToolCall, rs};
+    use xai_grok_inference_types::messages::{ContentBlock, MessageContent, MessageRole};
+    use xai_grok_inference_types::{ConversationRequest, ToolCall, rs};
 
     let mk_reasoning = |id: &str| {
         ConversationItem::Reasoning(rs::ReasoningItem {
@@ -581,7 +581,7 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
     // grok backend => strip_reasoning=false; the over-budget branch strips anyway.
     let items = session_recap::budget_recap_items(conv, "system-reminder", false, 8_000);
     let req = ConversationRequest::from_items(items);
-    let msg = xai_grok_sampling_types::build_messages_request(&req);
+    let msg = xai_grok_inference_types::build_messages_request(&req);
 
     assert!(msg.system.is_some(), "system prompt must be preserved");
 
@@ -652,10 +652,10 @@ async fn recap_request_rides_parent_prompt_cache() {
 
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("You asked about the borrow checker.");
-            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
             cfg.base_url = server.url();
-            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
-            actor.chat_state_handle.update_sampling_config(cfg);
+            cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_inference_settings(cfg);
 
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),
@@ -707,7 +707,7 @@ async fn recap_request_rides_parent_prompt_cache() {
 /// tools or its prefix diverges and cold-misses the cache.
 #[tokio::test(flavor = "current_thread")]
 async fn recap_request_sends_hosted_tools_under_backend_search() {
-    use xai_grok_sampling_types::HostedTool;
+    use xai_grok_inference_types::HostedTool;
     use xai_grok_test_support::MockInferenceServer;
 
     let local = tokio::task::LocalSet::new();
@@ -738,10 +738,10 @@ async fn recap_request_sends_hosted_tools_under_backend_search() {
 
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("You asked about the borrow checker.");
-            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
             cfg.base_url = server.url();
-            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
-            actor.chat_state_handle.update_sampling_config(cfg);
+            cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_inference_settings(cfg);
 
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),
@@ -787,7 +787,7 @@ async fn recap_request_sends_hosted_tools_under_backend_search() {
 /// reaches the recap's `x_search` entry rather than an unbounded tool.
 #[tokio::test(flavor = "current_thread")]
 async fn recap_hosted_tools_reflect_the_active_per_turn_override() {
-    use xai_grok_sampling_types::{HostedTool, SearchDateBound, ToolOverrides, XSearchOptions};
+    use xai_grok_inference_types::{HostedTool, SearchDateBound, ToolOverrides, XSearchOptions};
     use xai_grok_test_support::MockInferenceServer;
 
     let local = tokio::task::LocalSet::new();
@@ -829,10 +829,10 @@ async fn recap_hosted_tools_reflect_the_active_per_turn_override() {
 
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("recap summary");
-            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
             cfg.base_url = server.url();
-            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
-            actor.chat_state_handle.update_sampling_config(cfg);
+            cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_inference_settings(cfg);
 
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("you are a coding agent"),

@@ -1070,7 +1070,7 @@ async fn run_agent_command(
     agent_config.reasoning_effort_override = agent_args
         .reasoning_effort
         .as_deref()
-        .and_then(xai_grok_shell::sampling::types::parse_canonical_effort_token);
+        .and_then(xai_grok_shell::inference::types::parse_canonical_effort_token);
     let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
         agent_args.yolo,
         permission_mode_flag.as_deref(),

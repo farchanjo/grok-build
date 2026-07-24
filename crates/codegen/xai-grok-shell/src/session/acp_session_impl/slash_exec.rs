@@ -970,12 +970,12 @@ impl SessionActor {
             return ok_end_turn(0, None);
         }
 
-        let (sampling_config, model_metadata, credentials) = tokio::join!(
-            self.chat_state_handle.get_sampling_config(),
+        let (inference_config, model_metadata, credentials) = tokio::join!(
+            self.chat_state_handle.get_inference_settings(),
             self.chat_state_handle.get_last_model_metadata(),
             self.chat_state_handle.get_credentials(),
         );
-        let model_id = sampling_config.map(|c| c.model);
+        let model_id = inference_config.map(|c| c.model);
         let resolved_model_id = model_metadata.resolved_model_id;
         let client_version = credentials.client_version;
 

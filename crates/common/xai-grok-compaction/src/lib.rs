@@ -6,7 +6,7 @@
 //! stay in each product host (for example `xai-grok-shell`).
 //!
 //! The crate depends on **neither** a conversation-type crate nor
-//! `xai-grok-sampling-types`. It is decoupled from both Grok chat and
+//! `xai-grok-inference-types`. It is decoupled from both Grok chat and
 //! grok-build hosts through a small set of trait seams:
 //!
 //! - [`CompactionItem`] / [`CompactionRole`] / [`CompactionItemBuilder`] —

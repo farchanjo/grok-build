@@ -3,7 +3,7 @@ use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::extensions::notification::SessionNotification;
-use crate::sampling::ConversationItem;
+use crate::inference::ConversationItem;
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
 use crate::session::signals::SessionSignals;
@@ -12,7 +12,7 @@ use crate::session::wire_tags::{
 };
 use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_inference_types::ReasoningEffort;
 use xai_grok_workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
@@ -133,7 +133,7 @@ pub(crate) mod chat_rebuild {
     use agent_client_protocol as acp;
 
     use super::{CHAT_HISTORY_FILE, SessionUpdate, UPDATES_FILE, UpdatesIterator};
-    use crate::sampling::{AssistantItem, ContentPart, ConversationItem, ToolCall};
+    use crate::inference::{AssistantItem, ContentPart, ConversationItem, ToolCall};
 
     /// Rebuild `chat_history.jsonl` from `updates.jsonl` alone. Builds a temp file and
     /// renames it over the target, so a failed rebuild leaves the existing cache intact

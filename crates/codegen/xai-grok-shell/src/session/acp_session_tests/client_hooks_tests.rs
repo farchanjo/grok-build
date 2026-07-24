@@ -136,7 +136,7 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
             let call = ToolCallResponse {
                 id: "call_1".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new(
+                function: crate::inference::types::ToolCallFunction::new(
                     "use_tool",
                     r#"{"tool_name":"linear__save_issue","tool_input":{}}"#,
                 ),
@@ -222,7 +222,7 @@ async fn subagent_inherits_parent_pre_tool_use_client_hook() {
             let call = ToolCallResponse {
                 id: "call_1".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new(
+                function: crate::inference::types::ToolCallFunction::new(
                     "run_terminal_command",
                     "{}",
                 ),
@@ -311,7 +311,7 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
             let call = ToolCallResponse {
                 id: "call_1".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new(
+                function: crate::inference::types::ToolCallFunction::new(
                     "run_terminal_command",
                     "{}",
                 ),
@@ -392,10 +392,10 @@ async fn post_tool_use_and_failure_never_double_fire() {
                     events
                 };
 
-            let todo_call = |id: &str| crate::sampling::types::ToolCallResponse {
+            let todo_call = |id: &str| crate::inference::types::ToolCallResponse {
                 id: id.to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new(
+                function: crate::inference::types::ToolCallFunction::new(
                     "todo_write",
                     r#"{"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
                 ),
@@ -465,7 +465,7 @@ async fn pre_tool_use_deny_feeds_reason_back_and_continues_turn() {
             let call = ToolCallResponse {
                 id: "call_1".to_string(),
                 kind: "function".to_string(),
-                function: crate::sampling::types::ToolCallFunction::new(
+                function: crate::inference::types::ToolCallFunction::new(
                     "todo_write",
                     r#"{"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
                 ),

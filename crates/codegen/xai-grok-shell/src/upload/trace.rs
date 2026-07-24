@@ -1,6 +1,6 @@
 //! Per-turn trace artifact uploads to cloud storage.
 use super::turn::{PromptTraceContext, UploadWait};
-use crate::sampling::types::ToolDefinition;
+use crate::inference::types::ToolDefinition;
 use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
 use base64::Engine as _;
 use std::path::Path;
@@ -977,7 +977,7 @@ pub(crate) struct SessionStateBuildError {
 /// zero-byte payload the viewer treats as "no history" (harness pairs always
 /// carry ≥1 message, so this is only a safety floor).
 pub(crate) fn build_chat_history_session_state(
-    messages: &[xai_grok_sampling_types::conversation::ConversationItem],
+    messages: &[xai_grok_inference_types::conversation::ConversationItem],
 ) -> Result<Vec<u8>, SessionStateBuildError> {
     use flate2::Compression;
     use flate2::write::GzEncoder;

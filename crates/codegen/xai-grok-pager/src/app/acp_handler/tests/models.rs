@@ -6,7 +6,7 @@
     /// session's chosen `xhigh`, and must not clobber the per-session choice.
     #[test]
     fn models_update_preserves_user_reasoning_effort() {
-        use xai_grok_shell::sampling::types::ReasoningEffort;
+        use xai_grok_shell::inference::types::ReasoningEffort;
         let mut app = make_app_with_agent("sess-1");
 
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -449,7 +449,7 @@
     /// `x.ai/models/update`.
     #[test]
     fn model_changed_applies_reasoning_effort_on_follower() {
-        use xai_grok_shell::sampling::types::ReasoningEffort;
+        use xai_grok_shell::inference::types::ReasoningEffort;
         let mut app = make_app_with_agent("sess-1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         seed_models(agent, "grok-3", &["grok-3", "grok-4"]);

@@ -1,6 +1,6 @@
 //! Mutation handlers for the ChatStateActor.
 
-use xai_grok_sampling_types::{
+use xai_grok_inference_types::{
     ContentPart, ConversationItem, DanglingToolCallReason, dedup_duplicate_tool_results,
     repair_dangling_tool_calls,
 };
@@ -330,7 +330,7 @@ impl ChatStateActor {
                 ConversationItem::ToolResult(tr) => tr.content.len(),
                 ConversationItem::BackendToolCall(b) => b.text_summary().len(),
                 ConversationItem::Reasoning(r) => {
-                    xai_grok_sampling_types::reasoning_item_text(r).len()
+                    xai_grok_inference_types::reasoning_item_text(r).len()
                         + r.encrypted_content.as_deref().map(str::len).unwrap_or(0)
                 }
             })
@@ -349,20 +349,20 @@ impl ChatStateActor {
     /// Stash the per-turn `TokenUsage` from the most recent model response.
     /// No event is emitted — this slot is read on demand at `PromptResponse`
     /// construction time, not pushed to subscribers.
-    pub(super) fn record_last_turn_usage(&mut self, usage: xai_grok_sampling_types::TokenUsage) {
+    pub(super) fn record_last_turn_usage(&mut self, usage: xai_grok_inference_types::TokenUsage) {
         self.state.last_turn_usage = Some(usage);
     }
 
     pub(super) fn record_model_call_usage(
         &mut self,
         model_id: Option<String>,
-        usage: &xai_grok_sampling_types::TokenUsage,
+        usage: &xai_grok_inference_types::TokenUsage,
         api_duration_ms: Option<u64>,
         cost_usd_ticks: Option<i64>,
     ) {
         let model_key = match model_id.as_deref() {
             Some(id) if !id.is_empty() => id,
-            _ => self.state.sampling_config.model.as_str(),
+            _ => self.state.inference_settings.model.as_str(),
         }
         .to_owned();
         self.state
@@ -499,7 +499,7 @@ impl ChatStateActor {
         // intentionally survive a restore — see `replace_conversation`.
         self.state.conversation = snap.conversation;
         self.rebase_turn_capture_offset();
-        self.state.sampling_config = snap.sampling_config;
+        self.state.inference_settings = snap.inference_settings;
         self.state.prompt_index = snap.prompt_index;
         self.state.total_tokens = snap.total_tokens;
         self.state.estimated_tokens_since_model = 0;

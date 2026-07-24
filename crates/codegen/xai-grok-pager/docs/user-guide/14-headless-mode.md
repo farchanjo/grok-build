@@ -174,7 +174,7 @@ Usage notes:
     sum; only the headless projector subtracts cache. Prefer headless fields
     for spend automation.
 - `num_turns` counts main-agent model rounds recorded on the prompt ledger
-  (tool-loop rounds that reported usage). Subagent sampler calls do not
+  (tool-loop rounds that reported usage). Subagent inference calls do not
   increase it. Per-model call counts (including subagents) stay on
   `modelUsage.*.modelCalls`. This is the same counter family as `--max-turns`,
   not a guarantee of exact equality when rounds lack usage or hit gates.

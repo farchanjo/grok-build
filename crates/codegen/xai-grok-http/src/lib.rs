@@ -16,12 +16,12 @@
 //!   final retry attempt to escape a poisoned pool within a tight budget.
 //!
 //! Sampling traffic uses process-wide shared clients owned by
-//! `xai_grok_sampler::shared_http` (one HTTP/2 pooled client plus
+//! `xai_grok_inference::shared_http` (one HTTP/2 pooled client plus
 //! a pool-less HTTP/1.1 fallback shared across every
-//! `SamplingClient`). The sampler reads `GROK_POOL_*` /
+//! `InferenceClient`). The sampler reads `GROK_POOL_*` /
 //! `GROK_CONNECT_TIMEOUT_SECS` once, when its shared client is
 //! first built, and `GROK_SAMPLER_SHARED_CLIENT=0` falls back to
-//! a fresh client per `SamplingClient`.
+//! a fresh client per `InferenceClient`.
 //!
 //! TLS root certificates are warmed at process start via
 //! `warm_async_http_client()` (in `mvp_agent.rs`).
@@ -55,14 +55,14 @@ macro_rules! startup_timer {
 
 static CLIENT_TYPE: OnceLock<ClientType> = OnceLock::new();
 
-// `OriginClientInfo` is owned by `xai-grok-sampler` so `SamplerConfig` can use
+// `OriginClientInfo` is owned by `xai-grok-inference` so `InferenceConfig` can use
 // it without taking a circular dependency on `xai-grok-shell`. Re-exported
 // under the same path (`crate::http::OriginClientInfo`) so existing call-sites
 // compile unchanged. The telemetry engine in `xai-grok-telemetry` consumes
-// the same type via `xai_grok_sampler::OriginClientInfo`. The shell-specific
+// the same type via `xai_grok_inference::OriginClientInfo`. The shell-specific
 // constructors that depended on `ClientType` (a shell-only type) are free
 // functions below.
-pub use xai_grok_sampler::OriginClientInfo;
+pub use xai_grok_inference::OriginClientInfo;
 
 /// Construct an [`OriginClientInfo`] from `GROK_CLIENT_NAME` /
 /// `GROK_CLIENT_VERSION` env vars. Returns `None` when

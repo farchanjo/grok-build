@@ -414,9 +414,9 @@ fn allocate_turn_number_advances_counter() {
 }
 /// Build a synthetic harness `task` call/result pair carrying the
 /// `<subagent_result>` footer, mirroring what the verifier/planner record.
-fn harness_pair(id: &str) -> Vec<xai_grok_sampling_types::conversation::ConversationItem> {
-    use xai_grok_sampling_types::ToolCall;
-    use xai_grok_sampling_types::conversation::ConversationItem;
+fn harness_pair(id: &str) -> Vec<xai_grok_inference_types::conversation::ConversationItem> {
+    use xai_grok_inference_types::ToolCall;
+    use xai_grok_inference_types::conversation::ConversationItem;
     vec![
         ConversationItem::assistant_tool_calls(vec![ToolCall {
             id: id.into(),
@@ -1256,7 +1256,7 @@ async fn set_session_model_does_not_cross_contaminate() {
 #[tokio::test]
 async fn model_state_prefers_session_reasoning_effort_over_global() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use xai_grok_sampling_types::{REASONING_EFFORT_META_KEY, ReasoningEffort};
+    use xai_grok_inference_types::{REASONING_EFFORT_META_KEY, ReasoningEffort};
     let agent = build_minimal_agent_for_tests();
     let mut entry = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
     entry.info.supports_reasoning_effort = Some(true);
@@ -1303,7 +1303,7 @@ async fn model_state_prefers_session_reasoning_effort_over_global() {
 #[tokio::test]
 async fn session_config_options_resolves_routing_slug_to_catalog_model() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use xai_grok_sampling_types::ReasoningEffort;
+    use xai_grok_inference_types::ReasoningEffort;
     let agent = build_minimal_agent_for_tests();
     let mut entry = ModelEntry::fallback("catalog-key-model", &EndpointsConfig::default());
     entry.info.model = "routing-slug".to_string();
@@ -2128,7 +2128,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
-            api_backend: crate::sampling::ApiBackend::default(),
+            api_backend: crate::inference::ApiBackend::default(),
             auth_scheme: Default::default(),
             extra_headers: IndexMap::new(),
             context_window: std::num::NonZeroU64::new(200_000).unwrap(),
@@ -2505,7 +2505,7 @@ async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
         }
     }
     let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
     assert!(matches!(
         agent.prepare_video_gen_config(),
         VideoGenConfig::Enabled { .. }
@@ -2542,7 +2542,7 @@ async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
 async fn prepare_video_gen_config_respects_feature_flag() {
     use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
     let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
     assert!(matches!(
         agent.prepare_video_gen_config(),
         VideoGenConfig::Enabled { .. }
@@ -2561,7 +2561,7 @@ async fn prepare_video_gen_config_respects_feature_flag() {
 async fn prepare_image_gen_config_fails_open_without_auth() {
     use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
     let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
     let ImageGenConfig::Enabled {
         tier_restricted, ..
     } = agent.prepare_image_gen_config()
@@ -2581,7 +2581,7 @@ async fn prepare_image_gen_config_fails_open_without_auth() {
 async fn prepare_image_gen_config_sends_client_identifier_header() {
     use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
     let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
     let ImageGenConfig::Enabled { extra_headers, .. } = agent.prepare_image_gen_config() else {
         panic!("expected Enabled");
     };
@@ -2599,7 +2599,7 @@ async fn prepare_image_gen_config_sends_client_identifier_header() {
 async fn prepare_video_gen_config_sends_client_identifier_header() {
     use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
     let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    agent.inference_config.borrow_mut().api_key = Some("test-key".to_string());
     let VideoGenConfig::Enabled { extra_headers, .. } = agent.prepare_video_gen_config() else {
         panic!("expected Enabled");
     };

@@ -1191,7 +1191,7 @@ pub struct CompactionCheckpointFile {
     /// The prompt index at the time compaction completed.
     pub prompt_index_at_compaction: usize,
     /// The exact compacted conversation used by the model.
-    pub compacted_history: Vec<crate::sampling::ConversationItem>,
+    pub compacted_history: Vec<crate::inference::ConversationItem>,
     /// Schema version for forward compatibility.
     pub schema_version: u32,
     /// ISO 8601 timestamp of when the checkpoint was created.
@@ -1214,7 +1214,7 @@ pub struct CompactionCheckpointFile {
 /// the header/metadata embed), so the caller supplies the render inputs.
 #[derive(Debug, Clone)]
 pub struct CompactionSegmentFile {
-    pub items: Vec<xai_grok_sampling_types::ConversationItem>,
+    pub items: Vec<xai_grok_inference_types::ConversationItem>,
     /// Curated summary, analysis tags already stripped.
     pub summary: String,
     pub detail: xai_chat_state::CompactionDetail,
@@ -1254,13 +1254,13 @@ pub struct CompactionRequestFile {
     /// The full `ConversationItem` list sent to the model, with the
     /// summarization prompt already appended as the final user message.
     /// Replaying this against any model reproduces the exact request.
-    pub chat_history: Vec<crate::sampling::ConversationItem>,
+    pub chat_history: Vec<crate::inference::ConversationItem>,
     /// Tool definitions attached to the request (same effective set as the
     /// turn loop, for prompt-prefix/KV-cache alignment). Empty for artifacts
     /// written before tools were attached. Backend-hosted tools are not
     /// recorded (not serializable; IC-side concept).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<crate::sampling::ToolSpec>,
+    pub tools: Vec<crate::inference::ToolSpec>,
     /// Generated summary text, on success. `None` if all retries failed.
     pub summary: Option<String>,
     /// Most recent error message captured during the retry loop, if any.
@@ -1317,7 +1317,7 @@ pub struct RecapRequestFile {
     /// The full `ConversationItem` list sent to the model, with the recap
     /// instruction already appended as the final user message. Replaying
     /// this against any model reproduces the exact request.
-    pub chat_history: Vec<crate::sampling::ConversationItem>,
+    pub chat_history: Vec<crate::inference::ConversationItem>,
     /// Cleaned one-line recap body shown to the user, on success.
     /// `None` if the model call failed or returned empty after cleaning.
     pub summary: Option<String>,

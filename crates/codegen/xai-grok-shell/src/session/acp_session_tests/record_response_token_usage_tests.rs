@@ -1,6 +1,6 @@
 use super::support::*;
 use super::*;
-use xai_grok_sampling_types::{ConversationItem, ConversationResponse, TokenUsage};
+use xai_grok_inference_types::{ConversationItem, ConversationResponse, TokenUsage};
 
 fn response_with_usage(total_tokens: u32) -> ConversationResponse {
     ConversationResponse {

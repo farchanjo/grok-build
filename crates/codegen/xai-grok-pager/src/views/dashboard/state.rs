@@ -741,7 +741,7 @@ impl DashboardDispatchMode {
 #[derive(Debug, Clone)]
 pub struct PendingDispatchModel {
     pub id: agent_client_protocol::ModelId,
-    pub effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+    pub effort: Option<xai_grok_shell::inference::types::ReasoningEffort>,
     pub display: String,
 }
 

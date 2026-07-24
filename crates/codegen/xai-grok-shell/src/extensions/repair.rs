@@ -149,11 +149,11 @@ async fn repair_on_disk(grok_root: &std::path::Path, session_id: &str, dry_run: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampling::ConversationItem;
+    use crate::inference::ConversationItem;
     use crate::session::info::Info;
     use crate::session::persistence::default_model_id;
     use tempfile::TempDir;
-    use xai_grok_sampling_types::ToolCall;
+    use xai_grok_inference_types::ToolCall;
 
     const SESSION_ID: &str = "019f3df7-3d70-7f60-8ca0-a38d2d005670";
 

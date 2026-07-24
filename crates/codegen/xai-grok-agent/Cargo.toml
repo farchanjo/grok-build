@@ -8,7 +8,7 @@ description = "Agent builder, definition parsing, and system prompt assembly"
 [dependencies]
 dunce = { workspace = true }
 xai-grok-hooks = { path = "../xai-grok-hooks" }
-xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
+xai-grok-inference-types = { path = "../xai-grok-inference-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
 xai-tty-utils = { workspace = true }
 xai-token-estimation = { workspace = true }

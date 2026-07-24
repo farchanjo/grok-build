@@ -15,7 +15,7 @@ pub(crate) enum McpReminderMode {
 /// Recovery decision returned by
 /// `SessionActor::handle_sampling_failure` for the sampler-based
 /// turn loop.
-pub(crate) enum SamplerFailureRecovery {
+pub(crate) enum InferenceFailureRecovery {
     /// Compaction ran. The turn loop should rebuild the request from
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
@@ -29,11 +29,11 @@ pub(crate) enum SamplerFailureRecovery {
 /// `CompactAndResubmit` short-circuits the outer turn loop with
 /// `continue` (the turn driver re-builds the request from the latest
 /// chat state).
-pub(crate) enum SamplerTurnOutcome {
+pub(crate) enum InferenceTurnOutcome {
     /// Model responded, with per-call latency stats for `shell.turn.inference_done`.
     Response(
         Box<ConversationResponse>,
-        Box<xai_grok_sampler::InferenceLatencyStats>,
+        Box<xai_grok_inference::InferenceLatencyStats>,
     ),
     CompactAndResubmit,
     /// Auth recovery succeeded; the outer loop should retry once.
@@ -239,7 +239,7 @@ pub(crate) enum StopGateDecision {
 /// response, or tool-call emission.
 ///
 /// There is deliberately **no `ToolExecution` variant**: on
-/// `SamplingEvent::Completed` (the point at which the canonical assistant
+/// `InferenceEvent::Completed` (the point at which the canonical assistant
 /// message is committed) the in-progress generation is discarded from the
 /// capture, and `Completed` always fires before the turn loop dispatches
 /// tools. A streaming partial can therefore only ever be tied to one of the

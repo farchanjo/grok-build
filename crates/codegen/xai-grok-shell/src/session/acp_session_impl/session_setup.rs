@@ -10,7 +10,7 @@ impl SessionActor {
             .as_deref()
             .is_some_and(crate::agent::auth_method::is_session_based_method)
     }
-    pub(super) fn to_acp_error(&self, err: SamplingError) -> acp::Error {
+    pub(super) fn to_acp_error(&self, err: InferenceError) -> acp::Error {
         if err.is_auth_error() {
             let method_guard = self.auth_method_id.load();
             let method = method_guard.as_deref();
@@ -82,7 +82,7 @@ impl SessionActor {
                 item,
                 ConversationItem::User(u)
                     if u.synthetic_reason
-                        == Some(xai_grok_sampling_types::SyntheticReason::SystemReminder)
+                        == Some(xai_grok_inference_types::SyntheticReason::SystemReminder)
             )
         });
         let effects = bridge.apply_pending_skill_update().await?;
@@ -353,7 +353,7 @@ impl SessionActor {
         if idle_secs < Self::IDLE_REFRESH_THRESHOLD_SECS {
             return;
         }
-        let Some(current_config) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(current_config) = self.chat_state_handle.get_inference_settings().await else {
             return;
         };
         let current_model = &current_config.model;
@@ -462,18 +462,18 @@ impl SessionActor {
         }
         if config_changed {
             self.chat_state_handle
-                .update_sampling_config(updated_config);
+                .update_inference_settings(updated_config);
         }
     }
     /// Update cached sampling config if model metadata changed (from response headers).
     pub(super) async fn handle_model_metadata_update(
         &self,
-        metadata: crate::sampling::ResponseModelMetadata,
+        metadata: crate::inference::ResponseModelMetadata,
     ) {
         if let Some(ref etag) = metadata.models_etag {
             self.models_manager.refresh_if_new_etag(etag.clone()).await;
         }
-        let current_config = match self.chat_state_handle.get_sampling_config().await {
+        let current_config = match self.chat_state_handle.get_inference_settings().await {
             Some(cfg) => cfg,
             None => return,
         };
@@ -514,13 +514,13 @@ impl SessionActor {
         if !config_changed {
             return;
         }
-        let updated_config = xai_grok_sampling_types::SamplingConfig {
+        let updated_config = xai_grok_inference_types::InferenceSettings {
             context_window: new_context_window,
             max_completion_tokens: new_max_completion_tokens,
             ..current_config
         };
         self.chat_state_handle
-            .update_sampling_config(updated_config);
+            .update_inference_settings(updated_config);
     }
     /// Inject the actor's managed Read-deny globs into the current ToolBridge so
     /// the Grep tool excludes policy-forbidden paths. No-op when empty. Called on
@@ -539,7 +539,7 @@ impl SessionActor {
     }
     /// Shared by `/session-info`, `/context`, and `GetSessionInfo`.
     pub(super) async fn build_session_info(&self) -> SessionInfoData {
-        let config = self.chat_state_handle.get_sampling_config().await;
+        let config = self.chat_state_handle.get_inference_settings().await;
         let model = config.as_ref().map(|c| c.model.clone());
         let context_window = config.as_ref().map(|c| c.context_window.get()).unwrap_or(0);
         let model_metadata = self.chat_state_handle.get_last_model_metadata().await;

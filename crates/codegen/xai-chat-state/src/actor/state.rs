@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use xai_grok_sampling_types::{
-    ConversationItem, DanglingToolCallReason, SamplingConfig, TokenUsage,
+use xai_grok_inference_types::{
+    ConversationItem, DanglingToolCallReason, InferenceSettings, TokenUsage,
     dedup_duplicate_tool_results, repair_dangling_tool_calls,
 };
 
@@ -22,7 +22,7 @@ pub fn estimate_system_message_tokens(item: &ConversationItem) -> u64 {
 
 /// Bytes/4 estimate of one tool definition (name + description + the
 /// JSON-serialized parameters).
-pub fn estimate_tool_definition_tokens(td: &xai_grok_sampling_types::ToolDefinition) -> u64 {
+pub fn estimate_tool_definition_tokens(td: &xai_grok_inference_types::ToolDefinition) -> u64 {
     let name_len = td.function.name.len();
     let desc_len = td.function.description.as_deref().map_or(0, |d| d.len());
     let params_len = td.function.parameters.to_string().len();
@@ -30,7 +30,7 @@ pub fn estimate_tool_definition_tokens(td: &xai_grok_sampling_types::ToolDefinit
 }
 
 /// Sum [`estimate_tool_definition_tokens`] across a slice.
-pub fn estimate_tool_definitions_tokens(tds: &[xai_grok_sampling_types::ToolDefinition]) -> u64 {
+pub fn estimate_tool_definitions_tokens(tds: &[xai_grok_inference_types::ToolDefinition]) -> u64 {
     tds.iter().map(estimate_tool_definition_tokens).sum()
 }
 
@@ -40,7 +40,7 @@ pub fn estimate_tool_definitions_tokens(tds: &[xai_grok_sampling_types::ToolDefi
 /// Shared by [`estimate_conversation_tokens`] and [`estimate_messages_tokens`]
 /// so the per-variant arithmetic stays in one place.
 pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
-    use xai_grok_sampling_types::ContentPart;
+    use xai_grok_inference_types::ContentPart;
     match item {
         ConversationItem::System(s) => xai_token_estimation::estimate_tokens(&s.content),
         ConversationItem::User(u) => {
@@ -71,7 +71,7 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
             // Summary + content text follow the standard bytes-per-token
             // estimate; encrypted blobs are base64 and don't survive
             // tokenization 1:1, so estimate at len/4 as well.
-            let text_bytes = xai_grok_sampling_types::reasoning_item_text(r).len();
+            let text_bytes = xai_grok_inference_types::reasoning_item_text(r).len();
             let enc_bytes = r.encrypted_content.as_deref().map(str::len).unwrap_or(0);
             ((text_bytes + enc_bytes) as u64) / xai_token_estimation::BYTES_PER_TOKEN
         }
@@ -119,7 +119,7 @@ pub(crate) struct ChatState {
     /// The full conversation history.
     pub conversation: Vec<ConversationItem>,
     /// Current sampling configuration (model, context window, etc.).
-    pub sampling_config: SamplingConfig,
+    pub inference_settings: InferenceSettings,
     /// Current prompt index (incremented per user turn).
     pub prompt_index: usize,
     /// Cached prompt texts for rewind preview.
@@ -207,7 +207,7 @@ impl ChatState {
     /// `chat_history.jsonl` has an assistant message with tool call IDs that
     /// lack matching `ToolResult` entries. Without this, the in-memory state
     /// would carry broken conversation history until the next `build_request`.
-    pub fn new(mut conversation: Vec<ConversationItem>, sampling_config: SamplingConfig) -> Self {
+    pub fn new(mut conversation: Vec<ConversationItem>, inference_settings: InferenceSettings) -> Self {
         let deduped = dedup_duplicate_tool_results(&mut conversation);
         if deduped > 0 {
             tracing::info!(
@@ -228,7 +228,7 @@ impl ChatState {
 
         Self {
             conversation,
-            sampling_config,
+            inference_settings,
             prompt_index: 0,
             prompt_texts: Vec::new(),
             total_tokens: initial_tokens,
@@ -264,8 +264,8 @@ impl ChatState {
 mod tests {
     use super::*;
 
-    fn test_sampling_config() -> SamplingConfig {
-        SamplingConfig {
+    fn test_inference_settings() -> InferenceSettings {
+        InferenceSettings {
             base_url: "https://api.example.com".to_string(),
             model: "test-model".to_string(),
             max_completion_tokens: None,
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn new_state_has_correct_defaults() {
-        let state = ChatState::new(vec![], test_sampling_config());
+        let state = ChatState::new(vec![], test_inference_settings());
         assert_eq!(state.prompt_index, 0);
         assert_eq!(state.total_tokens, 0); // empty conversation → 0
         assert!(state.conversation.is_empty());
@@ -318,7 +318,7 @@ mod tests {
             ConversationItem::system("sys"),
             ConversationItem::user("hello"),
         ];
-        let state = ChatState::new(items, test_sampling_config());
+        let state = ChatState::new(items, test_inference_settings());
         assert_eq!(state.conversation.len(), 2);
     }
 
@@ -331,7 +331,7 @@ mod tests {
             ConversationItem::assistant("z".repeat(4000).as_str()),
             ConversationItem::tool_result("call-1", "w".repeat(4000).as_str()),
         ];
-        let state = ChatState::new(items, test_sampling_config());
+        let state = ChatState::new(items, test_inference_settings());
         assert_eq!(state.total_tokens, 4000); // 4 * (4000/4)
     }
 
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn estimate_tool_definition_tokens_counts_name_desc_params() {
         // Empty parameters serialize to "null" (4 bytes) in the JSON-string len
-        let td = xai_grok_sampling_types::ToolDefinition::function(
+        let td = xai_grok_inference_types::ToolDefinition::function(
             "search",
             Some("find a file"),
             serde_json::json!({}),
@@ -386,12 +386,12 @@ mod tests {
 
     #[test]
     fn estimate_tool_definitions_tokens_sums_across_slice() {
-        let a = xai_grok_sampling_types::ToolDefinition::function(
+        let a = xai_grok_inference_types::ToolDefinition::function(
             "a",
             None::<&str>,
             serde_json::json!({}),
         );
-        let b = xai_grok_sampling_types::ToolDefinition::function(
+        let b = xai_grok_inference_types::ToolDefinition::function(
             "b",
             None::<&str>,
             serde_json::json!({}),

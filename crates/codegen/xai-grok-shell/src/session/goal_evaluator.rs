@@ -1,4 +1,4 @@
-use crate::sampling::{ConversationItem, ConversationRequest};
+use crate::inference::{ConversationItem, ConversationRequest};
 
 pub(crate) const GOAL_EVALUATOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 

@@ -504,7 +504,7 @@ context_window = 1050000
 
 Codex is a complete coding agent rather than a sampling endpoint. Primary
 turns and subagent turns therefore run through the official native app-server,
-not through the OpenAI API or Grok Build's inference sampler. During primary and subagent Codex turns, Grok Build forwards app-server stream
+not through the OpenAI API or Grok Build's inference runtime. During primary and subagent Codex turns, Grok Build forwards app-server stream
 notifications into the same ACP surfaces used by native models: assistant text
 deltas, reasoning/thought chunks, tool call cards (commands, file edits, MCP,
 host tools), plan updates, and completion status. Codex `userMessage` items are

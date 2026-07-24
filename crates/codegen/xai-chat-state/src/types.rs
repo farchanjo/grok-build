@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
-use xai_grok_sampling_types::{ConversationItem, SamplingConfig};
+use xai_grok_inference_types::{ConversationItem, InferenceSettings};
 
 /// Canonical marker for an injected memory-context block. Shared by the
 /// emitter in `xai-grok-shell` and the upsert/detection here — a drift would
@@ -22,7 +22,7 @@ pub struct ChatStateConfig {
     /// Initial conversation items to populate the state with.
     pub initial_conversation: Vec<ConversationItem>,
     /// Sampling configuration (model, context window, etc.).
-    pub sampling_config: SamplingConfig,
+    pub inference_settings: InferenceSettings,
 }
 
 /// Immutable snapshot of the actor's state (for forking, rewind).
@@ -30,8 +30,9 @@ pub struct ChatStateConfig {
 pub struct ChatStateSnapshot {
     /// The full conversation history.
     pub conversation: Vec<ConversationItem>,
-    /// Current sampling configuration.
-    pub sampling_config: SamplingConfig,
+    /// Current inference settings (JSON key kept as `sampling_config` for snapshot compat).
+    #[serde(rename = "sampling_config")]
+    pub inference_settings: InferenceSettings,
     /// Current prompt index (incremented per user turn).
     pub prompt_index: usize,
     /// Accumulated token usage.
@@ -112,7 +113,7 @@ pub enum AuthType {
 /// Credential/secret fields that the actor stores opaquely.
 ///
 /// These are fields from the shell's full `Config` that aren't part of
-/// `xai_grok_sampling_types::SamplingConfig` (which is secret-free).
+/// `xai_grok_inference_types::InferenceSettings` (which is secret-free).
 /// The actor just stores and returns them — it never interprets them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
@@ -173,7 +174,7 @@ mod tests {
     fn snapshot_round_trips_through_serde_json() {
         let snapshot = ChatStateSnapshot {
             conversation: vec![],
-            sampling_config: SamplingConfig {
+            inference_settings: InferenceSettings {
                 base_url: "https://api.example.com".to_string(),
                 model: "test-model".to_string(),
                 max_completion_tokens: None,
@@ -208,7 +209,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips_with_data() {
-        use xai_grok_sampling_types::ConversationItem;
+        use xai_grok_inference_types::ConversationItem;
 
         let snapshot = ChatStateSnapshot {
             conversation: vec![
@@ -216,7 +217,7 @@ mod tests {
                 ConversationItem::user("Hello!"),
                 ConversationItem::assistant("Hi there!"),
             ],
-            sampling_config: SamplingConfig {
+            inference_settings: InferenceSettings {
                 base_url: "https://api.example.com".to_string(),
                 model: "grok-3".to_string(),
                 max_completion_tokens: Some(4096),

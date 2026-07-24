@@ -12875,7 +12875,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "xai-grok-compaction",
- "xai-grok-sampling-types",
+ "xai-grok-inference-types",
  "xai-token-estimation",
 ]
 
@@ -13136,7 +13136,7 @@ dependencies = [
  "tracing",
  "xai-grok-config",
  "xai-grok-hooks",
- "xai-grok-sampling-types",
+ "xai-grok-inference-types",
  "xai-grok-tools",
  "xai-token-estimation",
  "xai-tool-types",
@@ -13258,10 +13258,51 @@ dependencies = [
  "serde_json",
  "tracing",
  "xai-grok-auth",
- "xai-grok-sampler",
+ "xai-grok-inference",
  "xai-grok-telemetry",
  "xai-grok-version",
  "xai-grok-workspace",
+]
+
+[[package]]
+name = "xai-grok-inference"
+version = "0.1.0"
+dependencies = [
+ "async-openai",
+ "async-stream",
+ "axum",
+ "chrono",
+ "eventsource-stream",
+ "futures-util",
+ "indexmap",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "xai-grok-inference-types",
+ "xai-grok-test-support",
+ "xai-grok-version",
+]
+
+[[package]]
+name = "xai-grok-inference-types"
+version = "0.1.0"
+dependencies = [
+ "assert_matches",
+ "async-openai",
+ "chrono",
+ "indexmap",
+ "reqwest 0.12.24",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "xai-grok-compaction",
+ "xai-grok-tools",
 ]
 
 [[package]]
@@ -13644,47 +13685,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xai-grok-sampler"
-version = "0.1.0"
-dependencies = [
- "async-openai",
- "async-stream",
- "axum",
- "chrono",
- "eventsource-stream",
- "futures-util",
- "indexmap",
- "reqwest 0.12.24",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "xai-grok-sampling-types",
- "xai-grok-test-support",
- "xai-grok-version",
-]
-
-[[package]]
-name = "xai-grok-sampling-types"
-version = "0.1.0"
-dependencies = [
- "assert_matches",
- "async-openai",
- "chrono",
- "indexmap",
- "reqwest 0.12.24",
- "schemars 1.0.4",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "xai-grok-compaction",
- "xai-grok-tools",
-]
-
-[[package]]
 name = "xai-grok-sandbox"
 version = "0.1.0"
 dependencies = [
@@ -13856,13 +13856,13 @@ dependencies = [
  "xai-grok-config-types",
  "xai-grok-hooks",
  "xai-grok-http",
+ "xai-grok-inference",
+ "xai-grok-inference-types",
  "xai-grok-mcp",
  "xai-grok-memory",
  "xai-grok-models",
  "xai-grok-paths",
  "xai-grok-plugin-marketplace",
- "xai-grok-sampler",
- "xai-grok-sampling-types",
  "xai-grok-sandbox",
  "xai-grok-shared",
  "xai-grok-shell-base",
@@ -13946,7 +13946,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
- "xai-grok-sampling-types",
+ "xai-grok-inference-types",
  "xai-grok-tools",
  "xai-tool-types",
 ]
@@ -13995,7 +13995,7 @@ dependencies = [
  "xai-grok-auth",
  "xai-grok-config",
  "xai-grok-env",
- "xai-grok-sampler",
+ "xai-grok-inference",
  "xai-grok-secrets",
  "xai-mixpanel",
  "xai-token-estimation",

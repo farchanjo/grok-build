@@ -46,12 +46,12 @@ fn auth_manager_with_refresher(
     (dir, am)
 }
 
-/// Build a `SamplingErrorInfo` of kind Auth - the same shape the
+/// Build a `InferenceErrorInfo` of kind Auth - the same shape the
 /// inner `OaiCompatClient` emit surfaces after recording its own
 /// attribution.
-fn auth_error() -> xai_grok_sampler::SamplingErrorInfo {
-    xai_grok_sampler::SamplingErrorInfo {
-        kind: xai_grok_sampler::SamplingErrorKind::Auth,
+fn auth_error() -> xai_grok_inference::InferenceErrorInfo {
+    xai_grok_inference::InferenceErrorInfo {
+        kind: xai_grok_inference::InferenceErrorKind::Auth,
         message: "Unauthorized (401)".to_string(),
         status_code: Some(401),
         is_retryable: false,
@@ -197,7 +197,7 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
             let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
                 "session-based auth with a working refresher must return RefreshAuthAndResubmit"
             );
             assert!(called.load(Ordering::SeqCst), "refresher must be invoked");
@@ -450,9 +450,9 @@ async fn proactive_refresh_makes_per_turn_refresh_a_cache_hit() {
         .await;
 }
 
-fn model_not_found_error() -> xai_grok_sampler::SamplingErrorInfo {
-    xai_grok_sampler::SamplingErrorInfo {
-            kind: xai_grok_sampler::SamplingErrorKind::Api,
+fn model_not_found_error() -> xai_grok_inference::InferenceErrorInfo {
+    xai_grok_inference::InferenceErrorInfo {
+            kind: xai_grok_inference::InferenceErrorKind::Api,
             message: "API error (status 404 Not Found): The model grok-build does not exist or your team does not have access".into(),
             status_code: Some(404),
             is_retryable: false,
@@ -510,7 +510,7 @@ async fn legacy_auth_hint_on_404_model_not_found() {
 
 /// Build a 401-shaped error that bypasses step 4b's auth recovery.
 ///
-/// In production, 401s arrive as `SamplingErrorKind::Auth` with
+/// In production, 401s arrive as `InferenceErrorKind::Auth` with
 /// `status_code: None`. Step 4b intercepts `Auth`-kind errors and
 /// runs the full recovery chain — which succeeds on devbox/CI
 /// environments via SA-token mint, masking the hint.
@@ -518,9 +518,9 @@ async fn legacy_auth_hint_on_404_model_not_found() {
 /// Using `Api` kind + `status_code: Some(401)` exercises the hint
 /// condition (`status_code == Some(401)`) without triggering
 /// recovery, making the test environment-independent.
-fn unauthorized_401_error() -> xai_grok_sampler::SamplingErrorInfo {
-    xai_grok_sampler::SamplingErrorInfo {
-            kind: xai_grok_sampler::SamplingErrorKind::Api,
+fn unauthorized_401_error() -> xai_grok_inference::InferenceErrorInfo {
+    xai_grok_inference::InferenceErrorInfo {
+            kind: xai_grok_inference::InferenceErrorKind::Api,
             message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: {\"error\":\"Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=Unauthenticated, reason=no auth context)\"}".into(),
             status_code: Some(401),
             is_retryable: false,
@@ -708,7 +708,7 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
                 "session-based method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -742,7 +742,7 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
                 "oidc method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -807,12 +807,12 @@ async fn reconstruct_full_config_no_bearer_resolver_for_api_key_method() {
 }
 
 /// H4 wire shaping (per-turn reconstruction): `reconstruct_full_config` mirrors
-/// `sampling_config_for_model` — when the resolved catalog model explicitly
+/// `inference_config_for_model` — when the resolved catalog model explicitly
 /// disclaims reasoning support (`Some(false)`), `reasoning_effort` is stripped
 /// even if stale session state left an effort set on the chat-state config.
 #[tokio::test(flavor = "current_thread")]
 async fn reconstruct_full_config_strips_reasoning_effort_for_unsupported_model() {
-    use xai_grok_sampling_types::ReasoningEffort;
+    use xai_grok_inference_types::ReasoningEffort;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -824,9 +824,9 @@ async fn reconstruct_full_config_strips_reasoning_effort_for_unsupported_model()
             )
             .await;
             // Stale session state: an effort stamped onto the chat-state config.
-            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
             cfg.reasoning_effort = Some(ReasoningEffort::High);
-            actor.chat_state_handle.update_sampling_config(cfg);
+            actor.chat_state_handle.update_inference_settings(cfg);
             // Catalog model "test" (the chat-state model id) explicitly
             // disclaims reasoning support.
             let mut entry = crate::agent::config::ModelEntry {
@@ -856,7 +856,7 @@ async fn reconstruct_full_config_strips_reasoning_effort_for_unsupported_model()
 /// explicit effort, matching the initial-build path.
 #[tokio::test(flavor = "current_thread")]
 async fn reconstruct_full_config_honors_reasoning_effort_when_support_unknown() {
-    use xai_grok_sampling_types::ReasoningEffort;
+    use xai_grok_inference_types::ReasoningEffort;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -867,9 +867,9 @@ async fn reconstruct_full_config_honors_reasoning_effort_when_support_unknown() 
                 "xai-static-key".to_string(),
             )
             .await;
-            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
             cfg.reasoning_effort = Some(ReasoningEffort::Low);
-            actor.chat_state_handle.update_sampling_config(cfg);
+            actor.chat_state_handle.update_inference_settings(cfg);
             // Manual TOML model: `supports_reasoning_effort = None` (unknown).
             let mut entry = crate::agent::config::ModelEntry {
                 info: crate::agent::config::ModelInfo::fallback("test"),
@@ -1049,7 +1049,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
 
             let model = actor
                 .chat_state_handle
-                .get_sampling_config()
+                .get_inference_settings()
                 .await
                 .map(|c| c.model)
                 .unwrap_or_default();
@@ -1097,7 +1097,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
 
             let model = actor
                 .chat_state_handle
-                .get_sampling_config()
+                .get_inference_settings()
                 .await
                 .map(|c| c.model)
                 .unwrap_or_default();
@@ -1116,7 +1116,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
 
             // Switch to the same model_id, now a per-model BYOK model on a
             // third-party endpoint.
-            let cfg = xai_grok_sampler::SamplerConfig {
+            let cfg = xai_grok_inference::InferenceConfig {
                 api_key: Some("byok-key".to_string()),
                 base_url: "https://third-party.example/v1".to_string(),
                 model: model.clone(),
@@ -1126,7 +1126,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 openrouter_fallback_models: Vec::new(),
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
-                api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                api_backend: crate::inference::ApiBackend::ChatCompletions,
                 include_message_model_id: true,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
@@ -1170,7 +1170,7 @@ use crate::auth::test_counting_provider as counting_provider;
 async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::AuthProviderRef) {
     let model = actor
         .chat_state_handle
-        .get_sampling_config()
+        .get_inference_settings()
         .await
         .map(|c| c.model)
         .unwrap_or_default();
@@ -1208,12 +1208,12 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
 
             let model = actor
                 .chat_state_handle
-                .get_sampling_config()
+                .get_inference_settings()
                 .await
                 .map(|c| c.model)
                 .unwrap_or_default();
 
-            let cfg = xai_grok_sampler::SamplerConfig {
+            let cfg = xai_grok_inference::InferenceConfig {
                 api_key: Some("session-jwt".to_string()),
                 base_url: "https://api.x.ai/v1".to_string(),
                 model,
@@ -1223,7 +1223,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 openrouter_fallback_models: Vec::new(),
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
-                api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                api_backend: crate::inference::ApiBackend::ChatCompletions,
                 include_message_model_id: true,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
@@ -1245,7 +1245,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
-                provider_identity: xai_grok_sampler::config::ProviderIdentity::Xai,
+                provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
             };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, true, 85)
@@ -1284,7 +1284,7 @@ async fn sampler_401_on_provider_model_remints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
                 "provider 401 must re-mint and resubmit"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1317,10 +1317,10 @@ async fn sampler_non_auth_kind_401_on_provider_model_still_recovers() {
             );
 
             let mut error = auth_error();
-            error.kind = xai_grok_sampler::SamplingErrorKind::Api;
+            error.kind = xai_grok_inference::InferenceErrorKind::Api;
             let result = actor.handle_sampling_failure(error).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
                 "a non-Auth-kind 401 on a provider model must still recover via 4c"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1352,7 +1352,7 @@ async fn sampler_401_with_no_key_on_provider_model_mints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
                 "an unauthenticated 401 on a provider model must mint and resubmit"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1395,7 +1395,7 @@ async fn sampler_401_on_provider_model_never_refreshes_session() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
                 "the provider arm must recover"
             );
             assert!(

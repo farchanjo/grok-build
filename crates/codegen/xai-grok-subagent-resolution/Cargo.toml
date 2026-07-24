@@ -10,7 +10,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
+xai-grok-inference-types = { path = "../xai-grok-inference-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
 xai-tool-types.workspace = true
 # TODO(phase2): add these when resolve_subagent_spec() composition is implemented:

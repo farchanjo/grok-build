@@ -224,13 +224,13 @@ pub fn auto_mode_classifier_defaults(
     effective_supports_reasoning_effort: bool,
 ) -> (
     xai_grok_workspace::permission::ClassifierPromptType,
-    Option<xai_grok_sampling_types::ReasoningEffort>,
+    Option<xai_grok_inference_types::ReasoningEffort>,
 ) {
     let prompt_type = cfg
         .prompt_type
         .unwrap_or(xai_grok_workspace::permission::ClassifierPromptType::Full);
     let reasoning_effort = cfg.reasoning_effort.or_else(|| {
-        effective_supports_reasoning_effort.then_some(xai_grok_sampling_types::ReasoningEffort::Low)
+        effective_supports_reasoning_effort.then_some(xai_grok_inference_types::ReasoningEffort::Low)
     });
     (prompt_type, reasoning_effort)
 }
@@ -423,7 +423,7 @@ mod auto_permission_mode_gate_tests {
     #[test]
     fn merge_auto_mode_config_precedence() {
         use crate::agent::config::AutoModeConfig;
-        use xai_grok_sampling_types::ReasoningEffort;
+        use xai_grok_inference_types::ReasoningEffort;
         use xai_grok_workspace::permission::ClassifierPromptType;
         // config wins where set; remote fills the gaps.
         let config = AutoModeConfig {
@@ -498,7 +498,7 @@ mod auto_permission_mode_gate_tests {
     #[test]
     fn auto_mode_classifier_defaults_apply_when_unset() {
         use crate::agent::config::AutoModeConfig;
-        use xai_grok_sampling_types::ReasoningEffort;
+        use xai_grok_inference_types::ReasoningEffort;
         use xai_grok_workspace::permission::ClassifierPromptType;
         // Unset + RE-supporting effective model ⇒ full (transcript) + low.
         let (pt, eff) = auto_mode_classifier_defaults(&AutoModeConfig::default(), true);

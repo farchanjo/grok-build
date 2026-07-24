@@ -11,12 +11,12 @@
 
 mod common;
 
-use common::{create_test_client, test_sampler_config};
-use xai_grok_sampler::RetryPolicy;
-use xai_grok_sampling_types::doom_loop::{DoomLoopSignalKind, SAMPLE_CHECK_EVENT_DATA_CUMULATIVE};
-use xai_grok_shell::sampling::{
-    ApiBackend, Client, ConversationItem, ConversationRequest, RequestId, SamplerActor,
-    SamplerHandle,
+use common::{create_test_client, test_inference_config};
+use xai_grok_inference::RetryPolicy;
+use xai_grok_inference_types::doom_loop::{DoomLoopSignalKind, SAMPLE_CHECK_EVENT_DATA_CUMULATIVE};
+use xai_grok_shell::inference::{
+    ApiBackend, Client, ConversationItem, ConversationRequest, RequestId, InferenceActor,
+    InferenceHandle,
 };
 use xai_grok_test_support::sse::{
     responses_api_doom_loop_check_events, responses_api_doom_loop_terminal_only_events,
@@ -30,15 +30,15 @@ const MODEL: &str = "test-model";
 /// A sampling client with the doom-loop check enabled (default tunables:
 /// `max_threshold` 8, `max_retries` 2).
 fn doom_loop_client(base_url: &str) -> Client {
-    let mut config = test_sampler_config(base_url, ApiBackend::Responses, &[]);
+    let mut config = test_inference_config(base_url, ApiBackend::Responses, &[]);
     config.doom_loop_recovery = Some(Default::default());
     Client::new(config).unwrap()
 }
 
 /// A sampler actor (the rung that owns retry/recovery) with the given
 /// doom-loop policy. Events are fire-and-forget, so the receiver is dropped.
-fn spawn_actor(base_url: &str, doom_loop_enabled: bool) -> SamplerHandle {
-    let mut config = test_sampler_config(base_url, ApiBackend::Responses, &[]);
+fn spawn_actor(base_url: &str, doom_loop_enabled: bool) -> InferenceHandle {
+    let mut config = test_inference_config(base_url, ApiBackend::Responses, &[]);
     if doom_loop_enabled {
         config.doom_loop_recovery = Some(Default::default());
     }
@@ -49,7 +49,7 @@ fn spawn_actor(base_url: &str, doom_loop_enabled: bool) -> SamplerHandle {
         ..RetryPolicy::default()
     };
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    SamplerActor::spawn(config, retry, event_tx)
+    InferenceActor::spawn(config, retry, event_tx)
 }
 
 fn user_request(text: &str) -> ConversationRequest {

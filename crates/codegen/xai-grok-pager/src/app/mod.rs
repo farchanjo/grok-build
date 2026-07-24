@@ -619,7 +619,7 @@ pub async fn run(
         reasoning_effort_override: args
             .reasoning_effort
             .as_deref()
-            .and_then(xai_grok_shell::sampling::types::parse_canonical_effort_token),
+            .and_then(xai_grok_shell::inference::types::parse_canonical_effort_token),
         permission_rules: crate::headless::parse_permission_rules_lenient(
             &args.allow_rules,
             &args.deny_rules,

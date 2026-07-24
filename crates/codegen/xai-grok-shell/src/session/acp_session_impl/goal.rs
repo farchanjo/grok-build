@@ -106,7 +106,7 @@ impl SessionActor {
         };
         let active_model = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|config| config.model)
             .filter(|model| !model.is_empty())
@@ -134,7 +134,7 @@ impl SessionActor {
                 }
             } else {
                 let active_config = self.reconstruct_full_config().await;
-                match self.resolve_aux_sampler_config(requested_model).await {
+                match self.resolve_aux_inference_config(requested_model).await {
                     Some(mut config) => {
                         crate::agent::config::stamp_session_local_sampler_fields(
                             &mut config,
@@ -143,7 +143,7 @@ impl SessionActor {
                             Some(self.max_retries),
                         );
                         let model = config.model.clone();
-                        match xai_grok_sampler::SamplingClient::new(config) {
+                        match xai_grok_inference::InferenceClient::new(config) {
                             Ok(client) => (client, model),
                             Err(error) => {
                                 last_error = format!("could not prepare small evaluator: {error}");
@@ -563,7 +563,7 @@ impl SessionActor {
 
         let model_id = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model)
             .unwrap_or_default();
@@ -571,7 +571,7 @@ impl SessionActor {
         let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
             tracing::warn!("verification stage: no subagent coordinator channel; failing open");
             return GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
+                reason: GoalClassifierFailOpenReason::InferenceError,
                 details_path: String::new(),
             };
         };
@@ -1102,7 +1102,7 @@ impl SessionActor {
     }
 
     pub(super) async fn prune_prior_goal_continuation_directives(&self) {
-        use xai_grok_sampling_types::conversation::SyntheticReason;
+        use xai_grok_inference_types::conversation::SyntheticReason;
 
         fn is_goal_continuation_directive(item: &ConversationItem) -> bool {
             matches!(

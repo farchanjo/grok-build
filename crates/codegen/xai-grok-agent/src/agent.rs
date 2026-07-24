@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use xai_grok_sampling_types::HostedTool;
+use xai_grok_inference_types::HostedTool;
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::types::definition::ToolDefinition;
 
@@ -197,7 +197,7 @@ impl Agent {
 
     /// Whether auto-compact should trigger given current token usage.
     ///
-    /// `context_window` comes from the session's SamplingConfig (model-provided).
+    /// `context_window` comes from the session's InferenceSettings (model-provided).
     pub fn should_auto_compact(
         &self,
         total_tokens: u64,

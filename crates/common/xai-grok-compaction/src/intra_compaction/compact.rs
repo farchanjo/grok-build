@@ -618,9 +618,9 @@ fn build_prompt_for_target(
         CompactionTarget::Steps => Ok(format_compaction_prompt()),
         CompactionTarget::History => {
             let system = format_compaction_developer_prompt()
-                .map_err(|e| IntraCompactionError::SamplerBuild(e.to_string()))?;
+                .map_err(|e| IntraCompactionError::InferenceBuild(e.to_string()))?;
             let user = format_compaction_user_prompt()
-                .map_err(|e| IntraCompactionError::SamplerBuild(e.to_string()))?;
+                .map_err(|e| IntraCompactionError::InferenceBuild(e.to_string()))?;
             Ok(CompactionPrompt { system, user })
         }
         CompactionTarget::FullReplace => {
@@ -641,9 +641,9 @@ fn build_prompt_for_target(
 /// intra and grok-build stay in lock-step. Outcome mapping:
 /// - exhausted empty/degenerate run → [`IntraCompactionError::EmptyResponse`];
 /// - deterministic sampler error (incl. context overflow) →
-///   [`IntraCompactionError::SamplerBuild`] (terminal);
+///   [`IntraCompactionError::InferenceBuild`] (terminal);
 /// - transient sampler error that exhausts retries →
-///   [`IntraCompactionError::SamplerStream`].
+///   [`IntraCompactionError::InferenceStream`].
 ///
 /// Intra observes terminally (via [`IntraCompactionObserver`]), not per-attempt,
 /// so it passes the no-op `()` observer to the shared loop.
@@ -685,9 +685,9 @@ where
             ..
         }) => {
             if deterministic {
-                Err(IntraCompactionError::SamplerBuild(message))
+                Err(IntraCompactionError::InferenceBuild(message))
             } else {
-                Err(IntraCompactionError::SamplerStream(message))
+                Err(IntraCompactionError::InferenceStream(message))
             }
         }
     }
@@ -704,9 +704,9 @@ pub fn error_status_label(err: &IntraCompactionError) -> &'static str {
         IntraCompactionError::InsufficientReduction { .. } => "insufficient_reduction",
         IntraCompactionError::InvalidSplit { .. } => "invalid_split",
         IntraCompactionError::Unsupported => "unsupported",
-        IntraCompactionError::SamplerBuild(_) => "sampler_build",
-        IntraCompactionError::SamplerStart(_) => "sampler_start",
-        IntraCompactionError::SamplerStream(_) => "sampler_stream",
+        IntraCompactionError::InferenceBuild(_) => "inference_build",
+        IntraCompactionError::InferenceStart(_) => "inference_start",
+        IntraCompactionError::InferenceStream(_) => "inference_stream",
         IntraCompactionError::Apply(_) => "apply",
     }
 }
@@ -759,19 +759,19 @@ where
 fn compaction_sample_error_to_intra(err: CompactionSampleError) -> IntraCompactionError {
     match err {
         CompactionSampleError::Timeout { .. } => IntraCompactionError::Timeout,
-        CompactionSampleError::Build(msg) => IntraCompactionError::SamplerBuild(msg),
-        CompactionSampleError::Start(msg) => IntraCompactionError::SamplerStart(msg),
+        CompactionSampleError::Build(msg) => IntraCompactionError::InferenceBuild(msg),
+        CompactionSampleError::Start(msg) => IntraCompactionError::InferenceStart(msg),
         CompactionSampleError::EmptyResponse => IntraCompactionError::EmptyResponse,
         CompactionSampleError::Other(e) => {
             let msg = e.to_string();
             if msg.contains("Failed to build") {
-                IntraCompactionError::SamplerBuild(msg)
+                IntraCompactionError::InferenceBuild(msg)
             } else if msg.contains("Failed to start") {
-                IntraCompactionError::SamplerStart(msg)
+                IntraCompactionError::InferenceStart(msg)
             } else if msg.contains("no response channel content") {
                 IntraCompactionError::EmptyResponse
             } else {
-                IntraCompactionError::SamplerStream(msg)
+                IntraCompactionError::InferenceStream(msg)
             }
         }
     }
@@ -783,10 +783,10 @@ fn is_transient(err: &IntraCompactionError) -> bool {
         err,
         IntraCompactionError::Timeout
             | IntraCompactionError::EmptyResponse
-            | IntraCompactionError::SamplerStream(_)
-            | IntraCompactionError::SamplerStart(_)
+            | IntraCompactionError::InferenceStream(_)
+            | IntraCompactionError::InferenceStart(_)
     )
-    // Deterministic: SamplerBuild (config error), Unsupported, InvalidSplit,
+    // Deterministic: InferenceBuild (config error), Unsupported, InvalidSplit,
     // InsufficientReduction, NothingToCompact, Apply.
 }
 
@@ -835,16 +835,16 @@ mod tests {
             ),
             (IntraCompactionError::Unsupported, "unsupported"),
             (
-                IntraCompactionError::SamplerBuild("x".into()),
-                "sampler_build",
+                IntraCompactionError::InferenceBuild("x".into()),
+                "inference_build",
             ),
             (
-                IntraCompactionError::SamplerStart("x".into()),
-                "sampler_start",
+                IntraCompactionError::InferenceStart("x".into()),
+                "inference_start",
             ),
             (
-                IntraCompactionError::SamplerStream("x".into()),
-                "sampler_stream",
+                IntraCompactionError::InferenceStream("x".into()),
+                "inference_stream",
             ),
             (IntraCompactionError::Apply("x".into()), "apply"),
         ];
@@ -869,7 +869,7 @@ mod tests {
         let intra = compaction_sample_error_to_intra(CompactionSampleError::Other(
             anyhow::anyhow!("Failed to build AgenticScheduler: config error"),
         ));
-        assert!(matches!(intra, IntraCompactionError::SamplerBuild(_)));
+        assert!(matches!(intra, IntraCompactionError::InferenceBuild(_)));
     }
 
     #[test]
@@ -877,7 +877,7 @@ mod tests {
         let intra = compaction_sample_error_to_intra(CompactionSampleError::Other(
             anyhow::anyhow!("Failed to start compaction sample: stream error"),
         ));
-        assert!(matches!(intra, IntraCompactionError::SamplerStart(_)));
+        assert!(matches!(intra, IntraCompactionError::InferenceStart(_)));
     }
 
     #[test]
@@ -898,18 +898,18 @@ mod tests {
         let intra = compaction_sample_error_to_intra(CompactionSampleError::Other(
             anyhow::anyhow!("Compaction scheduler error: kind=Parser, message=boom"),
         ));
-        assert!(matches!(intra, IntraCompactionError::SamplerStream(_)));
+        assert!(matches!(intra, IntraCompactionError::InferenceStream(_)));
     }
 
     #[test]
     fn compaction_sample_error_to_intra_maps_structured_variants() {
         assert!(matches!(
             compaction_sample_error_to_intra(CompactionSampleError::Build("bad config".into())),
-            IntraCompactionError::SamplerBuild(_)
+            IntraCompactionError::InferenceBuild(_)
         ));
         assert!(matches!(
             compaction_sample_error_to_intra(CompactionSampleError::Start("no stream".into())),
-            IntraCompactionError::SamplerStart(_)
+            IntraCompactionError::InferenceStart(_)
         ));
         assert!(matches!(
             compaction_sample_error_to_intra(CompactionSampleError::EmptyResponse),
@@ -1271,7 +1271,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(matches!(result, Err(IntraCompactionError::SamplerBuild(_))));
+        assert!(matches!(result, Err(IntraCompactionError::InferenceBuild(_))));
         assert_eq!(
             sampler.call_count(),
             1,
@@ -1472,7 +1472,7 @@ mod tests {
     #[tokio::test]
     async fn shared_summarizer_bails_on_deterministic_error() {
         // A deterministic (Build) failure short-circuits without retrying and
-        // maps to SamplerBuild (terminal).
+        // maps to InferenceBuild (terminal).
         let sampler = MockSampler::fails_then(
             vec![CompactionSampleError::Build("config".into())],
             "unused",
@@ -1480,8 +1480,8 @@ mod tests {
         let turns = vec![MockItem::user("hi")];
         let result = sample_shared_summary_with_retries(&sampler, &turns, &enabled_policy()).await;
         assert!(
-            matches!(result, Err(IntraCompactionError::SamplerBuild(_))),
-            "expected SamplerBuild, got {result:?}"
+            matches!(result, Err(IntraCompactionError::InferenceBuild(_))),
+            "expected InferenceBuild, got {result:?}"
         );
         assert_eq!(
             sampler.call_count(),

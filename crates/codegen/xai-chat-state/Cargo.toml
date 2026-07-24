@@ -18,7 +18,7 @@ tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 xai-grok-compaction = { path = "../../common/xai-grok-compaction" }
-xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
+xai-grok-inference-types = { path = "../xai-grok-inference-types" }
 xai-token-estimation = { workspace = true }
 
 [dev-dependencies]

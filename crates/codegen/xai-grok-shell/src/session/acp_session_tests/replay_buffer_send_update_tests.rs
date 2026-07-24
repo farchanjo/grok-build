@@ -246,7 +246,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
-        sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
@@ -480,7 +480,7 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
 /// `record_assistant_response` path is skipped (cancel / max tokens).
 #[tokio::test(flavor = "current_thread")]
 async fn channel_tokens_accumulate_into_streaming_capture() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
+    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -493,25 +493,25 @@ async fn channel_tokens_accumulate_into_streaming_capture() {
             actor.current_turn_number.set(7);
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 1_700_000_000_000,
                 })
                 .await;
             for chunk in ["Let me ", "think ", "step by step. "] {
                 actor
-                    .handle_sampling_event(SamplingEvent::ChannelToken {
+                    .handle_sampling_event(InferenceEvent::ChannelToken {
                         request_id: req.clone(),
-                        channel: SamplingChannel::Reasoning,
+                        channel: InferenceChannel::Reasoning,
                         text: chunk.to_string(),
                         chunk_index: 0,
                     })
                     .await;
             }
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Text,
+                    channel: InferenceChannel::Text,
                     text: "Answer: 42".to_string(),
                     chunk_index: 0,
                 })
@@ -554,7 +554,7 @@ async fn channel_tokens_accumulate_into_streaming_capture() {
 /// `StreamStarted` arm that the pure-struct tests bypass.
 #[tokio::test(flavor = "current_thread")]
 async fn same_prompt_restart_accumulates_segments_via_handler() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
+    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -566,29 +566,29 @@ async fn same_prompt_restart_accumulates_segments_via_handler() {
                 .expect("current_prompt_id mutex poisoned") = Some("prompt-doomloop".to_string());
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 1,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "first gen reasoning".to_string(),
                     chunk_index: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 2,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req,
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "second gen reasoning".to_string(),
                     chunk_index: 0,
                 })
@@ -608,7 +608,7 @@ async fn same_prompt_restart_accumulates_segments_via_handler() {
         })
         .await;
 }
-/// On `SamplingEvent::Completed` the canonical response is committed via
+/// On `InferenceEvent::Completed` the canonical response is committed via
 /// `record_assistant_response`, so its generation is DISCARDED from the
 /// out-of-band capture (the in-progress slot is cleared, not folded into
 /// `segments`) — that reasoning is already in afterStateHistory. Prior
@@ -617,8 +617,8 @@ async fn same_prompt_restart_accumulates_segments_via_handler() {
 /// reasoning nor erases earlier uncommitted partials.
 #[tokio::test(flavor = "current_thread")]
 async fn completed_event_clears_slot_keeps_prior_uncommitted_segments() {
-    use xai_grok_sampler::{InferenceLatencyStats, RequestId, SamplingChannel, SamplingEvent};
-    use xai_grok_sampling_types::{ConversationItem, ConversationResponse};
+    use xai_grok_inference::{InferenceLatencyStats, RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference_types::{ConversationItem, ConversationResponse};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -630,35 +630,35 @@ async fn completed_event_clears_slot_keeps_prior_uncommitted_segments() {
                 .expect("current_prompt_id mutex poisoned") = Some("prompt-completed".to_string());
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "prior uncommitted reasoning".to_string(),
                     chunk_index: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 1,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "committed reasoning".to_string(),
                     chunk_index: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::Completed {
+                .handle_sampling_event(InferenceEvent::Completed {
                     request_id: req,
                     response: Box::new(ConversationResponse {
                         items: vec![ConversationItem::assistant("Answer".to_string())],
@@ -701,8 +701,8 @@ async fn completed_event_clears_slot_keeps_prior_uncommitted_segments() {
 /// client — the multi-pane "out of order" bug.
 #[tokio::test(flavor = "current_thread")]
 async fn completed_event_releases_stream_drain_barrier() {
-    use xai_grok_sampler::{InferenceLatencyStats, RequestId, SamplingChannel, SamplingEvent};
-    use xai_grok_sampling_types::{ConversationItem, ConversationResponse};
+    use xai_grok_inference::{InferenceLatencyStats, RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference_types::{ConversationItem, ConversationResponse};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -716,15 +716,15 @@ async fn completed_event_releases_stream_drain_barrier() {
             *actor.turn_stream_drained.lock() = Some(tx);
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Text,
+                    channel: InferenceChannel::Text,
                     text: "the scrollback blo".to_string(),
                     chunk_index: 0,
                 })
@@ -734,7 +734,7 @@ async fn completed_event_releases_stream_drain_barrier() {
                 "a mid-stream text chunk must NOT release the stream-drain barrier"
             );
             actor
-                .handle_sampling_event(SamplingEvent::Completed {
+                .handle_sampling_event(InferenceEvent::Completed {
                     request_id: req,
                     response: Box::new(ConversationResponse {
                         items: vec![ConversationItem::assistant("blocks".to_string())],
@@ -761,14 +761,14 @@ async fn completed_event_releases_stream_drain_barrier() {
         })
         .await;
 }
-/// `SamplingEvent::Failed` (fired by the sampler for cancellation,
+/// `InferenceEvent::Failed` (fired by the sampler for cancellation,
 /// `MaxTokensTruncation`, etc.) must NOT clear the accumulator —
 /// the consumer needs to take it via `TakeStreamingCapture` and
 /// upload as `streaming_partial.json`.
 #[tokio::test(flavor = "current_thread")]
 async fn failed_event_preserves_streaming_capture_for_takeout() {
-    use xai_grok_sampler::{
-        RequestId, SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent,
+    use xai_grok_inference::{
+        RequestId, InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent,
     };
     let local = tokio::task::LocalSet::new();
     local
@@ -781,24 +781,24 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                 .expect("current_prompt_id mutex poisoned") = Some("prompt-failed".to_string());
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "I should consider...".to_string(),
                     chunk_index: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::Failed {
+                .handle_sampling_event(InferenceEvent::Failed {
                     request_id: req,
-                    error: SamplingErrorInfo {
-                        kind: SamplingErrorKind::MaxTokensTruncation,
+                    error: InferenceErrorInfo {
+                        kind: InferenceErrorKind::MaxTokensTruncation,
                         status_code: None,
                         message: "max output tokens reached".to_string(),
                         is_retryable: false,
@@ -836,13 +836,13 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
 /// signals stay warn-only on the accepted response.
 #[tokio::test(flavor = "current_thread")]
 async fn observe_only_confident_completion_stays_warn_only() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
+    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let mut fixture = make_replay_send_update_fixture().await;
             fixture.actor.doom_loop_recovery =
-                Some(xai_grok_sampling_types::DoomLoopRecoveryPolicy {
+                Some(xai_grok_inference_types::DoomLoopRecoveryPolicy {
                     max_threshold: 8,
                     max_retries: 0,
                 });
@@ -853,35 +853,35 @@ async fn observe_only_confident_completion_stays_warn_only() {
                 .expect("current_prompt_id mutex poisoned") = Some("prompt-observe".to_string());
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "loop loop loop".to_string(),
                     chunk_index: 0,
                 })
                 .await;
-            let response = xai_grok_sampling_types::ConversationResponse {
-                items: vec![xai_grok_sampling_types::ConversationItem::assistant(
+            let response = xai_grok_inference_types::ConversationResponse {
+                items: vec![xai_grok_inference_types::ConversationItem::assistant(
                     "answer kept as-is",
                 )],
                 stop_reason: None,
                 usage: None,
                 cost_usd_ticks: None,
                 message_chunks_emitted: 1,
-                doom_loop_signals: vec![xai_grok_sampling_types::doom_loop::DoomLoopSignal::parse(
+                doom_loop_signals: vec![xai_grok_inference_types::doom_loop::DoomLoopSignal::parse(
                     "tail_repetition:8@thinking",
                 )],
                 stop_message: None,
                 fallback_served_model: None,
             };
             actor
-                .handle_sampling_event(SamplingEvent::Completed {
+                .handle_sampling_event(InferenceEvent::Completed {
                     request_id: req,
                     response: Box::new(response),
                     metrics: Default::default(),
@@ -915,13 +915,13 @@ async fn observe_only_confident_completion_stays_warn_only() {
 /// on `Completed`. Session counters and the per-turn tally track along.
 #[tokio::test(flavor = "current_thread")]
 async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingErrorKind, SamplingEvent};
+    use xai_grok_inference::{RequestId, InferenceChannel, InferenceErrorKind, InferenceEvent};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let mut fixture = make_replay_send_update_fixture().await;
             fixture.actor.doom_loop_recovery =
-                Some(xai_grok_sampling_types::DoomLoopRecoveryPolicy::default());
+                Some(xai_grok_inference_types::DoomLoopRecoveryPolicy::default());
             let actor = Arc::new(fixture.actor);
             *actor
                 .current_prompt_id
@@ -929,25 +929,25 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
                 .expect("current_prompt_id mutex poisoned") = Some("prompt-doom".to_string());
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "loop loop loop".to_string(),
                     chunk_index: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::Retrying {
+                .handle_sampling_event(InferenceEvent::Retrying {
                     request_id: req.clone(),
                     attempt: 1,
                     max_retries: 2,
-                    kind: SamplingErrorKind::DoomLoopDetected,
+                    kind: InferenceErrorKind::DoomLoopDetected,
                     reason: "doom loop detected: tail_repetition:8@thinking".to_string(),
                     doom_loop_triggers: Some(vec!["tail_repetition:8@thinking".to_string()]),
                     doom_loop_aborted_at_chunk: Some(421),
@@ -956,35 +956,35 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 1,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "still looping".to_string(),
                     chunk_index: 0,
                 })
                 .await;
-            let response = xai_grok_sampling_types::ConversationResponse {
-                items: vec![xai_grok_sampling_types::ConversationItem::assistant(
+            let response = xai_grok_inference_types::ConversationResponse {
+                items: vec![xai_grok_inference_types::ConversationItem::assistant(
                     "still looping answer",
                 )],
                 stop_reason: None,
                 usage: None,
                 cost_usd_ticks: None,
                 message_chunks_emitted: 1,
-                doom_loop_signals: vec![xai_grok_sampling_types::doom_loop::DoomLoopSignal::parse(
+                doom_loop_signals: vec![xai_grok_inference_types::doom_loop::DoomLoopSignal::parse(
                     "tail_repetition:4@thinking",
                 )],
                 stop_message: None,
                 fallback_served_model: None,
             };
             actor
-                .handle_sampling_event(SamplingEvent::Completed {
+                .handle_sampling_event(InferenceEvent::Completed {
                     request_id: req,
                     response: Box::new(response),
                     metrics: Default::default(),
@@ -1037,7 +1037,7 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
 /// taken at that point shows the model was cut off mid tool-call.
 #[tokio::test(flavor = "current_thread")]
 async fn tool_call_delta_marks_streaming_capture_phase() {
-    use xai_grok_sampler::{RequestId, SamplingChannel, SamplingEvent};
+    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1049,21 +1049,21 @@ async fn tool_call_delta_marks_streaming_capture_phase() {
                 .expect("current_prompt_id mutex poisoned") = Some("prompt-toolcall".to_string());
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "I'll call a tool.".to_string(),
                     chunk_index: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ToolCallDelta {
+                .handle_sampling_event(InferenceEvent::ToolCallDelta {
                     request_id: req,
                     tool_index: 0,
                     id: Some("call-1".to_string()),
@@ -1090,14 +1090,14 @@ async fn tool_call_delta_marks_streaming_capture_phase() {
 /// fabricate a phase — there is no partial to attribute it to.
 #[tokio::test(flavor = "current_thread")]
 async fn tool_call_delta_on_idle_slot_leaves_phase_pending() {
-    use xai_grok_sampler::{RequestId, SamplingEvent};
+    use xai_grok_inference::{RequestId, InferenceEvent};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let fixture = make_replay_send_update_fixture().await;
             let actor = Arc::new(fixture.actor);
             actor
-                .handle_sampling_event(SamplingEvent::ToolCallDelta {
+                .handle_sampling_event(InferenceEvent::ToolCallDelta {
                     request_id: RequestId::random(),
                     tool_index: 0,
                     id: Some("call-1".to_string()),
@@ -1159,10 +1159,10 @@ fn streaming_capture_appender_respects_byte_cap() {
 /// the sampler classifier (the mock-HTTP test covers that).
 #[tokio::test(start_paused = true)]
 async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
-    use xai_grok_sampler::{
-        RequestId, SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent,
+    use xai_grok_inference::{
+        RequestId, InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent,
     };
-    use xai_grok_sampling_types::{EmptyReason, EmptyResponseContext};
+    use xai_grok_inference_types::{EmptyReason, EmptyResponseContext};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1179,35 +1179,35 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                 .expect("current_prompt_id mutex poisoned") = Some("prompt-doomloop".to_string());
             let req = RequestId::random();
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 1,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "thinking attempt 1".to_string(),
                     chunk_index: 0,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::StreamStarted {
+                .handle_sampling_event(InferenceEvent::StreamStarted {
                     request_id: req.clone(),
                     timestamp_ms: 2,
                 })
                 .await;
             actor
-                .handle_sampling_event(SamplingEvent::ChannelToken {
+                .handle_sampling_event(InferenceEvent::ChannelToken {
                     request_id: req.clone(),
-                    channel: SamplingChannel::Reasoning,
+                    channel: InferenceChannel::Reasoning,
                     text: "thinking attempt 2".to_string(),
                     chunk_index: 0,
                 })
                 .await;
-            let error = SamplingErrorInfo {
-                kind: SamplingErrorKind::EmptyResponse,
+            let error = InferenceErrorInfo {
+                kind: InferenceErrorKind::EmptyResponse,
                 status_code: None,
                 message: "empty response from model (reasoning_only)".to_string(),
                 is_retryable: false,
@@ -1230,7 +1230,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                 doom_loop_aborted_at_chunk: None,
             };
             actor
-                .handle_sampling_event(SamplingEvent::Failed {
+                .handle_sampling_event(InferenceEvent::Failed {
                     request_id: req,
                     error: error.clone(),
                 })

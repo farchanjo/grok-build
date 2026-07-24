@@ -1,6 +1,6 @@
 //! ConversationRequest assembly — image compaction, pruning, repair, memory injection.
 
-use xai_grok_sampling_types::{
+use xai_grok_inference_types::{
     ContentPart, ConversationItem, ConversationRequest, ToolSpec, TraceContext,
 };
 
@@ -45,7 +45,7 @@ impl ChatStateActor {
     ) -> ConversationRequest {
         let needs_prune = should_prune(
             self.state.total_tokens,
-            self.state.sampling_config.context_window,
+            self.state.inference_settings.context_window,
         );
         let mut memory_reminder = memory_reminder;
         if let Some(reminder) = memory_reminder.as_deref()
@@ -130,10 +130,10 @@ impl ChatStateActor {
             tools: tool_definitions,
             hosted_tools: vec![],
             tool_choice: None,
-            model: Some(self.state.sampling_config.model.clone()),
-            temperature: self.state.sampling_config.temperature,
-            max_output_tokens: self.state.sampling_config.max_completion_tokens,
-            top_p: self.state.sampling_config.top_p,
+            model: Some(self.state.inference_settings.model.clone()),
+            temperature: self.state.inference_settings.temperature,
+            max_output_tokens: self.state.inference_settings.max_completion_tokens,
+            top_p: self.state.inference_settings.top_p,
             x_grok_conv_id: Some(conv_id),
             x_grok_req_id: Some(req_id),
             x_grok_session_id: None,
@@ -143,7 +143,7 @@ impl ChatStateActor {
             x_grok_user_id: None,
             trace,
             prompt_cache_key: None,
-            reasoning_effort: self.state.sampling_config.reasoning_effort,
+            reasoning_effort: self.state.inference_settings.reasoning_effort,
             json_schema: None,
         }
     }

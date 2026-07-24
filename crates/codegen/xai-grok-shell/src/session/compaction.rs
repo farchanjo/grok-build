@@ -31,7 +31,7 @@ use xai_chat_state::compaction_utils::{
     prepare_conversation_for_verbatim_summarization, sanitize_compacted_history,
     validate_compacted_history,
 };
-use xai_grok_sampling_types::{ApiBackend, ConversationItem};
+use xai_grok_inference_types::{ApiBackend, ConversationItem};
 /// Default percentage points below the auto-compact threshold at which prefire
 /// (background pass-1) starts, giving pass-1 runway to finish before the limit.
 /// Override with `GROK_PREFIRE_LEAD_PERCENT`.
@@ -115,7 +115,7 @@ impl From<PrefireOutcome> for PrefirePass1Run {
 #[cfg(test)]
 mod two_pass_prefire_helper_tests {
     use super::{fingerprint_prefix, prefire_lead_percent};
-    use xai_grok_sampling_types::ConversationItem;
+    use xai_grok_inference_types::ConversationItem;
     #[test]
     fn fingerprint_stable_for_same_prefix() {
         let items = vec![
@@ -173,7 +173,7 @@ impl SessionActor {
     /// the turn loop; a long-lived borrow would race with turn/compact/cancel
     /// and panic on double-borrow.
     async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
-        let sampling_config = self.reconstruct_full_config().await;
+        let inference_config = self.reconstruct_full_config().await;
         let client = match self.prepare_chat_completion(false).await {
             Ok(c) => c,
             Err(e) => {
@@ -195,7 +195,7 @@ impl SessionActor {
             hosted_tools,
             client,
             self.session_info.id.clone(),
-            &sampling_config,
+            &inference_config,
             self.inference_idle_timeout,
             wall_clock_budget_secs,
             self.compaction.tool_choice,
@@ -212,7 +212,7 @@ impl SessionActor {
     /// Per-turn prefire decision: usage has reached `threshold - lead` (so there
     /// is still runway before the hard auto-compact line at `threshold`).
     pub(crate) async fn should_prefire_two_pass(&self) -> bool {
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
+        let sampling_cfg = self.chat_state_handle.get_inference_settings().await;
         let Some(cw) = sampling_cfg.as_ref().map(|c| c.context_window.get()) else {
             return false;
         };
@@ -283,7 +283,7 @@ impl SessionActor {
         if split.prefix.is_empty() || split.tail.is_empty() {
             return PrefireOutcome::EmptySplit.into();
         }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
+        let sampling_cfg = self.chat_state_handle.get_inference_settings().await;
         let strips = sampling_cfg
             .as_ref()
             .map(|c| c.api_backend == ApiBackend::Messages)
@@ -376,7 +376,7 @@ impl SessionActor {
         let live = self.chat_state_handle.get_conversation().await;
         let model_slug = self
             .chat_state_handle
-            .get_sampling_config()
+            .get_inference_settings()
             .await
             .map(|c| c.model.to_string())
             .unwrap_or_default();
@@ -604,8 +604,8 @@ impl SessionActor {
         self.record_compaction_variant();
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", total_tokens as i64);
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_config
+        let inference_config = self.chat_state_handle.get_inference_settings().await;
+        let context_window = inference_config
             .as_ref()
             .map(|c| c.context_window.get())
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
@@ -766,10 +766,10 @@ impl SessionActor {
             },
         ))
         .await;
-        acp::Error::auth_required().data(crate::sampling::error::terminal_error_data(
+        acp::Error::auth_required().data(crate::inference::error::terminal_error_data(
             message,
             Some(401),
-            xai_grok_sampler::SamplingErrorKind::Auth,
+            xai_grok_inference::InferenceErrorKind::Auth,
         ))
     }
     /// Clear [`SUPPRESS_AUTH`] on login/token refresh (credit suppress waits for a 200).
@@ -898,8 +898,8 @@ impl SessionActor {
             xai_grok_telemetry::events::CompactionTrigger::Manual => "manual",
             xai_grok_telemetry::events::CompactionTrigger::Auto => "auto",
         };
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_config
+        let inference_config = self.chat_state_handle.get_inference_settings().await;
+        let context_window = inference_config
             .as_ref()
             .map(|c| c.context_window.get())
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
@@ -917,11 +917,11 @@ impl SessionActor {
             );
             span.record("compaction_trigger", trigger_str);
         }
-        let summary_strips_reasoning = sampling_config
+        let summary_strips_reasoning = inference_config
             .as_ref()
             .map(|c| c.api_backend == ApiBackend::Messages)
             .unwrap_or(false);
-        let model_id = sampling_config.map(|c| c.model).unwrap_or_default();
+        let model_id = inference_config.map(|c| c.model).unwrap_or_default();
         let compaction = xai_grok_telemetry::events::CompactionScope::begin(
             trigger,
             tokens_before,
@@ -1008,10 +1008,10 @@ impl SessionActor {
             return Err(acp::Error::internal_error()
                 .data("Compaction failed: no system message in simplified conversation"));
         }
-        let sampling_config = self.reconstruct_full_config().await;
+        let inference_config = self.reconstruct_full_config().await;
         let sampling_client = self.prepare_chat_completion(false).await?;
         let backend_search_active = self.backend_search_active();
-        let effective_tool_defs: Vec<xai_grok_sampling_types::ToolDefinition> = self
+        let effective_tool_defs: Vec<xai_grok_inference_types::ToolDefinition> = self
             .prepare_tool_definitions()
             .await
             .into_iter()
@@ -1019,18 +1019,18 @@ impl SessionActor {
             .collect();
         let compaction_tool_tokens =
             xai_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
-        let compaction_tools: Vec<xai_grok_sampling_types::ToolSpec> = effective_tool_defs
+        let compaction_tools: Vec<xai_grok_inference_types::ToolSpec> = effective_tool_defs
             .into_iter()
-            .map(xai_grok_sampling_types::ToolSpec::from)
+            .map(xai_grok_inference_types::ToolSpec::from)
             .collect();
-        let compaction_hosted_tools: Vec<xai_grok_sampling_types::HostedTool> =
+        let compaction_hosted_tools: Vec<xai_grok_inference_types::HostedTool> =
             self.hosted_tools_for_turn();
         tracing::info!(
             num_tools = compaction_tools.len(),
             tool_tokens = compaction_tool_tokens,
             "Running compact with model '{}' (user model: '{}')",
-            &sampling_config.model,
-            &sampling_config.model
+            &inference_config.model,
+            &inference_config.model
         );
         let mut last_error: Option<acp::Error> = None;
         let mut last_failure_outcome = CompactionOutcome::Failed;
@@ -1071,7 +1071,7 @@ impl SessionActor {
             compaction_hosted_tools.clone(),
             sampling_client,
             self.session_info.id.clone(),
-            sampling_config.clone(),
+            inference_config.clone(),
             self.inference_idle_timeout,
             wall_clock_budget_secs,
             self.compaction.tool_choice,
@@ -1236,7 +1236,7 @@ impl SessionActor {
                 compaction_tools,
                 user_context.as_deref(),
                 use_short_prompt,
-                &sampling_config.model,
+                &inference_config.model,
                 trigger,
                 compact_summary
                     .as_deref()
@@ -1638,7 +1638,7 @@ impl SessionActor {
             .and_then(|item| match item {
                 ConversationItem::User(parts) => {
                     parts.content.into_iter().next().and_then(|p| match p {
-                        xai_grok_sampling_types::ContentPart::Text { text } => {
+                        xai_grok_inference_types::ContentPart::Text { text } => {
                             Some(text.as_ref().to_owned())
                         }
                         _ => None,
@@ -1809,14 +1809,14 @@ impl SessionActor {
     }
     /// Returns true if the error response indicates tokens exceed the
     /// model's context window. Inspects only the model-metadata
-    /// portion of the [`SamplingErrorInfo`] (the `context_window`
+    /// portion of the [`InferenceErrorInfo`] (the `context_window`
     /// field) against the session's tracked token estimate.
     ///
     /// Called from `handle_sampling_failure` with the
-    /// `SamplingErrorInfo` the sampler hands back.
+    /// `InferenceErrorInfo` the sampler hands back.
     pub(crate) async fn should_compact_on_error(
         &self,
-        err: &xai_grok_sampler::SamplingErrorInfo,
+        err: &xai_grok_inference::InferenceErrorInfo,
     ) -> bool {
         if self
             .compaction
@@ -1849,7 +1849,7 @@ impl SessionActor {
         {
             return None;
         }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
+        let sampling_cfg = self.chat_state_handle.get_inference_settings().await;
         let context_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
         let cw = context_window.get();
         let model = sampling_cfg
@@ -1913,7 +1913,7 @@ impl SessionActor {
             return None;
         }
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        let cfg = self.chat_state_handle.get_sampling_config().await?;
+        let cfg = self.chat_state_handle.get_inference_settings().await?;
         let cw = cfg.context_window.get();
         if estimated_total <= cw {
             return None;
@@ -1942,7 +1942,7 @@ impl SessionActor {
         let Some(prev) = self.compaction.previous_model.take() else {
             return Ok(());
         };
-        let Some(cfg) = self.chat_state_handle.get_sampling_config().await else {
+        let Some(cfg) = self.chat_state_handle.get_inference_settings().await else {
             return Ok(());
         };
         if cfg.model == prev.model_slug {
@@ -1979,7 +1979,7 @@ impl SessionActor {
     }
     /// Record the current model for model-switch detection on the next turn.
     pub(crate) async fn record_turn_model(&self) {
-        if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
+        if let Some(cfg) = self.chat_state_handle.get_inference_settings().await {
             self.compaction.previous_model.set(Some(
                 crate::session::compaction_config::PreviousModelInfo {
                     model_slug: cfg.model.clone(),
@@ -2093,7 +2093,7 @@ impl SessionActor {
     fn persist_compaction_request_artifact(
         &self,
         chat_history: Vec<ConversationItem>,
-        tools: Vec<xai_grok_sampling_types::ToolSpec>,
+        tools: Vec<xai_grok_inference_types::ToolSpec>,
         user_context: Option<&str>,
         use_short_prompt: bool,
         model: &str,
@@ -2258,7 +2258,7 @@ mod inline_auto_compact_flow_tests {
             tokio::sync::mpsc::unbounded_channel::<crate::session::replay_events::SessionEvent>();
         let chat_state_handle = xai_chat_state::ChatStateActor::spawn(
             vec![],
-            xai_grok_sampling_types::SamplingConfig {
+            xai_grok_inference_types::InferenceSettings {
                 base_url: "http://localhost".to_string(),
                 model: "test".to_string(),
                 max_completion_tokens: None,
@@ -2453,7 +2453,7 @@ mod inline_auto_compact_flow_tests {
                 crate::session::acp_session::StreamingTurnCapture::default(),
             ),
             turn_stream_drained: parking_lot::Mutex::new(None),
-            sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+            sampler_handle: xai_grok_inference::InferenceHandle::noop(),
             rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
             image_description_model: crate::test_support::TEST_MODEL.to_owned(),
             image_describe_cache: Arc::new(
@@ -2498,10 +2498,10 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(86_000, 100_000, 85, gateway_tx, persistence_tx).await;
                 let result = actor.check_auto_compact_needed().await;
                 assert!(result.is_some(), "Should trigger at 86% of 100K window");
-                if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                if let Some(mut cfg) = actor.chat_state_handle.get_inference_settings().await {
                     cfg.model = "larger-model".to_string();
                     cfg.context_window = std::num::NonZeroU64::new(200_000).unwrap();
-                    actor.chat_state_handle.update_sampling_config(cfg);
+                    actor.chat_state_handle.update_inference_settings(cfg);
                 }
                 let result = actor.check_auto_compact_needed().await;
                 assert!(
@@ -2525,10 +2525,10 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(86_000, 200_000, 85, gateway_tx, persistence_tx).await;
                 let result = actor.check_auto_compact_needed().await;
                 assert!(result.is_none(), "Should NOT trigger at 43% of 200K window");
-                if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                if let Some(mut cfg) = actor.chat_state_handle.get_inference_settings().await {
                     cfg.model = "smaller-model".to_string();
                     cfg.context_window = std::num::NonZeroU64::new(100_000).unwrap();
-                    actor.chat_state_handle.update_sampling_config(cfg);
+                    actor.chat_state_handle.update_inference_settings(cfg);
                 }
                 let result = actor.check_auto_compact_needed().await;
                 assert!(
@@ -2943,9 +2943,9 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_401_server().await;
-                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 cfg.base_url = base_url;
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
                     ConversationItem::system("sys"),
                     ConversationItem::user("hello"),
@@ -3029,9 +3029,9 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_401_server().await;
-                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 cfg.base_url = base_url;
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
                     ConversationItem::system("sys"),
                     ConversationItem::user("hello"),
@@ -3098,9 +3098,9 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_400_server().await;
-                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 cfg.base_url = base_url;
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
                     ConversationItem::system("sys"),
                     ConversationItem::user("hello"),
@@ -3164,9 +3164,9 @@ mod inline_auto_compact_flow_tests {
                     context_window: 400_000,
                 }));
                 let base_url = spawn_deterministic_400_server().await;
-                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 cfg.base_url = base_url;
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
                     ConversationItem::system("sys"),
                     ConversationItem::user("hello"),
@@ -3199,9 +3199,9 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_400_server().await;
-                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 cfg.base_url = base_url;
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
                     ConversationItem::system("sys"),
                     ConversationItem::user("hello"),
@@ -3256,9 +3256,9 @@ mod inline_auto_compact_flow_tests {
                 let actor = Arc::new(actor);
                 let server = MockInferenceServer::start().await.unwrap();
                 server.set_response("Summary of prior work. ".repeat(30));
-                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 cfg.base_url = server.url();
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(conv);
                 let threshold_tokens = 40_000u64 * 80 / 100;
                 let before = actor.chat_state_handle.get_total_tokens().await;
@@ -3331,9 +3331,9 @@ mod inline_auto_compact_flow_tests {
                 let actor = Arc::new(actor);
                 let server = MockInferenceServer::start().await.unwrap();
                 server.set_response("Summary. ".repeat(70));
-                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 cfg.base_url = server.url();
-                actor.chat_state_handle.update_sampling_config(cfg);
+                actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(conv);
                 let threshold_tokens = 40_000u64 * 80 / 100;
                 let before = actor.chat_state_handle.get_total_tokens().await;
@@ -3431,7 +3431,7 @@ mod inline_auto_compact_flow_tests {
     mod preserve_prefix {
         use super::super::preserve_inherited_prefix;
         use super::super::project_preserved_reseed_tokens;
-        use xai_grok_sampling_types::conversation::ConversationItem;
+        use xai_grok_inference_types::conversation::ConversationItem;
         #[test]
         fn splices_inherited_with_compacted_suffix() {
             let conversation = vec![
@@ -3670,14 +3670,14 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    fn api_error_with_context_window(context_window: u64) -> xai_grok_sampler::SamplingErrorInfo {
-        xai_grok_sampler::SamplingErrorInfo {
-            kind: xai_grok_sampler::SamplingErrorKind::Api,
+    fn api_error_with_context_window(context_window: u64) -> xai_grok_inference::InferenceErrorInfo {
+        xai_grok_inference::InferenceErrorInfo {
+            kind: xai_grok_inference::InferenceErrorKind::Api,
             status_code: Some(400),
             message: "prompt is too long".to_string(),
             is_retryable: false,
             retry_after_secs: None,
-            model_metadata: Some(crate::sampling::ResponseModelMetadata {
+            model_metadata: Some(crate::inference::ResponseModelMetadata {
                 context_window: Some(context_window),
                 max_completion_tokens: None,
                 models_etag: None,
@@ -3732,8 +3732,8 @@ mod inline_auto_compact_flow_tests {
                 let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor =
                     create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
-                let err = xai_grok_sampler::SamplingErrorInfo {
-                    kind: xai_grok_sampler::SamplingErrorKind::Api,
+                let err = xai_grok_inference::InferenceErrorInfo {
+                    kind: xai_grok_inference::InferenceErrorKind::Api,
                     status_code: Some(400),
                     message: "prompt is too long".to_string(),
                     is_retryable: false,
@@ -3787,7 +3787,7 @@ mod inline_auto_compact_flow_tests {
                 assert!(prev.is_some());
                 let prev = prev.unwrap();
                 assert_eq!(prev.context_window, 200_000);
-                let cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
                 assert!(prev.context_window > cfg.context_window.get());
                 let total = actor.chat_state_handle.get_estimated_total_tokens().await;
                 let trigger = actor.should_auto_compact(total, cfg.context_window);
