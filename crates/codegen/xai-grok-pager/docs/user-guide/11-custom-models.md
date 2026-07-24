@@ -6,7 +6,7 @@ Grok connects to custom model endpoints for alternative providers, self-hosted m
 
 ## Default Models
 
-By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Authenticate with `grok login` or an API key, then start a session.
+By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Connect xAI from `/providers`, run `grok login`, or set an API key before sending prompts to first-party models. The TUI itself starts without a mandatory Grok login so you can also use OpenAI, OpenRouter, or Codex credentials alone.
 
 List all available models:
 
@@ -507,7 +507,20 @@ turns and subagent turns therefore run through the official native app-server,
 not through the OpenAI API or Grok Build's inference runtime. During primary and subagent Codex turns, Grok Build forwards app-server stream
 notifications into the same ACP surfaces used by native models: assistant text
 deltas, reasoning/thought chunks, tool call cards (commands, file edits, MCP,
-host tools), plan updates, and completion status. Codex `userMessage` items are
+host tools), plan updates, and completion status.
+
+**Host dynamic tools on Codex primary turns:** Grok Build still injects a small
+set of host-owned tools into the Codex thread so catalog and subagent features
+work without leaving Codex:
+
+- `search_models` — BM25 lookup over the live Grok model catalog (product name →
+  exact slug for host `task` `model=`). Always advertised when the active agent
+  registers it (every stock toolset does).
+- `task` / `get_task_output` / `kill_task` — host-managed subagents, when the
+  agent toolset includes them.
+
+Codex keeps its own shell/edit tools; these host tools only fill gaps the
+app-server cannot see. Codex `userMessage` items are
 never rendered as fake tool cards: on the primary surface the host already owns
 the user bubble, and on a subagent surface the text appears as a normal user
 chunk. Only an explicit allowlist of tool-like item kinds increments tool

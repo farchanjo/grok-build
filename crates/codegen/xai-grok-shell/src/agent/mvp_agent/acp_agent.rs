@@ -297,10 +297,25 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        let has_external_api_key = auth_method::should_advertise_xai_api_key(
-            disable_api_key_auth,
-            self.models_manager.models().values(),
-        );
+        // Unpinned: advertise xai.api_key whenever API-key auth is allowed so
+        // the TUI can start without interactive Grok login; credentials come
+        // from env/config/providers at request time. preferred_method=api_key
+        // stays fail-closed and still requires a resolvable key.
+        let has_external_api_key = {
+            let models = self.models_manager.models();
+            let preferred = self.cfg.borrow().grok_com_config.preferred_method;
+            match preferred {
+                Some(crate::auth::PreferredAuthMethod::ApiKey) => {
+                    !disable_api_key_auth
+                        && auth_method::has_api_key_credentials(models.values())
+                }
+                Some(crate::auth::PreferredAuthMethod::Oidc) => false,
+                None => auth_method::should_advertise_xai_api_key(
+                    disable_api_key_auth,
+                    models.values(),
+                ),
+            }
+        };
         let init_has_current = self.auth_manager.current().is_some();
         let init_is_expired = self.auth_manager.is_expired();
         xai_grok_telemetry::unified_log::info(
@@ -378,10 +393,7 @@ impl acp::Agent for MvpAgent {
             );
         }
         let preferred_method = self.cfg.borrow().grok_com_config.preferred_method;
-        let has_external_api_key = match preferred_method {
-            Some(crate::auth::PreferredAuthMethod::Oidc) => false,
-            _ => has_external_api_key,
-        };
+        // has_external_api_key already accounts for preferred_method above.
         let has_cached_token = match preferred_method {
             Some(crate::auth::PreferredAuthMethod::ApiKey) => false,
             _ => has_cached_token,
@@ -582,35 +594,26 @@ impl acp::Agent for MvpAgent {
                     );
                 }
                 let mut inference_config = self.inference_config.borrow_mut();
-                if inference_config.api_key.is_none() {
-                    if let Ok(api_key) = auth_method::read_xai_api_key_env() {
-                        inference_config.api_key = Some(api_key.clone());
-                        if let Err(e) = crate::auth::store_api_key(
-                            &crate::util::grok_home::grok_home(),
-                            &api_key,
-                        ) {
-                            tracing::warn!("failed to persist API key to auth.json: {e}");
-                            xai_grok_telemetry::unified_log::warn(
-                                "failed to persist API key to auth.json",
-                                None,
-                                Some(serde_json::json!({ "error": e.to_string() })),
-                            );
-                        }
-                    } else if !self
-                        .models_manager
-                        .models()
-                        .values()
-                        .any(|m| m.has_own_credentials())
-                    {
-                        emit_login_span(false, "api_key", None, Some("no_credentials"));
-                        return Err(
-                            acp::Error::auth_required()
-                                .data(
-                                    "Set XAI_API_KEY or add api_key/env_key to config.toml.",
-                                ),
+                if inference_config.api_key.is_none()
+                    && let Ok(api_key) = auth_method::read_xai_api_key_env()
+                {
+                    inference_config.api_key = Some(api_key.clone());
+                    if let Err(e) = crate::auth::store_api_key(
+                        &crate::util::grok_home::grok_home(),
+                        &api_key,
+                    ) {
+                        tracing::warn!("failed to persist API key to auth.json: {e}");
+                        xai_grok_telemetry::unified_log::warn(
+                            "failed to persist API key to auth.json",
+                            None,
+                            Some(serde_json::json!({ "error": e.to_string() })),
                         );
                     }
                 }
+                // Allow authenticate without a present key: provider credentials
+                // are resolved per request (env, vault, /providers). Missing
+                // credentials surface as a clear model/provider error, not a
+                // forced Grok login gate at startup.
                 self.set_auth_method(arguments.method_id.clone());
                 self.sync_process_static_api_key(None);
                 self.ensure_telemetry_client();

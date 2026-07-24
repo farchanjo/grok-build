@@ -23,8 +23,8 @@ impl AuthStatus {
     ///
     /// Differs from sampling (`resolve_credentials`: BYOK → session → env) so a
     /// logged-in user sees the login host. BYOK uses
-    /// [`crate::agent::auth_method::should_advertise_xai_api_key`] so
-    /// `disable_api_key_auth` is honored.
+    /// [`crate::agent::auth_method::has_api_key_credentials`] so only models
+    /// with real keys count (not the deferred provider-startup path).
     pub fn resolve(agent_config: &AgentConfig) -> Self {
         if crate::agent::auth_method::has_xai_api_key_env() {
             return Self::ApiKey;
@@ -38,12 +38,13 @@ impl AuthStatus {
             return Self::LoggedIn(host.to_owned());
         }
         let models = crate::agent::config::resolve_model_list(agent_config, None);
-        if crate::agent::auth_method::should_advertise_xai_api_key(
-            agent_config.grok_com_config.api_key_auth_disabled(),
-            models.values(),
-        ) && let Some(name) = models
-            .iter()
-            .find_map(|(name, entry)| entry.has_own_credentials().then(|| name.clone()))
+        // Banner status requires a real static key (api_key/env_key), not a
+        // fail-closed model_provider auth_provider stub and not the deferred
+        // "advertise api key so TUI can start" path.
+        if !agent_config.grok_com_config.api_key_auth_disabled()
+            && let Some(name) = models.iter().find_map(|(name, entry)| {
+                entry.own_credential().is_some().then(|| name.clone())
+            })
         {
             return Self::ModelCredentials(name);
         }

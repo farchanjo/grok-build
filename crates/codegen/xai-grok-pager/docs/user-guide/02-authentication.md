@@ -4,12 +4,32 @@ Grok supports several authentication methods, including interactive browser logi
 
 ---
 
-## Browser Login (Default)
+## Provider credentials (default)
 
-On first launch, Grok opens your browser to authenticate with grok.com:
+Grok no longer requires an interactive Grok/xAI login to open the TUI. Connect
+the providers you need from `/providers` (or the command palette):
+
+| Provider | How to connect |
+|----------|----------------|
+| **xAI** | Browser OAuth and/or an xAI API key (separate choices) |
+| **OpenAI API** | API key stored in the owner-only vault |
+| **OpenRouter** | API key stored in the owner-only vault |
+| **Codex / ChatGPT** | Official Codex CLI login |
+
+You can also set `XAI_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY` in the
+environment. Missing credentials for a model surface when you use that model —
+they do not block startup.
+
+Enterprise deployments that set `disable_api_key_auth` or force OIDC still
+require interactive login at startup.
+
+## Browser Login (xAI)
+
+To sign in to xAI with a browser from the TUI, open `/providers` and connect
+xAI, or run:
 
 ```bash
-grok
+grok login
 ```
 
 Grok stores credentials in `~/.grok/auth.json` and reuses them across sessions. Grok refreshes access tokens automatically in the background. When a token can't be refreshed, Grok prompts you to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
@@ -51,18 +71,6 @@ grok
 ```
 
 Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `grok logout` or delete `~/.grok/auth.json`.
-
-### Multiple provider accounts
-
-Open `/providers` to manage four independent credential realms:
-
-- **xAI**: browser OAuth and an xAI API key are separate choices. OAuth takes
-  precedence for xAI requests when both are present, and disconnecting the API
-  key does not sign out the OAuth account.
-- **OpenAI API**: an API key used only with the OpenAI API provider.
-- **OpenRouter**: an API key used only with the OpenRouter provider.
-- **Codex / ChatGPT**: the official Codex CLI login. A ChatGPT subscription is
-  not treated as an OpenAI API key.
 
 Stored API keys occupy distinct scopes in the owner-only `auth.json` vault.
 Disconnecting one API-key provider preserves the other providers and the xAI
