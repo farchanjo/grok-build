@@ -76,27 +76,41 @@ pub(crate) fn task_model_error_for_catalog(
              the parent model."
         ));
     }
-    let is_available = |entry: &ModelEntry| {
-        let is_codex_agent = entry.model_provider.as_ref().is_some_and(|provider| {
-            provider.kind == crate::agent::model_providers::ModelProviderKind::Codex
-        });
-        entry.info.user_selectable
-            && (is_codex_agent || entry.info.visible_for_auth(is_session_auth))
-            && has_required_provider_credential(entry)
-    };
-    if config::find_model_by_id(available, requested).is_some_and(&is_available) {
-        return None;
+
+    // Found and fully eligible → no error.
+    if let Some(entry) = config::find_model_by_id(available, requested) {
+        if is_task_agent_eligible(entry, is_session_auth) {
+            return None;
+        }
+        // Entry exists but isn't eligible. If it passes visibility/credential
+        // and only fails the tools gate, give the specific tool-support message
+        // (e.g. an OpenRouter model that doesn't advertise tool calling).
+        if is_task_visible_and_credentialed(entry, is_session_auth)
+            && !passes_task_tools_gate(entry)
+        {
+            return Some(format!(
+                "Task.model slug '{requested}' does not advertise tool support and cannot be \
+                 used for subagents. Choose a tool-capable model or omit `model` to inherit \
+                 the parent model."
+            ));
+        }
     }
 
+    // Unknown slug or otherwise ineligible: list agent-eligible slugs.
     let mut slugs = available
         .iter()
-        .filter(|(_, entry)| is_available(entry))
+        .filter(|(_, entry)| is_task_agent_eligible(entry, is_session_auth))
         .map(|(slug, _)| slug.as_str())
         .collect::<Vec<_>>();
     slugs.sort_unstable();
     let guidance = if slugs.is_empty() {
         "No valid model slugs are currently available. Omit `model` to inherit the parent model."
             .to_string()
+    } else if slugs.len() > 80 {
+        format!(
+            "Valid model slugs: {}, … Omit `model` to inherit the parent model.",
+            slugs[..80].join(", ")
+        )
     } else {
         format!(
             "Valid model slugs: {}. Omit `model` to inherit the parent model.",
@@ -112,6 +126,52 @@ pub(crate) fn task_model_error_for_catalog(
 /// change picker visibility without rebuilding every configured model.
 fn has_required_provider_credential(entry: &ModelEntry) -> bool {
     crate::agent::providers::missing_api_key_provider(entry).is_none()
+}
+
+/// Whether a catalog entry is visible and credentialed for task-agent use.
+///
+/// This is the pre-existing visibility/credential gate (without the tools
+/// check) so `task_model_error_for_catalog` can distinguish an entry that
+/// fails the tools gate alone from one that is invisible or uncredentialed.
+fn is_task_visible_and_credentialed(entry: &ModelEntry, is_session_auth: bool) -> bool {
+    let is_codex_agent = entry.model_provider.as_ref().is_some_and(|provider| {
+        provider.kind == crate::agent::model_providers::ModelProviderKind::Codex
+    });
+    entry.info.user_selectable
+        && (is_codex_agent || entry.info.visible_for_auth(is_session_auth))
+        && has_required_provider_credential(entry)
+}
+
+/// Whether `entry` passes the task-agent tools gate.
+///
+/// - **OpenRouter** (`model_provider.kind == OpenRouter`): require
+///   `supports_tools == Some(true)`; `None`/`Some(false)` are rejected
+///   because the OpenRouter catalog populates the flag from
+///   `supported_parameters`, so `None` means the flag was missing on a
+///   catalog entry rather than a first-party model.
+/// - **All other providers**: reject only when `supports_tools == Some(false)`;
+///   `None` remains eligible (first-party models and hand-written TOML
+///   entries without the field).
+fn passes_task_tools_gate(entry: &ModelEntry) -> bool {
+    let is_openrouter = entry.model_provider.as_ref().is_some_and(|provider| {
+        provider.kind == crate::agent::model_providers::ModelProviderKind::OpenRouter
+    });
+    if is_openrouter {
+        entry.info.supports_tools == Some(true)
+    } else {
+        entry.info.supports_tools != Some(false)
+    }
+}
+
+/// Shared eligibility predicate for task-agent model selection.
+///
+/// Combines the existing visibility/credential gate with the task-agent
+/// tools gate (see [`passes_task_tools_gate`]). Used by both
+/// [`task_model_error_for_catalog`] (slug validation) and the task tool
+/// description slug advertisement so the two surfaces agree on which models
+/// are subagent-capable.
+pub(crate) fn is_task_agent_eligible(entry: &ModelEntry, is_session_auth: bool) -> bool {
+    is_task_visible_and_credentialed(entry, is_session_auth) && passes_task_tools_gate(entry)
 }
 
 /// Thread-safe model manager.
@@ -410,6 +470,24 @@ impl ModelsManager {
         let is_session_auth = self.is_session_auth();
         let models = self.inner.models.read();
         task_model_error_for_catalog(requested, &models, is_session_auth)
+    }
+
+    /// Agent-eligible catalog keys for `Task.model` slug advertisement.
+    ///
+    /// Sorted stably so the task tool description is deterministic across
+    /// rebuilds. Uses the same [`is_task_agent_eligible`] predicate as
+    /// [`Self::task_model_error`] so the advertised slug list and the
+    /// validation surface agree.
+    pub(crate) fn task_eligible_slugs(&self) -> Vec<String> {
+        let is_session_auth = self.is_session_auth();
+        let models = self.inner.models.read();
+        let mut slugs = models
+            .iter()
+            .filter(|(_, entry)| is_task_agent_eligible(entry, is_session_auth))
+            .map(|(slug, _)| slug.clone())
+            .collect::<Vec<_>>();
+        slugs.sort();
+        slugs
     }
 
     pub fn current_model_id(&self) -> acp::ModelId {
@@ -3693,5 +3771,226 @@ mod tests {
                 (id.clone(), acp::ModelInfo::new(id, (*k).to_string()))
             })
             .collect()
+    }
+
+    // ── Phase 2: task-agent tools-eligibility ───────────────────────
+
+    /// Build a `ModelEntry` with the given provider kind, an API key so the
+    /// credential gate passes, and `supports_tools` on the `ModelInfo`.
+    fn entry_with_provider_and_tools(
+        slug: &str,
+        kind: crate::agent::model_providers::ModelProviderKind,
+        supports_tools: Option<bool>,
+    ) -> ModelEntry {
+        ModelEntry {
+            info: {
+                let mut info = config::ModelInfo::fallback(slug);
+                info.supports_tools = supports_tools;
+                info
+            },
+            model_provider: Some(crate::agent::model_providers::ResolvedModelProvider {
+                id: slug.to_owned(),
+                kind,
+                openrouter_fallback_models: Vec::new(),
+                openrouter_provider_preferences: None,
+                openrouter_plugins: Vec::new(),
+                command: Vec::new(),
+            }),
+            api_key: Some("configured-for-test".to_owned()),
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        }
+    }
+
+    #[test]
+    fn openrouter_supports_tools_true_is_task_eligible() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openrouter:acme/tools".to_owned(),
+            entry_with_provider_and_tools(
+                "openrouter:acme/tools",
+                crate::agent::model_providers::ModelProviderKind::OpenRouter,
+                Some(true),
+            ),
+        );
+        assert!(
+            task_model_error_for_catalog("openrouter:acme/tools", &catalog, false).is_none(),
+            "OpenRouter model advertising tool support must be eligible for subagents"
+        );
+    }
+
+    #[test]
+    fn openrouter_supports_tools_false_is_rejected() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openrouter:acme/notools".to_owned(),
+            entry_with_provider_and_tools(
+                "openrouter:acme/notools",
+                crate::agent::model_providers::ModelProviderKind::OpenRouter,
+                Some(false),
+            ),
+        );
+        let err = task_model_error_for_catalog("openrouter:acme/notools", &catalog, false)
+            .expect("tools-incapable OpenRouter model must be rejected");
+        assert!(
+            err.contains("does not advertise tool support"),
+            "rejection message must explain the tool-support gap: {err}"
+        );
+    }
+
+    #[test]
+    fn openrouter_supports_tools_none_is_rejected() {
+        // OpenRouter populates supports_tools from the catalog, so None means
+        // the flag was missing — reject for subagent safety.
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openrouter:acme/unknown".to_owned(),
+            entry_with_provider_and_tools(
+                "openrouter:acme/unknown",
+                crate::agent::model_providers::ModelProviderKind::OpenRouter,
+                None,
+            ),
+        );
+        let err = task_model_error_for_catalog("openrouter:acme/unknown", &catalog, false)
+            .expect("OpenRouter model with unknown tool support must be rejected");
+        assert!(
+            err.contains("does not advertise tool support"),
+            "rejection message must explain the tool-support gap: {err}"
+        );
+    }
+
+    #[test]
+    fn openai_prefix_is_still_hard_rejected() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openai:gpt-unverified".to_owned(),
+            entry_with_provider_and_tools(
+                "openai:gpt-unverified",
+                crate::agent::model_providers::ModelProviderKind::OpenAi,
+                Some(true),
+            ),
+        );
+        let err = task_model_error_for_catalog("openai:gpt-unverified", &catalog, false)
+            .expect("openai: prefix must be hard-rejected");
+        assert!(
+            err.contains("unverified tool support"),
+            "openai: prefix must keep its existing rejection message: {err}"
+        );
+    }
+
+    #[test]
+    fn other_provider_supports_tools_none_stays_eligible() {
+        // First-party / hand-written TOML without the field stays eligible.
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "grok-4.5".to_owned(),
+            entry_with_provider_and_tools(
+                "grok-4.5",
+                crate::agent::model_providers::ModelProviderKind::Xai,
+                None,
+            ),
+        );
+        assert!(
+            task_model_error_for_catalog("grok-4.5", &catalog, false).is_none(),
+            "first-party model with unknown tool support must remain eligible"
+        );
+    }
+
+    #[test]
+    fn other_provider_supports_tools_false_is_rejected() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "grok-no-tools".to_owned(),
+            entry_with_provider_and_tools(
+                "grok-no-tools",
+                crate::agent::model_providers::ModelProviderKind::Xai,
+                Some(false),
+            ),
+        );
+        let err = task_model_error_for_catalog("grok-no-tools", &catalog, false)
+            .expect("explicitly tools-incapable model must be rejected");
+        assert!(
+            err.contains("does not advertise tool support"),
+            "rejection message must explain the tool-support gap: {err}"
+        );
+    }
+
+    #[test]
+    fn eligible_slug_list_excludes_no_tools_openrouter() {
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openrouter:acme/tools".to_owned(),
+            entry_with_provider_and_tools(
+                "openrouter:acme/tools",
+                crate::agent::model_providers::ModelProviderKind::OpenRouter,
+                Some(true),
+            ),
+        );
+        catalog.insert(
+            "openrouter:acme/notools".to_owned(),
+            entry_with_provider_and_tools(
+                "openrouter:acme/notools",
+                crate::agent::model_providers::ModelProviderKind::OpenRouter,
+                Some(false),
+            ),
+        );
+        catalog.insert(
+            "grok-4.5".to_owned(),
+            entry_with_provider_and_tools(
+                "grok-4.5",
+                crate::agent::model_providers::ModelProviderKind::Xai,
+                None,
+            ),
+        );
+        // Requesting a missing slug surfaces the valid slug list — it must
+        // include the tools-capable entries and exclude the tools-incapable
+        // OpenRouter entry.
+        let err = task_model_error_for_catalog("missing-slug", &catalog, false)
+            .expect("missing slug must return guidance");
+        assert!(
+            err.contains("openrouter:acme/tools"),
+            "tools-capable OpenRouter model must appear in the valid slug list"
+        );
+        assert!(
+            err.contains("grok-4.5"),
+            "first-party model must appear in the valid slug list"
+        );
+        assert!(
+            !err.contains("openrouter:acme/notools"),
+            "tools-incapable OpenRouter model must be excluded from the valid slug list"
+        );
+    }
+
+    #[test]
+    fn eligible_slug_list_soft_caps_at_eighty() {
+        let mut catalog = IndexMap::new();
+        for i in 0..100 {
+            let slug = format!("grok-model-{i:03}");
+            catalog.insert(
+                slug.clone(),
+                entry_with_provider_and_tools(
+                    &slug,
+                    crate::agent::model_providers::ModelProviderKind::Xai,
+                    None,
+                ),
+            );
+        }
+        let err = task_model_error_for_catalog("missing-slug", &catalog, false)
+            .expect("missing slug must return guidance");
+        assert!(
+            err.contains("…"),
+            "a slug list exceeding 80 entries must be soft-capped with an ellipsis"
+        );
+        // The soft-capped list must contain the first 80 sorted slugs and
+        // must not leak the 81st.
+        assert!(
+            err.contains("grok-model-079"),
+            "the soft cap must include the 80th sorted slug"
+        );
+        assert!(
+            !err.contains("grok-model-080"),
+            "the soft cap must exclude the 81st and later slugs"
+        );
     }
 }

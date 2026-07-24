@@ -258,13 +258,7 @@ impl AgentRebuildSpec {
         .with_subagents_enabled(*subagents_enabled)
         .with_subagent_toggle(subagent_toggle.clone())
         .with_background_workflows_enabled(*background_workflows_enabled)
-        .with_task_model_slugs(
-            models_manager
-                .available()
-                .keys()
-                .map(|model_id| model_id.0.to_string())
-                .collect::<Vec<_>>(),
-        )
+        .with_task_model_slugs(models_manager.task_eligible_slugs())
         .with_ask_user_question_enabled(*ask_user_question_enabled)
         .with_persona_summaries(persona_summaries.clone())
         .with_prompt_audience(*prompt_audience)
