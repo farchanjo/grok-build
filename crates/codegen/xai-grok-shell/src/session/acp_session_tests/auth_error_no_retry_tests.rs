@@ -806,6 +806,93 @@ async fn reconstruct_full_config_no_bearer_resolver_for_api_key_method() {
         .await;
 }
 
+/// H4 wire shaping (per-turn reconstruction): `reconstruct_full_config` mirrors
+/// `sampling_config_for_model` — when the resolved catalog model explicitly
+/// disclaims reasoning support (`Some(false)`), `reasoning_effort` is stripped
+/// even if stale session state left an effort set on the chat-state config.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_strips_reasoning_effort_for_unsupported_model() {
+    use xai_grok_sampling_types::ReasoningEffort;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "xai.api_key",
+                xai_chat_state::AuthType::ApiKey,
+                "xai-static-key".to_string(),
+            )
+            .await;
+            // Stale session state: an effort stamped onto the chat-state config.
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.reasoning_effort = Some(ReasoningEffort::High);
+            actor.chat_state_handle.update_sampling_config(cfg);
+            // Catalog model "test" (the chat-state model id) explicitly
+            // disclaims reasoning support.
+            let mut entry = crate::agent::config::ModelEntry {
+                info: crate::agent::config::ModelInfo::fallback("test"),
+                model_provider: None,
+                api_key: None,
+                env_key: None,
+                auth_provider: None,
+                api_base_url: None,
+            };
+            entry.info.supports_reasoning_effort = Some(false);
+            entry.info.reasoning_effort = Some(ReasoningEffort::High);
+            actor.models_manager.insert_test_entry("test", entry);
+
+            let cfg = actor.reconstruct_full_config().await;
+
+            assert_eq!(
+                cfg.reasoning_effort,
+                None,
+                "per-turn reconstruction must strip reasoning_effort for a model that explicitly disclaims support",
+            );
+        })
+        .await;
+}
+
+/// H4 wire shaping (per-turn reconstruction): `None` (unknown) honors an
+/// explicit effort, matching the initial-build path.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_honors_reasoning_effort_when_support_unknown() {
+    use xai_grok_sampling_types::ReasoningEffort;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "xai.api_key",
+                xai_chat_state::AuthType::ApiKey,
+                "xai-static-key".to_string(),
+            )
+            .await;
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.reasoning_effort = Some(ReasoningEffort::Low);
+            actor.chat_state_handle.update_sampling_config(cfg);
+            // Manual TOML model: `supports_reasoning_effort = None` (unknown).
+            let mut entry = crate::agent::config::ModelEntry {
+                info: crate::agent::config::ModelInfo::fallback("test"),
+                model_provider: None,
+                api_key: None,
+                env_key: None,
+                auth_provider: None,
+                api_base_url: None,
+            };
+            entry.info.supports_reasoning_effort = None;
+            actor.models_manager.insert_test_entry("test", entry);
+
+            let cfg = actor.reconstruct_full_config().await;
+
+            assert_eq!(
+                cfg.reasoning_effort,
+                Some(ReasoningEffort::Low),
+                "None (unknown) must honor an explicit reasoning_effort",
+            );
+        })
+        .await;
+}
+
 /// The pre-flight refresh heals a transiently-`ApiKey` session by writing the
 /// fresh session token back into `creds.api_key`.
 #[tokio::test(flavor = "current_thread")]

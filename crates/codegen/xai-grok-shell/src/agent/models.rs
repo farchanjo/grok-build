@@ -470,7 +470,7 @@ impl ModelsManager {
             .models
             .read()
             .get(model_id)
-            .map(|e| e.info().supports_reasoning_effort)
+            .map(|e| e.info().supports_reasoning_effort_ui())
             .unwrap_or(false)
     }
 
@@ -1905,7 +1905,7 @@ pub fn resolve_model_catalog(
     if let Some(effort) = cfg.models.default_reasoning_effort
         && let Some(default_id) = cfg.models.default.as_deref()
         && let Some(entry) = catalog.get_mut(default_id)
-        && entry.info.supports_reasoning_effort
+        && entry.info.supports_reasoning_effort_ui()
     {
         entry.info.reasoning_effort = Some(effort);
     }
@@ -1930,7 +1930,7 @@ pub fn resolve_model_catalog(
 /// built-in low/medium/high/xhigh set (same as the pager legacy menu — no
 /// `none`/`minimal`).
 fn model_offers_reasoning_effort(info: &config::ModelInfo, effort: ReasoningEffort) -> bool {
-    if !info.supports_reasoning_effort {
+    if !info.supports_reasoning_effort_ui() {
         return false;
     }
     if info.reasoning_efforts.is_empty() {
@@ -2301,7 +2301,7 @@ mod tests {
             auth_provider: None,
             api_base_url: None,
         };
-        reasoning_entry.info.supports_reasoning_effort = true;
+        reasoning_entry.info.supports_reasoning_effort = Some(true);
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
 
         let catalog = resolve_model_catalog(&cfg, Some(prefetched));
@@ -2354,7 +2354,7 @@ mod tests {
             auth_provider: None,
             api_base_url: None,
         };
-        no_none.info.supports_reasoning_effort = true;
+        no_none.info.supports_reasoning_effort = Some(true);
         no_none.info.reasoning_efforts = vec![ReasoningEffortOption {
             id: "high".into(),
             value: ReasoningEffort::High,
@@ -2374,7 +2374,7 @@ mod tests {
             auth_provider: None,
             api_base_url: None,
         };
-        with_none.info.supports_reasoning_effort = true;
+        with_none.info.supports_reasoning_effort = Some(true);
         with_none.info.reasoning_efforts = vec![ReasoningEffortOption {
             id: "none".into(),
             value: ReasoningEffort::None,
@@ -2433,7 +2433,7 @@ mod tests {
         let catalog = resolve_model_catalog(&cfg, None);
         let info = &catalog["menu-only"].info;
         assert!(
-            info.supports_reasoning_effort,
+            info.supports_reasoning_effort_ui(),
             "menu-only model must derive support"
         );
         assert_eq!(
@@ -2441,7 +2441,7 @@ mod tests {
             Some(ReasoningEffort::Xhigh),
             "derived default = marked-default option value"
         );
-        assert!(!catalog["plain"].info.supports_reasoning_effort);
+        assert!(!catalog["plain"].info.supports_reasoning_effort_ui());
         assert_eq!(catalog["plain"].info.reasoning_effort, None);
 
         // The internal getters read those derived fields.
@@ -2482,7 +2482,7 @@ mod tests {
             auth_provider: None,
             api_base_url: None,
         };
-        reasoning_entry.info.supports_reasoning_effort = true;
+        reasoning_entry.info.supports_reasoning_effort = Some(true);
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
 
         let plain_entry = ModelEntry {

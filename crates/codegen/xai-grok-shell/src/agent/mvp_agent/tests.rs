@@ -1259,7 +1259,7 @@ async fn model_state_prefers_session_reasoning_effort_over_global() {
     use xai_grok_sampling_types::{REASONING_EFFORT_META_KEY, ReasoningEffort};
     let agent = build_minimal_agent_for_tests();
     let mut entry = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
-    entry.info.supports_reasoning_effort = true;
+    entry.info.supports_reasoning_effort = Some(true);
     agent
         .models_manager
         .insert_test_entry("effort-model", entry);
@@ -1307,7 +1307,7 @@ async fn session_config_options_resolves_routing_slug_to_catalog_model() {
     let agent = build_minimal_agent_for_tests();
     let mut entry = ModelEntry::fallback("catalog-key-model", &EndpointsConfig::default());
     entry.info.model = "routing-slug".to_string();
-    entry.info.supports_reasoning_effort = true;
+    entry.info.supports_reasoning_effort = Some(true);
     entry.info.reasoning_effort = Some(ReasoningEffort::High);
     agent
         .models_manager
@@ -2141,7 +2141,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             hidden: false,
             supported_in_api: true,
             reasoning_effort: None,
-            supports_reasoning_effort: false,
+            supports_reasoning_effort: None,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             compactions_remaining: None,

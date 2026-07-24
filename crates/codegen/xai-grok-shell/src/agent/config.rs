@@ -3706,7 +3706,7 @@ pub fn effective_classifier_supports_re(
     models: &IndexMap<String, ModelEntry>,
 ) -> bool {
     find_model_by_id(models, aux_model.unwrap_or(session_model))
-        .map(|e| e.info().supports_reasoning_effort)
+        .map(|e| e.info().supports_reasoning_effort_ui())
         .unwrap_or(false)
 }
 /// JSON-only subset of `ModelEntryConfig`.
@@ -4064,11 +4064,11 @@ impl ConfigModelOverride {
             entry.info.reasoning_effort = self.reasoning_effort;
         }
         if let Some(v) = self.supports_reasoning_effort {
-            entry.info.supports_reasoning_effort = v;
-        } else if !entry.info.supports_reasoning_effort
+            entry.info.supports_reasoning_effort = Some(v);
+        } else if !entry.info.supports_reasoning_effort.unwrap_or(false)
             && matches!(entry.info.api_backend, ApiBackend::Messages)
         {
-            entry.info.supports_reasoning_effort = true;
+            entry.info.supports_reasoning_effort = Some(true);
         }
         if !self.reasoning_efforts.is_empty() {
             entry.info.reasoning_efforts = self.reasoning_efforts.clone();
@@ -4163,8 +4163,25 @@ pub struct ModelInfo {
     #[serde(default = "default_true")]
     pub supported_in_api: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// When true, the UI shows effort controls for this model.
-    pub supports_reasoning_effort: bool,
+    /// Tri-state reasoning-effort support flag.
+    ///
+    /// - `Some(true)` — the model/catalog explicitly advertises reasoning
+    ///   effort. UI shows effort controls; an explicit `reasoning_effort` is
+    ///   honored on the wire.
+    /// - `Some(false)` — the model/catalog explicitly disclaims reasoning
+    ///   effort. UI hides effort controls; `reasoning_effort` is stripped
+    ///   before it reaches the wire (some upstreams hard-400 the whole
+    ///   request when the field is present).
+    /// - `None` — unknown (e.g. a hand-written TOML `[model.X]` with no
+    ///   `supports_reasoning_effort`). UI hides effort controls (same as
+    ///   `Some(false)`), but an explicit `reasoning_effort` is still honored
+    ///   on the wire — an explicit user setting is an explicit statement.
+    ///
+    /// UI affordance reads use [`Self::supports_reasoning_effort_ui`]
+    /// (treats `None` as unsupported). Wire-shaping reads compare directly
+    /// against `Some(false)` so the `None` case preserves prior behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning_effort: Option<bool>,
     /// Per-model reasoning-effort menu (source of truth); legacy fields derived from it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
@@ -4210,7 +4227,7 @@ impl ModelInfo {
             hidden: false,
             supported_in_api: true,
             reasoning_effort: None,
-            supports_reasoning_effort: false,
+            supports_reasoning_effort: None,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             compactions_remaining: None,
@@ -4245,7 +4262,7 @@ impl ModelInfo {
             hidden: entry.hidden,
             supported_in_api: entry.supported_in_api,
             reasoning_effort: entry.reasoning_effort,
-            supports_reasoning_effort: entry.supports_reasoning_effort,
+            supports_reasoning_effort: Some(entry.supports_reasoning_effort),
             reasoning_efforts: entry.reasoning_efforts.clone(),
             supports_backend_search: entry.supports_backend_search,
             compactions_remaining: entry.compactions_remaining,
@@ -4264,7 +4281,7 @@ impl ModelInfo {
         if self.reasoning_efforts.is_empty() {
             return;
         }
-        self.supports_reasoning_effort = true;
+        self.supports_reasoning_effort = Some(true);
         if self.reasoning_effort.is_none() {
             let default = self
                 .reasoning_efforts
@@ -4284,6 +4301,15 @@ impl ModelInfo {
     /// | false    | false              | visible    | **hidden**   |
     pub fn visible_for_auth(&self, is_session_auth: bool) -> bool {
         !self.hidden && (is_session_auth || self.supported_in_api)
+    }
+    /// UI-affordance read: whether the picker should show effort controls.
+    /// Treats `None` (unknown) as unsupported, matching the prior `bool`
+    /// behavior so a hand-written TOML model without `supports_reasoning_effort`
+    /// hides the effort UI exactly as before. Wire-shaping callers must compare
+    /// [`Self::supports_reasoning_effort`] directly against `Some(false)` so the
+    /// `None` case still honors an explicit `reasoning_effort`.
+    pub fn supports_reasoning_effort_ui(&self) -> bool {
+        self.supports_reasoning_effort.unwrap_or(false)
     }
 }
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
@@ -5027,7 +5053,7 @@ pub fn resolve_aux_model_sampling_config(
                 hidden: true,
                 supported_in_api: true,
                 reasoning_effort: None,
-                supports_reasoning_effort: false,
+                supports_reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
                 compactions_remaining: None,
@@ -5192,6 +5218,24 @@ pub fn sampling_config_for_model(
         .map(|provider| provider.openrouter_fallback_models.clone())
         .unwrap_or_default();
     let provider_identity = provider_identity_for_model(model);
+    // Wire shaping (H4): when the resolved model explicitly disclaims
+    // reasoning-effort support (`supports_reasoning_effort == Some(false)`),
+    // strip any `reasoning_effort` before it reaches the request body — some
+    // upstreams (notably OpenRouter models that never advertised `reasoning`
+    // in `supported_parameters`) hard-400 the whole request when the field is
+    // present. `Some(true)` and `None` (unknown, e.g. hand-written TOML) keep
+    // prior behavior: an explicit user-set effort is an explicit statement and
+    // must be honored.
+    let reasoning_effort = match (info.reasoning_effort, info.supports_reasoning_effort) {
+        (Some(_), Some(false)) => {
+            tracing::debug!(
+                model = %info.model,
+                "stripping reasoning_effort: model explicitly disclaims reasoning support",
+            );
+            None
+        }
+        (effort, _) => effort,
+    };
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5210,7 +5254,7 @@ pub fn sampling_config_for_model(
         extra_headers,
         context_window: info.context_window.get(),
         client_version,
-        reasoning_effort: info.reasoning_effort,
+        reasoning_effort,
         force_http1: false,
         max_retries: info.max_retries,
         stream_tool_calls: info.stream_tool_calls.unwrap_or(false),
@@ -5313,7 +5357,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             user_selectable: true,
             supported_in_api: true,
             reasoning_effort: None,
-            supports_reasoning_effort: false,
+            supports_reasoning_effort: None,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             compactions_remaining: None,
@@ -5403,7 +5447,7 @@ pub fn to_acp_model_info(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
                 );
-                if info.supports_reasoning_effort {
+                if info.supports_reasoning_effort_ui() {
                     map.insert(
                         "supportsReasoningEffort".to_string(),
                         serde_json::Value::Bool(true),
@@ -6455,7 +6499,7 @@ reasoning_effort = "low"
                 hidden: false,
                 supported_in_api: true,
                 reasoning_effort: None,
-                supports_reasoning_effort: false,
+                supports_reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
                 compactions_remaining: None,
@@ -6477,7 +6521,7 @@ reasoning_effort = "low"
     #[test]
     fn effective_classifier_supports_re_uses_actually_used_model() {
         let mut re_model = test_model_entry("v9", "https://x/v1", None, None, None);
-        re_model.info.supports_reasoning_effort = true;
+        re_model.info.supports_reasoning_effort = Some(true);
         let no_re_model = test_model_entry("legacy", "https://x/v1", None, None, None);
         let mut models = IndexMap::new();
         models.insert("v9".to_string(), re_model);
@@ -6954,6 +6998,84 @@ reasoning_effort = "low"
         let info = client.auth_info();
         assert_eq!(info.auth_type, "bearer");
     }
+    /// H4 wire shaping: a catalog model that explicitly disclaims reasoning
+    /// support (`supports_reasoning_effort == Some(false)`) must have its
+    /// `reasoning_effort` stripped before the request body is built, even when
+    /// an effort was stamped onto the model config by a default or UI state.
+    #[test]
+    fn sampling_config_strips_reasoning_effort_when_support_explicitly_false() {
+        use xai_grok_sampling_types::ReasoningEffort;
+        let mut model = test_model_entry(
+            "or-no-reason",
+            "https://openrouter.example/v1",
+            None,
+            None,
+            None,
+        );
+        model.info.reasoning_effort = Some(ReasoningEffort::High);
+        model.info.supports_reasoning_effort = Some(false);
+        let creds = resolve_credentials(&model, None);
+        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(
+            config.reasoning_effort, None,
+            "Some(false) must strip reasoning_effort before the wire",
+        );
+    }
+    /// H4 wire shaping: `Some(true)` keeps the effort serialized as before.
+    #[test]
+    fn sampling_config_keeps_reasoning_effort_when_support_explicitly_true() {
+        use xai_grok_sampling_types::ReasoningEffort;
+        let mut model = test_model_entry("grok-4.5", "https://api.x.ai/v1", None, None, None);
+        model.info.reasoning_effort = Some(ReasoningEffort::High);
+        model.info.supports_reasoning_effort = Some(true);
+        let creds = resolve_credentials(&model, None);
+        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(
+            config.reasoning_effort,
+            Some(ReasoningEffort::High),
+            "Some(true) must honor an explicit reasoning_effort",
+        );
+    }
+    /// H4 wire shaping: `None` (unknown, e.g. hand-written TOML with no
+    /// `supports_reasoning_effort`) must honor an explicit `reasoning_effort`
+    /// as before — an explicit user setting is an explicit statement.
+    #[test]
+    fn sampling_config_honors_reasoning_effort_when_support_unknown() {
+        use xai_grok_sampling_types::ReasoningEffort;
+        let mut model = test_model_entry(
+            "manual-toml",
+            "https://api.example.com/v1",
+            None,
+            None,
+            None,
+        );
+        model.info.reasoning_effort = Some(ReasoningEffort::Low);
+        model.info.supports_reasoning_effort = None;
+        let creds = resolve_credentials(&model, None);
+        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(
+            config.reasoning_effort,
+            Some(ReasoningEffort::Low),
+            "None (unknown) must honor an explicit reasoning_effort as before",
+        );
+    }
+    /// H4 wire shaping: when there is no `reasoning_effort` to begin with, the
+    /// `Some(false)` strip is a no-op (no spurious field on the wire).
+    #[test]
+    fn sampling_config_no_reasoning_effort_with_false_support_stays_none() {
+        let mut model = test_model_entry(
+            "or-plain",
+            "https://openrouter.example/v1",
+            None,
+            None,
+            None,
+        );
+        model.info.reasoning_effort = None;
+        model.info.supports_reasoning_effort = Some(false);
+        let creds = resolve_credentials(&model, None);
+        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(config.reasoning_effort, None);
+    }
     #[test]
     fn has_own_credentials_guards_session_vs_external_key() {
         let endpoints = EndpointsConfig::default();
@@ -7339,7 +7461,7 @@ reasoning_effort = "low"
         let resolved = resolve_model_list(&cfg, None);
         let model = resolved.get("my-claude").expect("model should exist");
         assert!(
-            model.info.supports_reasoning_effort,
+            model.info.supports_reasoning_effort_ui(),
             "Messages backend should auto-default supports_reasoning_effort=true",
         );
     }
@@ -7361,8 +7483,9 @@ reasoning_effort = "low"
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
         let resolved = resolve_model_list(&cfg, None);
         let model = resolved.get("my-claude").expect("model should exist");
-        assert!(
-            !model.info.supports_reasoning_effort,
+        assert_eq!(
+            model.info.supports_reasoning_effort,
+            Some(false),
             "explicit supports_reasoning_effort=false in config must override the Messages auto-default",
         );
     }
@@ -7383,9 +7506,9 @@ reasoning_effort = "low"
         let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
         let resolved = resolve_model_list(&cfg, None);
         let model = resolved.get("my-openai").expect("model should exist");
-        assert!(
-            !model.info.supports_reasoning_effort,
-            "ChatCompletions backend must not auto-default supports_reasoning_effort=true",
+        assert_eq!(
+            model.info.supports_reasoning_effort, None,
+            "ChatCompletions backend must not auto-default supports_reasoning_effort (stays None/unknown)",
         );
     }
     #[test]
@@ -7686,7 +7809,7 @@ reasoning_effort = "low"
     fn acp_model_meta_emits_reasoning_effort_when_supported() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.supports_reasoning_effort = true;
+        entry.info.supports_reasoning_effort = Some(true);
         entry.info.reasoning_effort = Some(ReasoningEffort::High);
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
@@ -7703,7 +7826,7 @@ reasoning_effort = "low"
     fn acp_model_meta_supports_without_default_effort() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.supports_reasoning_effort = true;
+        entry.info.supports_reasoning_effort = Some(true);
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
             .values()
@@ -7753,7 +7876,7 @@ reasoning_effort = "low"
     fn acp_model_meta_omits_reasoning_efforts_when_list_empty() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
-        entry.info.supports_reasoning_effort = true;
+        entry.info.supports_reasoning_effort = Some(true);
         entry.info.reasoning_effort = Some(ReasoningEffort::Medium);
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
@@ -11820,7 +11943,7 @@ default = "grok-4.5"
                 hidden: false,
                 supported_in_api: true,
                 reasoning_effort: None,
-                supports_reasoning_effort: false,
+                supports_reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
                 compactions_remaining: None,

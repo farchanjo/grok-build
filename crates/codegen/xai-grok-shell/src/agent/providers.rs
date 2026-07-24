@@ -2232,7 +2232,11 @@ mod tests {
             model.info.max_completion_tokens, None,
             "the provider capability ceiling must not become a per-turn output request"
         );
-        assert!(model.info.supports_reasoning_effort);
+        assert_eq!(
+            model.info.supports_reasoning_effort,
+            Some(true),
+            "catalog model advertising reasoning should resolve to Some(true)",
+        );
         assert_eq!(
             model.info.api_backend,
             crate::sampling::ApiBackend::ChatCompletions
@@ -2273,7 +2277,10 @@ mod tests {
             models["openai-gpt-5.6-sol"].info.max_completion_tokens,
             Some(128_000)
         );
-        assert!(models["openai-gpt-5.6-sol"].info.supports_reasoning_effort);
+        assert_eq!(
+            models["openai-gpt-5.6-sol"].info.supports_reasoning_effort,
+            Some(true)
+        );
         assert!(models.contains_key("openrouter-openai-gpt-5.6-terra"));
         assert!(!models["codex-subscription"].info.hidden);
         assert_eq!(models["codex-subscription"].info.model, "gpt-5.6-sol");

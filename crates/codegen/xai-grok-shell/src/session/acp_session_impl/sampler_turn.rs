@@ -478,12 +478,29 @@ impl SessionActor {
         // per-turn reconstruction matches `sampling_config_for_model`. A
         // missing entry falls back to the default (`Custom`): a model that
         // isn't in the catalog is not a built-in xAI first-party model.
-        let provider_identity = crate::agent::config::find_model_by_id(
-            &self.models_manager.models(),
-            cfg.model.as_str(),
-        )
-        .map(crate::agent::config::provider_identity_for_model)
-        .unwrap_or_default();
+        let models = self.models_manager.models();
+        let resolved_entry = crate::agent::config::find_model_by_id(&models, cfg.model.as_str());
+        let provider_identity = resolved_entry
+            .map(crate::agent::config::provider_identity_for_model)
+            .unwrap_or_default();
+        // Wire shaping (H4): mirror `sampling_config_for_model` — strip
+        // `reasoning_effort` when the resolved model explicitly disclaims
+        // reasoning support (`Some(false)`). `Some(true)` and `None` (unknown)
+        // keep prior behavior. The chat-state `SamplingConfig` may already be
+        // stripped from the initial build, but applying the same rule here is
+        // a defense-in-depth guard against stale session state restored from
+        // disk or a model switch that left an effort set on a now-unsupported
+        // model.
+        let reasoning_effort = match (cfg.reasoning_effort, resolved_entry) {
+            (Some(_), Some(entry)) if entry.info().supports_reasoning_effort == Some(false) => {
+                tracing::debug!(
+                    model = %cfg.model,
+                    "reconstruct_full_config: stripping reasoning_effort — model explicitly disclaims reasoning support",
+                );
+                None
+            }
+            (effort, _) => effort,
+        };
         SamplingConfig {
             api_key: creds.api_key,
             base_url: cfg.base_url,
@@ -499,7 +516,7 @@ impl SessionActor {
             extra_headers,
             context_window: cfg.context_window.get(),
             client_version: creds.client_version,
-            reasoning_effort: cfg.reasoning_effort,
+            reasoning_effort,
             force_http1: false,
             max_retries: Some(self.max_retries),
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
