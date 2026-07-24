@@ -6,6 +6,7 @@
 //! no file system access) so it can be depended on by downstream crates
 //! (e.g., `xai-chat-state`) without pulling in the full `xai-grok-shell`.
 
+pub mod codex_wire;
 pub mod conversation;
 pub mod doom_loop;
 pub mod error;
@@ -14,6 +15,10 @@ pub mod serde_helpers;
 pub mod tool_overrides;
 pub mod types;
 
+pub use self::codex_wire::{
+    clear_chatgpt_codex_create_response_fields, is_chatgpt_codex_base_url,
+    shape_chatgpt_codex_responses_body,
+};
 pub use self::conversation::*;
 pub use self::doom_loop::{
     DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER, DoomLoopPeek, DoomLoopRecoveryPolicy,

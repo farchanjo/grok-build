@@ -319,6 +319,10 @@ impl InferenceError {
     /// contains `encrypted_content` from a different model family that the
     /// current model cannot decrypt. Never retryable — the user must start
     /// a new session.
+    ///
+    /// Matches both the underscore form (`encrypted_content`) used by the
+    /// OpenAI Platform and the spaced form from ChatGPT Codex
+    /// (`"encrypted content for item rs_… could not be verified"`).
     pub fn is_encrypted_content_error(&self) -> bool {
         matches!(
             self,
@@ -327,6 +331,7 @@ impl InferenceError {
                 message,
                 ..
             } if message.contains("encrypted_content")
+                || message.to_ascii_lowercase().contains("encrypted content")
         )
     }
 
@@ -478,6 +483,11 @@ fn try_parse_error(data: &str) -> Option<(String, String)> {
         {
             return Some((kind, message));
         }
+        // ChatGPT Codex / FastAPI style: `{"detail":"Unsupported parameter: …"}`
+        // or a validation-error array under `detail`.
+        if let Some(message) = fastapi_detail_message(&value) {
+            return Some(("invalid_request_error".to_string(), message));
+        }
     }
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
         return Some((
@@ -492,6 +502,31 @@ fn try_parse_error(data: &str) -> Option<(String, String)> {
             flat.code.unwrap_or_else(|| "server_error".to_string()),
             flat.error,
         ));
+    }
+    None
+}
+
+/// Extract a user-facing message from FastAPI / ChatGPT Codex `detail` bodies.
+fn fastapi_detail_message(value: &serde_json::Value) -> Option<String> {
+    let detail = value.get("detail")?;
+    if let Some(s) = detail.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(s.to_owned());
+    }
+    // Validation list: [{"msg":"…","loc":[…],…}, …]
+    if let Some(arr) = detail.as_array() {
+        let parts: Vec<String> = arr
+            .iter()
+            .filter_map(|item| {
+                item.get("msg")
+                    .and_then(|m| m.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect();
+        if !parts.is_empty() {
+            return Some(parts.join("; "));
+        }
     }
     None
 }
@@ -917,6 +952,23 @@ mod tests {
     }
 
     #[test]
+    fn user_facing_surfaces_fastapi_detail_string() {
+        let bytes = br#"{"detail":"Unsupported parameter: max_output_tokens"}"#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
+        assert_eq!(
+            msg,
+            "invalid_request_error: Unsupported parameter: max_output_tokens"
+        );
+    }
+
+    #[test]
+    fn user_facing_surfaces_fastapi_detail_validation_list() {
+        let bytes = br#"{"detail":[{"type":"missing","loc":["query","client_version"],"msg":"Field required"}]}"#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
+        assert_eq!(msg, "invalid_request_error: Field required");
+    }
+
+    #[test]
     fn structured_error_message_is_length_capped() {
         let long_msg = "x".repeat(MAX_USER_ERROR_BODY_CHARS + 50);
         let bytes = format!(r#"{{"error":{{"message":"{long_msg}","type":"server_error"}}}}"#);
@@ -1062,6 +1114,25 @@ mod tests {
         assert!(
             !err.is_retryable(),
             "encrypted_content errors must not be retried"
+        );
+    }
+
+    #[test]
+    fn codex_spaced_encrypted_content_400_is_detected() {
+        let err = InferenceError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid_request_error: The encrypted content for item \
+                       rs_e33bd46c-b19e-99bb-bfe8-8da40e961752 could not be verified. \
+                       Reason: Encrypted content could not be decrypted or parsed."
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+        };
+        assert!(
+            err.is_encrypted_content_error(),
+            "ChatGPT Codex spaced wording must match"
         );
     }
 

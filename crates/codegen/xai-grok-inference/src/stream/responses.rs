@@ -15,7 +15,7 @@ use futures_util::stream::{BoxStream, Stream};
 
 use xai_grok_inference_types::{
     ConversationItem, ConversationResponse, ResponseModelMetadata, InferenceError, StopReason,
-    TokenUsage, rs,
+    TokenUsage, ToolCall, rs,
 };
 
 use crate::events::{InferenceChannel, InferenceErrorInfo, InferenceEvent};
@@ -155,6 +155,14 @@ pub(crate) fn stream_responses_tracked<'a>(
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
         let mut reasoning_acc = String::new();
+        // Accumulate visible assistant text from streaming deltas. Some
+        // providers (notably ChatGPT Codex OAuth) may emit
+        // `response.output_text.delta` events that the UI already painted
+        // while the terminal `response.completed` body lacks a Message
+        // item. Without this buffer, `empty_reason` treats the turn as
+        // empty and the actor resamples — leaving orphan paragraphs on
+        // screen (one per retry).
+        let mut text_acc = String::new();
         let mut last_content_chunk_at = Instant::now();
 
         // Maps Responses API `output_index` to our tool-only `tool_index`.
@@ -163,6 +171,11 @@ pub(crate) fn stream_responses_tracked<'a>(
         // look up `output_index` here to find the matching `tool_index`.
         let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
         let mut next_tool_index: u32 = 0;
+        // ChatGPT Codex OAuth streams function calls in item events but often
+        // leaves `response.completed.output` empty. Accumulate them so the
+        // final ConversationResponse still carries tool calls (otherwise the
+        // actor classifies the turn as empty_response and retries forever).
+        let mut streamed_tool_calls: BTreeMap<u32, StreamedToolCall> = BTreeMap::new();
 
         let mut stream = raw_stream;
         loop {
@@ -223,6 +236,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                 ResponseStreamEvent::ResponseOutputTextDelta(text_delta_event) => {
                     let delta = text_delta_event.delta;
                     if !delta.is_empty() {
+                        text_acc.push_str(&delta);
                         if !first_token_emitted {
                             first_token_emitted = true;
                             yield InferenceEvent::FirstToken {
@@ -238,6 +252,16 @@ pub(crate) fn stream_responses_tracked<'a>(
                             text: delta,
                             chunk_index,
                         };
+                    }
+                }
+
+                // Codex / some Responses dialects may finish a part with only
+                // the Done event (full text, no prior deltas). Capture it so
+                // the final assistant item is never empty after a painted turn.
+                ResponseStreamEvent::ResponseOutputTextDone(text_done_event) => {
+                    let text = text_done_event.text;
+                    if !text.is_empty() && text_acc.is_empty() {
+                        text_acc = text;
                     }
                 }
 
@@ -287,6 +311,14 @@ pub(crate) fn stream_responses_tracked<'a>(
                         let tool_index = next_tool_index;
                         next_tool_index += 1;
                         output_to_tool_index.insert(added_event.output_index, tool_index);
+                        streamed_tool_calls.insert(
+                            added_event.output_index,
+                            StreamedToolCall {
+                                call_id: fc.call_id.clone(),
+                                name: fc.name.clone(),
+                                arguments: fc.arguments.clone(),
+                            },
+                        );
 
                         yield InferenceEvent::ToolCallDelta {
                             request_id: request_id.clone(),
@@ -306,6 +338,9 @@ pub(crate) fn stream_responses_tracked<'a>(
                         && let Some(&tool_index) =
                             output_to_tool_index.get(&args_event.output_index)
                     {
+                        if let Some(tc) = streamed_tool_calls.get_mut(&args_event.output_index) {
+                            tc.arguments.push_str(&delta);
+                        }
                         yield InferenceEvent::ToolCallDelta {
                             request_id: request_id.clone(),
                             tool_index,
@@ -313,6 +348,21 @@ pub(crate) fn stream_responses_tracked<'a>(
                             name: None,
                             arguments_delta: Some(delta),
                         };
+                    }
+                }
+
+                // Full arguments for a FunctionCall — prefer this over delta
+                // concat when present (Codex emits both).
+                ResponseStreamEvent::ResponseFunctionCallArgumentsDone(done_event) => {
+                    if let Some(tc) = streamed_tool_calls.get_mut(&done_event.output_index) {
+                        if !done_event.arguments.is_empty() {
+                            tc.arguments = done_event.arguments.clone();
+                        }
+                        if let Some(name) = done_event.name.clone()
+                            && !name.is_empty()
+                        {
+                            tc.name = name;
+                        }
                     }
                 }
 
@@ -386,8 +436,26 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // OutputItemDone carries the full result for backend tools.
                 // For WebSearchCall this includes the query and source URLs.
                 // For CustomToolCall this includes x_search results.
+                // For FunctionCall, Codex may only put the complete call here
+                // (completed.output stays empty) — capture it for the fallback.
                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
                     match &done_event.item {
+                        rs::OutputItem::FunctionCall(fc) => {
+                            streamed_tool_calls.insert(
+                                done_event.output_index,
+                                StreamedToolCall {
+                                    call_id: fc.call_id.clone(),
+                                    name: fc.name.clone(),
+                                    arguments: fc.arguments.clone(),
+                                },
+                            );
+                            // Ensure tool_index mapping exists if Added was missed.
+                            if !output_to_tool_index.contains_key(&done_event.output_index) {
+                                let tool_index = next_tool_index;
+                                next_tool_index += 1;
+                                output_to_tool_index.insert(done_event.output_index, tool_index);
+                            }
+                        }
                         rs::OutputItem::WebSearchCall(ws) => {
                             let result = serde_json::to_value(ws).ok();
                             yield InferenceEvent::BackendToolCallCompleted {
@@ -504,6 +572,11 @@ pub(crate) fn stream_responses_tracked<'a>(
         // Splice policy lives in `inject_streaming_reasoning_fallback`.
         let mut items = xai_grok_inference_types::response_to_conversation_items(response);
         xai_grok_inference_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
+        inject_streaming_text_fallback(&mut items, &text_acc);
+        inject_streaming_tool_calls_fallback(
+            &mut items,
+            streamed_tool_calls.into_values().collect(),
+        );
 
         let has_tool_calls = items.iter().any(|i| match i {
             ConversationItem::Assistant(a) => !a.tool_calls.is_empty(),
@@ -554,6 +627,75 @@ pub(crate) fn stream_responses_tracked<'a>(
             response: Box::new(conversation_response),
             metrics,
         };
+    }
+}
+
+/// When the terminal Responses body has an empty assistant message but the
+/// stream already delivered text deltas, back-fill the trailing Assistant
+/// item so empty-response retry does not fire after a painted reply.
+fn inject_streaming_text_fallback(items: &mut Vec<ConversationItem>, text_acc: &str) {
+    if text_acc.is_empty() {
+        return;
+    }
+    match items.iter_mut().rev().find_map(|item| match item {
+        ConversationItem::Assistant(a) => Some(a),
+        _ => None,
+    }) {
+        Some(assistant) if assistant.content.is_empty() => {
+            assistant.content = std::sync::Arc::<str>::from(text_acc);
+        }
+        Some(_) => {}
+        None => {
+            items.push(ConversationItem::assistant(text_acc));
+        }
+    }
+}
+
+/// Streamed function-call capture for dialects (ChatGPT Codex) that omit
+/// tool calls from `response.completed.output`.
+#[derive(Debug, Clone)]
+struct StreamedToolCall {
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+/// When the terminal Responses body has no tool calls but the stream already
+/// delivered FunctionCall items/args, inject them so the shell executes tools
+/// instead of treating the turn as empty.
+fn inject_streaming_tool_calls_fallback(
+    items: &mut Vec<ConversationItem>,
+    streamed: Vec<StreamedToolCall>,
+) {
+    let tool_calls: Vec<ToolCall> = streamed
+        .into_iter()
+        .filter(|t| !t.call_id.is_empty() && !t.name.is_empty())
+        .map(|t| ToolCall {
+            id: std::sync::Arc::<str>::from(t.call_id),
+            name: t.name,
+            arguments: std::sync::Arc::<str>::from(t.arguments),
+        })
+        .collect();
+    if tool_calls.is_empty() {
+        return;
+    }
+    let already_has_tools = items.iter().any(|item| match item {
+        ConversationItem::Assistant(a) => !a.tool_calls.is_empty(),
+        _ => false,
+    });
+    if already_has_tools {
+        return;
+    }
+    match items.iter_mut().rev().find_map(|item| match item {
+        ConversationItem::Assistant(a) => Some(a),
+        _ => None,
+    }) {
+        Some(assistant) => {
+            assistant.tool_calls = tool_calls;
+        }
+        None => {
+            items.push(ConversationItem::assistant_tool_calls(tool_calls));
+        }
     }
 }
 
@@ -695,8 +837,144 @@ mod tests {
         match events.last().unwrap() {
             InferenceEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                // Terminal body is empty; streamed text must still back-fill.
+                assert_eq!(response.assistant_text(), "hello");
+                assert!(
+                    response.empty_reason().is_none(),
+                    "streamed text must not classify as empty_response"
+                );
+                assert_eq!(response.message_chunks_emitted, 1);
             }
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// ChatGPT Codex streams function_call items but leaves
+    /// `response.completed.output` empty — must still surface tool calls.
+    #[tokio::test]
+    async fn codex_style_function_call_with_empty_completed_output() {
+        let added = rs::ResponseStreamEvent::ResponseOutputItemAdded(
+            rs_types::ResponseOutputItemAddedEvent {
+                sequence_number: 1,
+                output_index: 0,
+                item: rs_types::OutputItem::FunctionCall(rs_types::FunctionToolCall {
+                    arguments: String::new(),
+                    call_id: "call_1".into(),
+                    name: "list_dir".into(),
+                    id: Some("fc_1".into()),
+                    status: Some(rs_types::OutputStatus::InProgress),
+                }),
+            },
+        );
+        let args_done = rs::ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
+            rs_types::ResponseFunctionCallArgumentsDoneEvent {
+                name: Some("list_dir".into()),
+                sequence_number: 2,
+                item_id: "fc_1".into(),
+                output_index: 0,
+                arguments: r#"{"target_directory":"."}"#.into(),
+            },
+        );
+        let item_done = rs::ResponseStreamEvent::ResponseOutputItemDone(
+            rs_types::ResponseOutputItemDoneEvent {
+                sequence_number: 3,
+                output_index: 0,
+                item: rs_types::OutputItem::FunctionCall(rs_types::FunctionToolCall {
+                    arguments: r#"{"target_directory":"."}"#.into(),
+                    call_id: "call_1".into(),
+                    name: "list_dir".into(),
+                    id: Some("fc_1".into()),
+                    status: Some(rs_types::OutputStatus::Completed),
+                }),
+            },
+        );
+        let raw = stream::iter(vec![
+            Ok(added),
+            Ok(args_done),
+            Ok(item_done),
+            Ok(completed_event()), // empty output — Codex dialect
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        let tool_deltas = events
+            .iter()
+            .filter(|e| matches!(e, InferenceEvent::ToolCallDelta { .. }))
+            .count();
+        assert!(tool_deltas >= 1, "expected ToolCallDelta events from stream");
+
+        match events.last().unwrap() {
+            InferenceEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                let calls = response.tool_calls();
+                assert_eq!(calls.len(), 1, "streamed tool call must be recovered");
+                assert_eq!(calls[0].name, "list_dir");
+                assert_eq!(calls[0].id.as_ref(), "call_1");
+                assert_eq!(calls[0].arguments.as_ref(), r#"{"target_directory":"."}"#);
+                assert!(
+                    response.empty_reason().is_none(),
+                    "function_call-only Codex turn must not be empty_response"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn text_done_without_deltas_fills_assistant_content() {
+        let done = rs::ResponseStreamEvent::ResponseOutputTextDone(
+            rs_types::ResponseTextDoneEvent {
+                sequence_number: 0,
+                item_id: "item-1".into(),
+                output_index: 0,
+                content_index: 0,
+                text: "full message".into(),
+                logprobs: None,
+            },
+        );
+        let raw = stream::iter(vec![Ok(done), Ok(completed_event())]).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            InferenceEvent::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "full message");
+                assert!(response.empty_reason().is_none());
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inject_text_fallback_fills_empty_assistant() {
+        let mut items = vec![ConversationItem::assistant("")];
+        inject_streaming_text_fallback(&mut items, "painted");
+        match &items[0] {
+            ConversationItem::Assistant(a) => assert_eq!(a.content.as_ref(), "painted"),
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inject_text_fallback_does_not_overwrite_existing_content() {
+        let mut items = vec![ConversationItem::assistant("from body")];
+        inject_streaming_text_fallback(&mut items, "from stream");
+        match &items[0] {
+            ConversationItem::Assistant(a) => assert_eq!(a.content.as_ref(), "from body"),
+            other => panic!("expected Assistant, got {other:?}"),
         }
     }
 

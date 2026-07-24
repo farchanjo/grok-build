@@ -1325,24 +1325,33 @@ impl InferenceClient {
             request.inner.model = Some(self.defaults.model.clone());
         }
 
-        // Apply temperature default if not specified
-        if request.inner.temperature.is_none() {
-            request.inner.temperature = self.defaults.temperature;
-        }
+        let is_codex = xai_grok_inference_types::is_chatgpt_codex_base_url(&self.base_url);
+        if is_codex {
+            // ChatGPT Codex rejects OpenAI Platform sampling/budget fields
+            // (OpenCode parity: omit maxOutputTokens / temperature / top_p).
+            xai_grok_inference_types::clear_chatgpt_codex_create_response_fields(
+                &mut request.inner,
+            );
+        } else {
+            // Apply temperature default if not specified
+            if request.inner.temperature.is_none() {
+                request.inner.temperature = self.defaults.temperature;
+            }
 
-        // Apply top_p default if not specified
-        if request.inner.top_p.is_none() {
-            request.inner.top_p = self.defaults.top_p;
-        }
+            // Apply top_p default if not specified
+            if request.inner.top_p.is_none() {
+                request.inner.top_p = self.defaults.top_p;
+            }
 
-        // Apply max_output_tokens default if not specified
-        if request.inner.max_output_tokens.is_none() {
-            request.inner.max_output_tokens = self.defaults.max_completion_tokens;
-        }
+            // Apply max_output_tokens default if not specified
+            if request.inner.max_output_tokens.is_none() {
+                request.inner.max_output_tokens = self.defaults.max_completion_tokens;
+            }
 
-        // Set store to false if not specified (default is true, but that breaks ZDR compliance)
-        if request.inner.store.is_none() {
-            request.inner.store = Some(false);
+            // Set store to false if not specified (default is true, but that breaks ZDR compliance)
+            if request.inner.store.is_none() {
+                request.inner.store = Some(false);
+            }
         }
 
         // Include encrypted reasoning content if not specified
@@ -1352,6 +1361,31 @@ impl InferenceClient {
         }
 
         Ok(())
+    }
+
+    /// Post-serialize Responses body shaping (Codex strip + optional xAI extras).
+    fn finalize_responses_request_body(
+        &self,
+        request_body: &mut serde_json::Value,
+        extra_tool_entries: Vec<serde_json::Value>,
+    ) {
+        let is_codex = xai_grok_inference_types::is_chatgpt_codex_base_url(&self.base_url);
+        // xAI-only: never inject stream_tool_calls toward ChatGPT Codex.
+        if !is_codex && self.defaults.stream_tool_calls {
+            request_body["stream_tool_calls"] = serde_json::json!(true);
+        }
+        add_openrouter_fallback_models(request_body, self.openrouter_fallback_models());
+        if !extra_tool_entries.is_empty() {
+            if let Some(tools) = request_body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                tools.extend(extra_tool_entries);
+            } else {
+                request_body["tools"] = serde_json::Value::Array(extra_tool_entries);
+            }
+        }
+        xai_grok_inference_types::patch_reasoning_text_types(request_body);
+        if is_codex {
+            xai_grok_inference_types::shape_chatgpt_codex_responses_body(request_body);
+        }
     }
 
     /// Create a response using the Responses API (non-streaming).
@@ -1391,12 +1425,7 @@ impl InferenceClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             InferenceError::Serialization(e)
         })?;
-        add_openrouter_fallback_models(&mut request_body, self.openrouter_fallback_models());
-        // async-openai's ReasoningTextContent struct omits the `type`
-        // discriminator that the Responses API requires on input. Patch
-        // it in post-serialize. This is the last surviving piece of the
-        // old raw_output machinery.
-        xai_grok_inference_types::patch_reasoning_text_types(&mut request_body);
+        self.finalize_responses_request_body(&mut request_body, Vec::new());
         let http_request = grok_headers
             .apply(self.post(self.endpoint("responses")))
             .json(&request_body);
@@ -1530,21 +1559,7 @@ impl InferenceClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             InferenceError::Serialization(e)
         })?;
-        // Inject xAI-specific fields not in async-openai's CreateResponse type.
-        if self.defaults.stream_tool_calls {
-            request_body["stream_tool_calls"] = serde_json::json!(true);
-        }
-        add_openrouter_fallback_models(&mut request_body, self.openrouter_fallback_models());
-        // Inject xAI-specific tools (e.g., x_search) that can't be expressed
-        // via async_openai's rs::Tool enum.
-        if !extra_tool_entries.is_empty() {
-            if let Some(tools) = request_body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-                tools.extend(extra_tool_entries);
-            } else {
-                request_body["tools"] = serde_json::Value::Array(extra_tool_entries);
-            }
-        }
-        xai_grok_inference_types::patch_reasoning_text_types(&mut request_body);
+        self.finalize_responses_request_body(&mut request_body, extra_tool_entries);
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
         let doom_loop = self
@@ -3594,7 +3609,6 @@ mod tests {
             (ProviderIdentity::OpenAi, false),
             (ProviderIdentity::OpenRouter, false),
             (ProviderIdentity::Custom, false),
-            (ProviderIdentity::Codex, false),
         ] {
             let cfg = InferenceConfig {
                 provider_identity: identity,

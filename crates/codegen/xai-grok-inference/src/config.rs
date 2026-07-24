@@ -33,10 +33,6 @@ pub enum AuthScheme {
 /// provider, because no first-party headers are sent and no
 /// OpenRouter-specific diagnostics path is taken.
 ///
-/// `Codex` is retained for completeness (mirroring
-/// `ModelProviderKind::Codex`) but never reaches the sampler in
-/// practice: Codex models run through `codex app-server`, not through
-/// the HTTP sampling client.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderIdentity {
@@ -44,11 +40,11 @@ pub enum ProviderIdentity {
     Custom,
     #[serde(rename = "xai")]
     Xai,
-    #[serde(rename = "openai")]
+    /// OpenAI API key or ChatGPT subscription OAuth (HTTP Responses).
+    #[serde(rename = "openai", alias = "codex")]
     OpenAi,
     #[serde(rename = "openrouter")]
     OpenRouter,
-    Codex,
 }
 
 /// OpenRouter's native `provider` request-body object. All fields are
@@ -167,13 +163,13 @@ impl ProviderIdentity {
     /// OpenRouter upstream) is unavailable at the call site.
     ///
     /// xAI keeps the historical "Grok" wording; OpenRouter and OpenAI use
-    /// their product names; `Custom`/`Codex` use a neutral phrase.
+    /// their product names; `Custom` uses a neutral phrase.
     pub fn label(self) -> &'static str {
         match self {
             ProviderIdentity::Xai => "Grok",
             ProviderIdentity::OpenAi => "OpenAI",
             ProviderIdentity::OpenRouter => "OpenRouter",
-            ProviderIdentity::Custom | ProviderIdentity::Codex => "the model provider",
+            ProviderIdentity::Custom => "the model provider",
         }
     }
 }
@@ -478,7 +474,6 @@ mod tests {
             ProviderIdentity::Xai,
             ProviderIdentity::OpenAi,
             ProviderIdentity::OpenRouter,
-            ProviderIdentity::Codex,
         ] {
             let cfg = InferenceConfig {
                 provider_identity: identity,
@@ -497,7 +492,6 @@ mod tests {
         assert!(!ProviderIdentity::OpenAi.is_first_party());
         assert!(!ProviderIdentity::OpenRouter.is_first_party());
         assert!(!ProviderIdentity::Custom.is_first_party());
-        assert!(!ProviderIdentity::Codex.is_first_party());
     }
 
     /// `is_openrouter` is true only for `OpenRouter`.
@@ -507,6 +501,5 @@ mod tests {
         assert!(!ProviderIdentity::Xai.is_openrouter());
         assert!(!ProviderIdentity::OpenAi.is_openrouter());
         assert!(!ProviderIdentity::Custom.is_openrouter());
-        assert!(!ProviderIdentity::Codex.is_openrouter());
     }
 }

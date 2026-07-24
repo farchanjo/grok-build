@@ -1019,7 +1019,6 @@ mod tests {
             ProviderIdentity::Xai,
             ProviderIdentity::OpenAi,
             ProviderIdentity::Custom,
-            ProviderIdentity::Codex,
         ] {
             let chunks: Vec<Result<ChatCompletionChunk, InferenceError>> = vec![
                 Ok(fallback_chunk("hi", "other-model")),
