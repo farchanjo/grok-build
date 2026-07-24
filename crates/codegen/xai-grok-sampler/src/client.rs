@@ -41,6 +41,10 @@ const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
+///
+/// These headers carry stable session/conversation identifiers that must
+/// never be leaked to third-party providers. `apply` is a no-op unless
+/// `first_party` is `true` (only the first-party xAI provider sets it).
 struct GrokRequestHeaders<'a> {
     conv_id: &'a str,
     req_id: &'a str,
@@ -50,10 +54,16 @@ struct GrokRequestHeaders<'a> {
     agent_id: &'a str,
     deployment_id: Option<&'a str>,
     user_id: Option<&'a str>,
+    /// When `false`, `apply` injects no `x-grok-*` headers at all. Only the
+    /// first-party xAI provider passes `true`.
+    first_party: bool,
 }
 
 impl GrokRequestHeaders<'_> {
     fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if !self.first_party {
+            return builder;
+        }
         let mut b = builder
             .header("x-grok-conv-id", self.conv_id)
             .header("x-grok-req-id", self.req_id)
@@ -458,8 +468,12 @@ pub struct SamplingClient {
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
     /// Per-request header injection (OTel traceparent).
     header_injector: Option<crate::config::SharedHeaderInjector>,
-    /// True only when the shell selected the native OpenRouter provider and
-    /// explicitly requested its metadata response header.
+    /// True only when the config targets the first-party xAI provider. Gates
+    /// injection of `x-grok-*` request headers so third-party providers never
+    /// see stable session/conversation identifiers.
+    first_party: bool,
+    /// True only when the config targets OpenRouter, so error diagnostics
+    /// treat the upstream metadata as explicitly requested.
     openrouter_metadata_requested: bool,
 }
 
@@ -718,10 +732,8 @@ impl SamplingClient {
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
-            openrouter_metadata_requested: config.extra_headers.iter().any(|(name, value)| {
-                name.eq_ignore_ascii_case("x-openrouter-metadata")
-                    && value.eq_ignore_ascii_case("enabled")
-            }),
+            first_party: config.provider_identity.is_first_party(),
+            openrouter_metadata_requested: config.provider_identity.is_openrouter(),
         })
     }
 
@@ -997,6 +1009,7 @@ impl SamplingClient {
             agent_id: payload.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
+            first_party: self.first_party,
         };
         let http_request = grok_headers
             .apply(self.post(self.endpoint("chat/completions")))
@@ -1059,6 +1072,7 @@ impl SamplingClient {
             agent_id: payload.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
+            first_party: self.first_party,
         };
         let http_request = grok_headers
             .apply(self.post(self.endpoint("chat/completions")))
@@ -1270,6 +1284,7 @@ impl SamplingClient {
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
+            first_party: self.first_party,
         };
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
@@ -1404,6 +1419,7 @@ impl SamplingClient {
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
+            first_party: self.first_party,
         };
         let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
@@ -1634,6 +1650,7 @@ impl SamplingClient {
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
+            first_party: self.first_party,
         };
         let http_request = grok_headers
             .apply(self.post(self.endpoint("messages")))
@@ -1748,6 +1765,7 @@ impl SamplingClient {
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
+            first_party: self.first_party,
         };
         let http_request = grok_headers
             .apply(self.post(self.endpoint("messages")))
@@ -2175,6 +2193,7 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            provider_identity: crate::config::ProviderIdentity::default(),
         }
     }
 
@@ -3037,5 +3056,146 @@ mod tests {
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
         ));
+    }
+
+    /// `GrokRequestHeaders::apply` injects the full `x-grok-*` header set only
+    /// for the first-party xAI provider (`first_party = true`) and injects
+    /// zero `x-grok-*` headers for any third-party identity.
+    #[test]
+    fn grok_request_headers_gated_by_first_party() {
+        // Build a throwaway client just to get a `RequestBuilder` to attach
+        // headers to. We only inspect the built request's headers.
+        let client = SamplingClient::new(minimal_config()).expect("client should build");
+        let builder = || client.post("https://example.test/chat/completions");
+
+        let headers = GrokRequestHeaders {
+            conv_id: "conv-1",
+            req_id: "req-1",
+            model_id: "grok-4",
+            session_id: "sess-1",
+            turn_idx: Some("3"),
+            agent_id: "agent-1",
+            deployment_id: Some("dep-1"),
+            user_id: Some("user-1"),
+            first_party: true,
+        };
+        let req = headers.apply(builder()).build().expect("build request");
+        let h = req.headers();
+        assert_eq!(h.get("x-grok-conv-id").unwrap(), "conv-1");
+        assert_eq!(h.get("x-grok-req-id").unwrap(), "req-1");
+        assert_eq!(h.get("x-grok-model-override").unwrap(), "grok-4");
+        assert_eq!(h.get("x-grok-session-id").unwrap(), "sess-1");
+        assert_eq!(h.get("x-grok-turn-idx").unwrap(), "3");
+        assert_eq!(h.get("x-grok-agent-id").unwrap(), "agent-1");
+        assert_eq!(h.get("x-grok-deployment-id").unwrap(), "dep-1");
+        assert_eq!(h.get("x-grok-user-id").unwrap(), "user-1");
+    }
+
+    /// `GrokRequestHeaders::apply` is a complete no-op for the per-request
+    /// `x-grok-*` identity headers when `first_party` is false (third-party
+    /// providers). The stable client-identifier header (set from
+    /// `SamplerConfig::client_identifier`) is unaffected and still present.
+    #[test]
+    fn grok_request_headers_skipped_for_third_party() {
+        let client = SamplingClient::new(minimal_config()).expect("client should build");
+        let builder = || client.post("https://example.test/chat/completions");
+
+        // The per-request identity headers that `GrokRequestHeaders` injects.
+        const IDENTITY_HEADERS: &[&str] = &[
+            "x-grok-conv-id",
+            "x-grok-req-id",
+            "x-grok-model-override",
+            "x-grok-session-id",
+            "x-grok-turn-idx",
+            "x-grok-agent-id",
+            "x-grok-deployment-id",
+            "x-grok-user-id",
+        ];
+
+        // Baseline (no apply) carries none of the identity headers.
+        let baseline = builder().build().expect("build baseline");
+        for name in IDENTITY_HEADERS {
+            assert!(
+                baseline.headers().get(*name).is_none(),
+                "baseline must not carry {name}"
+            );
+        }
+
+        let headers = GrokRequestHeaders {
+            conv_id: "conv-1",
+            req_id: "req-1",
+            model_id: "grok-4",
+            session_id: "sess-1",
+            turn_idx: Some("3"),
+            agent_id: "agent-1",
+            deployment_id: Some("dep-1"),
+            user_id: Some("user-1"),
+            first_party: false,
+        };
+        let req = headers.apply(builder()).build().expect("build request");
+        for name in IDENTITY_HEADERS {
+            assert!(
+                req.headers().get(*name).is_none(),
+                "third-party request must not carry per-request identity header {name}"
+            );
+        }
+    }
+
+    /// `openrouter_metadata_requested` derives from `provider_identity ==
+    /// OpenRouter`, not from scanning `extra_headers` for
+    /// `X-OpenRouter-Metadata`. Removing the header from a TOML OpenRouter
+    /// provider config does not change diagnostics behavior.
+    #[test]
+    fn openrouter_metadata_requested_derives_from_identity() {
+        use crate::config::ProviderIdentity;
+
+        let mut cfg = minimal_config();
+        cfg.provider_identity = ProviderIdentity::OpenRouter;
+        // No X-OpenRouter-Metadata header in extra_headers at all.
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert!(
+            client.openrouter_metadata_requested,
+            "OpenRouter identity requests diagnostics metadata even without the header"
+        );
+
+        // A non-OpenRouter identity with the header present still does NOT
+        // request metadata — identity is the single source of truth.
+        let mut cfg = minimal_config();
+        cfg.provider_identity = ProviderIdentity::Xai;
+        cfg.extra_headers
+            .insert("X-OpenRouter-Metadata".to_string(), "enabled".to_string());
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert!(
+            !client.openrouter_metadata_requested,
+            "non-OpenRouter identity must not request OpenRouter metadata"
+        );
+
+        // Custom (default) identity: no metadata.
+        let client = SamplingClient::new(minimal_config()).expect("client should build");
+        assert!(!client.openrouter_metadata_requested);
+    }
+
+    /// `first_party` on the client is set only for the `Xai` identity.
+    #[test]
+    fn first_party_flag_only_for_xai_identity() {
+        use crate::config::ProviderIdentity;
+
+        for (identity, expected) in [
+            (ProviderIdentity::Xai, true),
+            (ProviderIdentity::OpenAi, false),
+            (ProviderIdentity::OpenRouter, false),
+            (ProviderIdentity::Custom, false),
+            (ProviderIdentity::Codex, false),
+        ] {
+            let cfg = SamplerConfig {
+                provider_identity: identity,
+                ..minimal_config()
+            };
+            let client = SamplingClient::new(cfg).expect("client should build");
+            assert_eq!(
+                client.first_party, expected,
+                "first_party mismatch for {identity:?}"
+            );
+        }
     }
 }

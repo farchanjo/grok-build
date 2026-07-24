@@ -474,6 +474,16 @@ impl SessionActor {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
+        // Derive provider identity from the resolved model entry so the
+        // per-turn reconstruction matches `sampling_config_for_model`. A
+        // missing entry falls back to the default (`Custom`): a model that
+        // isn't in the catalog is not a built-in xAI first-party model.
+        let provider_identity = crate::agent::config::find_model_by_id(
+            &self.models_manager.models(),
+            cfg.model.as_str(),
+        )
+        .map(crate::agent::config::provider_identity_for_model)
+        .unwrap_or_default();
         SamplingConfig {
             api_key: creds.api_key,
             base_url: cfg.base_url,
@@ -485,6 +495,7 @@ impl SessionActor {
             api_backend: cfg.api_backend,
             include_message_model_id: model_facts.include_message_model_id,
             auth_scheme,
+            provider_identity,
             extra_headers,
             context_window: cfg.context_window.get(),
             client_version: creds.client_version,

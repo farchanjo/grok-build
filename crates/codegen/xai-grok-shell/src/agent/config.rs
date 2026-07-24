@@ -13,6 +13,7 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
+use xai_grok_sampler::config::ProviderIdentity;
 use xai_grok_sampler::{AuthScheme, SamplerConfig};
 use xai_grok_sampling_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
@@ -5122,6 +5123,26 @@ pub fn resolve_chat_state_auth_type(
         .map(|r| r.auth_type)
         .unwrap_or(fallback)
 }
+/// Map a resolved model's provider kind to the sampler's
+/// [`ProviderIdentity`]. Models without an explicit provider are built-in
+/// xAI first-party models and return [`ProviderIdentity::Xai`] so they keep
+/// their first-party `x-grok-*` request header behavior. Models with an
+/// explicit provider derive identity from the provider kind.
+///
+/// Shared by [`sampling_config_for_model`] (initial construction) and the
+/// per-turn [`SessionActor::reconstruct_full_config`] (in
+/// `session::acp_session_impl::sampler_turn`) so the two cannot drift.
+pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
+    match model.model_provider.as_ref().map(|provider| provider.kind) {
+        None => ProviderIdentity::Xai,
+        Some(ModelProviderKind::Xai) => ProviderIdentity::Xai,
+        Some(ModelProviderKind::OpenAi) => ProviderIdentity::OpenAi,
+        Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
+        Some(ModelProviderKind::Codex) => ProviderIdentity::Codex,
+        Some(ModelProviderKind::Custom) => ProviderIdentity::Custom,
+    }
+}
+
 pub fn sampling_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -5170,6 +5191,7 @@ pub fn sampling_config_for_model(
         .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
         .map(|provider| provider.openrouter_fallback_models.clone())
         .unwrap_or_default();
+    let provider_identity = provider_identity_for_model(model);
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5184,6 +5206,7 @@ pub fn sampling_config_for_model(
             .as_ref()
             .is_some_and(|provider| provider.kind == ModelProviderKind::OpenRouter),
         auth_scheme: credentials.auth_scheme,
+        provider_identity,
         extra_headers,
         context_window: info.context_window.get(),
         client_version,

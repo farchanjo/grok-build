@@ -23,6 +23,52 @@ pub enum AuthScheme {
     XApiKey,
 }
 
+/// Which upstream provider a `SamplerConfig` targets.
+///
+/// The shell derives this from `ModelProviderKind` when building a
+/// `SamplerConfig`. The sampler uses it to decide whether to attach
+/// first-party `x-grok-*` request headers (`Xai` only) and whether to
+/// treat OpenRouter diagnostics metadata as requested (`OpenRouter`
+/// only). The default is `Custom` — the safest choice for an unknown
+/// provider, because no first-party headers are sent and no
+/// OpenRouter-specific diagnostics path is taken.
+///
+/// `Codex` is retained for completeness (mirroring
+/// `ModelProviderKind::Codex`) but never reaches the sampler in
+/// practice: Codex models run through `codex app-server`, not through
+/// the HTTP sampling client.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderIdentity {
+    #[default]
+    Custom,
+    #[serde(rename = "xai")]
+    Xai,
+    #[serde(rename = "openai")]
+    OpenAi,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+    Codex,
+}
+
+impl ProviderIdentity {
+    /// Returns `true` only for the first-party xAI provider.
+    ///
+    /// Only first-party xAI requests carry the stable session/conversation
+    /// identifiers in `x-grok-*` request headers. Third-party providers
+    /// (OpenAI, OpenRouter, custom) must never see those headers.
+    pub fn is_first_party(self) -> bool {
+        matches!(self, ProviderIdentity::Xai)
+    }
+
+    /// Returns `true` only for OpenRouter, where upstream provider
+    /// diagnostics metadata is explicitly requested via the
+    /// `X-OpenRouter-Metadata` header set by the shell.
+    pub fn is_openrouter(self) -> bool {
+        matches!(self, ProviderIdentity::OpenRouter)
+    }
+}
+
 /// All knobs that control a single sampling request.
 ///
 /// The session typically owns one `SamplerConfig` per active model
@@ -68,6 +114,14 @@ pub struct SamplerConfig {
     pub include_message_model_id: bool,
     #[serde(default)]
     pub auth_scheme: AuthScheme,
+
+    /// Which upstream provider this config targets. The shell derives this
+    /// from `ModelProviderKind`. The sampler uses it to gate first-party
+    /// `x-grok-*` request header injection (`Xai` only) and to decide whether
+    /// OpenRouter diagnostics metadata was requested (`OpenRouter` only).
+    /// Defaults to `Custom` — the safest choice for an unknown provider.
+    #[serde(default)]
+    pub provider_identity: ProviderIdentity,
     /// Extra request headers applied verbatim. The sampler never inspects
     /// the URL to derive headers; callers (the session) inject proxy auth
     /// and other access headers here before constructing the config.
@@ -153,6 +207,7 @@ impl Default for SamplerConfig {
             api_backend: ApiBackend::default(),
             include_message_model_id: true,
             auth_scheme: AuthScheme::default(),
+            provider_identity: ProviderIdentity::default(),
             extra_headers: IndexMap::new(),
             context_window: 0,
             force_http1: false,
@@ -275,5 +330,61 @@ mod tests {
 
         let config: SamplerConfig = serde_json::from_value(stripped).unwrap();
         assert!(config.include_message_model_id);
+    }
+
+    /// `provider_identity` defaults to `Custom` (the safest choice: no
+    /// first-party headers) and survives serde round-trips.
+    #[test]
+    fn provider_identity_round_trips_and_defaults_to_custom() {
+        // Default is Custom.
+        assert_eq!(ProviderIdentity::default(), ProviderIdentity::Custom);
+        assert!(!ProviderIdentity::default().is_first_party());
+        assert!(!ProviderIdentity::default().is_openrouter());
+
+        // A config missing the field (legacy serialization) deserializes to Custom.
+        let mut stripped = serde_json::to_value(SamplerConfig::default()).unwrap();
+        stripped
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_identity");
+        let config: SamplerConfig = serde_json::from_value(stripped).unwrap();
+        assert_eq!(config.provider_identity, ProviderIdentity::Custom);
+
+        // Each variant round-trips through serde.
+        for identity in [
+            ProviderIdentity::Custom,
+            ProviderIdentity::Xai,
+            ProviderIdentity::OpenAi,
+            ProviderIdentity::OpenRouter,
+            ProviderIdentity::Codex,
+        ] {
+            let cfg = SamplerConfig {
+                provider_identity: identity,
+                ..Default::default()
+            };
+            let round_tripped: SamplerConfig =
+                serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+            assert_eq!(round_tripped.provider_identity, identity);
+        }
+    }
+
+    /// `is_first_party` is true only for `Xai`.
+    #[test]
+    fn provider_identity_first_party_only_for_xai() {
+        assert!(ProviderIdentity::Xai.is_first_party());
+        assert!(!ProviderIdentity::OpenAi.is_first_party());
+        assert!(!ProviderIdentity::OpenRouter.is_first_party());
+        assert!(!ProviderIdentity::Custom.is_first_party());
+        assert!(!ProviderIdentity::Codex.is_first_party());
+    }
+
+    /// `is_openrouter` is true only for `OpenRouter`.
+    #[test]
+    fn provider_identity_openrouter_only_for_openrouter() {
+        assert!(ProviderIdentity::OpenRouter.is_openrouter());
+        assert!(!ProviderIdentity::Xai.is_openrouter());
+        assert!(!ProviderIdentity::OpenAi.is_openrouter());
+        assert!(!ProviderIdentity::Custom.is_openrouter());
+        assert!(!ProviderIdentity::Codex.is_openrouter());
     }
 }
