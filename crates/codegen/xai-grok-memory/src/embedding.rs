@@ -212,6 +212,106 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
     }
 }
 
+/// Embedding provider backed by the shared OpenAI platform transport
+/// (`xai_grok_inference::openai_platform`). Prefer this over ad-hoc HTTP once
+/// a provider registry client is available; request bodies remain typed
+/// create-embedding JSON, not raw passthrough.
+pub struct PlatformEmbeddingProvider {
+    api_base: String,
+    model: String,
+    dimensions: usize,
+    token: String,
+    max_batch_size: usize,
+}
+
+impl PlatformEmbeddingProvider {
+    pub fn new(api_base: String, model: String, dimensions: usize, token: String) -> Self {
+        Self {
+            api_base,
+            model,
+            dimensions,
+            token,
+            max_batch_size: 32,
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for PlatformEmbeddingProvider {
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        use xai_grok_inference::{
+            OpenAiClient, PlatformClientConfig, TransportPolicy,
+            openai_platform::generated::openai_ops::{CreateEmbeddingBody, CreateEmbeddingRequest},
+        };
+        use tokio_util::sync::CancellationToken;
+
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+        let client = OpenAiClient::from_config(
+            PlatformClientConfig {
+                provider_id: "memory_embeddings".into(),
+                display_name: "Memory embeddings".into(),
+                base_url: self.api_base.clone(),
+                admin_base_url: None,
+                application_token: Some(self.token.clone()),
+                admin_token: None,
+                extra_headers: Default::default(),
+                policy: TransportPolicy::default(),
+            },
+            CancellationToken::new(),
+        )?;
+
+        let mut all = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(self.max_batch_size) {
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("model".into(), serde_json::json!(self.model));
+            fields.insert(
+                "input".into(),
+                serde_json::json!(batch.iter().copied().collect::<Vec<_>>()),
+            );
+            fields.insert("dimensions".into(), serde_json::json!(self.dimensions));
+            let req = CreateEmbeddingRequest {
+                body: CreateEmbeddingBody { fields },
+            };
+            let resp = client.create_embedding(req).await?;
+            // Response fields flatten; prefer `data` array when present.
+            let data = resp
+                .data
+                .clone()
+                .or_else(|| {
+                    resp.fields
+                        .get("data")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                })
+                .ok_or("embedding response missing data")?;
+            for item in data {
+                let embedding: Vec<f32> = item
+                    .get("embedding")
+                    .and_then(|e| e.as_array())
+                    .ok_or("embedding item missing embedding array")?
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                all.push(embedding);
+            }
+        }
+        Ok(all)
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
 /// A mock embedding provider for testing that returns deterministic vectors.
 /// Uses blake3 hash of text → float values for reproducible results.
 #[cfg(any(test, feature = "test-support"))]
