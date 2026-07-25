@@ -176,9 +176,7 @@ fn ensure_search_models_tool(tool_config: &mut xai_grok_tools::registry::types::
     if already {
         return;
     }
-    tool_config
-        .tools
-        .push((&archanjo::SearchModelsTool).into());
+    tool_config.tools.push((&archanjo::SearchModelsTool).into());
 }
 /// Merge a shell-resolved params map into every matching tool's
 /// `ToolConfig.params` (single copy of the loop the per-tool injections share).
@@ -1214,7 +1212,8 @@ impl AgentBuilder {
         let mut hosted_tools = Vec::new();
         if use_backend_search {
             if web_search_enabled && definition.hosted_tool_allowed("web_search") {
-                hosted_tools.push(xai_grok_inference_types::HostedTool::WebSearch { options: None });
+                hosted_tools
+                    .push(xai_grok_inference_types::HostedTool::WebSearch { options: None });
             }
             if definition.hosted_tool_allowed("x_search") {
                 hosted_tools.push(xai_grok_inference_types::HostedTool::XSearch { options: None });
@@ -1523,9 +1522,11 @@ mod tests {
         )];
         let desc = build_task_description(&subagents, &[]);
         assert!(desc.contains("search_models"));
-        assert!(desc.contains("omit `${{ params.task.model }}` to inherit the parent model.")
-            || desc.contains("Omit `${{ params.task.model }}` to inherit the parent model.")
-            || desc.contains("inherit the parent model"));
+        assert!(
+            desc.contains("omit `${{ params.task.model }}` to inherit the parent model.")
+                || desc.contains("Omit `${{ params.task.model }}` to inherit the parent model.")
+                || desc.contains("inherit the parent model")
+        );
         assert!(!desc.contains(concat!("grok", " models")));
     }
     #[test]

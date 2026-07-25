@@ -482,7 +482,7 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
 /// `record_assistant_response` path is skipped (cancel / max tokens).
 #[tokio::test(flavor = "current_thread")]
 async fn channel_tokens_accumulate_into_streaming_capture() {
-    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference::{InferenceChannel, InferenceEvent, RequestId};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -556,7 +556,7 @@ async fn channel_tokens_accumulate_into_streaming_capture() {
 /// `StreamStarted` arm that the pure-struct tests bypass.
 #[tokio::test(flavor = "current_thread")]
 async fn same_prompt_restart_accumulates_segments_via_handler() {
-    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference::{InferenceChannel, InferenceEvent, RequestId};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -619,7 +619,7 @@ async fn same_prompt_restart_accumulates_segments_via_handler() {
 /// reasoning nor erases earlier uncommitted partials.
 #[tokio::test(flavor = "current_thread")]
 async fn completed_event_clears_slot_keeps_prior_uncommitted_segments() {
-    use xai_grok_inference::{InferenceLatencyStats, RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference::{InferenceChannel, InferenceEvent, InferenceLatencyStats, RequestId};
     use xai_grok_inference_types::{ConversationItem, ConversationResponse};
     let local = tokio::task::LocalSet::new();
     local
@@ -703,7 +703,7 @@ async fn completed_event_clears_slot_keeps_prior_uncommitted_segments() {
 /// client — the multi-pane "out of order" bug.
 #[tokio::test(flavor = "current_thread")]
 async fn completed_event_releases_stream_drain_barrier() {
-    use xai_grok_inference::{InferenceLatencyStats, RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference::{InferenceChannel, InferenceEvent, InferenceLatencyStats, RequestId};
     use xai_grok_inference_types::{ConversationItem, ConversationResponse};
     let local = tokio::task::LocalSet::new();
     local
@@ -770,7 +770,7 @@ async fn completed_event_releases_stream_drain_barrier() {
 #[tokio::test(flavor = "current_thread")]
 async fn failed_event_preserves_streaming_capture_for_takeout() {
     use xai_grok_inference::{
-        RequestId, InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent,
+        InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent, RequestId,
     };
     let local = tokio::task::LocalSet::new();
     local
@@ -838,7 +838,7 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
 /// signals stay warn-only on the accepted response.
 #[tokio::test(flavor = "current_thread")]
 async fn observe_only_confident_completion_stays_warn_only() {
-    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference::{InferenceChannel, InferenceEvent, RequestId};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -876,9 +876,11 @@ async fn observe_only_confident_completion_stays_warn_only() {
                 usage: None,
                 cost_usd_ticks: None,
                 message_chunks_emitted: 1,
-                doom_loop_signals: vec![xai_grok_inference_types::doom_loop::DoomLoopSignal::parse(
-                    "tail_repetition:8@thinking",
-                )],
+                doom_loop_signals: vec![
+                    xai_grok_inference_types::doom_loop::DoomLoopSignal::parse(
+                        "tail_repetition:8@thinking",
+                    ),
+                ],
                 stop_message: None,
                 fallback_served_model: None,
             };
@@ -917,7 +919,7 @@ async fn observe_only_confident_completion_stays_warn_only() {
 /// on `Completed`. Session counters and the per-turn tally track along.
 #[tokio::test(flavor = "current_thread")]
 async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
-    use xai_grok_inference::{RequestId, InferenceChannel, InferenceErrorKind, InferenceEvent};
+    use xai_grok_inference::{InferenceChannel, InferenceErrorKind, InferenceEvent, RequestId};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -979,9 +981,11 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
                 usage: None,
                 cost_usd_ticks: None,
                 message_chunks_emitted: 1,
-                doom_loop_signals: vec![xai_grok_inference_types::doom_loop::DoomLoopSignal::parse(
-                    "tail_repetition:4@thinking",
-                )],
+                doom_loop_signals: vec![
+                    xai_grok_inference_types::doom_loop::DoomLoopSignal::parse(
+                        "tail_repetition:4@thinking",
+                    ),
+                ],
                 stop_message: None,
                 fallback_served_model: None,
             };
@@ -1039,7 +1043,7 @@ async fn doom_loop_recovery_stamps_capture_segments_and_counters() {
 /// taken at that point shows the model was cut off mid tool-call.
 #[tokio::test(flavor = "current_thread")]
 async fn tool_call_delta_marks_streaming_capture_phase() {
-    use xai_grok_inference::{RequestId, InferenceChannel, InferenceEvent};
+    use xai_grok_inference::{InferenceChannel, InferenceEvent, RequestId};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1092,7 +1096,7 @@ async fn tool_call_delta_marks_streaming_capture_phase() {
 /// fabricate a phase — there is no partial to attribute it to.
 #[tokio::test(flavor = "current_thread")]
 async fn tool_call_delta_on_idle_slot_leaves_phase_pending() {
-    use xai_grok_inference::{RequestId, InferenceEvent};
+    use xai_grok_inference::{InferenceEvent, RequestId};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1162,7 +1166,7 @@ fn streaming_capture_appender_respects_byte_cap() {
 #[tokio::test(start_paused = true)]
 async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
     use xai_grok_inference::{
-        RequestId, InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent,
+        InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent, RequestId,
     };
     use xai_grok_inference_types::{EmptyReason, EmptyResponseContext};
     let local = tokio::task::LocalSet::new();

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use xai_grok_inference::{InferenceConfig, InferenceClient};
+use xai_grok_inference::{InferenceClient, InferenceConfig};
 use xai_grok_inference_types::{ContentPart, ConversationItem, ConversationRequest, UserItem};
 
 pub fn test_config(base_url: &str, api_key: &str) -> InferenceConfig {

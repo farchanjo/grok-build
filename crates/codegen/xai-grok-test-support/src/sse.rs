@@ -1028,9 +1028,11 @@ mod tests {
 
         // The reconstruction preserves the fence as a real, newline-delimited
         // code block (the property diagram detection depends on).
-        assert!(chat_completion_deltas(text)
-            .concat()
-            .contains("```mermaid\nflowchart TD\n"));
+        assert!(
+            chat_completion_deltas(text)
+                .concat()
+                .contains("```mermaid\nflowchart TD\n")
+        );
     }
 
     /// Multiple consecutive spaces and a trailing newline survive too (no

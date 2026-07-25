@@ -200,8 +200,11 @@ fn x_search_cutoff_update() -> xai_grok_inference_types::ToolOverridesUpdate {
     xai_grok_inference_types::ToolOverridesUpdate {
         x_search: Some(Some(xai_grok_inference_types::XSearchOptions {
             date_bound: Some(
-                xai_grok_inference_types::SearchDateBound::new(None, Some("2024-03-15".to_string()))
-                    .unwrap(),
+                xai_grok_inference_types::SearchDateBound::new(
+                    None,
+                    Some("2024-03-15".to_string()),
+                )
+                .unwrap(),
             ),
         })),
         web_search: None,
@@ -1863,10 +1866,12 @@ async fn tool_overrides_update_applies_at_promotion_never_at_enqueue() {
                 Some(&expected),
                 "a prompt with no update leaves the sticky override in place"
             );
-            actor.apply_tool_overrides_update(Some(xai_grok_inference_types::ToolOverridesUpdate {
-                x_search: Some(None),
-                web_search: None,
-            }));
+            actor.apply_tool_overrides_update(Some(
+                xai_grok_inference_types::ToolOverridesUpdate {
+                    x_search: Some(None),
+                    web_search: None,
+                },
+            ));
             assert_eq!(
                 *actor.tool_overrides.borrow(),
                 None,

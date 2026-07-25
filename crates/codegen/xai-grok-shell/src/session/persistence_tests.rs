@@ -24,7 +24,8 @@ fn test_actor_with_remote_sync(
 ) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
     let summary_tx = tx.clone();
-    let sampling_client = OaiCompatClient::new(xai_grok_inference::InferenceConfig::default()).unwrap();
+    let sampling_client =
+        OaiCompatClient::new(xai_grok_inference::InferenceConfig::default()).unwrap();
     let task = tokio::spawn(
         SessionPersistence {
             info,

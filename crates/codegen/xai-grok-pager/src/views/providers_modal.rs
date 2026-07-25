@@ -609,12 +609,9 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             "Connect OpenAI (one method at a time):",
             Style::default().fg(theme.text_primary),
         );
-        for (idx, label) in [
-            "ChatGPT Pro/Plus (browser OAuth)",
-            "OpenAI API key",
-        ]
-        .iter()
-        .enumerate()
+        for (idx, label) in ["ChatGPT Pro/Plus (browser OAuth)", "OpenAI API key"]
+            .iter()
+            .enumerate()
         {
             let prefix = if *selected == idx { "› " } else { "  " };
             put_line(
@@ -673,7 +670,10 @@ mod tests {
             handle_key(&mut state, &key(KeyCode::Enter)),
             ProviderModalOutcome::Changed
         );
-        assert!(matches!(&state.mode, ProviderModalMode::ChoosingOpenAi { .. }));
+        assert!(matches!(
+            &state.mode,
+            ProviderModalMode::ChoosingOpenAi { .. }
+        ));
         handle_key(&mut state, &key(KeyCode::Down));
         assert_eq!(
             handle_key(&mut state, &key(KeyCode::Enter)),

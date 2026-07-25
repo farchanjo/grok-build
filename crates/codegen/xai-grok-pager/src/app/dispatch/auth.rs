@@ -242,7 +242,7 @@ pub(in crate::app::dispatch) fn begin_credential_repair(
     app: &mut AppView,
     provider_id: &str,
 ) -> Option<(AgentId, crate::app::agent::CredentialRepairScope)> {
-    use crate::app::agent::{mint_credential_repair_token, CredentialRepairScope};
+    use crate::app::agent::{CredentialRepairScope, mint_credential_repair_token};
 
     let (agent_id, generation) = match app.active_view {
         ActiveView::Agent(id) => {
@@ -364,10 +364,7 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     // when the stash is for this same repair scope. Sibling stashes/CTAs stay.
     if let Some((agent_id, scope)) = app.active_auth_repair.take() {
         if let Some(agent) = app.agents.get_mut(&agent_id) {
-            let bound = agent
-                .in_flight_repair
-                .as_ref()
-                .is_some_and(|f| f == &scope);
+            let bound = agent.in_flight_repair.as_ref().is_some_and(|f| f == &scope);
             if bound {
                 agent.in_flight_repair = None;
                 let drop_stash = agent.reauth_stashed_prompt.as_ref().is_some_and(|s| {
@@ -459,17 +456,14 @@ pub(super) fn handle_auth_complete(
                     && let Some(agent) = app.agents.get_mut(&agent_id)
                 {
                     if let Some(stashed) = agent.reauth_stashed_prompt.take() {
-                        if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed)
-                        {
+                        if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed) {
                             agent.in_flight_repair = None;
                             // Strip only this agent's credential CTA after exact match.
                             strip_trailing_auth_error_blocks(agent);
                             agent.scrollback.push_block(RenderBlock::system(
                                 "Reconnected xAI. Retrying\u{2026}".to_string(),
                             ));
-                            agent
-                                .session
-                                .enqueue_in_flight_prompt_front(stashed.prompt);
+                            agent.session.enqueue_in_flight_prompt_front(stashed.prompt);
                             let drain = maybe_drain_queue(agent);
                             retry_effects.extend(drain.effects);
                             page_flips.push((agent.session.id, drain.page_flip_entry));

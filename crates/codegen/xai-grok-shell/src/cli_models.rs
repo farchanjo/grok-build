@@ -42,9 +42,9 @@ impl AuthStatus {
         // fail-closed model_provider auth_provider stub and not the deferred
         // "advertise api key so TUI can start" path.
         if !agent_config.grok_com_config.api_key_auth_disabled()
-            && let Some(name) = models.iter().find_map(|(name, entry)| {
-                entry.own_credential().is_some().then(|| name.clone())
-            })
+            && let Some(name) = models
+                .iter()
+                .find_map(|(name, entry)| entry.own_credential().is_some().then(|| name.clone()))
         {
             return Self::ModelCredentials(name);
         }

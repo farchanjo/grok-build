@@ -9,10 +9,10 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use indexmap::IndexMap;
 
-use crate::agent::config::{self, ModelEntry, resolve_credentials, inference_config_for_model};
+use crate::agent::config::{self, ModelEntry, inference_config_for_model, resolve_credentials};
 use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
-use crate::remote::{FetchModelsResult, fetch_models_blocking};
 use crate::inference::InferenceConfig;
+use crate::remote::{FetchModelsResult, fetch_models_blocking};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortOption};
 

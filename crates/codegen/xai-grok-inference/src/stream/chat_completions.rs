@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, Stream};
 
 use xai_grok_inference_types::{
-    AssistantItem, ChatCompletionChunk, ConversationItem, ConversationResponse,
-    ResponseModelMetadata, InferenceError, StopReason, TokenUsage, ToolCall,
+    AssistantItem, ChatCompletionChunk, ConversationItem, ConversationResponse, InferenceError,
+    ResponseModelMetadata, StopReason, TokenUsage, ToolCall,
 };
 
 use crate::config::ProviderIdentity;

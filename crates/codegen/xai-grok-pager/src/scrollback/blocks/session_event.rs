@@ -1010,7 +1010,10 @@ mod tests {
             "must name xAI: {msg}"
         );
         assert!(!msg.contains("/login"), "must never mention /login: {msg}");
-        assert!(!msg.contains("/logout"), "must never mention /logout: {msg}");
+        assert!(
+            !msg.contains("/logout"),
+            "must never mention /logout: {msg}"
+        );
         assert!(
             msg.to_lowercase().contains("authentication")
                 || msg.to_lowercase().contains("credentials"),

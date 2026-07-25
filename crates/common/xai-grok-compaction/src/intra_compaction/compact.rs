@@ -1271,7 +1271,10 @@ mod tests {
             None,
         )
         .await;
-        assert!(matches!(result, Err(IntraCompactionError::InferenceBuild(_))));
+        assert!(matches!(
+            result,
+            Err(IntraCompactionError::InferenceBuild(_))
+        ));
         assert_eq!(
             sampler.call_count(),
             1,

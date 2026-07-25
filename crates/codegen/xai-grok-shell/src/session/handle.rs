@@ -354,7 +354,9 @@ impl SessionHandle {
     /// Snapshot the session's resolved tool schema for verbatim-fork inheritance.
     /// A dead actor or dropped reply fails open to an empty list (child then builds
     /// its own toolset, same as a non-fork spawn).
-    pub(crate) async fn snapshot_tool_definitions(&self) -> Vec<xai_grok_inference_types::ToolSpec> {
+    pub(crate) async fn snapshot_tool_definitions(
+        &self,
+    ) -> Vec<xai_grok_inference_types::ToolSpec> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx

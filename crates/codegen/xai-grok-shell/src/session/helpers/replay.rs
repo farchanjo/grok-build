@@ -150,8 +150,10 @@ pub fn replay_to_prompt(
             state.conversation.clear();
         } else {
             let truncate_at = state.truncate_target(target_prompt_index);
-            let keep =
-                crate::inference::conversation_truncate_for_prompt(&state.conversation, truncate_at);
+            let keep = crate::inference::conversation_truncate_for_prompt(
+                &state.conversation,
+                truncate_at,
+            );
             state.conversation.truncate(keep);
         }
         state.prompt_counter = target_prompt_index;

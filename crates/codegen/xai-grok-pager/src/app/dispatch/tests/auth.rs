@@ -481,11 +481,11 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
             provider_id: "xai".into(),
             credential_generation: 0,
             prompt: crate::app::agent::InFlightPrompt {
-            text: "first prompt".into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
+                text: "first prompt".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
             },
         });
         agent
@@ -558,11 +558,11 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
             provider_id: "xai".into(),
             credential_generation: 0,
             prompt: crate::app::agent::InFlightPrompt {
-            text: "stale".into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
+                text: "stale".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
             },
         });
         agent
@@ -887,12 +887,10 @@ fn provider_operation_complete_token_race_safety() {
         &mut app,
     );
     assert!(app.agents[&id].reauth_stashed_prompt.is_some());
-    assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        ))
-    );
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
 
     // Test/Refresh without repair token never resumes.
     let effects = dispatch(
@@ -999,12 +997,10 @@ fn openai_repair_token_does_not_resume_other_providers() {
         app.agents[&id].reauth_stashed_prompt.is_some(),
         "OpenAI completion must not resume OpenRouter stash"
     );
-    assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        ))
-    );
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
 
     // Exact OpenAI stash + token resumes once.
     {
@@ -1086,12 +1082,10 @@ fn unbound_auth_complete_does_not_resubmit_stash() {
         Some("keep"),
         "unbound AuthComplete must not resubmit"
     );
-    assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        ))
-    );
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
 }
 
 /// xAI repair AuthComplete with exact token resumes once; sibling agent
@@ -1137,9 +1131,9 @@ fn auth_complete_xai_repair_token_resumes_once() {
             },
         });
         agent.in_flight_repair = Some(scope.clone());
-        agent.scrollback.push_block(RenderBlock::session_event(
-            SessionEvent::ReAuthRequired,
-        ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
     }
     {
         let agent = app.agents.get_mut(&sibling_id).unwrap();
@@ -1220,7 +1214,10 @@ fn auth_complete_xai_repair_token_resumes_once() {
                 )
         )
     });
-    assert!(sibling_cta, "sibling OpenRouter CTA must stay after xAI complete");
+    assert!(
+        sibling_cta,
+        "sibling OpenRouter CTA must stay after xAI complete"
+    );
 
     // Duplicate with same token after clear: no second resume.
     app.auth_return_view = Some(ActiveView::Agent(id));
@@ -1409,8 +1406,14 @@ fn cancel_xai_repair_preserves_openrouter_stash_and_cta() {
                 )
         )
     });
-    assert!(has_or_cta, "OpenRouter CTA must remain after cancelling xAI repair");
-    assert!(agent.in_flight_repair.is_none(), "cancel clears only the bound in-flight");
+    assert!(
+        has_or_cta,
+        "OpenRouter CTA must remain after cancelling xAI repair"
+    );
+    assert!(
+        agent.in_flight_repair.is_none(),
+        "cancel clears only the bound in-flight"
+    );
     assert!(app.active_auth_repair.is_none());
 
     let sibling = &app.agents[&or_id];
@@ -1554,12 +1557,10 @@ fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
         Some("should-not-resume"),
         "delayed cancelled-token complete must not resume"
     );
-    assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        ))
-    );
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
     assert_eq!(
         app.agents[&sibling_id]
             .reauth_stashed_prompt
@@ -1706,5 +1707,8 @@ fn unbound_auth_complete_preserves_all_stashes_and_ctas() {
                 )
         )
     });
-    assert!(has_or_cta, "unbound AuthComplete must preserve OpenRouter CTA");
+    assert!(
+        has_or_cta,
+        "unbound AuthComplete must preserve OpenRouter CTA"
+    );
 }

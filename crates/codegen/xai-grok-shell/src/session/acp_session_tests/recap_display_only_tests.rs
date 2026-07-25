@@ -652,7 +652,11 @@ async fn recap_request_rides_parent_prompt_cache() {
 
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("You asked about the borrow checker.");
-            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let mut cfg = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             cfg.base_url = server.url();
             cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
             actor.chat_state_handle.update_inference_settings(cfg);
@@ -738,7 +742,11 @@ async fn recap_request_sends_hosted_tools_under_backend_search() {
 
             let server = MockInferenceServer::start().await.unwrap();
             server.set_response("You asked about the borrow checker.");
-            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let mut cfg = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             cfg.base_url = server.url();
             cfg.api_backend = xai_grok_inference_types::ApiBackend::Responses;
             actor.chat_state_handle.update_inference_settings(cfg);

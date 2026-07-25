@@ -11,7 +11,7 @@ use futures_util::stream::{BoxStream, Stream};
 
 use xai_grok_inference_types::messages::{self, MessageStreamEvent};
 use xai_grok_inference_types::{
-    AssistantItem, ConversationItem, ConversationResponse, ResponseModelMetadata, InferenceError,
+    AssistantItem, ConversationItem, ConversationResponse, InferenceError, ResponseModelMetadata,
     StopReason, TokenUsage, ToolCall, rs,
 };
 

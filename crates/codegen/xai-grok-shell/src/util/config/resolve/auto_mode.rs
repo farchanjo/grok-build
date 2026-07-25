@@ -230,7 +230,8 @@ pub fn auto_mode_classifier_defaults(
         .prompt_type
         .unwrap_or(xai_grok_workspace::permission::ClassifierPromptType::Full);
     let reasoning_effort = cfg.reasoning_effort.or_else(|| {
-        effective_supports_reasoning_effort.then_some(xai_grok_inference_types::ReasoningEffort::Low)
+        effective_supports_reasoning_effort
+            .then_some(xai_grok_inference_types::ReasoningEffort::Low)
     });
     (prompt_type, reasoning_effort)
 }

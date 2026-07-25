@@ -7,7 +7,7 @@ pub mod types;
 // `InferenceClient` -- the two have identical method sets, so call-sites
 // compile unchanged.
 pub use self::conversation::*;
-pub use self::error::{ResponseModelMetadata, Result, InferenceError};
+pub use self::error::{InferenceError, ResponseModelMetadata, Result};
 pub use self::types::*;
 pub use xai_grok_inference::ApiBackend;
 pub use xai_grok_inference::InferenceClient as Client;
@@ -27,6 +27,7 @@ pub use async_openai::types::responses as rs;
 // composite was removed when its only remaining role -- session-snapshot
 // state for `MvpAgent` -- was migrated to `RefCell<InferenceConfig>` directly.
 pub use xai_grok_inference::{
-    InferenceLatencyStats, OriginClientInfo, RequestId, InferenceActor, InferenceConfig, InferenceHandle,
-    InferenceChannel, InferenceClient, InferenceErrorInfo, InferenceErrorKind, InferenceEvent,
+    InferenceActor, InferenceChannel, InferenceClient, InferenceConfig, InferenceErrorInfo,
+    InferenceErrorKind, InferenceEvent, InferenceHandle, InferenceLatencyStats, OriginClientInfo,
+    RequestId,
 };

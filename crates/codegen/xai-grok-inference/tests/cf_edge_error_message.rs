@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use xai_grok_inference::config::ProviderIdentity;
-use xai_grok_inference::{InferenceConfig, InferenceClient};
+use xai_grok_inference::{InferenceClient, InferenceConfig};
 use xai_grok_inference_types::{
     ContentPart, ConversationItem, ConversationRequest, UserItem, status_user_message,
     status_user_message_for, user_facing_api_error_message,

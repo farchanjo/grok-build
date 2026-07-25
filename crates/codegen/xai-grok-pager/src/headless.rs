@@ -505,8 +505,7 @@ fn auto_respond_to_permissions(
 /// "Not signed in" error message, tailored to the session type.
 fn auth_required_message(interactive: bool) -> String {
     if interactive {
-        "Not signed in. Connect xAI in /providers (or run `grok provider connect xai`)."
-            .to_string()
+        "Not signed in. Connect xAI in /providers (or run `grok provider connect xai`).".to_string()
     } else {
         "Not signed in. To authenticate without a browser, run:\n  \
          grok provider connect xai\n\n\

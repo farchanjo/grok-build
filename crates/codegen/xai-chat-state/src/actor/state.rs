@@ -207,7 +207,10 @@ impl ChatState {
     /// `chat_history.jsonl` has an assistant message with tool call IDs that
     /// lack matching `ToolResult` entries. Without this, the in-memory state
     /// would carry broken conversation history until the next `build_request`.
-    pub fn new(mut conversation: Vec<ConversationItem>, inference_settings: InferenceSettings) -> Self {
+    pub fn new(
+        mut conversation: Vec<ConversationItem>,
+        inference_settings: InferenceSettings,
+    ) -> Self {
         let deduped = dedup_duplicate_tool_results(&mut conversation);
         if deduped > 0 {
             tracing::info!(

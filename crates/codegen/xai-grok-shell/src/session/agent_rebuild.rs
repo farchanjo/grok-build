@@ -322,9 +322,9 @@ impl AgentRebuildSpec {
         let model_catalog = models_manager.clone();
         agent
             .tool_bridge()
-            .update_resource(
-                archanjo::ModelCatalogSearch::new(move |query| model_catalog.search_models(query)),
-            )
+            .update_resource(archanjo::ModelCatalogSearch::new(move |query| {
+                model_catalog.search_models(query)
+            }))
             .await;
         if let Some(event_tx) = subagent_event_tx.clone() {
             use xai_grok_tools::implementations::grok_build::task::backend::{

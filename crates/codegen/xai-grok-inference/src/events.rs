@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use xai_grok_inference_types::{
-    ApiErrorDiagnostics, ConversationResponse, EmptyResponseContext, ResponseModelMetadata,
-    InferenceError,
+    ApiErrorDiagnostics, ConversationResponse, EmptyResponseContext, InferenceError,
+    ResponseModelMetadata,
 };
 
 use crate::metrics::InferenceLatencyStats;
@@ -226,7 +226,9 @@ impl From<&InferenceError> for InferenceErrorInfo {
                     diagnostics.clone(),
                 )
             }
-            InferenceError::EventStreamError(_) => (InferenceErrorKind::Http, None, None, None, None),
+            InferenceError::EventStreamError(_) => {
+                (InferenceErrorKind::Http, None, None, None, None)
+            }
             InferenceError::StreamError { .. } => (InferenceErrorKind::Api, None, None, None, None),
             InferenceError::IdleTimeout { .. } => {
                 (InferenceErrorKind::IdleTimeout, None, None, None, None)

@@ -5,9 +5,7 @@
 
 mod types;
 
-pub use types::{
-    ModelCatalogQuery, SearchModelsHit, SearchModelsInput, SearchModelsResult,
-};
+pub use types::{ModelCatalogQuery, SearchModelsHit, SearchModelsInput, SearchModelsResult};
 
 use std::sync::Arc;
 
@@ -189,17 +187,19 @@ mod tests {
             assert_eq!(q.query, "GLM 5.2");
             assert!(q.task_eligible_only);
             SearchModelsResult {
-                results: vec![SearchModelsHit {
-                    name: "Z.ai: GLM 5.2".into(),
-                    slug: "openrouter:z-ai/glm-5.2".into(),
-                    provider: "openrouter".into(),
-                    task_eligible: true,
-                    supports_tools: Some(true),
-                    context_window: Some(131072),
-                    call: String::new(),
-                    score: Some(1.0),
-                }
-                .with_call()],
+                results: vec![
+                    SearchModelsHit {
+                        name: "Z.ai: GLM 5.2".into(),
+                        slug: "openrouter:z-ai/glm-5.2".into(),
+                        provider: "openrouter".into(),
+                        task_eligible: true,
+                        supports_tools: Some(true),
+                        context_window: Some(131072),
+                        call: String::new(),
+                        score: Some(1.0),
+                    }
+                    .with_call(),
+                ],
                 truncated: false,
                 note: None,
             }

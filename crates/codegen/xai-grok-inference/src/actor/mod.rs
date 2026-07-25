@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::InferenceCommand;
-use crate::config::{RetryPolicy, InferenceConfig};
+use crate::config::{InferenceConfig, RetryPolicy};
 use crate::events::InferenceEvent;
 use crate::handle::InferenceHandle;
 use state::{ActiveRequest, ActorState};

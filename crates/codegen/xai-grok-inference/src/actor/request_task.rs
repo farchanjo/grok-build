@@ -23,7 +23,7 @@ use xai_grok_inference_types::{
 };
 
 use crate::client::{ApiBackend, InferenceClient};
-use crate::config::{RetryPolicy, InferenceConfig};
+use crate::config::{InferenceConfig, RetryPolicy};
 use crate::events::{InferenceErrorInfo, InferenceErrorKind, InferenceEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{

@@ -25,8 +25,8 @@ pub use self::doom_loop::{
     DoomLoopSignal, DoomLoopSignalKind, is_check_event, peek_doom_loop,
 };
 pub use self::error::{
-    ApiErrorDiagnostics, EmptyReason, EmptyResponseContext, ResponseModelMetadata, Result,
-    InferenceError, is_context_length_error, status_user_message, status_user_message_for,
+    ApiErrorDiagnostics, EmptyReason, EmptyResponseContext, InferenceError, ResponseModelMetadata,
+    Result, is_context_length_error, status_user_message, status_user_message_for,
     user_facing_api_error_message, user_facing_api_error_message_for,
 };
 pub use self::tool_overrides::{

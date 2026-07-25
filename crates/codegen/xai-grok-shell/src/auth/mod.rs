@@ -1,10 +1,10 @@
 pub(crate) mod attribution;
 mod auth_provider;
+pub mod chatgpt_oauth;
 mod config;
 pub mod credential_provider;
 #[path = "devbox_login_stub.rs"]
 pub(crate) mod devbox_login;
-pub mod chatgpt_oauth;
 pub mod device_code;
 pub mod error;
 mod external_auth;

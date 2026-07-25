@@ -69,7 +69,8 @@ mod tests {
             || l.contains("assert!")
             || l.contains("does **not** mention")
             || l.contains("does not mention")
-            || l.contains("line.contains(") // scanner self-reference
+            || l.contains("line.contains(")
+        // scanner self-reference
         {
             return true;
         }
@@ -130,12 +131,7 @@ mod tests {
                 if line.contains("no longer supported") || line.contains("there is no global") {
                     continue;
                 }
-                offenders.push(format!(
-                    "{}:{}: {}",
-                    path_str,
-                    line_no + 1,
-                    line.trim()
-                ));
+                offenders.push(format!("{}:{}: {}", path_str, line_no + 1, line.trim()));
             }
         }
 

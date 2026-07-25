@@ -31,10 +31,10 @@ pub mod leader;
 pub mod managed_config;
 pub mod mcp_doctor;
 pub use xai_grok_models as models;
+pub mod inference;
 pub mod plugin;
 pub mod relay;
 pub mod remote;
-pub mod inference;
 pub mod session;
 pub mod terminal;
 #[cfg(test)]

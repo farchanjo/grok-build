@@ -1184,7 +1184,9 @@ async fn test_responses_api_request_format() {
 /// absorbed mid-stream without disturbing the typed event flow.
 #[tokio::test]
 async fn test_doom_loop_check_enabled_sends_header_and_absorbs_check_event() {
-    use xai_grok_inference_types::doom_loop::{DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA};
+    use xai_grok_inference_types::doom_loop::{
+        DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA,
+    };
 
     let server = MockInferenceServer::start().await.unwrap();
     let mut events =
@@ -1225,7 +1227,9 @@ async fn test_doom_loop_check_enabled_sends_header_and_absorbs_check_event() {
 /// frame identified only by its payload `type` tag.
 #[tokio::test]
 async fn test_doom_loop_check_disabled_sends_no_header_and_drops_check_frames() {
-    use xai_grok_inference_types::doom_loop::{DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA};
+    use xai_grok_inference_types::doom_loop::{
+        DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA,
+    };
 
     let server = MockInferenceServer::start().await.unwrap();
     let mut events =

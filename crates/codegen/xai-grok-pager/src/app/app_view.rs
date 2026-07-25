@@ -8890,7 +8890,10 @@ pub(crate) mod tests {
         app.auth_state = AuthState::Pending { error: None };
         app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::OpenProviders)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::OpenProviders)
+        ));
     }
     #[test]
     fn welcome_pending_enter_opens_providers() {
@@ -8898,7 +8901,10 @@ pub(crate) mod tests {
         app.auth_state = AuthState::Pending { error: None };
         app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::OpenProviders)));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::OpenProviders)
+        ));
     }
     #[test]
     fn welcome_pending_n_is_unchanged() {

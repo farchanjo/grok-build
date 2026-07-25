@@ -2521,7 +2521,7 @@ async fn provider_credential_kind_action_table() {
     use crate::agent::config::{ModelEntry, ModelInfo};
     use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
     use crate::extensions::notification::{
-        ProviderCredentialAction, ProviderCredentialKind, PROVIDER_CREDENTIAL_ERROR_TYPE,
+        PROVIDER_CREDENTIAL_ERROR_TYPE, ProviderCredentialAction, ProviderCredentialKind,
         SessionUpdate as XaiSessionUpdate,
     };
     use crate::session::storage::SessionUpdate;
@@ -2715,7 +2715,11 @@ async fn provider_credential_kind_action_table() {
                         saw = true;
                     }
                 }
-                assert!(saw, "{}: expected RetryState::Failed with provider", case.name);
+                assert!(
+                    saw,
+                    "{}: expected RetryState::Failed with provider",
+                    case.name
+                );
             })
             .await;
     }
@@ -2734,12 +2738,8 @@ async fn mint_provider_credential_generation_is_monotonic_and_fails_closed() {
             )
             .await;
             assert_eq!(actor.provider_credential_generation.get(), 0);
-            let a = actor
-                .mint_provider_credential_generation()
-                .expect("first");
-            let b = actor
-                .mint_provider_credential_generation()
-                .expect("second");
+            let a = actor.mint_provider_credential_generation().expect("first");
+            let b = actor.mint_provider_credential_generation().expect("second");
             assert_eq!(a, 1);
             assert_eq!(b, 2);
             assert_ne!(a, b);

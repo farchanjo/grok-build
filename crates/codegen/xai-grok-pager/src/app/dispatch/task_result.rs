@@ -1358,9 +1358,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         "Reconnected {}. Retrying\u{2026}",
                         provider.label()
                     )));
-                    agent
-                        .session
-                        .enqueue_in_flight_prompt_front(stashed.prompt);
+                    agent.session.enqueue_in_flight_prompt_front(stashed.prompt);
                     let drain = maybe_drain_queue(agent);
                     retry_effects.extend(drain.effects);
                     page_flips.push((agent.session.id, drain.page_flip_entry));

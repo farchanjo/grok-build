@@ -1527,11 +1527,11 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
             provider_id: "xai".into(),
             credential_generation: 0,
             prompt: crate::app::agent::InFlightPrompt {
-            text: "retry me".into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
+                text: "retry me".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
             },
         });
     }

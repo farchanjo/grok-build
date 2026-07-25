@@ -3,12 +3,12 @@
 //! Mirrors the ranking approach of `session/tool_index.rs` (exact short-circuit
 //! + identifier decomposition + BM25) without embedding APIs.
 
-use bm25::{Language, SearchEngineBuilder};
 use archanjo::{ModelCatalogQuery, SearchModelsHit, SearchModelsResult};
+use bm25::{Language, SearchEngineBuilder};
 
 use super::config::ModelEntry;
 use super::model_providers::ModelProviderKind;
-use super::models::{is_task_agent_eligible, ModelsManager};
+use super::models::{ModelsManager, is_task_agent_eligible};
 
 /// Split a compound identifier into component words for BM25 matching.
 fn split_identifier(s: &str) -> Vec<&str> {
@@ -243,7 +243,8 @@ pub fn search_models_catalog(
         .map(|r| to_document(&r.slug, &r.entry, &r.provider))
         .collect();
 
-    let search_engine = SearchEngineBuilder::<u32>::with_corpus(Language::English, documents).build();
+    let search_engine =
+        SearchEngineBuilder::<u32>::with_corpus(Language::English, documents).build();
     // Fetch extra candidates so limit still fills after any post-filter (none today).
     let fetch = query.limit.saturating_mul(2).max(query.limit).min(100);
     let normalized = normalize_query(q);
@@ -372,10 +373,12 @@ mod tests {
         );
         assert_eq!(result.results[0].slug, "openrouter:z-ai/glm-5.2");
         assert!(result.results[0].call.contains("openrouter:z-ai/glm-5.2"));
-        assert!(!result
-            .results
-            .iter()
-            .any(|h| h.slug == "openrouter:no-tools/model"));
+        assert!(
+            !result
+                .results
+                .iter()
+                .any(|h| h.slug == "openrouter:no-tools/model")
+        );
     }
 
     #[test]

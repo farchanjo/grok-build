@@ -391,7 +391,10 @@ mod tests {
         shape_chatgpt_codex_responses_body(&mut body);
 
         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
-        assert!(input[0].get("id").is_none(), "reasoning id must be stripped");
+        assert!(
+            input[0].get("id").is_none(),
+            "reasoning id must be stripped"
+        );
         assert!(
             input[0]
                 .get("encrypted_content")

@@ -482,8 +482,8 @@ async fn run_headless_inner(
             Some(auth) => (auth, false),
             None if auth_manager.is_expired() => {
                 anyhow::bail!(
-                "Session expired. Connect xAI in /providers (or run `grok provider connect xai`)."
-            )
+                    "Session expired. Connect xAI in /providers (or run `grok provider connect xai`)."
+                )
             }
             None => anyhow::bail!("No cached credentials found. Connect xAI in /providers."),
         }

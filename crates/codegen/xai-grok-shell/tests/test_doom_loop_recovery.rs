@@ -15,8 +15,8 @@ use common::{create_test_client, test_inference_config};
 use xai_grok_inference::RetryPolicy;
 use xai_grok_inference_types::doom_loop::{DoomLoopSignalKind, SAMPLE_CHECK_EVENT_DATA_CUMULATIVE};
 use xai_grok_shell::inference::{
-    ApiBackend, Client, ConversationItem, ConversationRequest, RequestId, InferenceActor,
-    InferenceHandle,
+    ApiBackend, Client, ConversationItem, ConversationRequest, InferenceActor, InferenceHandle,
+    RequestId,
 };
 use xai_grok_test_support::sse::{
     responses_api_doom_loop_check_events, responses_api_doom_loop_terminal_only_events,
