@@ -701,6 +701,11 @@ pub(crate) struct SessionActor {
     /// Explicit OpenRouter request-pacing opt-in for the active model. Kept
     /// outside chat-state because it is provider transport configuration.
     pub(crate) openrouter_pacing: std::cell::Cell<bool>,
+    /// Monotonic generation for provider-scoped credential failures.
+    /// Bumped whenever a provider credential failure is surfaced so blocked
+    /// prompt resumption can require a matching generation (sibling-provider
+    /// reconnect cannot resubmit).
+    pub(crate) provider_credential_generation: std::cell::Cell<u64>,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,
     /// Pending mid-turn interjections from the user (Ctrl+Enter).

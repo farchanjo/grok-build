@@ -1507,6 +1507,7 @@ pub(crate) async fn spawn_session_actor(
         ),
         openrouter_plugins: std::cell::RefCell::new(inference_config.openrouter_plugins.clone()),
         openrouter_pacing: std::cell::Cell::new(inference_config.openrouter_pacing),
+        provider_credential_generation: std::cell::Cell::new(0),
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config

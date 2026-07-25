@@ -755,7 +755,8 @@ impl SessionActor {
                     .conversation_stream_messages(request)
                     .await
                     .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = xai_grok_inference::stream_messages(raw, meta, request_id, idle_timeout);
+                let events =
+                    xai_grok_inference::stream_messages(raw, meta, request_id, idle_timeout);
                 xai_grok_inference::collect_response(events).await
             }
         };

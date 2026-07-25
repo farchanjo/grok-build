@@ -1092,18 +1092,57 @@ pub const SAFE_ERROR_CATEGORIES: &[&str] = &[
     "unknown",
 ];
 
+/// How the rejected provider credential was obtained.
+///
+/// Structured — never inferred from endpoint hostnames or error strings.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCredentialKind {
+    /// Static or vault API key (OpenRouter key, OpenAI API key, custom key).
+    #[default]
+    ApiKey,
+    /// OAuth / session token (xAI OIDC, ChatGPT subscription OAuth).
+    Oauth,
+}
+
+/// Recommended operator action for a provider-scoped credential failure.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCredentialAction {
+    /// Open `/providers` and repair the named provider (API-key path).
+    #[default]
+    OpenProviders,
+    /// Automatically refresh OAuth when the runtime supports it; otherwise
+    /// open `/providers` for that provider's OAuth connect flow.
+    RefreshOauth,
+}
+
 /// Safe, credential-free context describing which configured provider
 /// rejected a request. Never includes API keys, prompts, or response bodies.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCredentialFailure {
-    /// Stable provider slug (`openrouter`, `openai`, ...).
+    /// Stable provider slug (`openrouter`, `openai`, `xai`, ...).
+    /// Sourced from resolved `[model_providers.<id>]` identity — never from
+    /// endpoint/error-string inference alone.
     pub provider_id: String,
-    /// User-facing provider label (`OpenRouter`, `OpenAI`, ...).
+    /// User-facing provider label (`OpenRouter`, `OpenAI`, `xAI`, ...).
     pub provider_name: String,
     /// Catalog / routed model id that failed (e.g. `moonshotai/kimi-k2`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_model_id: Option<String>,
+    /// Whether the credential is an API key or OAuth session.
+    #[serde(default)]
+    pub credential_kind: ProviderCredentialKind,
+    /// Recommended repair action for the pager / CLI.
+    #[serde(default)]
+    pub recommended_action: ProviderCredentialAction,
+    /// Monotonic generation for race-safe blocked-prompt resumption.
+    /// Bumped when a credential failure is recorded; a sibling-provider
+    /// reconnect cannot resubmit a prompt stashed under a different
+    /// `(provider_id, credential_generation)` pair.
+    #[serde(default)]
+    pub credential_generation: u64,
     /// HTTP status when known (typically 401).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
@@ -1152,7 +1191,7 @@ impl RetryState {
 /// again. Drives the actionable re-auth banner.
 ///
 /// `legacy_auth` is intentionally excluded: those failures carry their own
-/// detailed migration guidance (`grok logout` / `grok login`) in the
+/// detailed migration guidance (provider-scoped disconnect/connect) in the
 /// message, so we surface that verbatim instead of the generic prompt.
 ///
 /// `provider_credential` is also excluded from *global* reauth: the pager
@@ -1166,16 +1205,40 @@ pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
     error_type == Some("auth") || message.contains("Unauthorized (401)")
 }
 
-/// User-facing repair copy for a provider-scoped API-key rejection.
+/// User-facing repair copy for a provider-scoped credential rejection.
 ///
-/// Never mentions `/login` or xAI OAuth; always directs the operator to
+/// Never mentions `/login` or global logout; always directs the operator to
 /// `/providers` for the named provider. Never includes `"Unauthorized (401)"`
 /// so legacy global reauth classifiers do not fire.
 pub fn provider_credential_repair_message(provider_name: &str) -> String {
     format!(
-        "{provider_name} rejected its API key. Open /providers, select \
-         {provider_name}, and replace or test the key."
+        "{provider_name} rejected its credentials. Open /providers, select \
+         {provider_name}, and reconnect or replace the key."
     )
+}
+
+/// Repair copy that includes credential kind guidance.
+pub fn provider_credential_repair_message_detailed(
+    provider_name: &str,
+    kind: ProviderCredentialKind,
+) -> String {
+    match kind {
+        ProviderCredentialKind::ApiKey => format!(
+            "{provider_name} rejected its API key. Open /providers, select \
+             {provider_name}, and replace or test the key."
+        ),
+        ProviderCredentialKind::Oauth => format!(
+            "{provider_name} OAuth session was rejected. Open /providers, \
+             select {provider_name}, and reconnect with OAuth."
+        ),
+    }
+}
+
+/// First-party session-auth repair copy (replaces legacy `/login` guidance).
+pub fn xai_session_repair_message() -> String {
+    "Authentication required — your xAI session has expired or your credentials \
+     were rejected. Connect xAI in /providers, then resend your message."
+        .to_string()
 }
 
 /// Collapse free-form error labels to the controlled diagnostics allowlist.
@@ -1296,6 +1359,25 @@ mod provider_host_tests {
             &provider_credential_repair_message("OpenRouter")
         ));
         assert!(is_reauthable_failure(Some("auth"), "Unauthorized (401)"));
+    }
+
+    #[test]
+    fn repair_messages_never_mention_login_or_logout() {
+        let api = provider_credential_repair_message_detailed(
+            "OpenRouter",
+            ProviderCredentialKind::ApiKey,
+        );
+        let oauth =
+            provider_credential_repair_message_detailed("OpenAI", ProviderCredentialKind::Oauth);
+        let xai = xai_session_repair_message();
+        for msg in [&api, &oauth, &xai] {
+            assert!(!msg.contains("/login"), "{msg}");
+            assert!(!msg.contains("/logout"), "{msg}");
+            assert!(msg.contains("/providers"), "{msg}");
+        }
+        assert!(api.contains("API key"), "{api}");
+        assert!(oauth.contains("OAuth"), "{oauth}");
+        assert!(xai.contains("xAI"), "{xai}");
     }
 
     #[test]

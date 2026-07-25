@@ -138,7 +138,6 @@ fn user_echo_mode(prompt_id: &str) -> UserEchoMode {
     }
 }
 impl SessionActor {
-
     /// Run the image-normalization pipeline (re-encode caps, min-side and
     /// integrity checks) and surface its outcomes: compression / re-encode
     /// fallback / dropped notices are appended to `text_out` (TEXT only —
@@ -2039,14 +2038,14 @@ impl SessionActor {
                     effective_tools,
                     memory_reminder,
                     self.memory.is_enabled(),
-                    trace_gcs_config
-                        .clone()
-                        .map(|cfg| -> Box<dyn crate::inference::TraceContext> {
+                    trace_gcs_config.clone().map(
+                        |cfg| -> Box<dyn crate::inference::TraceContext> {
                             Box::new(crate::inference::ConversationRequestTrace {
                                 gcs_config: cfg,
                                 artifact_tracker: artifact_tracker.cloned(),
                             })
-                        }),
+                        },
+                    ),
                     self.session_info.id.to_string(),
                     req_id.to_owned(),
                 )

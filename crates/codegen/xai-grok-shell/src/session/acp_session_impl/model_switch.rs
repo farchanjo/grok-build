@@ -53,8 +53,8 @@ impl SessionActor {
                 "supports_backend_search": inference_config.supports_backend_search,
             })),
         );
-        self.chat_state_handle
-            .update_inference_settings(xai_grok_inference_types::InferenceSettings {
+        self.chat_state_handle.update_inference_settings(
+            xai_grok_inference_types::InferenceSettings {
                 base_url: inference_config.base_url.clone(),
                 model: inference_config.model.clone(),
                 max_completion_tokens: inference_config.max_completion_tokens,
@@ -65,7 +65,8 @@ impl SessionActor {
                 context_window: new_context_window,
                 reasoning_effort: inference_config.reasoning_effort,
                 stream_tool_calls: Some(inference_config.stream_tool_calls),
-            });
+            },
+        );
         let existing = self.chat_state_handle.get_credentials().await;
         let session_key = self
             .auth_manager

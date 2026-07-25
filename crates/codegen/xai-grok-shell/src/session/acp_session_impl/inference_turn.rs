@@ -402,10 +402,10 @@ impl SessionActor {
         };
 
         let models = self.models_manager.models();
-        if let Some(entry) = crate::agent::config::find_model_by_id(&models, model_id) {
-            if entry.is_provider_scoped_byok() || entry.has_own_credentials() {
-                return ModelByok::Byok;
-            }
+        if let Some(entry) = crate::agent::config::find_model_by_id(&models, model_id)
+            && (entry.is_provider_scoped_byok() || entry.has_own_credentials())
+        {
+            return ModelByok::Byok;
         }
 
         let byok = self.model_auth_facts(model_id).byok;
@@ -929,9 +929,11 @@ impl SessionActor {
         status_code: Option<u16>,
         kind: xai_grok_inference::InferenceErrorKind,
     ) -> Result<InferenceFailureRecovery, acp::Error> {
-        use crate::extensions::notification::provider_credential_repair_message;
-        let repair = provider_credential_repair_message(&provider.provider_name);
-        let mut msg = repair;
+        use crate::extensions::notification::provider_credential_repair_message_detailed;
+        let mut msg = provider_credential_repair_message_detailed(
+            &provider.provider_name,
+            provider.credential_kind,
+        );
         if let Some(model) = provider.failed_model_id.as_deref() {
             msg.push_str(&format!(" Failed model: {model}."));
         }
@@ -957,7 +959,11 @@ impl SessionActor {
     }
 
     /// Resolve provider-scoped credential failure for the active/failed model.
-    /// Returns `None` for first-party xAI (legacy global re-auth path).
+    ///
+    /// Returns `None` for first-party xAI session auth (uses the xAI-specific
+    /// reauth banner with `/providers` guidance). Third-party and ChatGPT
+    /// OAuth routes always return structured identity from the resolved
+    /// model provider — never from free-form error text.
     pub(crate) async fn provider_credential_failure_context(
         &self,
         failed_model_id: &str,
@@ -965,17 +971,24 @@ impl SessionActor {
         error_category: &str,
         diagnostics: Option<&xai_grok_inference_types::ApiErrorDiagnostics>,
     ) -> Option<crate::extensions::notification::ProviderCredentialFailure> {
+        use crate::agent::model_providers::ModelProviderKind;
         use crate::extensions::notification::{
-            ProviderCredentialFailure, approved_provider_for_exact_host, bound_safe_id,
-            host_from_base_url, sanitize_error_category,
+            ProviderCredentialAction, ProviderCredentialFailure, ProviderCredentialKind,
+            approved_provider_for_exact_host, bound_safe_id, host_from_base_url,
+            sanitize_error_category,
         };
         use xai_grok_inference::config::ProviderIdentity;
 
         let models = self.models_manager.models();
         let entry = crate::agent::config::find_model_by_id(&models, failed_model_id);
+
+        // Prefer the resolved `[model_providers.<id>]` record (structured).
+        let resolved = entry.and_then(|e| e.model_provider.as_ref());
         let mut identity = entry
             .map(crate::agent::config::provider_identity_for_model)
             .unwrap_or(ProviderIdentity::Custom);
+        let mut provider_id = resolved.map(|p| p.id.clone());
+        let mut provider_kind = resolved.map(|p| p.kind);
 
         // Reconstruct only when catalog miss — prefer catalog identity.
         if entry.is_none() {
@@ -994,28 +1007,70 @@ impl SessionActor {
         // Exact-host fallback only when catalog identity is unknown/custom.
         // Never substring-match URLs (suffix-confusion / query spoofs).
         if matches!(identity, ProviderIdentity::Custom)
+            && provider_id.is_none()
             && let Some(host) = host_from_base_url(base_url)
-            && let Some((id, name)) = approved_provider_for_exact_host(&host)
+            && let Some((id, _name)) = approved_provider_for_exact_host(&host)
         {
-            let _ = (id, name);
             identity = match id {
                 "openrouter" => ProviderIdentity::OpenRouter,
                 "openai" => ProviderIdentity::OpenAi,
                 _ => identity,
             };
+            provider_id = Some(id.to_owned());
+            provider_kind = Some(match id {
+                "openrouter" => ModelProviderKind::OpenRouter,
+                "openai" => ModelProviderKind::OpenAi,
+                _ => ModelProviderKind::Custom,
+            });
         }
 
-        let (provider_id, provider_name) = match identity {
+        // First-party xAI session auth keeps the dedicated reauth path
+        // (OAuth may auto-refresh). Never treat xAI as a third-party key.
+        if matches!(identity, ProviderIdentity::Xai)
+            || matches!(provider_kind, Some(ModelProviderKind::Xai))
+        {
+            return None;
+        }
+
+        let (default_id, default_name) = match identity {
             ProviderIdentity::OpenRouter => ("openrouter", "OpenRouter"),
             ProviderIdentity::OpenAi => ("openai", "OpenAI"),
             ProviderIdentity::Xai => return None,
             ProviderIdentity::Custom => return None,
         };
+        let provider_id = provider_id.unwrap_or_else(|| default_id.to_owned());
+        let provider_name = match provider_kind.unwrap_or(ModelProviderKind::Custom) {
+            ModelProviderKind::OpenRouter => "OpenRouter".to_owned(),
+            ModelProviderKind::OpenAi => "OpenAI".to_owned(),
+            ModelProviderKind::Xai => "xAI".to_owned(),
+            ModelProviderKind::Custom => default_name.to_owned(),
+        };
+
+        // ChatGPT subscription OAuth uses the Codex backend URL; API key uses
+        // api.openai.com. Prefer base_url structure over error-string guesswork.
+        let is_chatgpt_oauth = xai_grok_inference_types::is_chatgpt_codex_base_url(base_url);
+        let (credential_kind, recommended_action) = if is_chatgpt_oauth {
+            (
+                ProviderCredentialKind::Oauth,
+                ProviderCredentialAction::RefreshOauth,
+            )
+        } else {
+            (
+                ProviderCredentialKind::ApiKey,
+                ProviderCredentialAction::OpenProviders,
+            )
+        };
+
+        let generation = self.provider_credential_generation.get().wrapping_add(1);
+        self.provider_credential_generation.set(generation);
 
         Some(ProviderCredentialFailure {
-            provider_id: provider_id.to_owned(),
-            provider_name: provider_name.to_owned(),
+            provider_id,
+            provider_name,
             failed_model_id: (!failed_model_id.is_empty()).then(|| failed_model_id.to_owned()),
+            credential_kind,
+            recommended_action,
+            credential_generation: generation,
             http_status: status_code,
             request_id: None,
             generation_id: bound_safe_id(diagnostics.and_then(|d| d.generation_id.as_deref())),
@@ -1322,7 +1377,8 @@ impl SessionActor {
                 "{detailed_message}\n\n\
                  You are using a deprecated authentication method (WebLogin).\n\
                  This auth method is no longer supported and will cause errors.\n\n\
-                 To fix: run `grok logout` then `grok login` to re-authenticate with OAuth2.\n\n\
+                 To fix: disconnect and reconnect xAI in /providers \
+                 (or `grok provider disconnect xai` then `grok provider connect xai`).\n\n\
                  Version: {client_version}"
             );
             self.log_terminal_failure("legacy_auth", error.status_code, &msg);

@@ -129,6 +129,7 @@ async fn create_test_actor_with_memory(
         openrouter_provider_preferences: std::cell::RefCell::new(None),
         openrouter_plugins: std::cell::RefCell::new(Vec::new()),
         openrouter_pacing: std::cell::Cell::new(false),
+        provider_credential_generation: std::cell::Cell::new(0),
         attribution_callback: None,
         auth_manager: None,
         state,

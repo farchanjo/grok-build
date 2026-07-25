@@ -409,7 +409,7 @@ pub fn session_token_auth_gate(
 }
 
 pub const AUTH_ERROR_SESSION_EXPIRED: &str =
-    "Session expired. Open /providers to reconnect xAI, or run `grok login`.";
+    "Session expired. Connect xAI in /providers (or run `grok provider connect xai`).";
 
 pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Open /providers to connect a provider, set XAI_API_KEY, or add api_key to ~/.grok/config.toml.";
 
@@ -441,7 +441,7 @@ pub const PREFERRED_API_KEY_UNAVAILABLE: &str = "preferred_method=api_key but no
 
 /// Error when `preferred_method=oidc` but the session path cannot proceed.
 pub const PREFERRED_OIDC_UNAVAILABLE: &str =
-    "preferred_method=oidc but no session is available. Run `grok login` to authenticate.";
+    "preferred_method=oidc but no session is available. Connect xAI in /providers to authenticate.";
 
 pub const XAI_API_KEY_METHOD_ID: &str = "xai.api_key";
 pub fn xai_api_key_auth_method() -> acp::AuthMethod {

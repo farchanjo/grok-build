@@ -3,15 +3,17 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AuthError {
-    #[error("Not logged in. Run `grok login`.")]
+    #[error("Not logged in. Connect xAI in /providers (or run `grok provider connect xai`).")]
     NotLoggedIn,
 
     /// Token expired and no refresh authority available.
-    #[error("Token expired. Run `grok login` to re-authenticate.")]
+    #[error("Token expired. Connect xAI in /providers (or run `grok provider connect xai`).")]
     TokenExpiredNoRefresh,
 
     /// Server rejected the token (401) with no recovery path.
-    #[error("Authentication rejected by server. Run `grok login` to re-authenticate.")]
+    #[error(
+        "Authentication rejected by server. Connect xAI in /providers (or run `grok provider connect xai`)."
+    )]
     ServerRejectedNoRecovery,
 
     /// All recovery strategies exhausted.
@@ -20,11 +22,13 @@ pub enum AuthError {
 
     /// A session's team principal violates the `force_login_team_uuid` pin.
     /// `message` states which team is required vs. returned.
-    #[error("{message} Run `grok login` to sign in with the required team.")]
+    #[error("{message} Connect xAI in /providers to sign in with the required team.")]
     PinnedTeamMismatch { message: String },
 
     /// Cached API-key session rejected because API-key auth is disabled.
-    #[error("API-key auth is disabled by your administrator. Run `grok login` to authenticate.")]
+    #[error(
+        "API-key auth is disabled by your administrator. Connect xAI in /providers to authenticate."
+    )]
     ApiKeyAuthDisabled,
 
     /// Outcome of a refresh-authority attempt. Recoverability (and, for
@@ -106,13 +110,13 @@ impl RefreshTokenFailedReason {
     pub(crate) fn user_message(self) -> &'static str {
         match self {
             Self::RefreshTokenRejected => {
-                "Your session has expired. Run `grok login` to sign in again."
+                "Your session has expired. Connect xAI in /providers to sign in again."
             }
             Self::ClientRejected => {
-                "Authentication is temporarily unavailable. Run `grok login` if this persists."
+                "Authentication is temporarily unavailable. Connect xAI in /providers if this persists."
             }
             Self::Other => {
-                "Authentication could not be refreshed. Run `grok login` to sign in again."
+                "Authentication could not be refreshed. Connect xAI in /providers to sign in again."
             }
         }
     }

@@ -124,7 +124,8 @@ pub fn map_sampling_err_to_acp(err: InferenceError) -> acp::Error {
                     format!(
                         "{message}\n\nYou have an API key set (XAI_API_KEY). \
                          Your cached OAuth session is being used instead. \
-                         To use your API key, run `grok logout` or type /logout in the TUI."
+                         To use your API key, disconnect xAI OAuth in /providers \
+                         (or run `grok provider disconnect xai`)."
                     )
                 } else {
                     message
@@ -658,12 +659,12 @@ mod tests {
             let data = acp_err.data.unwrap();
             let msg = data.as_str().unwrap();
             assert!(
-                msg.contains("grok logout"),
-                "should suggest grok logout when API key is available: {msg}"
+                msg.contains("/providers") || msg.contains("provider disconnect"),
+                "should suggest provider-scoped disconnect when API key is available: {msg}"
             );
             assert!(
-                msg.contains("/logout"),
-                "should mention /logout TUI command: {msg}"
+                !msg.contains("/logout") && !msg.contains("grok logout"),
+                "must not suggest global logout: {msg}"
             );
         });
     }

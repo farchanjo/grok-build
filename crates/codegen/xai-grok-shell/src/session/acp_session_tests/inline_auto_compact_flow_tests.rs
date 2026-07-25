@@ -76,6 +76,7 @@ async fn create_test_actor(
         openrouter_provider_preferences: std::cell::RefCell::new(None),
         openrouter_plugins: std::cell::RefCell::new(Vec::new()),
         openrouter_pacing: std::cell::Cell::new(false),
+        provider_credential_generation: std::cell::Cell::new(0),
         attribution_callback: None,
         auth_manager: None,
         state,
@@ -366,7 +367,11 @@ async fn test_response_header_context_window_downgrade_rejected() {
                 mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(200_000, 500_000, 85, gateway_tx, persistence_tx).await;
-            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let cfg_before = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             assert_eq!(cfg_before.context_window.get(), 500_000);
             actor
                 .handle_model_metadata_update(crate::inference::ResponseModelMetadata {
@@ -375,7 +380,11 @@ async fn test_response_header_context_window_downgrade_rejected() {
                     models_etag: None,
                 })
                 .await;
-            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let cfg_after = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             assert_eq!(
                 cfg_after.context_window.get(),
                 500_000,
@@ -388,7 +397,11 @@ async fn test_response_header_context_window_downgrade_rejected() {
                     models_etag: None,
                 })
                 .await;
-            let cfg_upgraded = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let cfg_upgraded = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             assert_eq!(
                 cfg_upgraded.context_window.get(),
                 1_000_000,
@@ -522,6 +535,7 @@ async fn create_test_actor_with_memory(
         openrouter_provider_preferences: std::cell::RefCell::new(None),
         openrouter_plugins: std::cell::RefCell::new(Vec::new()),
         openrouter_pacing: std::cell::Cell::new(false),
+        provider_credential_generation: std::cell::Cell::new(0),
         attribution_callback: None,
         auth_manager: None,
         state,
@@ -1292,6 +1306,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 openrouter_provider_preferences: std::cell::RefCell::new(None),
                 openrouter_plugins: std::cell::RefCell::new(Vec::new()),
                 openrouter_pacing: std::cell::Cell::new(false),
+                provider_credential_generation: std::cell::Cell::new(0),
                 auth_manager: {
                     let dir = tempfile::tempdir().unwrap();
                     let mgr = std::sync::Arc::new(crate::auth::AuthManager::new(
@@ -1488,7 +1503,11 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             actor
                 .last_api_request_at
                 .store(eleven_minutes_ago_ms, std::sync::atomic::Ordering::Relaxed);
-            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let cfg_before = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             assert_eq!(
                 cfg_before.context_window,
                 std::num::NonZeroU64::new(200_000).unwrap()
@@ -1496,7 +1515,11 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             assert_eq!(cfg_before.max_completion_tokens, Some(8192));
             actor.maybe_refresh_model_metadata_on_resume().await;
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let cfg_after = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             assert_eq!(
                 cfg_after.context_window,
                 std::num::NonZeroU64::new(300_000).unwrap(),
@@ -1523,9 +1546,17 @@ async fn test_idle_resume_noop_when_not_idle_enough() {
             actor
                 .last_api_request_at
                 .store(five_minutes_ago_ms, std::sync::atomic::Ordering::Relaxed);
-            let cfg_before = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let cfg_before = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             actor.maybe_refresh_model_metadata_on_resume().await;
-            let cfg_after = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let cfg_after = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             assert_eq!(
                 cfg_before.context_window, cfg_after.context_window,
                 "config should not change when idle < 10 min"
