@@ -66,13 +66,13 @@ pub fn semantic_defects(b: &OperationBinding) -> Vec<String> {
         defects.push("missing_transports".into());
     }
     // Transport capability consistency.
-    if b.is_multipart && !b.transports.iter().any(|t| *t == "http_multipart") {
+    if b.is_multipart && !b.transports.contains(&"http_multipart") {
         defects.push("multipart_flag_without_transport".into());
     }
-    if b.is_sse && !b.transports.iter().any(|t| *t == "http_sse") {
+    if b.is_sse && !b.transports.contains(&"http_sse") {
         defects.push("sse_flag_without_transport".into());
     }
-    if b.is_binary && !b.transports.iter().any(|t| *t == "http_binary") {
+    if b.is_binary && !b.transports.contains(&"http_binary") {
         defects.push("binary_flag_without_transport".into());
     }
     // Admin credential class.
@@ -268,7 +268,7 @@ mod tests {
         assert!(n > 0, "expected multipart bindings");
         for b in OPERATION_BINDINGS.iter().filter(|b| b.is_multipart) {
             assert!(
-                b.transports.iter().any(|t| *t == "http_multipart"),
+                b.transports.contains(&"http_multipart"),
                 "{}",
                 b.operation_id
             );

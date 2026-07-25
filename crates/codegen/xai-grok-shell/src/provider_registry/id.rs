@@ -232,9 +232,9 @@ mod tests {
         ));
         assert!(matches!(
             ProviderId::new("Has Caps"),
-            Err(ProviderIdError::InvalidChar { .. })
+            Err(ProviderIdError::MustStartWithLetter)
         ));
-        assert!(ProviderId::new(&"a".repeat(MAX_PROVIDER_ID_LEN + 1)).is_err());
+        assert!(ProviderId::new("a".repeat(MAX_PROVIDER_ID_LEN + 1)).is_err());
     }
 
     #[test]

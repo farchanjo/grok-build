@@ -60,6 +60,7 @@ mod tests {
         }
         if l.contains("no longer supported")
             || l.contains("is no longer")
+            || l.contains("are removed")
             || l.contains("there is no global")
             || l.contains("There is no global")
             || l.contains("must not")
