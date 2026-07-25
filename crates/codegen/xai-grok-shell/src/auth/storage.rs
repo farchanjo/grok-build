@@ -407,13 +407,21 @@ pub const OPENAI_API_KEY_SCOPE: &str = "openai::api_key";
 /// with [`OPENAI_API_KEY_SCOPE`] — see `chatgpt_oauth` store helpers.
 pub const OPENAI_OAUTH_SCOPE: &str = "openai::oauth";
 pub const OPENROUTER_API_KEY_SCOPE: &str = "openrouter::api_key";
+/// Optional OpenAI administration key (organization APIs only).
+pub const OPENAI_ADMIN_KEY_SCOPE: &str = "openai::admin_key";
 
 fn validate_provider_scope(scope: &str) -> std::io::Result<()> {
-    if matches!(scope, OPENAI_API_KEY_SCOPE | OPENROUTER_API_KEY_SCOPE) {
-        Ok(())
-    } else {
-        Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    // Built-in product scopes plus validated per-instance openai_compatible scopes.
+    if matches!(
+        scope,
+        OPENAI_API_KEY_SCOPE | OPENROUTER_API_KEY_SCOPE | OPENAI_ADMIN_KEY_SCOPE
+    ) {
+        return Ok(());
     }
+    if crate::provider_registry::secrets::is_allowed_provider_scope(scope) {
+        return Ok(());
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
 }
 
 /// Read an API key from an explicitly provider-scoped auth entry. Missing
