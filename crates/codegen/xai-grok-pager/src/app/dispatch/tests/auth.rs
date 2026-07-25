@@ -1094,17 +1094,32 @@ fn unbound_auth_complete_does_not_resubmit_stash() {
     );
 }
 
-/// xAI repair AuthComplete with exact token resumes once.
+/// xAI repair AuthComplete with exact token resumes once; sibling agent
+/// OpenRouter stash/CTA/in-flight stay byte-for-byte.
 #[test]
 fn auth_complete_xai_repair_token_resumes_once() {
     use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::scrollback::block::RenderBlock;
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
+    let sibling_id = AgentId(1);
+    let sibling_session = make_test_agent_session(&app, sibling_id, "sess-or-sibling");
+    app.agents.insert(
+        sibling_id,
+        AgentView::new(sibling_session, ScrollbackState::new()),
+    );
+    app.next_agent_id = 2;
+
     let scope = CredentialRepairScope {
         token: CredentialRepairToken(5),
         provider_id: "xai".into(),
         credential_generation: 5,
+    };
+    let or_scope = CredentialRepairScope {
+        token: CredentialRepairToken(50),
+        provider_id: "openrouter".into(),
+        credential_generation: 7,
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1122,7 +1137,35 @@ fn auth_complete_xai_repair_token_resumes_once() {
             },
         });
         agent.in_flight_repair = Some(scope.clone());
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ReAuthRequired,
+        ));
     }
+    {
+        let agent = app.agents.get_mut(&sibling_id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 7,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "sibling-openrouter".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(or_scope.clone());
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ProviderCredentialRequired {
+                provider_id: "openrouter".into(),
+                provider_name: "OpenRouter".into(),
+                failed_model_id: None,
+                credential_kind: Some("api_key".into()),
+                credential_generation: Some(7),
+            },
+        ));
+    }
+    app.active_auth_repair = Some((id, scope.clone()));
     app.auth_return_view = Some(ActiveView::Agent(id));
     app.auth_state = AuthState::Authenticating {
         request_seq: 3,
@@ -1140,6 +1183,15 @@ fn auth_complete_xai_repair_token_resumes_once() {
     );
     assert!(app.agents[&id].reauth_stashed_prompt.is_none());
     assert!(app.agents[&id].in_flight_repair.is_none());
+    // xAI CTA stripped only on the matched target.
+    let xai_cta_gone = !(0..app.agents[&id].scrollback.len()).any(|i| {
+        matches!(
+            app.agents[&id].scrollback.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(ev.event, SessionEvent::ReAuthRequired)
+        )
+    });
+    assert!(xai_cta_gone, "exact xAI complete must strip only its CTA");
     assert!(
         effects.iter().any(|e| matches!(
             e,
@@ -1147,6 +1199,28 @@ fn auth_complete_xai_repair_token_resumes_once() {
         )),
         "xAI repair token must resume once: {effects:?}"
     );
+
+    let sibling = &app.agents[&sibling_id];
+    assert_eq!(
+        sibling
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("sibling-openrouter")
+    );
+    assert_eq!(sibling.in_flight_repair.as_ref(), Some(&or_scope));
+    let sibling_cta = (0..sibling.scrollback.len()).any(|i| {
+        matches!(
+            sibling.scrollback.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(
+                    &ev.event,
+                    SessionEvent::ProviderCredentialRequired { provider_id, .. }
+                        if provider_id == "openrouter"
+                )
+        )
+    });
+    assert!(sibling_cta, "sibling OpenRouter CTA must stay after xAI complete");
 
     // Duplicate with same token after clear: no second resume.
     app.auth_return_view = Some(ActiveView::Agent(id));
@@ -1170,6 +1244,14 @@ fn auth_complete_xai_repair_token_resumes_once() {
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
         "duplicate xAI repair completion must not resubmit"
+    );
+    // Sibling still untouched after duplicate complete.
+    assert_eq!(
+        app.agents[&sibling_id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("sibling-openrouter")
     );
 }
 
@@ -1217,4 +1299,412 @@ fn auth_complete_preserves_show_resolved_model_when_absent() {
     );
 
     assert!(!app.show_resolved_model);
+}
+
+/// Cancelling xAI OAuth repair must preserve sibling OpenRouter stash/CTA
+/// (same agent with non-matching stash, and a second agent with its own
+/// OpenRouter in-flight + stash + CTA).
+#[test]
+fn cancel_xai_repair_preserves_openrouter_stash_and_cta() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::scrollback::block::RenderBlock;
+
+    let mut app = test_app_with_agent();
+    let xai_id = AgentId(0);
+    let or_id = AgentId(1);
+    let or_session = make_test_agent_session(&app, or_id, "or-sibling");
+    app.agents
+        .insert(or_id, AgentView::new(or_session, ScrollbackState::new()));
+    app.next_agent_id = 2;
+
+    let xai_scope = CredentialRepairScope {
+        token: CredentialRepairToken(11),
+        provider_id: "xai".into(),
+        credential_generation: 1,
+    };
+    let or_scope = CredentialRepairScope {
+        token: CredentialRepairToken(12),
+        provider_id: "openrouter".into(),
+        credential_generation: 9,
+    };
+    let or_stash_bytes = "openrouter keep";
+    {
+        // Agent under xAI repair: OpenRouter stash (not the repair target).
+        let agent = app.agents.get_mut(&xai_id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 9,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: or_stash_bytes.into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ProviderCredentialRequired {
+                provider_id: "openrouter".into(),
+                provider_name: "OpenRouter".into(),
+                failed_model_id: None,
+                credential_kind: Some("api_key".into()),
+                credential_generation: Some(9),
+            },
+        ));
+        agent.in_flight_repair = Some(xai_scope.clone());
+    }
+    {
+        // Sibling agent: independent OpenRouter repair state.
+        let agent = app.agents.get_mut(&or_id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 9,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "sibling-or".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(or_scope.clone());
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ProviderCredentialRequired {
+                provider_id: "openrouter".into(),
+                provider_name: "OpenRouter".into(),
+                failed_model_id: None,
+                credential_kind: Some("api_key".into()),
+                credential_generation: Some(9),
+            },
+        ));
+    }
+    app.active_auth_repair = Some((xai_id, xai_scope));
+    app.auth_return_view = Some(ActiveView::Agent(xai_id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+
+    dispatch(Action::CancelLogin, &mut app);
+
+    let agent = &app.agents[&xai_id];
+    assert_eq!(
+        agent
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some(or_stash_bytes),
+        "non-matching OpenRouter stash on cancel target must stay byte-for-byte"
+    );
+    let has_or_cta = (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            agent.scrollback.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(
+                    &ev.event,
+                    SessionEvent::ProviderCredentialRequired { provider_id, .. }
+                        if provider_id == "openrouter"
+                )
+        )
+    });
+    assert!(has_or_cta, "OpenRouter CTA must remain after cancelling xAI repair");
+    assert!(agent.in_flight_repair.is_none(), "cancel clears only the bound in-flight");
+    assert!(app.active_auth_repair.is_none());
+
+    let sibling = &app.agents[&or_id];
+    assert_eq!(
+        sibling
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("sibling-or")
+    );
+    assert_eq!(sibling.in_flight_repair.as_ref(), Some(&or_scope));
+    let sibling_cta = (0..sibling.scrollback.len()).any(|i| {
+        matches!(
+            sibling.scrollback.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(
+                    &ev.event,
+                    SessionEvent::ProviderCredentialRequired { provider_id, .. }
+                        if provider_id == "openrouter"
+                )
+        )
+    });
+    assert!(sibling_cta, "sibling OpenRouter CTA must be untouched");
+}
+
+/// Cancel exact xAI token: delayed matching AuthComplete cannot resume;
+/// sibling OpenRouter stash/in-flight remain untouched through cancel + late complete.
+#[test]
+fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sibling_id = AgentId(1);
+    let sibling_session = make_test_agent_session(&app, sibling_id, "sess-or-cancel");
+    app.agents.insert(
+        sibling_id,
+        AgentView::new(sibling_session, ScrollbackState::new()),
+    );
+    app.next_agent_id = 2;
+
+    let scope = CredentialRepairScope {
+        token: CredentialRepairToken(22),
+        provider_id: "xai".into(),
+        credential_generation: 4,
+    };
+    let or_scope = CredentialRepairScope {
+        token: CredentialRepairToken(23),
+        provider_id: "openrouter".into(),
+        credential_generation: 2,
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-cancel-delay"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 4,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "xai-stashed".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(scope.clone());
+    }
+    {
+        let agent = app.agents.get_mut(&sibling_id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 2,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "or-sibling-keep".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(or_scope.clone());
+    }
+    app.active_auth_repair = Some((id, scope.clone()));
+    app.auth_return_view = Some(ActiveView::Agent(id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 5,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+
+    dispatch(Action::CancelLogin, &mut app);
+    // Matching xAI stash deliberately dropped on cancel so delayed complete cannot resume.
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert!(app.agents[&id].in_flight_repair.is_none());
+    assert_eq!(
+        app.agents[&sibling_id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("or-sibling-keep")
+    );
+    assert_eq!(
+        app.agents[&sibling_id].in_flight_repair.as_ref(),
+        Some(&or_scope)
+    );
+
+    app.auth_return_view = Some(ActiveView::Agent(id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 6,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
+        Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 4,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "should-not-resume".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 6,
+            meta: None,
+            repair: Some(scope),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("should-not-resume"),
+        "delayed cancelled-token complete must not resume"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        ))
+    );
+    assert_eq!(
+        app.agents[&sibling_id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("or-sibling-keep"),
+        "sibling OpenRouter stash must survive delayed cancelled complete"
+    );
+    assert_eq!(
+        app.agents[&sibling_id].in_flight_repair.as_ref(),
+        Some(&or_scope)
+    );
+}
+
+/// Mismatched xAI completion preserves stashes and CTAs.
+#[test]
+fn mismatched_auth_complete_preserves_sibling_stashes_and_ctas() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::scrollback::block::RenderBlock;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let flight = CredentialRepairScope {
+        token: CredentialRepairToken(30),
+        provider_id: "xai".into(),
+        credential_generation: 1,
+    };
+    let wrong = CredentialRepairScope {
+        token: CredentialRepairToken(31),
+        provider_id: "xai".into(),
+        credential_generation: 1,
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 1,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "xai".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(flight.clone());
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+    }
+    app.active_auth_repair = Some((id, flight));
+    app.auth_return_view = Some(ActiveView::Agent(id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 1,
+            meta: None,
+            repair: Some(wrong),
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(agent.reauth_stashed_prompt.is_some());
+    let has_reauth = (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            agent.scrollback.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(ev.event, SessionEvent::ReAuthRequired)
+        )
+    });
+    assert!(has_reauth, "mismatched complete must not strip CTA");
+}
+
+/// Unbound AuthComplete preserves all provider stashes and CTAs.
+#[test]
+fn unbound_auth_complete_preserves_all_stashes_and_ctas() {
+    use crate::scrollback::block::RenderBlock;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 2,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "keep-or".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ProviderCredentialRequired {
+                provider_id: "openrouter".into(),
+                provider_name: "OpenRouter".into(),
+                failed_model_id: None,
+                credential_kind: Some("api_key".into()),
+                credential_generation: Some(2),
+            },
+        ));
+    }
+    app.auth_return_view = Some(ActiveView::Agent(id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+
+    dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 1,
+            meta: None,
+            repair: None,
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("keep-or")
+    );
+    let has_or_cta = (0..agent.scrollback.len()).any(|i| {
+        matches!(
+            agent.scrollback.entry(i).map(|e| &e.block),
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(
+                    &ev.event,
+                    SessionEvent::ProviderCredentialRequired { provider_id, .. }
+                        if provider_id == "openrouter"
+                )
+        )
+    });
+    assert!(has_or_cta, "unbound AuthComplete must preserve OpenRouter CTA");
 }

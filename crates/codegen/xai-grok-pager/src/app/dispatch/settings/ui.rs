@@ -268,7 +268,9 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
     };
 
     // Mint repair token only for connect/save/oauth against a matching stash.
-    let repair = provider_for_repair.and_then(|pid| begin_credential_repair(app, pid));
+    let repair = provider_for_repair
+        .and_then(|pid| begin_credential_repair(app, pid))
+        .map(|(_, scope)| scope);
 
     vec![Effect::ProviderOperation {
         agent_id,

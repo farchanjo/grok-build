@@ -751,9 +751,18 @@ pub struct InFlightPrompt {
 }
 
 /// Opaque pager-owned token that binds one credential-repair operation to a
-/// failure scope. Monotonic, secret-free, never reused for a later op.
+/// failure scope. Monotonic, secret-free.
+///
+/// Allocation starts at `1` (`0` is reserved / never issued). The allocator
+/// uses checked arithmetic and fails closed on `u64` exhaustion so tokens are
+/// never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CredentialRepairToken(pub u64);
+
+impl CredentialRepairToken {
+    /// Reserved; never issued by the allocator.
+    pub const RESERVED: Self = Self(0);
+}
 
 /// Immutable scope captured when a repair operation **starts** and echoed on
 /// completion. Resume requires this exact scope to match both the in-flight
@@ -766,6 +775,22 @@ pub struct CredentialRepairScope {
     pub provider_id: String,
     /// Failure-side generation frozen at operation start (not re-read on complete).
     pub credential_generation: u64,
+}
+
+/// Issue the next repair token from a monotonic counter starting at 1.
+///
+/// Returns `None` if the counter would overflow — caller must not attach a
+/// repair binding and must not resume a stash.
+pub fn mint_credential_repair_token(next: &mut u64) -> Option<CredentialRepairToken> {
+    // Invariant: `next` is always the next value to issue; starts at 1.
+    // Advance with checked_add so we never wrap back to a previously issued id.
+    let issued = *next;
+    if issued == 0 {
+        // Counter was corrupted / zero — fail closed rather than reusing 0.
+        return None;
+    }
+    *next = next.checked_add(1)?;
+    Some(CredentialRepairToken(issued))
 }
 
 /// Prompt blocked on a provider credential failure, keyed so only the same
@@ -840,6 +865,28 @@ mod provider_scoped_stash_tests {
         assert!(stash.matches_repair("xai", 2));
         assert!(!stash.matches_repair("xai", 0));
         assert!(!stash.matches_repair("xai", 1));
+    }
+
+    #[test]
+    fn mint_credential_repair_token_is_monotonic_and_never_reuses() {
+        let mut next = 1u64;
+        let a = mint_credential_repair_token(&mut next).expect("first");
+        let b = mint_credential_repair_token(&mut next).expect("second");
+        assert_eq!(a.0, 1);
+        assert_eq!(b.0, 2);
+        assert_ne!(a, b);
+        assert_eq!(next, 3);
+        assert_ne!(a, CredentialRepairToken::RESERVED);
+    }
+
+    #[test]
+    fn mint_credential_repair_token_fails_closed_on_exhaustion() {
+        let mut next = u64::MAX;
+        assert!(mint_credential_repair_token(&mut next).is_none());
+        assert_eq!(next, u64::MAX, "counter unchanged on failure");
+        // Zero is reserved and never issued.
+        let mut zero = 0u64;
+        assert!(mint_credential_repair_token(&mut zero).is_none());
     }
 }
 /// Snapshot of a textarea chip element for rewind restore.

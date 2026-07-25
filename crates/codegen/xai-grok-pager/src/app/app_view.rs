@@ -592,6 +592,10 @@ pub struct AppView {
     /// (e.g. `Agent`) afterwards. `None` at startup so the normal
     /// login-then-load flow is preserved.
     pub auth_return_view: Option<ActiveView>,
+    /// Exact agent + repair scope bound to the current mid-session OAuth
+    /// Authenticate, when that Authenticate was launched as a credential
+    /// repair. Used by cancel/complete to touch only that agent.
+    pub active_auth_repair: Option<(AgentId, crate::app::agent::CredentialRepairScope)>,
     /// Per-agent views (keyed by AgentId).
     pub agents: IndexMap<AgentId, AgentView>,
     /// Monotonically increasing counter for agent ID allocation.
@@ -1346,6 +1350,7 @@ impl AppView {
         Self {
             active_view: ActiveView::Welcome,
             auth_return_view: None,
+            active_auth_repair: None,
             agents: IndexMap::new(),
             next_agent_id: 0,
             models,
@@ -5474,6 +5479,7 @@ pub(crate) mod tests {
         AppView {
             active_view: ActiveView::Welcome,
             auth_return_view: None,
+            active_auth_repair: None,
             agents: indexmap::IndexMap::new(),
             next_agent_id: 0,
             models: ModelState::default(),

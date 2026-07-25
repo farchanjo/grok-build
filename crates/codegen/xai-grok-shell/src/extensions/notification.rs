@@ -1186,27 +1186,6 @@ impl RetryState {
     }
 }
 
-/// **Legacy wire compatibility only.** New shells always attach a structured
-/// [`ProviderCredentialFailure`] on auth terminal failures (including xAI).
-///
-/// Returns true only for historic bare `error_type == "auth"` payloads that
-/// lack a `provider` field. Never inspects free-form message text. Callers
-/// must prefer the `provider` field when present; this helper is solely for
-/// the replay boundary that rewrites legacy payloads into neutral
-/// `/providers` guidance.
-#[deprecated(note = "New events carry ProviderCredentialFailure; use the provider field")]
-pub fn is_legacy_bare_auth_error_type(error_type: Option<&str>) -> bool {
-    error_type == Some("auth")
-}
-
-/// Retained name for older call sites; prefers structured provider data.
-/// Message-string classification is **not** performed.
-#[deprecated(note = "use is_legacy_bare_auth_error_type or structured provider field")]
-pub fn is_reauthable_failure(error_type: Option<&str>, _message: &str) -> bool {
-    #[allow(deprecated)]
-    is_legacy_bare_auth_error_type(error_type)
-}
-
 /// User-facing repair copy for a provider-scoped credential rejection.
 ///
 /// Never mentions `/login` or global logout; always directs the operator to
@@ -1352,22 +1331,6 @@ mod provider_host_tests {
         );
         assert!(approved_provider_for_exact_host("www.openrouter.ai").is_none());
         assert!(approved_provider_for_exact_host("openrouter.ai.evil").is_none());
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn legacy_bare_auth_type_only_matches_auth_error_type() {
-        assert!(is_legacy_bare_auth_error_type(Some("auth")));
-        assert!(!is_legacy_bare_auth_error_type(Some(
-            PROVIDER_CREDENTIAL_ERROR_TYPE
-        )));
-        assert!(!is_legacy_bare_auth_error_type(Some("api")));
-        // Message text must never drive classification.
-        assert!(!is_reauthable_failure(
-            Some(PROVIDER_CREDENTIAL_ERROR_TYPE),
-            "Unauthorized (401)"
-        ));
-        assert!(!is_reauthable_failure(None, "Unauthorized (401)"));
     }
 
     #[test]
