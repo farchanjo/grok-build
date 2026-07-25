@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "provider": "openrouter",
   "baseline": {
     "title": "OpenRouter API",
@@ -8,7 +8,7 @@
     "source_url": "https://openrouter.ai/openapi.json",
     "yaml_url": "https://openrouter.ai/openapi.yaml",
     "docs_url": "https://openrouter.ai/docs/api_reference/overview",
-    "fetched_at_utc": "2026-07-24T22:27:00Z",
+    "fetched_at_utc": "2026-07-25T16:25:35Z",
     "content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203",
     "content_bytes": 1653634,
     "path_count": 69,
@@ -23,7 +23,14 @@
       "tags": [
         "Analytics"
       ],
-      "summary": "Get user activity grouped by endpoint"
+      "summary": "Get user activity grouped by endpoint",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -32,7 +39,14 @@
       "tags": [
         "beta.Analytics"
       ],
-      "summary": "Get available analytics metrics and dimensions"
+      "summary": "Get available analytics metrics and dimensions",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -41,7 +55,16 @@
       "tags": [
         "beta.Analytics"
       ],
-      "summary": "Query analytics data"
+      "summary": "Query analytics data",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -50,7 +73,18 @@
       "tags": [
         "TTS"
       ],
-      "summary": "Create speech"
+      "summary": "Create speech",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json",
+        "audio/*"
+      ],
+      "transports": [
+        "http_binary",
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -59,7 +93,18 @@
       "tags": [
         "STT"
       ],
-      "summary": "Create transcription"
+      "summary": "Create transcription",
+      "request_content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     },
     {
       "method": "POST",
@@ -68,7 +113,16 @@
       "tags": [
         "OAuth"
       ],
-      "summary": "Exchange authorization code for API key"
+      "summary": "Exchange authorization code for API key",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -77,7 +131,16 @@
       "tags": [
         "OAuth"
       ],
-      "summary": "Create authorization code"
+      "summary": "Create authorization code",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -86,7 +149,14 @@
       "tags": [
         "Benchmarks"
       ],
-      "summary": "List Benchmarks"
+      "summary": "List Benchmarks",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -95,7 +165,14 @@
       "tags": [
         "BYOK"
       ],
-      "summary": "List BYOK provider credentials"
+      "summary": "List BYOK provider credentials",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -104,7 +181,16 @@
       "tags": [
         "BYOK"
       ],
-      "summary": "Create a BYOK provider credential"
+      "summary": "Create a BYOK provider credential",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -113,7 +199,14 @@
       "tags": [
         "BYOK"
       ],
-      "summary": "Delete a BYOK provider credential"
+      "summary": "Delete a BYOK provider credential",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -122,7 +215,14 @@
       "tags": [
         "BYOK"
       ],
-      "summary": "Get a BYOK provider credential"
+      "summary": "Get a BYOK provider credential",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "PATCH",
@@ -131,7 +231,16 @@
       "tags": [
         "BYOK"
       ],
-      "summary": "Update a BYOK provider credential"
+      "summary": "Update a BYOK provider credential",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -140,7 +249,18 @@
       "tags": [
         "Chat"
       ],
-      "summary": "Create a chat completion"
+      "summary": "Create a chat completion",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -149,7 +269,14 @@
       "tags": [
         "Classifications"
       ],
-      "summary": "Task classification market share"
+      "summary": "Task classification market share",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -158,7 +285,14 @@
       "tags": [
         "Credits"
       ],
-      "summary": "Get remaining credits"
+      "summary": "Get remaining credits",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -167,7 +301,14 @@
       "tags": [
         "Credits"
       ],
-      "summary": "Deprecated Coinbase Commerce charge endpoint"
+      "summary": "Deprecated Coinbase Commerce charge endpoint",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -176,7 +317,14 @@
       "tags": [
         "Datasets"
       ],
-      "summary": "Top apps by token usage"
+      "summary": "Top apps by token usage",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -185,7 +333,14 @@
       "tags": [
         "Datasets"
       ],
-      "summary": "Daily token totals for top 50 models"
+      "summary": "Daily token totals for top 50 models",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -194,7 +349,18 @@
       "tags": [
         "Embeddings"
       ],
-      "summary": "Submit an embedding request"
+      "summary": "Submit an embedding request",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -203,7 +369,14 @@
       "tags": [
         "Embeddings"
       ],
-      "summary": "List all embeddings models"
+      "summary": "List all embeddings models",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -212,7 +385,14 @@
       "tags": [
         "Endpoints"
       ],
-      "summary": "Preview the impact of ZDR on the available endpoints"
+      "summary": "Preview the impact of ZDR on the available endpoints",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -221,7 +401,14 @@
       "tags": [
         "Files"
       ],
-      "summary": "List files"
+      "summary": "List files",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -230,7 +417,16 @@
       "tags": [
         "Files"
       ],
-      "summary": "Upload a file"
+      "summary": "Upload a file",
+      "request_content_types": [
+        "multipart/form-data"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "DELETE",
@@ -239,7 +435,14 @@
       "tags": [
         "Files"
       ],
-      "summary": "Delete a file"
+      "summary": "Delete a file",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -248,7 +451,14 @@
       "tags": [
         "Files"
       ],
-      "summary": "Get file metadata"
+      "summary": "Get file metadata",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -257,7 +467,15 @@
       "tags": [
         "Files"
       ],
-      "summary": "Download file content"
+      "summary": "Download file content",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json",
+        "application/octet-stream"
+      ],
+      "transports": [
+        "http_binary"
+      ]
     },
     {
       "method": "GET",
@@ -266,7 +484,14 @@
       "tags": [
         "Generations"
       ],
-      "summary": "Get request & usage metadata for a generation"
+      "summary": "Get request & usage metadata for a generation",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -275,7 +500,14 @@
       "tags": [
         "Generations"
       ],
-      "summary": "Get stored prompt and completion content for a generation"
+      "summary": "Get stored prompt and completion content for a generation",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -284,7 +516,16 @@
       "tags": [
         "Generations"
       ],
-      "summary": "Submit feedback for a generation"
+      "summary": "Submit feedback for a generation",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -293,7 +534,14 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "List guardrails"
+      "summary": "List guardrails",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -302,7 +550,16 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Create a guardrail"
+      "summary": "Create a guardrail",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -311,7 +568,14 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "List all key assignments"
+      "summary": "List all key assignments",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -320,7 +584,14 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "List all member assignments"
+      "summary": "List all member assignments",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -329,7 +600,14 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Delete a guardrail"
+      "summary": "Delete a guardrail",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -338,7 +616,14 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Get a guardrail"
+      "summary": "Get a guardrail",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "PATCH",
@@ -347,7 +632,16 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Update a guardrail"
+      "summary": "Update a guardrail",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -356,7 +650,14 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "List key assignments for a guardrail"
+      "summary": "List key assignments for a guardrail",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -365,7 +666,16 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Bulk assign keys to a guardrail"
+      "summary": "Bulk assign keys to a guardrail",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -374,7 +684,16 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Bulk unassign keys from a guardrail"
+      "summary": "Bulk unassign keys from a guardrail",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -383,7 +702,14 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "List member assignments for a guardrail"
+      "summary": "List member assignments for a guardrail",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -392,7 +718,16 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Bulk assign members to a guardrail"
+      "summary": "Bulk assign members to a guardrail",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -401,7 +736,16 @@
       "tags": [
         "Guardrails"
       ],
-      "summary": "Bulk unassign members from a guardrail"
+      "summary": "Bulk unassign members from a guardrail",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -410,7 +754,18 @@
       "tags": [
         "Images"
       ],
-      "summary": "Generate an image"
+      "summary": "Generate an image",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -419,7 +774,14 @@
       "tags": [
         "Images"
       ],
-      "summary": "List image generation models"
+      "summary": "List image generation models",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -428,7 +790,14 @@
       "tags": [
         "Images"
       ],
-      "summary": "List endpoints for an image model"
+      "summary": "List endpoints for an image model",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -437,7 +806,14 @@
       "tags": [
         "API Keys"
       ],
-      "summary": "Get current API key"
+      "summary": "Get current API key",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -446,7 +822,14 @@
       "tags": [
         "API Keys"
       ],
-      "summary": "List API keys"
+      "summary": "List API keys",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -455,7 +838,16 @@
       "tags": [
         "API Keys"
       ],
-      "summary": "Create a new API key"
+      "summary": "Create a new API key",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -464,7 +856,14 @@
       "tags": [
         "API Keys"
       ],
-      "summary": "Delete an API key"
+      "summary": "Delete an API key",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -473,7 +872,14 @@
       "tags": [
         "API Keys"
       ],
-      "summary": "Get a single API key"
+      "summary": "Get a single API key",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "PATCH",
@@ -482,7 +888,16 @@
       "tags": [
         "API Keys"
       ],
-      "summary": "Update an API key"
+      "summary": "Update an API key",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -491,7 +906,18 @@
       "tags": [
         "Anthropic Messages"
       ],
-      "summary": "Create a message"
+      "summary": "Create a message",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -500,7 +926,14 @@
       "tags": [
         "Models"
       ],
-      "summary": "Get a model by its slug"
+      "summary": "Get a model by its slug",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -509,7 +942,14 @@
       "tags": [
         "Models"
       ],
-      "summary": "List all models and their properties"
+      "summary": "List all models and their properties",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -518,7 +958,14 @@
       "tags": [
         "Models"
       ],
-      "summary": "Get total count of available models"
+      "summary": "Get total count of available models",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -527,7 +974,14 @@
       "tags": [
         "Models"
       ],
-      "summary": "List models filtered by user provider preferences, privacy settings, and guardrails"
+      "summary": "List models filtered by user provider preferences, privacy settings, and guardrails",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -536,7 +990,14 @@
       "tags": [
         "Endpoints"
       ],
-      "summary": "List all endpoints for a model"
+      "summary": "List all endpoints for a model",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -545,7 +1006,14 @@
       "tags": [
         "Observability"
       ],
-      "summary": "List observability destinations"
+      "summary": "List observability destinations",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -554,7 +1022,16 @@
       "tags": [
         "Observability"
       ],
-      "summary": "Create an observability destination"
+      "summary": "Create an observability destination",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -563,7 +1040,14 @@
       "tags": [
         "Observability"
       ],
-      "summary": "Delete an observability destination"
+      "summary": "Delete an observability destination",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -572,7 +1056,14 @@
       "tags": [
         "Observability"
       ],
-      "summary": "Get an observability destination"
+      "summary": "Get an observability destination",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "PATCH",
@@ -581,7 +1072,16 @@
       "tags": [
         "Observability"
       ],
-      "summary": "Update an observability destination"
+      "summary": "Update an observability destination",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -590,7 +1090,14 @@
       "tags": [
         "Organization"
       ],
-      "summary": "List organization members"
+      "summary": "List organization members",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -599,7 +1106,14 @@
       "tags": [
         "Presets"
       ],
-      "summary": "List presets"
+      "summary": "List presets",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -608,7 +1122,14 @@
       "tags": [
         "Presets"
       ],
-      "summary": "Get a preset"
+      "summary": "Get a preset",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -617,7 +1138,17 @@
       "tags": [
         "Presets"
       ],
-      "summary": "Create a preset from a chat-completions request body"
+      "summary": "Create a preset from a chat-completions request body",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -626,7 +1157,17 @@
       "tags": [
         "Presets"
       ],
-      "summary": "Create a preset from a messages request body"
+      "summary": "Create a preset from a messages request body",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -635,7 +1176,17 @@
       "tags": [
         "Presets"
       ],
-      "summary": "Create a preset from a responses request body"
+      "summary": "Create a preset from a responses request body",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -644,7 +1195,14 @@
       "tags": [
         "Presets"
       ],
-      "summary": "List versions of a preset"
+      "summary": "List versions of a preset",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -653,7 +1211,14 @@
       "tags": [
         "Presets"
       ],
-      "summary": "Get a specific version of a preset"
+      "summary": "Get a specific version of a preset",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -662,7 +1227,14 @@
       "tags": [
         "Providers"
       ],
-      "summary": "List all providers"
+      "summary": "List all providers",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -671,7 +1243,18 @@
       "tags": [
         "Rerank"
       ],
-      "summary": "Submit a rerank request"
+      "summary": "Submit a rerank request",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -680,7 +1263,18 @@
       "tags": [
         "beta.responses"
       ],
-      "summary": "Create a response"
+      "summary": "Create a response",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -689,7 +1283,16 @@
       "tags": [
         "Video Generation"
       ],
-      "summary": "Submit a video generation request"
+      "summary": "Submit a video generation request",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -698,7 +1301,14 @@
       "tags": [
         "Video Generation"
       ],
-      "summary": "List all video generation models"
+      "summary": "List all video generation models",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -707,7 +1317,14 @@
       "tags": [
         "Video Generation"
       ],
-      "summary": "Poll video generation status"
+      "summary": "Poll video generation status",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -716,7 +1333,15 @@
       "tags": [
         "Video Generation"
       ],
-      "summary": "Download generated video content"
+      "summary": "Download generated video content",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json",
+        "video/mp4"
+      ],
+      "transports": [
+        "http_binary"
+      ]
     },
     {
       "method": "GET",
@@ -725,7 +1350,14 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "List workspaces"
+      "summary": "List workspaces",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -734,7 +1366,16 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Create a workspace"
+      "summary": "Create a workspace",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -743,7 +1384,14 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Delete a workspace"
+      "summary": "Delete a workspace",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -752,7 +1400,14 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Get a workspace"
+      "summary": "Get a workspace",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "PATCH",
@@ -761,7 +1416,16 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Update a workspace"
+      "summary": "Update a workspace",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -770,7 +1434,14 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "List workspace budgets"
+      "summary": "List workspace budgets",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -779,7 +1450,14 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Delete a workspace budget"
+      "summary": "Delete a workspace budget",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "PUT",
@@ -788,7 +1466,16 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Create or update a workspace budget"
+      "summary": "Create or update a workspace budget",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -797,7 +1484,14 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "List workspace members"
+      "summary": "List workspace members",
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -806,7 +1500,16 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Bulk add members to a workspace"
+      "summary": "Bulk add members to a workspace",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -815,7 +1518,16 @@
       "tags": [
         "Workspaces"
       ],
-      "summary": "Bulk remove members from a workspace"
+      "summary": "Bulk remove members from a workspace",
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     }
   ],
   "coding_agent_schema_fields": [
@@ -1786,6 +2498,9 @@
   ],
   "notes": [
     "Compact inventory only; full OpenAPI is not vendored.",
+    "transports is a multi-label set; stream-flag ops include http_json + http_sse.",
+    "Binary response ops are never collapsed to sole http_json.",
+    "OpenRouter is not a full OpenAI platform clone.",
     "Regenerate with generate_inventory.py from a local OpenAPI file.",
     "No network I/O in the generator or in unit tests."
   ]

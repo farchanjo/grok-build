@@ -41,6 +41,12 @@ pub use attribution::{
     SharedAttributionCallback,
 };
 pub use client::{ApiBackend, InferenceClient, user_agent_string_for};
+pub use compatibility::{
+    BindingStatus, ClaimSurface, CompatibilityCounts, CompatibilityStatus, DeclaredIntersection,
+    Evidence, EvidenceKind, OperationClaim, OperationIdentity, ProviderInventory, Transport,
+    claim_is_consistent, compatibility_counts, declared_intersection, intersection_report_json,
+    inventory_report_json, openai_inventory, openrouter_inventory as openrouter_provider_inventory,
+};
 pub use config::{
     AuthScheme, BearerResolver, HeaderInjector, InferenceConfig, OpenRouterMaxPrice,
     OpenRouterPlugin, OpenRouterProviderPreferences, OpenRouterReasoning, OpenRouterSort,
@@ -51,12 +57,6 @@ pub use events::{InferenceChannel, InferenceErrorInfo, InferenceErrorKind, Infer
 pub use handle::InferenceHandle;
 pub use inference_log::AuthInfo;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
-pub use compatibility::{
-    compatibility_counts, declared_intersection, intersection_report_json, inventory_report_json,
-    openai_inventory, openrouter_inventory as openrouter_provider_inventory, BindingStatus,
-    ClaimSurface, CompatibilityCounts, CompatibilityStatus, DeclaredIntersection, Evidence,
-    EvidenceKind, OperationClaim, OperationIdentity, ProviderInventory, Transport,
-};
 pub use openrouter_baseline::{
     OpenRouterEndpoint, OpenRouterEndpointInventory, coding_agent_priority_endpoints,
     inventory_has_endpoint, openrouter_endpoint_inventory, schema_field_names,

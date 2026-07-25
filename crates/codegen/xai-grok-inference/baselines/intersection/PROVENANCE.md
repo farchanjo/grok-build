@@ -1,51 +1,40 @@
 # Declared OpenAI ↔ OpenRouter intersection provenance
 
-This directory pins the **explicit** OpenAI-compatible intersection between the
-checked-in OpenAI and OpenRouter baseline inventories.
+## Semantic membership (not path partition)
 
-## Why declared (not path-guessed)
+Intersection members require **explicit OpenAI-compatible semantics** evidenced
+by official schemas/docs — not METHOD+path coincidence alone.
 
-Matching `METHOD + path` alone is a *candidate filter*, not an identity claim.
-Each intersection member records:
+### Members (4)
 
-- a stable `shared_id`
-- both vendors' `operationId` values (which often differ)
-- method, path, API family, transport, content types
-- baseline version + content SHA for both sides
-- honest `client_binding` / `cli_binding` status (`not_implemented` in Change 4)
+| shared_id | METHOD path | Evidence |
+| --- | --- | --- |
+| `compat.createChatCompletion` | POST /chat/completions | CreateChatCompletionRequest / ChatRequest |
+| `compat.createResponse` | POST /responses | CreateResponse / ResponsesRequest |
+| `compat.createEmbedding` | POST /embeddings | CreateEmbeddingRequest + path |
+| `compat.listModels` | GET /models | ListModelsResponse / ModelsListResponse |
 
-OpenRouter-native operations (present only on OpenRouter) are listed in
-`openrouter_native_operations` and are **never** claimed as OpenAI platform
-surface.
+Files, audio, video, and other same-path resources remain in
+**same_path_unverified_overlap** when schemas may differ.
 
-## Inputs
+## OpenRouter baseline partition (disjoint, exact cover)
 
-| Baseline | Provider | `info.version` | Content SHA-256 | Endpoints |
-| --- | --- | --- | --- | --- |
-| [`../openai/endpoint_inventory.json`](../openai/endpoint_inventory.json) | openai | 2.3.0 | `b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da` | see inventory |
-| [`../openrouter/endpoint_inventory.json`](../openrouter/endpoint_inventory.json) | openrouter | 1.0.0 | `90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203` | see inventory |
+Every OpenRouter endpoint is in exactly one category:
 
-Generated at: `2026-07-25T17:00:00Z` (UTC).
+1. **compatible intersection** (`members`)
+2. **same_path_unverified_overlap** (METHOD+path also on OpenAI, semantics not verified)
+3. **openrouter_contract_outside_intersection** (path exclusive to OpenRouter)
 
-## File
+## Baseline pins
 
-- [`declared_intersection.json`](declared_intersection.json)
+| Baseline | Content SHA-256 | Fetched at UTC | Endpoints |
+| --- | --- | --- | --- |
+| OpenAI (`source_revision` `5c044be3…`) | `b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da` | `2026-07-25T16:25:32Z` | 287 |
+| OpenRouter | `90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203` | `2026-07-25T16:25:35Z` | 89 |
 
-## Claims policy
+Generated at: `2026-07-25T16:25:35Z`.
 
-- **OpenAI client completeness** is measured against the OpenAI baseline only.
-- **OpenRouter-native coverage** is measured against OpenRouter endpoints that
-  are not intersection members.
-- **Configured-provider capability claims** may remain `Unknown` without
-  reducing either completeness metric.
-- Typed client/CLI bindings are **not implemented** in Change 4; statuses are
-  stored and tested as `not_implemented`, not as fake coverage.
+## Claims
 
-## Validation
-
-```sh
-cargo test -p xai-grok-inference compatibility -- --nocapture
-```
-
-Unit tests require every declared member to resolve unambiguously in **both**
-baseline inventories and reject duplicate `shared_id` values.
+- Baseline presence ≠ client completeness.
+- `client_binding` / `cli_binding` are `not_implemented` in Change 4.

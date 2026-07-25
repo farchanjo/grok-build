@@ -1,25 +1,12 @@
 #!/usr/bin/env python3
 """Deterministic OpenAI OpenAPI → endpoint_inventory.json generator.
 
-Source pin is the official openai/openai-openapi YAML (converted to JSON for
-this tool). The generator never performs network I/O.
+Pins the official openai/openai-openapi tree at an immutable commit SHA.
+Consumes either:
+  - the exact pinned YAML blob (--source-yaml), preferred integrity path, or
+  - a pre-converted JSON view (--input) plus verified source YAML metadata.
 
-Invocation:
-
-  python3 generate_inventory.py \\
-      --input /path/to/openai-openapi.json \\
-      --output endpoint_inventory.json \\
-      --fetched-at-utc 2026-07-25T17:00:00Z \\
-      --source-sha256 <yaml_sha256> \\
-      --source-bytes <yaml_bytes> \\
-      --source-format yaml
-
-Notes:
-  - Endpoint enumeration: every path + HTTP method (skip x-*, parameters).
-  - Priority endpoints are Grok coding-agent relevant and MUST exist.
-  - content_sha256/content_bytes in baseline describe the *source document*
-    pin (YAML blob when --source-format yaml), not the compact inventory.
-  - OpenAI paths in this OpenAPI pin omit the `/v1` prefix (base URL carries it).
+No network I/O.
 """
 
 from __future__ import annotations
@@ -28,10 +15,30 @@ import argparse
 import hashlib
 import json
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-# Coding-agent priority endpoints (must exist in the source OpenAPI).
+# Shared helpers live next to both generators.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_shared"))
+from openapi_contract import enumerate_endpoints, schema_fields  # noqa: E402
+
+FORMAT_VERSION = 2
+PROVIDER = "openai"
+
+# Immutable pin (resolved 2026-07-25 against blob SHA-256 b58d6cd…).
+SOURCE_REVISION = "5c044be3bf3a42854e99e34616564eeb2124a317"
+SOURCE_URL = (
+    f"https://raw.githubusercontent.com/openai/openai-openapi/"
+    f"{SOURCE_REVISION}/openapi.yaml"
+)
+DOCS_URL = "https://platform.openai.com/docs/api-reference"
+REPO_URL = "https://github.com/openai/openai-openapi"
+LICENSE_NOTE = (
+    "OpenAPI description from openai/openai-openapi (MIT) at the pinned commit. "
+    "Compact inventory is derived public shape metadata only."
+)
+
 PRIORITY_ENDPOINTS: list[str] = [
     "POST /chat/completions",
     "POST /responses",
@@ -43,7 +50,6 @@ PRIORITY_ENDPOINTS: list[str] = [
     "GET /files",
 ]
 
-# Schemas we inventory for later conformance (may be missing → skipped).
 KEY_SCHEMAS: list[str] = [
     "CreateChatCompletionRequest",
     "CreateResponse",
@@ -57,83 +63,25 @@ KEY_SCHEMAS: list[str] = [
     "ChatCompletionTool",
 ]
 
-FORMAT_VERSION = 1
-PROVIDER = "openai"
-# Official public sources (documentation / OpenAPI, not a live inference call).
-SOURCE_URL = (
-    "https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml"
-)
-DOCS_URL = "https://platform.openai.com/docs/api-reference"
-REPO_URL = "https://github.com/openai/openai-openapi"
-LICENSE_NOTE = (
-    "OpenAPI description from openai/openai-openapi (MIT). Compact inventory is "
-    "derived metadata only; full OpenAPI is not vendored."
-)
 
-HTTP_METHODS = {
-    "get",
-    "put",
-    "post",
-    "delete",
-    "options",
-    "head",
-    "patch",
-    "trace",
-}
+def json_default(o: Any) -> Any:
+    if isinstance(o, (date, datetime)):
+        return o.isoformat()
+    raise TypeError(type(o))
 
 
-def schema_fields(schemas: dict[str, Any], name: str) -> dict[str, Any] | None:
-    s = schemas.get(name)
-    if not s or not isinstance(s, dict):
-        return None
-    props: dict[str, Any] = dict(s.get("properties") or {})
-    required = set(s.get("required") or [])
-    for part in s.get("allOf") or []:
-        if isinstance(part, dict) and "properties" in part:
-            props = {**props, **part["properties"]}
-            required |= set(part.get("required") or [])
-    fields: list[dict[str, Any]] = []
-    for fname in sorted(props.keys()):
-        fdef = props[fname]
-        entry: dict[str, Any] = {"name": fname, "required": fname in required}
-        if isinstance(fdef, dict):
-            if "type" in fdef:
-                entry["type"] = fdef["type"]
-            if "$ref" in fdef and isinstance(fdef["$ref"], str):
-                entry["ref"] = fdef["$ref"].rsplit("/", 1)[-1]
-            if "anyOf" in fdef or "oneOf" in fdef:
-                entry["union"] = True
-            if "enum" in fdef:
-                entry["enum"] = fdef["enum"]
-        fields.append(entry)
-    return {"schema": name, "field_count": len(fields), "fields": fields}
-
-
-def request_content_types(op: dict[str, Any]) -> list[str]:
-    body = op.get("requestBody")
-    if not isinstance(body, dict):
-        return []
-    content = body.get("content")
-    if not isinstance(content, dict):
-        return []
-    return sorted(str(k) for k in content.keys())
-
-
-def infer_transport(method: str, content_types: list[str], op: dict[str, Any]) -> str:
-    """Conservative transport label from OpenAPI shape only."""
-    joined = " ".join(content_types).lower()
-    if "multipart/" in joined:
-        return "http_multipart"
-    # Streaming is typically negotiated via request body flags, not path alone.
-    # Mark unknown unless the summary/description clearly says SSE-only.
-    summary = (op.get("summary") or "") + " " + (op.get("description") or "")
-    if "server-sent" in summary.lower() or "sse" in summary.lower():
-        return "http_sse"
-    if method.upper() in {"GET", "DELETE", "HEAD", "OPTIONS"}:
-        return "http_json"
-    if content_types:
-        return "http_json"
-    return "unknown"
+def load_yaml_as_data(yaml_bytes: bytes) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except ImportError as e:
+        raise SystemExit(
+            "PyYAML required to parse --source-yaml; install pyyaml or pass --input JSON"
+        ) from e
+    data = yaml.safe_load(yaml_bytes)
+    if not isinstance(data, dict):
+        raise SystemExit("OpenAPI root must be an object")
+    # Round-trip through JSON to normalize dates like generators consuming --input.
+    return json.loads(json.dumps(data, default=json_default))
 
 
 def build_inventory(
@@ -143,49 +91,18 @@ def build_inventory(
     source_sha256: str,
     source_bytes: int,
     source_format: str,
+    converted_json_sha256: str | None,
 ) -> dict[str, Any]:
     info = data.get("info") or {}
     paths = data.get("paths") or {}
-    schemas = (data.get("components") or {}).get("schemas") or {}
-    if not isinstance(paths, dict) or not isinstance(schemas, dict):
-        raise SystemExit("invalid OpenAPI: paths/schemas must be objects")
-
-    endpoints: list[dict[str, Any]] = []
-    for path in sorted(paths.keys()):
-        if not isinstance(path, str) or not path.startswith("/"):
-            raise SystemExit(f"unsafe or malformed path key: {path!r}")
-        if ".." in path or path.startswith("//"):
-            raise SystemExit(f"unsafe path key: {path!r}")
-        methods = paths[path]
-        if not isinstance(methods, dict):
-            continue
-        for method in sorted(methods.keys()):
-            if method not in HTTP_METHODS:
-                continue
-            op = methods[method]
-            if not isinstance(op, dict):
-                continue
-            cts = request_content_types(op)
-            endpoints.append(
-                {
-                    "method": method.upper(),
-                    "path": path,
-                    "operation_id": op.get("operationId"),
-                    "tags": list(op.get("tags") or []),
-                    "summary": op.get("summary"),
-                    "content_types": cts,
-                    "transport": infer_transport(method, cts, op),
-                }
-            )
+    endpoints, schemas = enumerate_endpoints(data)
 
     endpoint_keys = {f"{e['method']} {e['path']}" for e in endpoints}
+    if len(endpoint_keys) != len(endpoints):
+        raise SystemExit("duplicate method+path identities")
     missing = [p for p in PRIORITY_ENDPOINTS if p not in endpoint_keys]
     if missing:
-        raise SystemExit(f"priority endpoints missing from source OpenAPI: {missing}")
-
-    # Reject duplicate method+path identities.
-    if len(endpoint_keys) != len(endpoints):
-        raise SystemExit("duplicate method+path identities in OpenAPI paths")
+        raise SystemExit(f"priority endpoints missing: {missing}")
 
     field_inventory = []
     for name in KEY_SCHEMAS:
@@ -193,37 +110,43 @@ def build_inventory(
         if inv is not None:
             field_inventory.append(inv)
 
-    inventory = {
+    baseline: dict[str, Any] = {
+        "title": info.get("title"),
+        "version": str(info.get("version")) if info.get("version") is not None else None,
+        "openapi": data.get("openapi"),
+        "source_url": SOURCE_URL,
+        "source_revision": SOURCE_REVISION,
+        "docs_url": DOCS_URL,
+        "repo_url": REPO_URL,
+        "license_note": LICENSE_NOTE,
+        "source_format": source_format,
+        "fetched_at_utc": fetched_at_utc,
+        "content_sha256": source_sha256,
+        "content_bytes": source_bytes,
+        "path_count": len(paths) if isinstance(paths, dict) else 0,
+        "endpoint_count": len(endpoints),
+        "schema_count": len(schemas),
+    }
+    if converted_json_sha256:
+        baseline["converted_json_sha256"] = converted_json_sha256
+
+    return {
         "format_version": FORMAT_VERSION,
         "provider": PROVIDER,
-        "baseline": {
-            "title": info.get("title"),
-            "version": str(info.get("version")) if info.get("version") is not None else None,
-            "openapi": data.get("openapi"),
-            "source_url": SOURCE_URL,
-            "docs_url": DOCS_URL,
-            "repo_url": REPO_URL,
-            "license_note": LICENSE_NOTE,
-            "source_format": source_format,
-            "fetched_at_utc": fetched_at_utc,
-            "content_sha256": source_sha256,
-            "content_bytes": source_bytes,
-            "path_count": len(paths),
-            "endpoint_count": len(endpoints),
-            "schema_count": len(schemas),
-        },
+        "baseline": baseline,
         "endpoints": endpoints,
         "coding_agent_schema_fields": field_inventory,
         "coding_agent_priority_endpoints": list(PRIORITY_ENDPOINTS),
         "notes": [
-            "Compact inventory only; full OpenAPI is not vendored (~2.8 MiB YAML).",
-            "OpenAI OpenAPI path templates omit the /v1 prefix (API base URL includes it).",
-            "OpenRouter is NOT treated as a full OpenAI platform clone.",
-            "Regenerate with generate_inventory.py from a local OpenAPI file.",
-            "No network I/O in the generator or in unit tests.",
+            "Compact inventory only; full OpenAPI YAML is not vendored.",
+            "source_url is commit-addressed (immutable); source_revision is the full git SHA.",
+            "OpenAI path templates omit the /v1 prefix (API base URL includes it).",
+            "transports is a multi-label set; stream-flag ops include http_json + http_sse.",
+            "Binary response ops are never collapsed to sole http_json.",
+            "OpenRouter is not the full OpenAI platform.",
+            "No network I/O in the generator or unit tests.",
         ],
     }
-    return inventory
 
 
 def canonical_json(obj: Any) -> str:
@@ -232,39 +155,97 @@ def canonical_json(obj: Any) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path, help="Local OpenAPI JSON path")
+    parser.add_argument(
+        "--source-yaml",
+        type=Path,
+        help="Exact pinned OpenAPI YAML blob (integrity verified via --expect-source-sha256)",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        help="Pre-converted OpenAPI JSON (must pair with --source-yaml for full chain)",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--fetched-at-utc", required=True)
     parser.add_argument(
-        "--source-sha256",
+        "--expect-source-sha256",
         required=True,
-        help="SHA-256 of the exact source blob being pinned (YAML preferred)",
+        help="Expected SHA-256 of the immutable source YAML (or JSON if only --input)",
     )
     parser.add_argument(
-        "--source-bytes",
+        "--expect-source-bytes",
         required=True,
         type=int,
-        help="Byte length of the exact source blob being pinned",
-    )
-    parser.add_argument(
-        "--source-format",
-        default="yaml",
-        choices=["yaml", "json"],
-        help="Format of the source blob described by --source-sha256",
+        help="Expected byte length of the immutable source blob",
     )
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
 
-    raw = args.input.read_bytes()
-    # Input JSON is a conversion of the pin; integrity of the pin is the
-    # explicit --source-sha256 of the original YAML (or JSON) blob.
-    data = json.loads(raw)
+    converted_json_sha256: str | None = None
+
+    if args.source_yaml:
+        yaml_bytes = args.source_yaml.read_bytes()
+        sha = hashlib.sha256(yaml_bytes).hexdigest()
+        if sha != args.expect_source_sha256:
+            print(
+                f"source YAML sha mismatch: got {sha} expected {args.expect_source_sha256}",
+                file=sys.stderr,
+            )
+            return 1
+        if len(yaml_bytes) != args.expect_source_bytes:
+            print(
+                f"source YAML size mismatch: got {len(yaml_bytes)} "
+                f"expected {args.expect_source_bytes}",
+                file=sys.stderr,
+            )
+            return 1
+        data = load_yaml_as_data(yaml_bytes)
+        # Digested converted JSON view for the chain.
+        converted = json.dumps(data, default=json_default, sort_keys=True).encode("utf-8")
+        converted_json_sha256 = hashlib.sha256(converted).hexdigest()
+        if args.input:
+            # Optional consistency: input JSON must match conversion of YAML.
+            input_data = json.loads(args.input.read_text(encoding="utf-8"))
+            # Compare structural JSON (keys normalized).
+            a = json.dumps(data, sort_keys=True, default=json_default)
+            b = json.dumps(input_data, sort_keys=True, default=json_default)
+            if a != b:
+                print(
+                    "ERROR: --input JSON does not match conversion of --source-yaml",
+                    file=sys.stderr,
+                )
+                return 1
+        source_format = "yaml"
+        source_sha = sha
+        source_bytes = len(yaml_bytes)
+    elif args.input:
+        # JSON-only path: pin is the JSON blob itself (discouraged for OpenAI).
+        raw = args.input.read_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
+        if sha != args.expect_source_sha256:
+            print(
+                f"source JSON sha mismatch: got {sha} expected {args.expect_source_sha256}",
+                file=sys.stderr,
+            )
+            return 1
+        if len(raw) != args.expect_source_bytes:
+            print("source JSON size mismatch", file=sys.stderr)
+            return 1
+        data = json.loads(raw)
+        source_format = "json"
+        source_sha = sha
+        source_bytes = len(raw)
+    else:
+        print("error: provide --source-yaml and/or --input", file=sys.stderr)
+        return 2
+
     inventory = build_inventory(
         data,
         fetched_at_utc=args.fetched_at_utc,
-        source_sha256=args.source_sha256,
-        source_bytes=args.source_bytes,
-        source_format=args.source_format,
+        source_sha256=source_sha,
+        source_bytes=source_bytes,
+        source_format=source_format,
+        converted_json_sha256=converted_json_sha256,
     )
     text = canonical_json(inventory)
 
@@ -273,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         if existing != text:
             print("inventory differs from generator output", file=sys.stderr)
             return 1
-        print("OK: inventory matches generator for", args.input)
+        print("OK: inventory matches generator")
         return 0
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -281,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"wrote {args.output} endpoints={inventory['baseline']['endpoint_count']} "
         f"sha256={inventory['baseline']['content_sha256']} "
-        f"bytes={inventory['baseline']['content_bytes']}"
+        f"revision={SOURCE_REVISION}"
     )
     return 0
 

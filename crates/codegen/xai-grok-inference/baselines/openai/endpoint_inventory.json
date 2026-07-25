@@ -1,21 +1,23 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "provider": "openai",
   "baseline": {
     "title": "OpenAI API",
     "version": "2.3.0",
     "openapi": "3.1.0",
-    "source_url": "https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml",
+    "source_url": "https://raw.githubusercontent.com/openai/openai-openapi/5c044be3bf3a42854e99e34616564eeb2124a317/openapi.yaml",
+    "source_revision": "5c044be3bf3a42854e99e34616564eeb2124a317",
     "docs_url": "https://platform.openai.com/docs/api-reference",
     "repo_url": "https://github.com/openai/openai-openapi",
-    "license_note": "OpenAPI description from openai/openai-openapi (MIT). Compact inventory is derived metadata only; full OpenAPI is not vendored.",
+    "license_note": "OpenAPI description from openai/openai-openapi (MIT) at the pinned commit. Compact inventory is derived public shape metadata only.",
     "source_format": "yaml",
-    "fetched_at_utc": "2026-07-25T17:00:00Z",
+    "fetched_at_utc": "2026-07-25T16:25:32Z",
     "content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
     "content_bytes": 2827615,
     "path_count": 181,
     "endpoint_count": 287,
-    "schema_count": 1385
+    "schema_count": 1385,
+    "converted_json_sha256": "23d0b06c1330c87c9e3538560580903d4f284a72514a2aaeec449e059c0d743f"
   },
   "endpoints": [
     {
@@ -26,8 +28,13 @@
         "Assistants"
       ],
       "summary": "Returns a list of assistants.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -37,10 +44,15 @@
         "Assistants"
       ],
       "summary": "Create an assistant with a model and instructions.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -50,8 +62,13 @@
         "Assistants"
       ],
       "summary": "Delete an assistant.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -61,8 +78,13 @@
         "Assistants"
       ],
       "summary": "Retrieves an assistant.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -72,10 +94,15 @@
         "Assistants"
       ],
       "summary": "Modifies an assistant.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -85,10 +112,18 @@
         "Audio"
       ],
       "summary": "Generates audio from the input text.\n\nReturns the audio file content, or a stream of audio events.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/octet-stream",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_binary",
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -98,10 +133,18 @@
         "Audio"
       ],
       "summary": "Transcribes audio into the input language.\n\nReturns a transcription object in `json`, `diarized_json`, or `verbose_json`\nformat, or a stream of transcript events.\n",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -111,10 +154,15 @@
         "Audio"
       ],
       "summary": "Translates audio into English.",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "GET",
@@ -124,8 +172,13 @@
         "Audio"
       ],
       "summary": "Returns a list of voice consent recordings.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -135,10 +188,15 @@
         "Audio"
       ],
       "summary": "Upload a voice consent recording.",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "DELETE",
@@ -148,8 +206,13 @@
         "Audio"
       ],
       "summary": "Deletes a voice consent recording.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -159,8 +222,13 @@
         "Audio"
       ],
       "summary": "Retrieves a voice consent recording.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -170,10 +238,15 @@
         "Audio"
       ],
       "summary": "Updates a voice consent recording (metadata only).",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -183,10 +256,15 @@
         "Audio"
       ],
       "summary": "Creates a custom voice.",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "GET",
@@ -196,8 +274,13 @@
         "Batch"
       ],
       "summary": "List your organization's batches.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -207,10 +290,15 @@
         "Batch"
       ],
       "summary": "Creates and executes a batch from an uploaded file of requests",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -220,8 +308,13 @@
         "Batch"
       ],
       "summary": "Retrieves a batch.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -231,8 +324,13 @@
         "Batch"
       ],
       "summary": "Cancels an in-progress batch. The batch will be in status `cancelling` for up to 10 minutes, before changing to `cancelled`, where it will have partial results (if any) available in the output file.",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -242,8 +340,13 @@
         "Chat"
       ],
       "summary": "List stored Chat Completions. Only Chat Completions that have been stored\nwith the `store` parameter set to `true` will be returned.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -253,10 +356,17 @@
         "Chat"
       ],
       "summary": "**Starting a new project?** We recommend trying [Responses](/docs/api-reference/responses)\nto take advantage of the latest OpenAI platform features. Compare\n[Chat Completions with Responses](/docs/guides/responses-vs-chat-completions?api-mode=responses).\n\n---\n\nCreates a model response for the given chat conversation. Learn more in the\n[text generation](/docs/guides/text-generation), [vision](/docs/guides/vision),\nand [audio](/docs/guides/audio) guides.\n\nParameter support can differ depending on the model used to generate the\nresponse, particularly for newer reasoning models. Parameters that are only\nsupported for reasoning models are noted below. For the current state of\nunsupported parameters in reasoning models,\n[refer to the reasoning guide](/docs/guides/reasoning).\n\nReturns a chat completion object, or a streamed sequence of chat completion\nchunk objects if the request is streamed.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "DELETE",
@@ -266,8 +376,13 @@
         "Chat"
       ],
       "summary": "Delete a stored chat completion. Only Chat Completions that have been\ncreated with the `store` parameter set to `true` can be deleted.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -277,8 +392,13 @@
         "Chat"
       ],
       "summary": "Get a stored chat completion. Only Chat Completions that have been created\nwith the `store` parameter set to `true` will be returned.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -288,10 +408,15 @@
         "Chat"
       ],
       "summary": "Modify a stored chat completion. Only Chat Completions that have been\ncreated with the `store` parameter set to `true` can be modified. Currently,\nthe only supported modification is to update the `metadata` field.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -301,8 +426,13 @@
         "Chat"
       ],
       "summary": "Get the messages in a stored chat completion. Only Chat Completions that\nhave been created with the `store` parameter set to `true` will be\nreturned.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -310,10 +440,15 @@
       "operation_id": "CreateChatSessionMethod",
       "tags": [],
       "summary": "Create a ChatKit session.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -321,8 +456,13 @@
       "operation_id": "CancelChatSessionMethod",
       "tags": [],
       "summary": "Cancel an active ChatKit session and return its most recent metadata.\n\nCancelling prevents new requests from using the issued client secret.",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -330,8 +470,13 @@
       "operation_id": "ListThreadsMethod",
       "tags": [],
       "summary": "List ChatKit threads with optional pagination and user filters.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -339,8 +484,13 @@
       "operation_id": "DeleteThreadMethod",
       "tags": [],
       "summary": "Delete a ChatKit thread along with its items and stored attachments.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -348,8 +498,13 @@
       "operation_id": "GetThreadMethod",
       "tags": [],
       "summary": "Retrieve a ChatKit thread by its identifier.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -357,8 +512,13 @@
       "operation_id": "ListThreadItemsMethod",
       "tags": [],
       "summary": "List items that belong to a ChatKit thread.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -368,10 +528,16 @@
         "Completions"
       ],
       "summary": "Creates a completion for the provided prompt and parameters.\n\nReturns a completion object, or a sequence of completion objects if the request is streamed.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -379,8 +545,13 @@
       "operation_id": "ListContainers",
       "tags": [],
       "summary": "List Containers",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -388,10 +559,15 @@
       "operation_id": "CreateContainer",
       "tags": [],
       "summary": "Create Container",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -399,8 +575,11 @@
       "operation_id": "DeleteContainer",
       "tags": [],
       "summary": "Delete Container",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -408,8 +587,13 @@
       "operation_id": "RetrieveContainer",
       "tags": [],
       "summary": "Retrieve Container",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -417,8 +601,13 @@
       "operation_id": "ListContainerFiles",
       "tags": [],
       "summary": "List Container files",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -426,11 +615,17 @@
       "operation_id": "CreateContainerFile",
       "tags": [],
       "summary": "Create a Container File\n\nYou can send either a multipart/form-data request with the raw file content, or a JSON request with a file ID.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     },
     {
       "method": "DELETE",
@@ -438,8 +633,11 @@
       "operation_id": "DeleteContainerFile",
       "tags": [],
       "summary": "Delete Container File",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -447,8 +645,13 @@
       "operation_id": "RetrieveContainerFile",
       "tags": [],
       "summary": "Retrieve Container File",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -456,8 +659,11 @@
       "operation_id": "RetrieveContainerFileContent",
       "tags": [],
       "summary": "Retrieve Container File Content",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -467,10 +673,15 @@
         "Conversations"
       ],
       "summary": "Create a conversation.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -480,8 +691,13 @@
         "Conversations"
       ],
       "summary": "Delete a conversation. Items in the conversation will not be deleted.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -491,8 +707,13 @@
         "Conversations"
       ],
       "summary": "Get a conversation",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -502,10 +723,15 @@
         "Conversations"
       ],
       "summary": "Update a conversation",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -515,8 +741,13 @@
         "Conversations"
       ],
       "summary": "List all items for a conversation with the given ID.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -526,10 +757,15 @@
         "Conversations"
       ],
       "summary": "Create items in a conversation with the given ID.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -539,8 +775,13 @@
         "Conversations"
       ],
       "summary": "Delete an item from a conversation with the given IDs.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -550,8 +791,13 @@
         "Conversations"
       ],
       "summary": "Get a single item from a conversation with the given IDs.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -561,10 +807,15 @@
         "Embeddings"
       ],
       "summary": "Creates an embedding vector representing the input text.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -574,8 +825,13 @@
         "Evals"
       ],
       "summary": "List evaluations for a project.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -585,10 +841,15 @@
         "Evals"
       ],
       "summary": "Create the structure of an evaluation that can be used to test a model's performance.\nAn evaluation is a set of testing criteria and the config for a data source, which dictates the schema of the data used in the evaluation. After creating an evaluation, you can run it on different models and model parameters. We support several types of graders and datasources.\nFor more information, see the [Evals guide](/docs/guides/evals).\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -598,8 +859,13 @@
         "Evals"
       ],
       "summary": "Delete an evaluation.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -609,8 +875,13 @@
         "Evals"
       ],
       "summary": "Get an evaluation by ID.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -620,10 +891,15 @@
         "Evals"
       ],
       "summary": "Update certain properties of an evaluation.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -633,8 +909,13 @@
         "Evals"
       ],
       "summary": "Get a list of runs for an evaluation.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -644,10 +925,15 @@
         "Evals"
       ],
       "summary": "Kicks off a new run for a given evaluation, specifying the data source, and what model configuration to use to test. The datasource will be validated against the schema specified in the config of the evaluation.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -657,8 +943,13 @@
         "Evals"
       ],
       "summary": "Delete an eval run.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -668,8 +959,13 @@
         "Evals"
       ],
       "summary": "Get an evaluation run by ID.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -679,8 +975,13 @@
         "Evals"
       ],
       "summary": "Cancel an ongoing evaluation run.\n",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -690,8 +991,13 @@
         "Evals"
       ],
       "summary": "Get a list of output items for an evaluation run.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -701,8 +1007,13 @@
         "Evals"
       ],
       "summary": "Get an evaluation run output item by ID.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -712,8 +1023,13 @@
         "Files"
       ],
       "summary": "Returns a list of files.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -723,10 +1039,15 @@
         "Files"
       ],
       "summary": "Upload a file that can be used across various endpoints. Individual files\ncan be up to 512 MB, and each project can store up to 2.5 TB of files in\ntotal. There is no organization-wide storage limit. Uploads to this\nendpoint are rate-limited to 1,000 requests per minute per authenticated\nuser.\n\n- The Assistants API supports files up to 2 million tokens and of specific\n  file types. See the [Assistants Tools guide](/docs/assistants/tools) for\n  details.\n- The Fine-tuning API only supports `.jsonl` files. The input also has\n  certain required formats for fine-tuning\n  [chat](/docs/api-reference/fine-tuning/chat-input) or\n  [completions](/docs/api-reference/fine-tuning/completions-input) models.\n- The Batch API only supports `.jsonl` files up to 200 MB in size. The input\n  also has a specific required\n  [format](/docs/api-reference/batch/request-input).\n- For Retrieval or `file_search` ingestion, upload files here first. If\n  you need to attach multiple uploaded files to the same vector store, use\n  [`/vector_stores/{vector_store_id}/file_batches`](/docs/api-reference/vector-stores-file-batches/createBatch)\n  instead of attaching them one by one. Vector store attachment has separate\n  limits from file upload, including 2,000 attached files per minute per\n  organization.\n\nPlease [contact us](https://help.openai.com/) if you need to increase these\nstorage limits.\n",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "DELETE",
@@ -736,8 +1057,13 @@
         "Files"
       ],
       "summary": "Delete a file and remove it from all vector stores.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -747,8 +1073,13 @@
         "Files"
       ],
       "summary": "Returns information about a specific file.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -758,8 +1089,13 @@
         "Files"
       ],
       "summary": "Returns the contents of the specified file.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -769,10 +1105,15 @@
         "Fine-tuning"
       ],
       "summary": "Run a grader.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -782,10 +1123,15 @@
         "Fine-tuning"
       ],
       "summary": "Validate a grader.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -795,8 +1141,13 @@
         "Fine-tuning"
       ],
       "summary": "**NOTE:** This endpoint requires an [admin API key](../admin-api-keys).\n\nOrganization owners can use this endpoint to view all permissions for a fine-tuned model checkpoint.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -806,10 +1157,15 @@
         "Fine-tuning"
       ],
       "summary": "**NOTE:** Calling this endpoint requires an [admin API key](../admin-api-keys).\n\nThis enables organization owners to share fine-tuned models with other projects in their organization.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -819,8 +1175,13 @@
         "Fine-tuning"
       ],
       "summary": "**NOTE:** This endpoint requires an [admin API key](../admin-api-keys).\n\nOrganization owners can use this endpoint to delete a permission for a fine-tuned model checkpoint.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -830,8 +1191,13 @@
         "Fine-tuning"
       ],
       "summary": "List your organization's fine-tuning jobs\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -841,10 +1207,15 @@
         "Fine-tuning"
       ],
       "summary": "Creates a fine-tuning job which begins the process of creating a new model from a given dataset.\n\nResponse includes details of the enqueued job including job status and the name of the fine-tuned models once complete.\n\n[Learn more about fine-tuning](/docs/guides/model-optimization)\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -854,8 +1225,13 @@
         "Fine-tuning"
       ],
       "summary": "Get info about a fine-tuning job.\n\n[Learn more about fine-tuning](/docs/guides/model-optimization)\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -865,8 +1241,13 @@
         "Fine-tuning"
       ],
       "summary": "Immediately cancel a fine-tune job.\n",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -876,8 +1257,13 @@
         "Fine-tuning"
       ],
       "summary": "List checkpoints for a fine-tuning job.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -887,8 +1273,13 @@
         "Fine-tuning"
       ],
       "summary": "Get status updates for a fine-tuning job.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -898,8 +1289,13 @@
         "Fine-tuning"
       ],
       "summary": "Pause a fine-tune job.\n",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "POST",
@@ -909,8 +1305,13 @@
         "Fine-tuning"
       ],
       "summary": "Resume a fine-tune job.\n",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "POST",
@@ -920,11 +1321,19 @@
         "Images"
       ],
       "summary": "Creates an edited or extended image given one or more source images and a prompt. This endpoint supports GPT Image models (`gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini`, and `chatgpt-image-latest`) and `dall-e-2`.",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -934,10 +1343,17 @@
         "Images"
       ],
       "summary": "Creates an image given a prompt. [Learn more](/docs/guides/images).\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -947,10 +1363,15 @@
         "Images"
       ],
       "summary": "Creates a variation of a given image. This endpoint only supports `dall-e-2`.",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "GET",
@@ -960,8 +1381,13 @@
         "Models"
       ],
       "summary": "Lists the currently available models, and provides basic information about each one such as the owner and availability.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -971,8 +1397,13 @@
         "Models"
       ],
       "summary": "Delete a fine-tuned model. You must have the Owner role in your organization to delete a model.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -982,8 +1413,13 @@
         "Models"
       ],
       "summary": "Retrieves a model instance, providing basic information about the model such as the owner and permissioning.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -993,10 +1429,15 @@
         "Moderations"
       ],
       "summary": "Classifies if text and/or image inputs are potentially harmful. Learn\nmore in the [moderation guide](/docs/guides/moderation).\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1004,8 +1445,13 @@
       "operation_id": "admin-api-keys-list",
       "tags": [],
       "summary": "List organization API keys",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1013,10 +1459,15 @@
       "operation_id": "admin-api-keys-create",
       "tags": [],
       "summary": "Create an organization admin API key",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1024,8 +1475,13 @@
       "operation_id": "admin-api-keys-delete",
       "tags": [],
       "summary": "Delete an organization admin API key",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1033,8 +1489,13 @@
       "operation_id": "admin-api-keys-get",
       "tags": [],
       "summary": "Retrieve a single organization API key",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1044,8 +1505,13 @@
         "Audit Logs"
       ],
       "summary": "List user actions and configuration changes within this organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1055,8 +1521,13 @@
         "Certificates"
       ],
       "summary": "List uploaded certificates for this organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1066,10 +1537,15 @@
         "Certificates"
       ],
       "summary": "Upload a certificate to the organization. This does **not** automatically activate the certificate.\n\nOrganizations can upload up to 50 certificates.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1079,10 +1555,15 @@
         "Certificates"
       ],
       "summary": "Activate certificates at the organization level.\n\nYou can atomically and idempotently activate up to 10 certificates at a time.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1092,10 +1573,15 @@
         "Certificates"
       ],
       "summary": "Deactivate certificates at the organization level.\n\nYou can atomically and idempotently deactivate up to 10 certificates at a time.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1105,8 +1591,13 @@
         "Certificates"
       ],
       "summary": "Delete a certificate from the organization.\n\nThe certificate must be inactive for the organization and all projects.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1116,8 +1607,13 @@
         "Certificates"
       ],
       "summary": "Get a certificate that has been uploaded to the organization.\n\nYou can get a certificate regardless of whether it is active or not.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1127,10 +1623,15 @@
         "Certificates"
       ],
       "summary": "Modify a certificate. Note that only the name can be modified.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1140,8 +1641,13 @@
         "Usage"
       ],
       "summary": "Get costs details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1151,8 +1657,13 @@
         "Data retention"
       ],
       "summary": "Retrieves organization data retention controls.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1162,10 +1673,15 @@
         "Data retention"
       ],
       "summary": "Updates organization data retention controls.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1175,8 +1691,13 @@
         "Groups"
       ],
       "summary": "Lists all groups in the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1186,10 +1707,15 @@
         "Groups"
       ],
       "summary": "Creates a new group in the organization.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1199,8 +1725,13 @@
         "Groups"
       ],
       "summary": "Deletes a group from the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1210,8 +1741,13 @@
         "Groups"
       ],
       "summary": "Retrieves a group.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1221,10 +1757,15 @@
         "Groups"
       ],
       "summary": "Updates a group's information.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1234,8 +1775,13 @@
         "Group organization role assignments"
       ],
       "summary": "Lists the organization roles assigned to a group within the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1245,10 +1791,15 @@
         "Group organization role assignments"
       ],
       "summary": "Assigns an organization role to a group within the organization.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1258,8 +1809,13 @@
         "Group organization role assignments"
       ],
       "summary": "Unassigns an organization role from a group within the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1269,8 +1825,13 @@
         "Group organization role assignments"
       ],
       "summary": "Retrieves an organization role assigned to a group.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1280,8 +1841,13 @@
         "Group users"
       ],
       "summary": "Lists the users assigned to a group.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1291,10 +1857,15 @@
         "Group users"
       ],
       "summary": "Adds a user to a group.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1304,8 +1875,13 @@
         "Group users"
       ],
       "summary": "Removes a user from a group.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1315,8 +1891,13 @@
         "Group users"
       ],
       "summary": "Retrieves a user in a group.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1326,8 +1907,13 @@
         "Invites"
       ],
       "summary": "Returns a list of invites in the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1337,10 +1923,15 @@
         "Invites"
       ],
       "summary": "Create an invite for a user to the organization. The invite must be accepted by the user before they have access to the organization.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1350,8 +1941,13 @@
         "Invites"
       ],
       "summary": "Delete an invite. If the invite has already been accepted, it cannot be deleted.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1361,8 +1957,13 @@
         "Invites"
       ],
       "summary": "Retrieves an invite.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1372,8 +1973,13 @@
         "Projects"
       ],
       "summary": "Returns a list of projects.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1383,10 +1989,15 @@
         "Projects"
       ],
       "summary": "Create a new project in the organization. Projects can be created and archived, but cannot be deleted.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1396,8 +2007,13 @@
         "Projects"
       ],
       "summary": "Retrieves a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1407,10 +2023,15 @@
         "Projects"
       ],
       "summary": "Modifies a project in the organization.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1420,8 +2041,13 @@
         "Projects"
       ],
       "summary": "Returns a list of API keys in the project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1431,8 +2057,13 @@
         "Projects"
       ],
       "summary": "Deletes an API key from the project.\n\nReturns confirmation of the key deletion, or an error if the key belonged to\na service account.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1442,8 +2073,13 @@
         "Projects"
       ],
       "summary": "Retrieves an API key in the project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1453,8 +2089,13 @@
         "Projects"
       ],
       "summary": "Archives a project in the organization. Archived projects cannot be used or updated.",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -1464,8 +2105,13 @@
         "Certificates"
       ],
       "summary": "List certificates for this project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1475,10 +2121,15 @@
         "Certificates"
       ],
       "summary": "Activate certificates at the project level.\n\nYou can atomically and idempotently activate up to 10 certificates at a time.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1488,10 +2139,15 @@
         "Certificates"
       ],
       "summary": "Deactivate certificates at the project level. You can atomically and \nidempotently deactivate up to 10 certificates at a time.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1501,8 +2157,13 @@
         "Data retention"
       ],
       "summary": "Retrieves project data retention controls.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1512,10 +2173,15 @@
         "Data retention"
       ],
       "summary": "Updates project data retention controls.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1525,8 +2191,13 @@
         "Project groups"
       ],
       "summary": "Lists the groups that have access to a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1536,10 +2207,15 @@
         "Project groups"
       ],
       "summary": "Grants a group access to a project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1549,8 +2225,13 @@
         "Project groups"
       ],
       "summary": "Revokes a group's access to a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1560,8 +2241,13 @@
         "Project groups"
       ],
       "summary": "Retrieves a project's group.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1571,8 +2257,13 @@
         "Hosted tools"
       ],
       "summary": "Returns hosted tool permissions for a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1582,10 +2273,15 @@
         "Hosted tools"
       ],
       "summary": "Updates hosted tool permissions for a project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1595,8 +2291,13 @@
         "Projects"
       ],
       "summary": "Deletes model permissions for a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1606,8 +2307,13 @@
         "Projects"
       ],
       "summary": "Returns model permissions for a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1617,10 +2323,15 @@
         "Projects"
       ],
       "summary": "Updates model permissions for a project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1630,8 +2341,13 @@
         "Projects"
       ],
       "summary": "Returns the rate limits per model for a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1641,10 +2357,15 @@
         "Projects"
       ],
       "summary": "Updates a project rate limit.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1654,8 +2375,13 @@
         "Projects"
       ],
       "summary": "Returns a list of service accounts in the project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1665,10 +2391,15 @@
         "Projects"
       ],
       "summary": "Creates a new service account in the project. By default, this also returns an unredacted API key for the service account.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1678,8 +2409,13 @@
         "Projects"
       ],
       "summary": "Deletes a service account from the project.\n\nReturns confirmation of service account deletion, or an error if the project\nis archived (archived projects have no service accounts).\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1689,8 +2425,13 @@
         "Projects"
       ],
       "summary": "Retrieves a service account in the project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1700,10 +2441,15 @@
         "Projects"
       ],
       "summary": "Updates a service account in the project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1711,10 +2457,15 @@
       "operation_id": "CreateanAPIkeyforaserviceaccount",
       "tags": [],
       "summary": "Creates an API key for a service account in the project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1724,8 +2475,13 @@
         "Spend alerts"
       ],
       "summary": "Lists project spend alerts.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1735,10 +2491,15 @@
         "Spend alerts"
       ],
       "summary": "Creates a project spend alert.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1748,8 +2509,13 @@
         "Spend alerts"
       ],
       "summary": "Deletes a project spend alert.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1759,8 +2525,13 @@
         "Spend alerts"
       ],
       "summary": "Retrieves a project spend alert.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1770,10 +2541,15 @@
         "Spend alerts"
       ],
       "summary": "Updates a project spend alert.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1781,8 +2557,13 @@
       "operation_id": "Deleteprojectspendlimit",
       "tags": [],
       "summary": "Delete a project's hard spend limit.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1790,8 +2571,13 @@
       "operation_id": "Getprojectspendlimit",
       "tags": [],
       "summary": "Get a project's hard spend limit.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1799,10 +2585,15 @@
       "operation_id": "Updateprojectspendlimit",
       "tags": [],
       "summary": "Create or replace a project's hard spend limit.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1812,8 +2603,13 @@
         "Projects"
       ],
       "summary": "Returns a list of users in the project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1823,10 +2619,15 @@
         "Projects"
       ],
       "summary": "Adds a user to the project. Users must already be members of the organization to be added to a project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1836,8 +2637,13 @@
         "Projects"
       ],
       "summary": "Deletes a user from the project.\n\nReturns confirmation of project user deletion, or an error if the project is\narchived (archived projects have no users).\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1847,8 +2653,13 @@
         "Projects"
       ],
       "summary": "Retrieves a user in the project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1858,10 +2669,15 @@
         "Projects"
       ],
       "summary": "Modifies a user's role in the project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1871,8 +2687,13 @@
         "Roles"
       ],
       "summary": "Lists the roles configured for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1882,10 +2703,15 @@
         "Roles"
       ],
       "summary": "Creates a custom role for the organization.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1895,8 +2721,13 @@
         "Roles"
       ],
       "summary": "Deletes a custom role from the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1906,8 +2737,13 @@
         "Roles"
       ],
       "summary": "Retrieves an organization role.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1917,10 +2753,15 @@
         "Roles"
       ],
       "summary": "Updates an existing organization role.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1930,8 +2771,13 @@
         "Spend alerts"
       ],
       "summary": "Lists organization spend alerts.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1941,10 +2787,15 @@
         "Spend alerts"
       ],
       "summary": "Creates an organization spend alert.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1954,8 +2805,13 @@
         "Spend alerts"
       ],
       "summary": "Deletes an organization spend alert.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1965,8 +2821,13 @@
         "Spend alerts"
       ],
       "summary": "Retrieves an organization spend alert.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -1976,10 +2837,15 @@
         "Spend alerts"
       ],
       "summary": "Updates an organization spend alert.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -1987,8 +2853,13 @@
       "operation_id": "Deleteorganizationspendlimit",
       "tags": [],
       "summary": "Delete the organization's hard spend limit.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -1996,8 +2867,13 @@
       "operation_id": "Getorganizationspendlimit",
       "tags": [],
       "summary": "Get the organization's hard spend limit.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2005,10 +2881,15 @@
       "operation_id": "Updateorganizationspendlimit",
       "tags": [],
       "summary": "Create or replace the organization's hard spend limit.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2018,8 +2899,13 @@
         "Usage"
       ],
       "summary": "Get audio speeches usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2029,8 +2915,13 @@
         "Usage"
       ],
       "summary": "Get audio transcriptions usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2040,8 +2931,13 @@
         "Usage"
       ],
       "summary": "Get code interpreter sessions usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2051,8 +2947,13 @@
         "Usage"
       ],
       "summary": "Get completions usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2062,8 +2963,13 @@
         "Usage"
       ],
       "summary": "Get embeddings usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2073,8 +2979,13 @@
         "Usage"
       ],
       "summary": "Get file search calls usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2084,8 +2995,13 @@
         "Usage"
       ],
       "summary": "Get images usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2095,8 +3011,13 @@
         "Usage"
       ],
       "summary": "Get moderations usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2106,8 +3027,13 @@
         "Usage"
       ],
       "summary": "Get vector stores usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2117,8 +3043,13 @@
         "Usage"
       ],
       "summary": "Get web search calls usage details for the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2128,8 +3059,13 @@
         "Users"
       ],
       "summary": "Lists all of the users in the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2139,8 +3075,13 @@
         "Users"
       ],
       "summary": "Deletes a user from the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2150,8 +3091,13 @@
         "Users"
       ],
       "summary": "Retrieves a user by their identifier.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2161,10 +3107,15 @@
         "Users"
       ],
       "summary": "Modifies a user's role in the organization.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2174,8 +3125,13 @@
         "User organization role assignments"
       ],
       "summary": "Lists the organization roles assigned to a user within the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2185,10 +3141,15 @@
         "User organization role assignments"
       ],
       "summary": "Assigns an organization role to a user within the organization.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2198,8 +3159,13 @@
         "User organization role assignments"
       ],
       "summary": "Unassigns an organization role from a user within the organization.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2209,8 +3175,13 @@
         "User organization role assignments"
       ],
       "summary": "Retrieves an organization role assigned to a user.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2220,8 +3191,13 @@
         "Project group role assignments"
       ],
       "summary": "Lists the project roles assigned to a group within a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2231,10 +3207,15 @@
         "Project group role assignments"
       ],
       "summary": "Assigns a project role to a group within a project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2244,8 +3225,13 @@
         "Project group role assignments"
       ],
       "summary": "Unassigns a project role from a group within a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2255,8 +3241,13 @@
         "Project group role assignments"
       ],
       "summary": "Retrieves a project role assigned to a group.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2266,8 +3257,13 @@
         "Roles"
       ],
       "summary": "Lists the roles configured for a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2277,10 +3273,15 @@
         "Roles"
       ],
       "summary": "Creates a custom role for a project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2290,8 +3291,13 @@
         "Roles"
       ],
       "summary": "Deletes a custom role from a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2301,8 +3307,13 @@
         "Roles"
       ],
       "summary": "Retrieves a project role.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2312,10 +3323,15 @@
         "Roles"
       ],
       "summary": "Updates an existing project role.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2325,8 +3341,13 @@
         "Project user role assignments"
       ],
       "summary": "Lists the project roles assigned to a user within a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2336,10 +3357,15 @@
         "Project user role assignments"
       ],
       "summary": "Assigns a project role to a user within a project.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2349,8 +3375,13 @@
         "Project user role assignments"
       ],
       "summary": "Unassigns a project role from a user within a project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2360,8 +3391,13 @@
         "Project user role assignments"
       ],
       "summary": "Retrieves a project role assigned to a user.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2371,11 +3407,16 @@
         "Realtime"
       ],
       "summary": "Create a new Realtime API call over WebRTC and receive the SDP answer needed\nto complete the peer connection.",
-      "content_types": [
+      "request_content_types": [
         "application/sdp",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/sdp"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "POST",
@@ -2385,10 +3426,13 @@
         "Realtime"
       ],
       "summary": "Accept an incoming SIP call and configure the realtime session that will\nhandle it.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2398,8 +3442,11 @@
         "Realtime"
       ],
       "summary": "End an active Realtime API call, whether it was initiated over SIP or\nWebRTC.",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "POST",
@@ -2409,10 +3456,13 @@
         "Realtime"
       ],
       "summary": "Transfer an active SIP call to a new destination using the SIP REFER verb.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2422,10 +3472,13 @@
         "Realtime"
       ],
       "summary": "Decline an incoming SIP call by returning a SIP status code to the caller.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2435,10 +3488,15 @@
         "Realtime"
       ],
       "summary": "Create a Realtime client secret with an associated session configuration.\n\nClient secrets are short-lived tokens that can be passed to a client app,\nsuch as a web frontend or mobile client, which grants access to the Realtime API without\nleaking your main API key. You can configure a custom TTL for each client secret.\n\nYou can also attach session configuration options to the client secret, which will be\napplied to any sessions created using that client secret, but these can also be overridden\nby the client connection.\n\n[Learn more about authentication with client secrets over WebRTC](/docs/guides/realtime-webrtc).\n\nReturns the created client secret and the effective session object. The client secret is a string that looks like `ek_1234`.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_sse"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2448,10 +3506,15 @@
         "Realtime"
       ],
       "summary": "Create an ephemeral API token for use in client-side applications with the\nRealtime API. Can be configured with the same session parameters as the\n`session.update` client event.\n\nIt responds with a session object, plus a `client_secret` key which contains\na usable ephemeral API token that can be used to authenticate browser clients\nfor the Realtime API.\n\nReturns the created Realtime session object, plus an ephemeral key.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2461,10 +3524,15 @@
         "Realtime"
       ],
       "summary": "Create an ephemeral API token for use in client-side applications with the\nRealtime API specifically for realtime transcriptions. \nCan be configured with the same session parameters as the `transcription_session.update` client event.\n\nIt responds with a session object, plus a `client_secret` key which contains\na usable ephemeral API token that can be used to authenticate browser clients\nfor the Realtime API.\n\nReturns the created Realtime transcription session object, plus an ephemeral key.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2474,10 +3542,15 @@
         "Realtime"
       ],
       "summary": "Create a Realtime translation client secret with an associated translation session configuration.\n\nClient secrets are short-lived tokens that can be passed to a client app,\nsuch as a web frontend or mobile client, which grants access to the Realtime\nTranslation API without leaking your main API key. You can configure a custom\nTTL for each client secret.\n\nReturns the created client secret and the effective translation session object.\nThe client secret is a string that looks like `ek_1234`.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_sse"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2487,10 +3560,17 @@
         "Responses"
       ],
       "summary": "Creates a model response. Provide [text](/docs/guides/text) or\n[image](/docs/guides/images) inputs to generate [text](/docs/guides/text)\nor [JSON](/docs/guides/structured-outputs) outputs. Have the model call\nyour own [custom code](/docs/guides/function-calling) or use built-in\n[tools](/docs/guides/tools) like [web search](/docs/guides/tools-web-search)\nor [file search](/docs/guides/tools-file-search) to use your own data\nas input for the model's response.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -2498,10 +3578,15 @@
       "operation_id": "Compactconversation",
       "tags": [],
       "summary": "Compact a conversation. Returns a compacted response object.\n\nLearn when and how to compact long-running conversations in the [conversation state guide](/docs/guides/conversation-state#managing-the-context-window). For ZDR-compatible compaction details, see [Compaction (advanced)](/docs/guides/conversation-state#compaction-advanced).",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2509,10 +3594,15 @@
       "operation_id": "beta_Compactconversation",
       "tags": [],
       "summary": "Compact a conversation. Returns a compacted response object.\n\nLearn when and how to compact long-running conversations in the [conversation state guide](/docs/guides/conversation-state#managing-the-context-window). For ZDR-compatible compaction details, see [Compaction (advanced)](/docs/guides/conversation-state#compaction-advanced).",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2520,10 +3610,15 @@
       "operation_id": "Getinputtokencounts",
       "tags": [],
       "summary": "Returns input token counts of the request.\n\nReturns an object with `object` set to `response.input_tokens` and an `input_tokens` count.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2531,10 +3626,15 @@
       "operation_id": "beta_Getinputtokencounts",
       "tags": [],
       "summary": "Returns input token counts of the request.\n\nReturns an object with `object` set to `response.input_tokens` and an `input_tokens` count.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2544,8 +3644,13 @@
         "Responses"
       ],
       "summary": "Deletes a model response with the given ID.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2555,8 +3660,13 @@
         "Responses"
       ],
       "summary": "Retrieves a model response with the given ID.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2566,8 +3676,13 @@
         "Responses"
       ],
       "summary": "Cancels a model response with the given ID. Only responses created with\nthe `background` parameter set to `true` can be cancelled. \n[Learn more](/docs/guides/background).\n",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "POST",
@@ -2577,8 +3692,13 @@
         "Responses"
       ],
       "summary": "Cancels a model response with the given ID. Only responses created with\nthe `background` parameter set to `true` can be cancelled. \n[Learn more](/docs/guides/background).\n",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -2588,8 +3708,13 @@
         "Responses"
       ],
       "summary": "Returns a list of input items for a given response.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2599,8 +3724,13 @@
         "Responses"
       ],
       "summary": "Returns a list of input items for a given response.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2610,8 +3740,13 @@
         "Responses"
       ],
       "summary": "Deletes a model response with the given ID.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2621,8 +3756,13 @@
         "Responses"
       ],
       "summary": "Retrieves a model response with the given ID.\n",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2632,10 +3772,17 @@
         "Responses"
       ],
       "summary": "Creates a model response. Provide [text](/docs/guides/text) or\n[image](/docs/guides/images) inputs to generate [text](/docs/guides/text)\nor [JSON](/docs/guides/structured-outputs) outputs. Have the model call\nyour own [custom code](/docs/guides/function-calling) or use built-in\n[tools](/docs/guides/tools) like [web search](/docs/guides/tools-web-search)\nor [file search](/docs/guides/tools-file-search) to use your own data\nas input for the model's response.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -2645,8 +3792,13 @@
         "Skills"
       ],
       "summary": "List all skills for the current project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2656,11 +3808,17 @@
         "Skills"
       ],
       "summary": "Create a new skill.",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     },
     {
       "method": "DELETE",
@@ -2670,8 +3828,13 @@
         "Skills"
       ],
       "summary": "Delete a skill by its ID.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2681,8 +3844,13 @@
         "Skills"
       ],
       "summary": "Get a skill by its ID.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2692,10 +3860,15 @@
         "Skills"
       ],
       "summary": "Update the default version pointer for a skill.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2705,8 +3878,14 @@
         "Skills"
       ],
       "summary": "Download a skill zip bundle by its ID.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json",
+        "application/zip"
+      ],
+      "transports": [
+        "http_binary"
+      ]
     },
     {
       "method": "GET",
@@ -2716,8 +3895,13 @@
         "Skills"
       ],
       "summary": "List skill versions for a skill.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2727,11 +3911,17 @@
         "Skills"
       ],
       "summary": "Create a new immutable skill version.",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     },
     {
       "method": "DELETE",
@@ -2741,8 +3931,13 @@
         "Skills"
       ],
       "summary": "Delete a skill version.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2752,8 +3947,13 @@
         "Skills"
       ],
       "summary": "Get a specific skill version.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2763,8 +3963,14 @@
         "Skills"
       ],
       "summary": "Download a skill version zip bundle.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json",
+        "application/zip"
+      ],
+      "transports": [
+        "http_binary"
+      ]
     },
     {
       "method": "POST",
@@ -2774,10 +3980,15 @@
         "Assistants"
       ],
       "summary": "Create a thread.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2787,10 +3998,16 @@
         "Assistants"
       ],
       "summary": "Create a thread and run it in one request.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "DELETE",
@@ -2800,8 +4017,13 @@
         "Assistants"
       ],
       "summary": "Delete a thread.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2811,8 +4033,13 @@
         "Assistants"
       ],
       "summary": "Retrieves a thread.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2822,10 +4049,15 @@
         "Assistants"
       ],
       "summary": "Modifies a thread.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2835,8 +4067,13 @@
         "Assistants"
       ],
       "summary": "Returns a list of messages for a given thread.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2846,10 +4083,15 @@
         "Assistants"
       ],
       "summary": "Create a message.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -2859,8 +4101,13 @@
         "Assistants"
       ],
       "summary": "Deletes a message.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2870,8 +4117,13 @@
         "Assistants"
       ],
       "summary": "Retrieve a message.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2881,10 +4133,15 @@
         "Assistants"
       ],
       "summary": "Modifies a message.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2894,8 +4151,13 @@
         "Assistants"
       ],
       "summary": "Returns a list of runs belonging to a thread.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2905,10 +4167,16 @@
         "Assistants"
       ],
       "summary": "Create a run.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "GET",
@@ -2918,8 +4186,13 @@
         "Assistants"
       ],
       "summary": "Retrieves a run.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2929,10 +4202,15 @@
         "Assistants"
       ],
       "summary": "Modifies a run.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2942,8 +4220,13 @@
         "Assistants"
       ],
       "summary": "Cancels a run that is `in_progress`.",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -2953,8 +4236,13 @@
         "Assistants"
       ],
       "summary": "Returns a list of run steps belonging to a run.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -2964,8 +4252,13 @@
         "Assistants"
       ],
       "summary": "Retrieves a run step.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -2975,10 +4268,16 @@
         "Assistants"
       ],
       "summary": "When a run has the `status: \"requires_action\"` and `required_action.type` is `submit_tool_outputs`, this endpoint can be used to submit the outputs from the tool calls once they're all completed. All outputs must be submitted in a single request.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
     },
     {
       "method": "POST",
@@ -2988,10 +4287,15 @@
         "Uploads"
       ],
       "summary": "Creates an intermediate [Upload](/docs/api-reference/uploads/object) object\nthat you can add [Parts](/docs/api-reference/uploads/part-object) to.\nCurrently, an Upload can accept at most 8 GB in total and expires after an\nhour after you create it.\n\nOnce you complete the Upload, we will create a\n[File](/docs/api-reference/files/object) object that contains all the parts\nyou uploaded. This File is usable in the rest of our platform as a regular\nFile object.\n\nFor certain `purpose` values, the correct `mime_type` must be specified. \nPlease refer to documentation for the \n[supported MIME types for your use case](/docs/assistants/tools/file-search#supported-files).\n\nFor guidance on the proper filename extensions for each purpose, please\nfollow the documentation on [creating a\nFile](/docs/api-reference/files/create).\n\nReturns the Upload object with status `pending`.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3001,8 +4305,13 @@
         "Uploads"
       ],
       "summary": "Cancels the Upload. No Parts may be added after an Upload is cancelled.\n\nReturns the Upload object with status `cancelled`.\n",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "POST",
@@ -3012,10 +4321,15 @@
         "Uploads"
       ],
       "summary": "Completes the [Upload](/docs/api-reference/uploads/object). \n\nWithin the returned Upload object, there is a nested [File](/docs/api-reference/files/object) object that is ready to use in the rest of the platform.\n\nYou can specify the order of the Parts by passing in an ordered list of the Part IDs.\n\nThe number of bytes uploaded upon completion must match the number of bytes initially specified when creating the Upload object. No Parts may be added after an Upload is completed.\nReturns the Upload object with status `completed`, including an additional `file` property containing the created usable File object.\n",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3025,10 +4339,15 @@
         "Uploads"
       ],
       "summary": "Adds a [Part](/docs/api-reference/uploads/part-object) to an [Upload](/docs/api-reference/uploads/object) object. A Part represents a chunk of bytes from the file you are trying to upload. \n\nEach Part can be at most 64 MB, and you can add Parts until you hit the Upload maximum of 8 GB.\n\nIt is possible to add multiple Parts in parallel. You can decide the intended order of the Parts when you [complete the Upload](/docs/api-reference/uploads/complete).\n",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "GET",
@@ -3038,8 +4357,13 @@
         "Vector stores"
       ],
       "summary": "Returns a list of vector stores.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3049,10 +4373,15 @@
         "Vector stores"
       ],
       "summary": "Create a vector store.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -3062,8 +4391,13 @@
         "Vector stores"
       ],
       "summary": "Delete a vector store.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3073,8 +4407,13 @@
         "Vector stores"
       ],
       "summary": "Retrieves a vector store.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3084,10 +4423,15 @@
         "Vector stores"
       ],
       "summary": "Modifies a vector store.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3097,10 +4441,15 @@
         "Vector stores"
       ],
       "summary": "Create a vector store file batch.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3110,8 +4459,13 @@
         "Vector stores"
       ],
       "summary": "Retrieves a vector store file batch.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3121,8 +4475,13 @@
         "Vector stores"
       ],
       "summary": "Cancel a vector store file batch. This attempts to cancel the processing of files in this batch as soon as possible.",
-      "content_types": [],
-      "transport": "unknown"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "unknown"
+      ]
     },
     {
       "method": "GET",
@@ -3132,8 +4491,13 @@
         "Vector stores"
       ],
       "summary": "Returns a list of vector store files in a batch.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3143,8 +4507,13 @@
         "Vector stores"
       ],
       "summary": "Returns a list of vector store files.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3154,10 +4523,15 @@
         "Vector stores"
       ],
       "summary": "Create a vector store file by attaching a [File](/docs/api-reference/files) to a [vector store](/docs/api-reference/vector-stores/object).",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "DELETE",
@@ -3167,8 +4541,13 @@
         "Vector stores"
       ],
       "summary": "Delete a vector store file. This will remove the file from the vector store but the file itself will not be deleted. To delete the file, use the [delete file](/docs/api-reference/files/delete) endpoint.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3178,8 +4557,13 @@
         "Vector stores"
       ],
       "summary": "Retrieves a vector store file.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3189,10 +4573,15 @@
         "Vector stores"
       ],
       "summary": "Update attributes on a vector store file.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3202,8 +4591,13 @@
         "Vector stores"
       ],
       "summary": "Retrieve the parsed contents of a vector store file.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3213,10 +4607,15 @@
         "Vector stores"
       ],
       "summary": "Search a vector store for relevant chunks based on a query and file attributes filter.",
-      "content_types": [
+      "request_content_types": [
         "application/json"
       ],
-      "transport": "http_json"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3226,8 +4625,13 @@
         "Videos"
       ],
       "summary": "List recently generated videos for the current project.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3237,11 +4641,17 @@
         "Videos"
       ],
       "summary": "Create a new video generation job from a prompt and optional reference assets.",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     },
     {
       "method": "POST",
@@ -3251,10 +4661,15 @@
         "Videos"
       ],
       "summary": "Create a character from an uploaded video.",
-      "content_types": [
+      "request_content_types": [
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_multipart"
+      ]
     },
     {
       "method": "GET",
@@ -3264,8 +4679,13 @@
         "Videos"
       ],
       "summary": "Fetch a character.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "POST",
@@ -3275,11 +4695,17 @@
         "Videos"
       ],
       "summary": "Create a new video generation job by editing a source video or existing generated video.",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     },
     {
       "method": "POST",
@@ -3289,11 +4715,17 @@
         "Videos"
       ],
       "summary": "Create an extension of a completed video.",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     },
     {
       "method": "DELETE",
@@ -3303,8 +4735,13 @@
         "Videos"
       ],
       "summary": "Permanently delete a completed or failed video and its stored assets.",
-      "content_types": [],
-      "transport": "http_sse"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3314,8 +4751,13 @@
         "Videos"
       ],
       "summary": "Fetch the latest metadata for a generated video.",
-      "content_types": [],
-      "transport": "http_json"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json"
+      ]
     },
     {
       "method": "GET",
@@ -3325,8 +4767,15 @@
         "Videos"
       ],
       "summary": "Download the generated video bytes or a derived preview asset.\n\nStreams the rendered video content for the specified video job.",
-      "content_types": [],
-      "transport": "http_sse"
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json",
+        "image/webp",
+        "video/mp4"
+      ],
+      "transports": [
+        "http_binary"
+      ]
     },
     {
       "method": "POST",
@@ -3336,11 +4785,17 @@
         "Videos"
       ],
       "summary": "Create a remix of a completed video using a refreshed prompt.",
-      "content_types": [
+      "request_content_types": [
         "application/json",
         "multipart/form-data"
       ],
-      "transport": "http_multipart"
+      "response_content_types": [
+        "application/json"
+      ],
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
     }
   ],
   "coding_agent_schema_fields": [
@@ -3828,10 +5283,12 @@
     "GET /files"
   ],
   "notes": [
-    "Compact inventory only; full OpenAPI is not vendored (~2.8 MiB YAML).",
-    "OpenAI OpenAPI path templates omit the /v1 prefix (API base URL includes it).",
-    "OpenRouter is NOT treated as a full OpenAI platform clone.",
-    "Regenerate with generate_inventory.py from a local OpenAPI file.",
-    "No network I/O in the generator or in unit tests."
+    "Compact inventory only; full OpenAPI YAML is not vendored.",
+    "source_url is commit-addressed (immutable); source_revision is the full git SHA.",
+    "OpenAI path templates omit the /v1 prefix (API base URL includes it).",
+    "transports is a multi-label set; stream-flag ops include http_json + http_sse.",
+    "Binary response ops are never collapsed to sole http_json.",
+    "OpenRouter is not the full OpenAI platform.",
+    "No network I/O in the generator or unit tests."
   ]
 }

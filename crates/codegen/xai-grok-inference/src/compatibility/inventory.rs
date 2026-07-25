@@ -1,19 +1,21 @@
 //! Shared baseline inventory types and loaders.
 
 use super::domain::{
-    ApiFamily, BindingStatus, HttpMethod, OperationIdentity, Transport, path_is_safe,
+    ApiFamily, BindingStatus, HttpMethod, OperationIdentity, Transport, media_type_is_valid,
+    path_is_safe, timestamp_is_rfc3339_utc,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::OnceLock;
 
-/// Provenance metadata shared by OpenAI and OpenRouter inventories.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct BaselineMeta {
     pub title: Option<String>,
     pub version: Option<String>,
     pub openapi: Option<String>,
     pub source_url: String,
+    #[serde(default)]
+    pub source_revision: Option<String>,
     #[serde(default)]
     pub docs_url: Option<String>,
     #[serde(default)]
@@ -27,12 +29,13 @@ pub struct BaselineMeta {
     pub fetched_at_utc: String,
     pub content_sha256: String,
     pub content_bytes: u64,
+    #[serde(default)]
+    pub converted_json_sha256: Option<String>,
     pub path_count: u64,
     pub endpoint_count: u64,
     pub schema_count: u64,
 }
 
-/// One path operation from a compact inventory.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct InventoryEndpoint {
     pub method: String,
@@ -41,8 +44,14 @@ pub struct InventoryEndpoint {
     #[serde(default)]
     pub tags: Vec<String>,
     pub summary: Option<String>,
+    /// Prefer v2 field; accept legacy `content_types` as request types only.
+    #[serde(default, alias = "content_types")]
+    pub request_content_types: Vec<String>,
     #[serde(default)]
-    pub content_types: Vec<String>,
+    pub response_content_types: Vec<String>,
+    /// Multi-label transports. Legacy single `transport` string is upgraded.
+    #[serde(default)]
+    pub transports: Vec<String>,
     #[serde(default)]
     pub transport: Option<String>,
 }
@@ -56,19 +65,56 @@ impl InventoryEndpoint {
         HttpMethod::parse(&self.method)
     }
 
-    pub fn transport(&self) -> Transport {
-        self.transport
-            .as_deref()
-            .map(Transport::parse)
-            .unwrap_or(Transport::Unknown)
+    pub fn transport_set(&self) -> Result<Vec<Transport>, String> {
+        let mut labels = self.transports.clone();
+        if labels.is_empty()
+            && let Some(t) = &self.transport
+        {
+            labels.push(t.clone());
+        }
+        if labels.is_empty() {
+            return Err(format!(
+                "endpoint {} missing transports",
+                self.method_path_key()
+            ));
+        }
+        let mut out = Vec::with_capacity(labels.len());
+        let mut seen = HashSet::new();
+        for raw in labels {
+            let t = Transport::parse_strict(&raw).ok_or_else(|| {
+                format!(
+                    "invalid transport label `{raw}` on {}",
+                    self.method_path_key()
+                )
+            })?;
+            if seen.insert(t) {
+                out.push(t);
+            }
+        }
+        out.sort_by_key(|t| t.as_str());
+        Ok(out)
     }
 
-    pub fn to_identity(&self) -> Option<OperationIdentity> {
-        let method = self.http_method()?;
+    pub fn to_identity(&self) -> Result<OperationIdentity, String> {
+        let method = self
+            .http_method()
+            .ok_or_else(|| format!("invalid method {}", self.method))?;
         if !path_is_safe(&self.path) {
-            return None;
+            return Err(format!("unsafe path {}", self.path));
         }
-        Some(OperationIdentity {
+        for mt in self
+            .request_content_types
+            .iter()
+            .chain(self.response_content_types.iter())
+        {
+            if !media_type_is_valid(mt) {
+                return Err(format!(
+                    "malformed media type `{mt}` on {}",
+                    self.method_path_key()
+                ));
+            }
+        }
+        Ok(OperationIdentity {
             family: ApiFamily::from_path(&self.path),
             operation_id: self.operation_id.clone().unwrap_or_else(|| {
                 format!(
@@ -79,13 +125,13 @@ impl InventoryEndpoint {
             }),
             method,
             path: self.path.clone(),
-            transport: self.transport(),
-            content_types: self.content_types.clone(),
+            transports: self.transport_set()?,
+            request_content_types: self.request_content_types.clone(),
+            response_content_types: self.response_content_types.clone(),
         })
     }
 }
 
-/// Schema field inventory (optional, coding-agent focused).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SchemaField {
     pub name: String,
@@ -108,7 +154,6 @@ pub struct SchemaInventory {
     pub fields: Vec<SchemaField>,
 }
 
-/// Compact provider baseline inventory document.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ProviderInventory {
     pub format_version: u32,
@@ -132,14 +177,47 @@ impl ProviderInventory {
     }
 
     pub fn validate_integrity(&self) -> Result<(), String> {
-        if self.baseline.content_sha256.is_empty() {
-            return Err("missing content_sha256".into());
+        if self.format_version < 2 {
+            return Err(format!(
+                "inventory format_version {} < 2 (transport/content contract required)",
+                self.format_version
+            ));
+        }
+        if self.baseline.content_sha256.len() != 64
+            || !self
+                .baseline
+                .content_sha256
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        {
+            return Err("content_sha256 must be 64 hex chars".into());
         }
         if self.baseline.content_bytes == 0 {
             return Err("content_bytes must be non-zero".into());
         }
         if self.baseline.source_url.is_empty() {
             return Err("missing source_url".into());
+        }
+        // Mutable branch pins are rejected for OpenAI (must be commit-addressed).
+        if self.provider == "openai" {
+            if self.baseline.source_revision.as_deref().unwrap_or("").len() != 40 {
+                return Err("openai source_revision must be full 40-char git SHA".into());
+            }
+            if self.baseline.source_url.contains("/master/")
+                || self.baseline.source_url.contains("/main/")
+            {
+                return Err("openai source_url must not use mutable branch path".into());
+            }
+            let rev = self.baseline.source_revision.as_deref().unwrap();
+            if !self.baseline.source_url.contains(rev) {
+                return Err("openai source_url must embed source_revision".into());
+            }
+        }
+        if !timestamp_is_rfc3339_utc(&self.baseline.fetched_at_utc) {
+            return Err(format!(
+                "invalid fetched_at_utc `{}`",
+                self.baseline.fetched_at_utc
+            ));
         }
         if self.endpoints.len() as u64 != self.baseline.endpoint_count {
             return Err(format!(
@@ -157,6 +235,7 @@ impl ProviderInventory {
             ));
         }
         let mut keys = BTreeSet::new();
+        let mut op_ids = HashSet::new();
         for ep in &self.endpoints {
             if !path_is_safe(&ep.path) {
                 return Err(format!("unsafe path: {}", ep.path));
@@ -168,6 +247,14 @@ impl ProviderInventory {
             if !keys.insert(key.clone()) {
                 return Err(format!("duplicate operation identity: {key}"));
             }
+            if let Some(id) = ep.operation_id.as_deref() {
+                // operationId uniqueness is preferred; warn-as-error if duplicate non-empty.
+                if !id.is_empty() && !op_ids.insert(id.to_owned()) {
+                    return Err(format!("duplicate operation_id `{id}`"));
+                }
+            }
+            // Every endpoint must have validated transports + media types.
+            ep.to_identity()?;
         }
         for schema in &self.coding_agent_schema_fields {
             if schema.field_count != schema.fields.len() {
@@ -186,7 +273,6 @@ impl ProviderInventory {
 const OPENAI_JSON: &str = include_str!("../../baselines/openai/endpoint_inventory.json");
 const OPENROUTER_JSON: &str = include_str!("../../baselines/openrouter/endpoint_inventory.json");
 
-/// Parse and cache the OpenAI baseline inventory.
 pub fn openai_inventory() -> &'static ProviderInventory {
     static INV: OnceLock<ProviderInventory> = OnceLock::new();
     INV.get_or_init(|| {
@@ -194,7 +280,6 @@ pub fn openai_inventory() -> &'static ProviderInventory {
     })
 }
 
-/// Parse and cache the OpenRouter baseline inventory (shared loader).
 pub fn openrouter_inventory() -> &'static ProviderInventory {
     static INV: OnceLock<ProviderInventory> = OnceLock::new();
     INV.get_or_init(|| {
@@ -202,7 +287,6 @@ pub fn openrouter_inventory() -> &'static ProviderInventory {
     })
 }
 
-/// Stable JSON report of a provider inventory (sorted keys via serde_json Value).
 pub fn inventory_report_json(inv: &ProviderInventory) -> serde_json::Value {
     serde_json::json!({
         "provider": inv.provider,
@@ -211,9 +295,11 @@ pub fn inventory_report_json(inv: &ProviderInventory) -> serde_json::Value {
             "version": inv.baseline.version,
             "openapi": inv.baseline.openapi,
             "source_url": inv.baseline.source_url,
+            "source_revision": inv.baseline.source_revision,
             "fetched_at_utc": inv.baseline.fetched_at_utc,
             "content_sha256": inv.baseline.content_sha256,
             "content_bytes": inv.baseline.content_bytes,
+            "converted_json_sha256": inv.baseline.converted_json_sha256,
             "path_count": inv.baseline.path_count,
             "endpoint_count": inv.baseline.endpoint_count,
             "schema_count": inv.baseline.schema_count,
@@ -233,34 +319,154 @@ mod tests {
     fn openai_inventory_parses_and_validates() {
         let inv = openai_inventory();
         assert_eq!(inv.provider, "openai");
-        assert_eq!(inv.format_version, 1);
+        assert_eq!(inv.format_version, 2);
         assert_eq!(
             inv.baseline.content_sha256,
             "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da"
         );
         assert_eq!(inv.baseline.content_bytes, 2_827_615);
-        assert_eq!(inv.baseline.fetched_at_utc, "2026-07-25T17:00:00Z");
-        assert_eq!(inv.baseline.version.as_deref(), Some("2.3.0"));
+        assert_eq!(inv.baseline.fetched_at_utc, "2026-07-25T16:25:32Z");
+        assert_eq!(
+            inv.baseline.source_revision.as_deref(),
+            Some("5c044be3bf3a42854e99e34616564eeb2124a317")
+        );
+        assert!(
+            inv.baseline
+                .source_url
+                .contains("5c044be3bf3a42854e99e34616564eeb2124a317")
+        );
+        assert!(!inv.baseline.source_url.contains("/master/"));
         inv.validate_integrity().expect("openai integrity");
-        assert_eq!(inv.endpoints.len() as u64, inv.baseline.endpoint_count);
     }
 
     #[test]
-    fn openrouter_inventory_parses_via_shared_loader() {
+    fn openrouter_inventory_parses_and_validates() {
         let inv = openrouter_inventory();
         assert_eq!(inv.provider, "openrouter");
+        assert_eq!(inv.format_version, 2);
         assert_eq!(
             inv.baseline.content_sha256,
             "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
         );
+        assert_eq!(inv.baseline.fetched_at_utc, "2026-07-25T16:25:35Z");
         inv.validate_integrity().expect("openrouter integrity");
+    }
+
+    #[test]
+    fn every_endpoint_has_validated_transports_and_media_types() {
+        for inv in [openai_inventory(), openrouter_inventory()] {
+            for ep in &inv.endpoints {
+                let id = ep.to_identity().expect(ep.method_path_key().as_str());
+                assert!(!id.transports.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn stream_flag_ops_include_json_and_sse() {
+        let oa = openai_inventory();
+        let chat = oa
+            .endpoints
+            .iter()
+            .find(|e| e.method_path_key() == "POST /chat/completions")
+            .unwrap();
+        let t = chat.transport_set().unwrap();
+        assert!(t.contains(&Transport::HttpJson));
+        assert!(t.contains(&Transport::HttpSse));
+    }
+
+    #[test]
+    fn openrouter_file_download_is_binary_not_sole_json() {
+        let or = openrouter_inventory();
+        let dl = or
+            .endpoints
+            .iter()
+            .find(|e| e.method_path_key() == "GET /files/{file_id}/content")
+            .unwrap();
+        let t = dl.transport_set().unwrap();
+        assert!(t.contains(&Transport::HttpBinary));
+        assert_ne!(t.as_slice(), &[Transport::HttpJson]);
     }
 
     #[test]
     fn report_json_is_stable_shape() {
         let report = inventory_report_json(openai_inventory());
         assert_eq!(report["provider"], "openai");
-        assert!(report["endpoint_keys"].as_array().unwrap().len() > 0);
         assert_eq!(report["client_binding_default"], "not_implemented");
+        assert!(
+            report["baseline"]["source_revision"]
+                .as_str()
+                .unwrap()
+                .len()
+                == 40
+        );
+    }
+
+    #[test]
+    fn invalid_transport_label_rejected() {
+        let mut ep = openai_inventory().endpoints[0].clone();
+        ep.transports = vec!["not_a_transport".into()];
+        assert!(ep.transport_set().is_err());
+    }
+
+    #[test]
+    fn malformed_media_type_rejected() {
+        let mut ep = openai_inventory().endpoints[0].clone();
+        ep.request_content_types = vec!["not-a-type".into()];
+        assert!(ep.to_identity().is_err());
+    }
+
+    #[test]
+    fn openai_generator_verifies_source_yaml_sha() {
+        use std::process::Command;
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let generator = crate_dir.join("baselines/openai/generate_inventory.py");
+        let mini = crate_dir.join("baselines/openai/fixtures/mini_openapi.json");
+        // JSON-only mini path with wrong sha must fail.
+        let status = Command::new("python3")
+            .arg(&generator)
+            .arg("--input")
+            .arg(&mini)
+            .arg("--output")
+            .arg(std::env::temp_dir().join("oa-bad.json"))
+            .arg("--fetched-at-utc")
+            .arg("2026-07-25T16:25:32Z")
+            .arg("--expect-source-sha256")
+            .arg("00".repeat(32))
+            .arg("--expect-source-bytes")
+            .arg("999999")
+            .status()
+            .expect("spawn");
+        assert!(!status.success(), "wrong sha must fail");
+    }
+
+    /// Optional full-blob regen when OPENAI_OPENAPI_YAML_PATH is set.
+    #[test]
+    fn openai_inventory_regenerates_from_local_yaml_when_path_set() {
+        let Ok(path) = std::env::var("OPENAI_OPENAPI_YAML_PATH") else {
+            return;
+        };
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let generator = crate_dir.join("baselines/openai/generate_inventory.py");
+        let inv_path = crate_dir.join("baselines/openai/endpoint_inventory.json");
+        let status = std::process::Command::new("python3")
+            .arg(&generator)
+            .arg("--source-yaml")
+            .arg(&path)
+            .arg("--output")
+            .arg(&inv_path)
+            .arg("--fetched-at-utc")
+            .arg("2026-07-25T16:25:32Z")
+            .arg("--expect-source-sha256")
+            .arg("b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da")
+            .arg("--expect-source-bytes")
+            .arg("2827615")
+            .arg("--check")
+            .status()
+            .expect("spawn");
+        assert!(
+            status.success(),
+            "checked-in inventory must match generator for OPENAI_OPENAPI_YAML_PATH"
+        );
     }
 }

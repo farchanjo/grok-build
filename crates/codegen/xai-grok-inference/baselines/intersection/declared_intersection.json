@@ -1,208 +1,23 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "kind": "openai_openrouter_declared_intersection",
-  "generated_at_utc": "2026-07-25T17:00:00Z",
+  "generated_at_utc": "2026-07-25T16:25:35Z",
   "openai_baseline": {
     "provider": "openai",
     "version": "2.3.0",
     "content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-    "fetched_at_utc": "2026-07-25T17:00:00Z",
+    "source_revision": "5c044be3bf3a42854e99e34616564eeb2124a317",
+    "fetched_at_utc": "2026-07-25T16:25:32Z",
     "endpoint_count": 287
   },
   "openrouter_baseline": {
     "provider": "openrouter",
     "version": "1.0.0",
     "content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203",
-    "fetched_at_utc": "2026-07-24T22:27:00Z",
+    "fetched_at_utc": "2026-07-25T16:25:35Z",
     "endpoint_count": 89
   },
   "members": [
-    {
-      "shared_id": "compat.deleteFile",
-      "api_family": "files",
-      "method": "DELETE",
-      "path": "/files/{file_id}",
-      "openai_operation_id": "deleteFile",
-      "openrouter_operation_id": "deleteFile",
-      "transport": "http_json",
-      "content_types": [],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.listFiles",
-      "api_family": "files",
-      "method": "GET",
-      "path": "/files",
-      "openai_operation_id": "listFiles",
-      "openrouter_operation_id": "listFiles",
-      "transport": "http_json",
-      "content_types": [],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.retrieveFile",
-      "api_family": "files",
-      "method": "GET",
-      "path": "/files/{file_id}",
-      "openai_operation_id": "retrieveFile",
-      "openrouter_operation_id": "getFileMetadata",
-      "transport": "http_json",
-      "content_types": [],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.downloadFile",
-      "api_family": "files",
-      "method": "GET",
-      "path": "/files/{file_id}/content",
-      "openai_operation_id": "downloadFile",
-      "openrouter_operation_id": "downloadFileContent",
-      "transport": "http_json",
-      "content_types": [],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.listModels",
-      "api_family": "models",
-      "method": "GET",
-      "path": "/models",
-      "openai_operation_id": "listModels",
-      "openrouter_operation_id": "getModels",
-      "transport": "http_json",
-      "content_types": [],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.createSpeech",
-      "api_family": "audio",
-      "method": "POST",
-      "path": "/audio/speech",
-      "openai_operation_id": "createSpeech",
-      "openrouter_operation_id": "createAudioSpeech",
-      "transport": "http_json",
-      "content_types": [
-        "application/json"
-      ],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.createTranscription",
-      "api_family": "audio",
-      "method": "POST",
-      "path": "/audio/transcriptions",
-      "openai_operation_id": "createTranscription",
-      "openrouter_operation_id": "createAudioTranscriptions",
-      "transport": "http_multipart",
-      "content_types": [
-        "multipart/form-data"
-      ],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
     {
       "shared_id": "compat.createChatCompletion",
       "api_family": "chat_completions",
@@ -210,81 +25,40 @@
       "path": "/chat/completions",
       "openai_operation_id": "createChatCompletion",
       "openrouter_operation_id": "sendChatCompletionRequest",
-      "transport": "http_json",
-      "content_types": [
+      "transports": [
+        "http_json",
+        "http_sse"
+      ],
+      "request_content_types": [
         "application/json"
       ],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.createEmbedding",
-      "api_family": "embeddings",
-      "method": "POST",
-      "path": "/embeddings",
-      "openai_operation_id": "createEmbedding",
-      "openrouter_operation_id": "createEmbeddings",
-      "transport": "http_json",
-      "content_types": [
-        "application/json"
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
       ],
+      "semantic_evidence": {
+        "kind": "official_schema_and_path",
+        "openai_schema": "CreateChatCompletionRequest",
+        "openrouter_schema": "ChatRequest",
+        "rationale": "Both baselines document a chat-completions create operation with messages/model request schema and OpenAI-compatible chat completion semantics (stream flag).",
+        "openai_docs": "https://platform.openai.com/docs/api-reference",
+        "openrouter_docs": "https://openrouter.ai/docs/api_reference/overview"
+      },
       "evidence": {
         "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
+        "source": "declared_intersection_v2_semantic",
+        "timestamp_utc": "2026-07-25T16:25:35Z",
         "openai_baseline_version": "2.3.0",
         "openrouter_baseline_version": "1.0.0",
         "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
+        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203",
+        "openai_source_revision": "5c044be3bf3a42854e99e34616564eeb2124a317"
       },
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented",
       "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
-      ]
-    },
-    {
-      "shared_id": "compat.createFile",
-      "api_family": "files",
-      "method": "POST",
-      "path": "/files",
-      "openai_operation_id": "createFile",
-      "openrouter_operation_id": "uploadFile",
-      "transport": "http_multipart",
-      "content_types": [
-        "multipart/form-data"
-      ],
-      "evidence": {
-        "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
-        "openai_baseline_version": "2.3.0",
-        "openrouter_baseline_version": "1.0.0",
-        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
-      },
-      "client_binding": "not_implemented",
-      "cli_binding": "not_implemented",
-      "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
+        "Semantic intersection member with explicit schema/document evidence.",
+        "Baseline presence is not client completeness; bindings remain not_implemented."
       ]
     },
     {
@@ -294,58 +68,215 @@
       "path": "/responses",
       "openai_operation_id": "createResponse",
       "openrouter_operation_id": "createResponses",
-      "transport": "http_json",
-      "content_types": [
+      "transports": [
+        "http_json",
+        "http_sse"
+      ],
+      "request_content_types": [
         "application/json"
       ],
+      "response_content_types": [
+        "application/json",
+        "text/event-stream"
+      ],
+      "semantic_evidence": {
+        "kind": "official_schema_and_path",
+        "openai_schema": "CreateResponse",
+        "openrouter_schema": "ResponsesRequest",
+        "rationale": "Both baselines document the Responses API create operation with input/model request schema and stream support (OpenAI beta Responses + OpenRouter Responses).",
+        "openai_docs": "https://platform.openai.com/docs/api-reference",
+        "openrouter_docs": "https://openrouter.ai/docs/api_reference/overview"
+      },
       "evidence": {
         "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
+        "source": "declared_intersection_v2_semantic",
+        "timestamp_utc": "2026-07-25T16:25:35Z",
         "openai_baseline_version": "2.3.0",
         "openrouter_baseline_version": "1.0.0",
         "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
+        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203",
+        "openai_source_revision": "5c044be3bf3a42854e99e34616564eeb2124a317"
       },
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented",
       "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
+        "Semantic intersection member with explicit schema/document evidence.",
+        "Baseline presence is not client completeness; bindings remain not_implemented."
       ]
     },
     {
-      "shared_id": "compat.createVideo",
-      "api_family": "videos",
+      "shared_id": "compat.createEmbedding",
+      "api_family": "embeddings",
       "method": "POST",
-      "path": "/videos",
-      "openai_operation_id": "createVideo",
-      "openrouter_operation_id": "createVideos",
-      "transport": "http_multipart",
-      "content_types": [
-        "application/json",
-        "multipart/form-data"
+      "path": "/embeddings",
+      "openai_operation_id": "createEmbedding",
+      "openrouter_operation_id": "createEmbeddings",
+      "transports": [
+        "http_json",
+        "http_sse"
       ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "response_content_types": [
+        "application/json"
+      ],
+      "semantic_evidence": {
+        "kind": "official_schema_and_path",
+        "openai_schema": "CreateEmbeddingRequest",
+        "openrouter_schema": null,
+        "rationale": "Both baselines document embeddings create with input/model; OpenAI schema CreateEmbeddingRequest is inventoried; OpenRouter path/operation is OpenAI-compatible.",
+        "openai_docs": "https://platform.openai.com/docs/api-reference",
+        "openrouter_docs": "https://openrouter.ai/docs/api_reference/overview"
+      },
       "evidence": {
         "kind": "official_baseline_intersection",
-        "source": "declared_intersection_v1",
-        "timestamp_utc": "2026-07-25T17:00:00Z",
+        "source": "declared_intersection_v2_semantic",
+        "timestamp_utc": "2026-07-25T16:25:35Z",
         "openai_baseline_version": "2.3.0",
         "openrouter_baseline_version": "1.0.0",
         "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
-        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
+        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203",
+        "openai_source_revision": "5c044be3bf3a42854e99e34616564eeb2124a317"
       },
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented",
       "notes": [
-        "Declared intersection member: method+path exists in both official baselines.",
-        "operationId values may differ between vendors; shared_id is explicit.",
-        "Client/CLI bindings are intentionally not_implemented until later milestones."
+        "Semantic intersection member with explicit schema/document evidence.",
+        "Baseline presence is not client completeness; bindings remain not_implemented."
+      ]
+    },
+    {
+      "shared_id": "compat.listModels",
+      "api_family": "models",
+      "method": "GET",
+      "path": "/models",
+      "openai_operation_id": "listModels",
+      "openrouter_operation_id": "getModels",
+      "transports": [
+        "http_json"
+      ],
+      "request_content_types": [],
+      "response_content_types": [
+        "application/json"
+      ],
+      "semantic_evidence": {
+        "kind": "official_schema_and_path",
+        "openai_schema": "ListModelsResponse",
+        "openrouter_schema": "ModelsListResponse",
+        "rationale": "Both baselines document a models list operation returning a model catalog (OpenAI ListModelsResponse / OpenRouter ModelsListResponse).",
+        "openai_docs": "https://platform.openai.com/docs/api-reference",
+        "openrouter_docs": "https://openrouter.ai/docs/api_reference/overview"
+      },
+      "evidence": {
+        "kind": "official_baseline_intersection",
+        "source": "declared_intersection_v2_semantic",
+        "timestamp_utc": "2026-07-25T16:25:35Z",
+        "openai_baseline_version": "2.3.0",
+        "openrouter_baseline_version": "1.0.0",
+        "openai_content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
+        "openrouter_content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203",
+        "openai_source_revision": "5c044be3bf3a42854e99e34616564eeb2124a317"
+      },
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented",
+      "notes": [
+        "Semantic intersection member with explicit schema/document evidence.",
+        "Baseline presence is not client completeness; bindings remain not_implemented."
       ]
     }
   ],
-  "openrouter_native_operations": [
+  "same_path_unverified_overlap": [
+    {
+      "method": "DELETE",
+      "path": "/files/{file_id}",
+      "operation_id": "deleteFile",
+      "openai_operation_id": "deleteFile",
+      "summary": "Delete a file",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/files",
+      "operation_id": "listFiles",
+      "openai_operation_id": "listFiles",
+      "summary": "List files",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/files/{file_id}",
+      "operation_id": "getFileMetadata",
+      "openai_operation_id": "retrieveFile",
+      "summary": "Get file metadata",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/files/{file_id}/content",
+      "operation_id": "downloadFileContent",
+      "openai_operation_id": "downloadFile",
+      "summary": "Download file content",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/speech",
+      "operation_id": "createAudioSpeech",
+      "openai_operation_id": "createSpeech",
+      "summary": "Create speech",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/transcriptions",
+      "operation_id": "createAudioTranscriptions",
+      "openai_operation_id": "createTranscription",
+      "summary": "Create transcription",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/files",
+      "operation_id": "uploadFile",
+      "openai_operation_id": "createFile",
+      "summary": "Upload a file",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/videos",
+      "operation_id": "createVideos",
+      "openai_operation_id": "createVideo",
+      "summary": "Submit a video generation request",
+      "category": "same_path_unverified_overlap",
+      "reason": "METHOD+path exists in both baselines, but OpenAI-compatible request/response semantics were not verified for Change 4 (files/media and other non-coding-agent surfaces remain separate when schemas may differ).",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    }
+  ],
+  "openrouter_contract_outside_intersection": [
     {
       "method": "DELETE",
       "path": "/byok/{id}",
@@ -354,6 +285,7 @@
       "tags": [
         "BYOK"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -365,6 +297,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -376,6 +309,7 @@
       "tags": [
         "API Keys"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -387,6 +321,7 @@
       "tags": [
         "Observability"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -398,6 +333,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -409,6 +345,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -420,6 +357,7 @@
       "tags": [
         "Analytics"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -431,6 +369,7 @@
       "tags": [
         "beta.Analytics"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -442,6 +381,7 @@
       "tags": [
         "Benchmarks"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -453,6 +393,7 @@
       "tags": [
         "BYOK"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -464,6 +405,7 @@
       "tags": [
         "BYOK"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -475,6 +417,7 @@
       "tags": [
         "Classifications"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -486,6 +429,7 @@
       "tags": [
         "Credits"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -497,6 +441,7 @@
       "tags": [
         "Datasets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -508,6 +453,7 @@
       "tags": [
         "Datasets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -519,6 +465,7 @@
       "tags": [
         "Embeddings"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -530,6 +477,7 @@
       "tags": [
         "Endpoints"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -541,6 +489,7 @@
       "tags": [
         "Generations"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -552,6 +501,7 @@
       "tags": [
         "Generations"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -563,6 +513,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -574,6 +525,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -585,6 +537,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -596,6 +549,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -607,6 +561,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -618,6 +573,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -629,6 +585,7 @@
       "tags": [
         "Images"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -640,6 +597,7 @@
       "tags": [
         "Images"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -651,6 +609,7 @@
       "tags": [
         "API Keys"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -662,6 +621,7 @@
       "tags": [
         "API Keys"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -673,6 +633,7 @@
       "tags": [
         "API Keys"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -684,6 +645,7 @@
       "tags": [
         "Models"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -695,6 +657,7 @@
       "tags": [
         "Models"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -706,6 +669,7 @@
       "tags": [
         "Models"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -717,6 +681,7 @@
       "tags": [
         "Endpoints"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -728,6 +693,7 @@
       "tags": [
         "Observability"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -739,6 +705,7 @@
       "tags": [
         "Observability"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -750,6 +717,7 @@
       "tags": [
         "Organization"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -761,6 +729,7 @@
       "tags": [
         "Presets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -772,6 +741,7 @@
       "tags": [
         "Presets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -783,6 +753,7 @@
       "tags": [
         "Presets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -794,6 +765,7 @@
       "tags": [
         "Presets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -805,6 +777,7 @@
       "tags": [
         "Providers"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -816,6 +789,7 @@
       "tags": [
         "Video Generation"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -827,6 +801,7 @@
       "tags": [
         "Video Generation"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -838,6 +813,7 @@
       "tags": [
         "Video Generation"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -849,6 +825,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -860,6 +837,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -871,6 +849,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -882,6 +861,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -893,6 +873,7 @@
       "tags": [
         "BYOK"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -904,6 +885,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -915,6 +897,7 @@
       "tags": [
         "API Keys"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -926,6 +909,7 @@
       "tags": [
         "Observability"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -937,6 +921,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -948,6 +933,7 @@
       "tags": [
         "beta.Analytics"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -959,6 +945,7 @@
       "tags": [
         "OAuth"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -970,6 +957,7 @@
       "tags": [
         "OAuth"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -981,6 +969,7 @@
       "tags": [
         "BYOK"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -992,6 +981,7 @@
       "tags": [
         "Credits"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1003,6 +993,7 @@
       "tags": [
         "Generations"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1014,6 +1005,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1025,6 +1017,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1036,6 +1029,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1047,6 +1041,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1058,6 +1053,7 @@
       "tags": [
         "Guardrails"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1069,6 +1065,7 @@
       "tags": [
         "Images"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1080,6 +1077,7 @@
       "tags": [
         "API Keys"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1091,6 +1089,7 @@
       "tags": [
         "Anthropic Messages"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1102,6 +1101,7 @@
       "tags": [
         "Observability"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1113,6 +1113,7 @@
       "tags": [
         "Presets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1124,6 +1125,7 @@
       "tags": [
         "Presets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1135,6 +1137,7 @@
       "tags": [
         "Presets"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1146,6 +1149,7 @@
       "tags": [
         "Rerank"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1157,6 +1161,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1168,6 +1173,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1179,6 +1185,7 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     },
@@ -1190,15 +1197,942 @@
       "tags": [
         "Workspaces"
       ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    }
+  ],
+  "openrouter_native_operations": [
+    {
+      "method": "DELETE",
+      "path": "/byok/{id}",
+      "operation_id": "deleteBYOKKey",
+      "summary": "Delete a BYOK provider credential",
+      "tags": [
+        "BYOK"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "DELETE",
+      "path": "/guardrails/{id}",
+      "operation_id": "deleteGuardrail",
+      "summary": "Delete a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "DELETE",
+      "path": "/keys/{hash}",
+      "operation_id": "deleteKeys",
+      "summary": "Delete an API key",
+      "tags": [
+        "API Keys"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "DELETE",
+      "path": "/observability/destinations/{id}",
+      "operation_id": "deleteObservabilityDestination",
+      "summary": "Delete an observability destination",
+      "tags": [
+        "Observability"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "DELETE",
+      "path": "/workspaces/{id}",
+      "operation_id": "deleteWorkspace",
+      "summary": "Delete a workspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "DELETE",
+      "path": "/workspaces/{id}/budgets/{interval}",
+      "operation_id": "deleteWorkspaceBudget",
+      "summary": "Delete a workspace budget",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/activity",
+      "operation_id": "getUserActivity",
+      "summary": "Get user activity grouped by endpoint",
+      "tags": [
+        "Analytics"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/analytics/meta",
+      "operation_id": "getAnalyticsMeta",
+      "summary": "Get available analytics metrics and dimensions",
+      "tags": [
+        "beta.Analytics"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/benchmarks",
+      "operation_id": "getBenchmarks",
+      "summary": "List Benchmarks",
+      "tags": [
+        "Benchmarks"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/byok",
+      "operation_id": "listBYOKKeys",
+      "summary": "List BYOK provider credentials",
+      "tags": [
+        "BYOK"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/byok/{id}",
+      "operation_id": "getBYOKKey",
+      "summary": "Get a BYOK provider credential",
+      "tags": [
+        "BYOK"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/classifications/task",
+      "operation_id": "getTaskClassifications",
+      "summary": "Task classification market share",
+      "tags": [
+        "Classifications"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/credits",
+      "operation_id": "getCredits",
+      "summary": "Get remaining credits",
+      "tags": [
+        "Credits"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/datasets/app-rankings",
+      "operation_id": "getAppRankings",
+      "summary": "Top apps by token usage",
+      "tags": [
+        "Datasets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/datasets/rankings-daily",
+      "operation_id": "getRankingsDaily",
+      "summary": "Daily token totals for top 50 models",
+      "tags": [
+        "Datasets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/embeddings/models",
+      "operation_id": "listEmbeddingsModels",
+      "summary": "List all embeddings models",
+      "tags": [
+        "Embeddings"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/endpoints/zdr",
+      "operation_id": "listEndpointsZdr",
+      "summary": "Preview the impact of ZDR on the available endpoints",
+      "tags": [
+        "Endpoints"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/generation",
+      "operation_id": "getGeneration",
+      "summary": "Get request & usage metadata for a generation",
+      "tags": [
+        "Generations"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/generation/content",
+      "operation_id": "listGenerationContent",
+      "summary": "Get stored prompt and completion content for a generation",
+      "tags": [
+        "Generations"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails",
+      "operation_id": "listGuardrails",
+      "summary": "List guardrails",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/assignments/keys",
+      "operation_id": "listKeyAssignments",
+      "summary": "List all key assignments",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/assignments/members",
+      "operation_id": "listMemberAssignments",
+      "summary": "List all member assignments",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/{id}",
+      "operation_id": "getGuardrail",
+      "summary": "Get a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/{id}/assignments/keys",
+      "operation_id": "listGuardrailKeyAssignments",
+      "summary": "List key assignments for a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/{id}/assignments/members",
+      "operation_id": "listGuardrailMemberAssignments",
+      "summary": "List member assignments for a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/images/models",
+      "operation_id": "listImageModels",
+      "summary": "List image generation models",
+      "tags": [
+        "Images"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/images/models/{author}/{slug}/endpoints",
+      "operation_id": "listImageModelEndpoints",
+      "summary": "List endpoints for an image model",
+      "tags": [
+        "Images"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/key",
+      "operation_id": "getCurrentKey",
+      "summary": "Get current API key",
+      "tags": [
+        "API Keys"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/keys",
+      "operation_id": "list",
+      "summary": "List API keys",
+      "tags": [
+        "API Keys"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/keys/{hash}",
+      "operation_id": "getKey",
+      "summary": "Get a single API key",
+      "tags": [
+        "API Keys"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/model/{author}/{slug}",
+      "operation_id": "getModel",
+      "summary": "Get a model by its slug",
+      "tags": [
+        "Models"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/models/count",
+      "operation_id": "listModelsCount",
+      "summary": "Get total count of available models",
+      "tags": [
+        "Models"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/models/user",
+      "operation_id": "listModelsUser",
+      "summary": "List models filtered by user provider preferences, privacy settings, and guardrails",
+      "tags": [
+        "Models"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/models/{author}/{slug}/endpoints",
+      "operation_id": "listEndpoints",
+      "summary": "List all endpoints for a model",
+      "tags": [
+        "Endpoints"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/observability/destinations",
+      "operation_id": "listObservabilityDestinations",
+      "summary": "List observability destinations",
+      "tags": [
+        "Observability"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/observability/destinations/{id}",
+      "operation_id": "getObservabilityDestination",
+      "summary": "Get an observability destination",
+      "tags": [
+        "Observability"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/members",
+      "operation_id": "listOrganizationMembers",
+      "summary": "List organization members",
+      "tags": [
+        "Organization"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/presets",
+      "operation_id": "listPresets",
+      "summary": "List presets",
+      "tags": [
+        "Presets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/presets/{slug}",
+      "operation_id": "getPreset",
+      "summary": "Get a preset",
+      "tags": [
+        "Presets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/presets/{slug}/versions",
+      "operation_id": "listPresetVersions",
+      "summary": "List versions of a preset",
+      "tags": [
+        "Presets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/presets/{slug}/versions/{version}",
+      "operation_id": "getPresetVersion",
+      "summary": "Get a specific version of a preset",
+      "tags": [
+        "Presets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/providers",
+      "operation_id": "listProviders",
+      "summary": "List all providers",
+      "tags": [
+        "Providers"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/models",
+      "operation_id": "listVideosModels",
+      "summary": "List all video generation models",
+      "tags": [
+        "Video Generation"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/{jobId}",
+      "operation_id": "getVideos",
+      "summary": "Poll video generation status",
+      "tags": [
+        "Video Generation"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/{jobId}/content",
+      "operation_id": "listVideosContent",
+      "summary": "Download generated video content",
+      "tags": [
+        "Video Generation"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces",
+      "operation_id": "listWorkspaces",
+      "summary": "List workspaces",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces/{id}",
+      "operation_id": "getWorkspace",
+      "summary": "Get a workspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces/{id}/budgets",
+      "operation_id": "listWorkspaceBudgets",
+      "summary": "List workspace budgets",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces/{id}/members",
+      "operation_id": "listWorkspaceMembers",
+      "summary": "List workspace members",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "PATCH",
+      "path": "/byok/{id}",
+      "operation_id": "updateBYOKKey",
+      "summary": "Update a BYOK provider credential",
+      "tags": [
+        "BYOK"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "PATCH",
+      "path": "/guardrails/{id}",
+      "operation_id": "updateGuardrail",
+      "summary": "Update a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "PATCH",
+      "path": "/keys/{hash}",
+      "operation_id": "updateKeys",
+      "summary": "Update an API key",
+      "tags": [
+        "API Keys"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "PATCH",
+      "path": "/observability/destinations/{id}",
+      "operation_id": "updateObservabilityDestination",
+      "summary": "Update an observability destination",
+      "tags": [
+        "Observability"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "PATCH",
+      "path": "/workspaces/{id}",
+      "operation_id": "updateWorkspace",
+      "summary": "Update a workspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/analytics/query",
+      "operation_id": "queryAnalytics",
+      "summary": "Query analytics data",
+      "tags": [
+        "beta.Analytics"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/auth/keys",
+      "operation_id": "exchangeAuthCodeForAPIKey",
+      "summary": "Exchange authorization code for API key",
+      "tags": [
+        "OAuth"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/auth/keys/code",
+      "operation_id": "createAuthKeysCode",
+      "summary": "Create authorization code",
+      "tags": [
+        "OAuth"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/byok",
+      "operation_id": "createBYOKKey",
+      "summary": "Create a BYOK provider credential",
+      "tags": [
+        "BYOK"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/credits/coinbase",
+      "operation_id": "createCoinbaseCharge",
+      "summary": "Deprecated Coinbase Commerce charge endpoint",
+      "tags": [
+        "Credits"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/generation/feedback",
+      "operation_id": "submitGenerationFeedback",
+      "summary": "Submit feedback for a generation",
+      "tags": [
+        "Generations"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails",
+      "operation_id": "createGuardrail",
+      "summary": "Create a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/keys",
+      "operation_id": "bulkAssignKeysToGuardrail",
+      "summary": "Bulk assign keys to a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/keys/remove",
+      "operation_id": "bulkUnassignKeysFromGuardrail",
+      "summary": "Bulk unassign keys from a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/members",
+      "operation_id": "bulkAssignMembersToGuardrail",
+      "summary": "Bulk assign members to a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/members/remove",
+      "operation_id": "bulkUnassignMembersFromGuardrail",
+      "summary": "Bulk unassign members from a guardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/images",
+      "operation_id": "createImages",
+      "summary": "Generate an image",
+      "tags": [
+        "Images"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/keys",
+      "operation_id": "createKeys",
+      "summary": "Create a new API key",
+      "tags": [
+        "API Keys"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/messages",
+      "operation_id": "createMessages",
+      "summary": "Create a message",
+      "tags": [
+        "Anthropic Messages"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/observability/destinations",
+      "operation_id": "createObservabilityDestination",
+      "summary": "Create an observability destination",
+      "tags": [
+        "Observability"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/presets/{slug}/chat/completions",
+      "operation_id": "createPresetsChatCompletions",
+      "summary": "Create a preset from a chat-completions request body",
+      "tags": [
+        "Presets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/presets/{slug}/messages",
+      "operation_id": "createPresetsMessages",
+      "summary": "Create a preset from a messages request body",
+      "tags": [
+        "Presets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/presets/{slug}/responses",
+      "operation_id": "createPresetsResponses",
+      "summary": "Create a preset from a responses request body",
+      "tags": [
+        "Presets"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/rerank",
+      "operation_id": "createRerank",
+      "summary": "Submit a rerank request",
+      "tags": [
+        "Rerank"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/workspaces",
+      "operation_id": "createWorkspace",
+      "summary": "Create a workspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/workspaces/{id}/members/add",
+      "operation_id": "bulkAddWorkspaceMembers",
+      "summary": "Bulk add members to a workspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "POST",
+      "path": "/workspaces/{id}/members/remove",
+      "operation_id": "bulkRemoveWorkspaceMembers",
+      "summary": "Bulk remove members from a workspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
+      "client_binding": "not_implemented",
+      "cli_binding": "not_implemented"
+    },
+    {
+      "method": "PUT",
+      "path": "/workspaces/{id}/budgets/{interval}",
+      "operation_id": "upsertWorkspaceBudget",
+      "summary": "Create or update a workspace budget",
+      "tags": [
+        "Workspaces"
+      ],
+      "category": "openrouter_contract_outside_intersection",
       "client_binding": "not_implemented",
       "cli_binding": "not_implemented"
     }
   ],
   "notes": [
-    "Intersection membership is an explicit declaration, not a pure path-string guess.",
-    "Each member resolves to both baselines by method+path and records both operationIds.",
-    "OpenRouter-native operations are listed separately and are never claimed as OpenAI platform surface.",
-    "A provider capability claim may remain Unknown without reducing OpenAI client completeness.",
-    "client_binding/cli_binding are not_implemented in Change 4; typed coverage lands later."
+    "Intersection membership requires explicit semantic evidence (schema/docs), not METHOD+path alone.",
+    "OpenRouter endpoints partition into three disjoint categories covering the full baseline: compatible intersection, same-path-unverified overlap, and OpenRouter contract outside intersection.",
+    "Files/audio/video and other media ops with matching paths remain same_path_unverified when schemas may differ; they are not claimed as OpenAI-compatible intersection.",
+    "client_binding/cli_binding are not_implemented in Change 4.",
+    "Baseline presence is not client completeness."
   ]
 }

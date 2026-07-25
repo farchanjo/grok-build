@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn inventory_parses_with_expected_provenance() {
         let inv = openrouter_endpoint_inventory();
-        assert_eq!(inv.format_version, 1);
+        assert_eq!(inv.format_version, 2);
         assert_eq!(inv.provider, "openrouter");
         assert_eq!(
             inv.baseline.source_url,
@@ -138,7 +138,7 @@ mod tests {
             "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203"
         );
         assert_eq!(inv.baseline.content_bytes, 1_653_634);
-        assert_eq!(inv.baseline.fetched_at_utc, "2026-07-24T22:27:00Z");
+        assert_eq!(inv.baseline.fetched_at_utc, "2026-07-25T16:25:35Z");
         assert_eq!(inv.baseline.path_count, 69);
         assert_eq!(inv.baseline.endpoint_count, 89);
         assert_eq!(inv.baseline.schema_count, 712);
@@ -327,7 +327,11 @@ mod tests {
             .arg("--output")
             .arg(&inv_path)
             .arg("--fetched-at-utc")
-            .arg("2026-07-24T22:27:00Z")
+            .arg("2026-07-25T16:25:35Z")
+            .arg("--expect-source-sha256")
+            .arg("90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203")
+            .arg("--expect-source-bytes")
+            .arg("1653634")
             .arg("--check")
             .status()
             .expect("spawn generator --check");

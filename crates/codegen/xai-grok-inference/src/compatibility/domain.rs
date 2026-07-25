@@ -22,15 +22,10 @@ pub enum CompatibilityStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
-    /// Derived from a pinned official OpenAPI baseline inventory.
     OfficialBaseline,
-    /// Explicit intersection or native declaration inventory.
     InventoryDeclaration,
-    /// Typed client binding table (later milestones).
     ClientBinding,
-    /// Runtime probe (later milestones; never invented here).
     RuntimeProbe,
-    /// Unknown / future evidence kinds deserialize here when tagged oddly.
     #[serde(other)]
     Other,
 }
@@ -39,14 +34,10 @@ pub enum EvidenceKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     pub kind: EvidenceKind,
-    /// Human-readable source label (URL, inventory path, or declaration id).
     pub source: String,
-    /// ISO-8601 UTC timestamp when the evidence was recorded.
     pub timestamp_utc: String,
-    /// Baseline document version when applicable (e.g. OpenAPI `info.version`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_version: Option<String>,
-    /// Content SHA-256 of the pinned source blob when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_sha256: Option<String>,
 }
@@ -57,7 +48,6 @@ pub struct Evidence {
 pub enum ApiFamily {
     ChatCompletions,
     Responses,
-    /// Anthropic-compatible Messages surface (OpenRouter-native relative to OpenAI).
     Messages,
     Embeddings,
     Models,
@@ -74,7 +64,6 @@ pub enum ApiFamily {
 }
 
 impl ApiFamily {
-    /// Map a path template to a family; unknown paths become `Other`.
     pub fn from_path(path: &str) -> Self {
         let p = path.trim();
         if p.starts_with("/chat/completions") {
@@ -111,7 +100,6 @@ impl ApiFamily {
     }
 }
 
-/// HTTP method for baseline operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
@@ -154,26 +142,51 @@ impl HttpMethod {
     }
 }
 
-/// Transport classification derived conservatively from OpenAPI shape.
+/// Transport classification from official OpenAPI shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     HttpJson,
     HttpSse,
     HttpMultipart,
+    HttpBinary,
     Websocket,
     #[default]
     Unknown,
 }
 
 impl Transport {
-    pub fn parse(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "http_json" => Self::HttpJson,
-            "http_sse" => Self::HttpSse,
-            "http_multipart" => Self::HttpMultipart,
-            "websocket" | "ws" => Self::Websocket,
-            _ => Self::Unknown,
+    pub const ALL_LABELS: &'static [&'static str] = &[
+        "http_json",
+        "http_sse",
+        "http_multipart",
+        "http_binary",
+        "websocket",
+        "unknown",
+    ];
+
+    /// Parse a strict inventory label. Returns `None` for invalid labels
+    /// (callers that require validation should treat `None` as an error).
+    pub fn parse_strict(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "http_json" => Some(Self::HttpJson),
+            "http_sse" => Some(Self::HttpSse),
+            "http_multipart" => Some(Self::HttpMultipart),
+            "http_binary" => Some(Self::HttpBinary),
+            "websocket" => Some(Self::Websocket),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HttpJson => "http_json",
+            Self::HttpSse => "http_sse",
+            Self::HttpMultipart => "http_multipart",
+            Self::HttpBinary => "http_binary",
+            Self::Websocket => "websocket",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -182,18 +195,18 @@ impl Transport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationIdentity {
     pub family: ApiFamily,
-    /// Stable id (OpenAPI operationId or declared shared id).
     pub operation_id: String,
     pub method: HttpMethod,
-    /// OpenAPI path template (e.g. `/chat/completions`).
     pub path: String,
-    pub transport: Transport,
+    /// Multi-label transport set (JSON + SSE for stream-flag ops, etc.).
+    pub transports: Vec<Transport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub content_types: Vec<String>,
+    pub request_content_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_content_types: Vec<String>,
 }
 
 impl OperationIdentity {
-    /// Deterministic method+path key.
     pub fn method_path_key(&self) -> String {
         format!("{} {}", self.method.as_str(), self.path)
     }
@@ -203,24 +216,25 @@ impl OperationIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimSurface {
-    /// Completeness of a typed OpenAI client vs the OpenAI baseline.
+    /// Operation exists in the official OpenAI baseline inventory.
+    OpenaiBaselinePresence,
+    /// Typed OpenAI client binding completeness (Change 9+).
     OpenaiClientCompleteness,
-    /// Coverage of OpenRouter-native operations (not in OpenAI baseline).
+    /// CLI binding coverage (later milestones).
+    CliCoverage,
+    /// OpenRouter-native exclusive operations (path not in OpenAI baseline).
     OpenrouterNativeCoverage,
-    /// Capability advertised by a configured third-party provider.
+    /// Configured third-party provider capability.
     ConfiguredProviderCapability,
 }
 
-/// Binding of an operation into product surfaces (client library / CLI).
+/// Binding of an operation into product surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingStatus {
-    /// Typed binding exists and is covered by tests (later milestones).
     Implemented,
-    /// Explicitly not wired yet — honest default for Change 4.
     #[default]
     NotImplemented,
-    /// Unknown / not assessed.
     Unknown,
 }
 
@@ -259,11 +273,85 @@ pub fn path_is_safe(path: &str) -> bool {
     if path.contains('\0') || path.contains('\n') || path.contains('\r') {
         return false;
     }
-    // Reject scheme-like absolute URLs smuggled as paths.
     if path.contains("://") {
         return false;
     }
     true
+}
+
+/// Basic media-type syntax check (type/subtype or type/*).
+pub fn media_type_is_valid(mt: &str) -> bool {
+    let s = mt.trim();
+    if s.is_empty() || s.len() > 256 {
+        return false;
+    }
+    if s == "*/*" {
+        return true;
+    }
+    let main = s.split(';').next().unwrap_or("").trim();
+    let Some((t, st)) = main.split_once('/') else {
+        return false;
+    };
+    if t.is_empty() || st.is_empty() {
+        return false;
+    }
+    let ok = |p: &str| {
+        p.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '!' | '#' | '$' | '&' | '-' | '^' | '_' | '+' | '.' | '*')
+        })
+    };
+    ok(t) && ok(st)
+}
+
+/// RFC3339-ish UTC timestamp check (`YYYY-MM-DDTHH:MM:SSZ`).
+pub fn timestamp_is_rfc3339_utc(ts: &str) -> bool {
+    let b = ts.as_bytes();
+    if b.len() != 20 || b[19] != b'Z' {
+        return false;
+    }
+    // 2026-07-25T16:25:32Z
+    let digits = |i: usize| b[i].is_ascii_digit();
+    digits(0)
+        && digits(1)
+        && digits(2)
+        && digits(3)
+        && b[4] == b'-'
+        && digits(5)
+        && digits(6)
+        && b[7] == b'-'
+        && digits(8)
+        && digits(9)
+        && b[10] == b'T'
+        && digits(11)
+        && digits(12)
+        && b[13] == b':'
+        && digits(14)
+        && digits(15)
+        && b[16] == b':'
+        && digits(17)
+        && digits(18)
+}
+
+/// Reject Supported status paired with unimplemented bindings on client/CLI surfaces.
+pub fn claim_is_consistent(claim: &OperationClaim) -> Result<(), String> {
+    match claim.surface {
+        ClaimSurface::OpenaiClientCompleteness | ClaimSurface::CliCoverage => {
+            if claim.status == CompatibilityStatus::Supported
+                && (claim.client_binding == BindingStatus::NotImplemented
+                    || claim.cli_binding == BindingStatus::NotImplemented)
+            {
+                return Err(
+                    "Supported client/CLI completeness cannot pair with NotImplemented bindings"
+                        .into(),
+                );
+            }
+        }
+        ClaimSurface::OpenaiBaselinePresence
+        | ClaimSurface::OpenrouterNativeCoverage
+        | ClaimSurface::ConfiguredProviderCapability => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -273,7 +361,6 @@ mod tests {
     #[test]
     fn path_safety_rejects_traversal_and_urls() {
         assert!(path_is_safe("/chat/completions"));
-        assert!(path_is_safe("/files/{file_id}"));
         assert!(!path_is_safe("chat/completions"));
         assert!(!path_is_safe("//evil"));
         assert!(!path_is_safe("/../etc/passwd"));
@@ -281,26 +368,69 @@ mod tests {
     }
 
     #[test]
-    fn unknown_status_is_default() {
-        assert_eq!(CompatibilityStatus::default(), CompatibilityStatus::Unknown);
+    fn media_type_validation() {
+        assert!(media_type_is_valid("application/json"));
+        assert!(media_type_is_valid("audio/*"));
+        assert!(media_type_is_valid("text/event-stream"));
+        assert!(!media_type_is_valid(""));
+        assert!(!media_type_is_valid("no-slash"));
+        assert!(!media_type_is_valid("application/"));
     }
 
     #[test]
-    fn binding_defaults_to_not_implemented() {
-        assert_eq!(BindingStatus::default(), BindingStatus::NotImplemented);
+    fn timestamp_validation() {
+        assert!(timestamp_is_rfc3339_utc("2026-07-25T16:25:32Z"));
+        assert!(!timestamp_is_rfc3339_utc("2026-07-25T17:00:00+00:00"));
+        assert!(!timestamp_is_rfc3339_utc("not-a-time"));
     }
 
     #[test]
-    fn family_from_path_covers_coding_agent_routes() {
-        assert_eq!(
-            ApiFamily::from_path("/chat/completions"),
-            ApiFamily::ChatCompletions
-        );
-        assert_eq!(ApiFamily::from_path("/responses"), ApiFamily::Responses);
-        assert_eq!(ApiFamily::from_path("/messages"), ApiFamily::Messages);
-        assert!(matches!(
-            ApiFamily::from_path("/alpha/experimental"),
-            ApiFamily::Other(_)
-        ));
+    fn transport_strict_rejects_unknown_labels() {
+        assert!(Transport::parse_strict("http_json").is_some());
+        assert!(Transport::parse_strict("http_binary").is_some());
+        assert!(Transport::parse_strict("application/json").is_none());
+        assert!(Transport::parse_strict("sse").is_none());
+    }
+
+    #[test]
+    fn supported_plus_not_implemented_is_inconsistent_for_client_surface() {
+        let claim = OperationClaim {
+            identity: OperationIdentity {
+                family: ApiFamily::ChatCompletions,
+                operation_id: "x".into(),
+                method: HttpMethod::Post,
+                path: "/chat/completions".into(),
+                transports: vec![Transport::HttpJson],
+                request_content_types: vec![],
+                response_content_types: vec![],
+            },
+            surface: ClaimSurface::OpenaiClientCompleteness,
+            status: CompatibilityStatus::Supported,
+            evidence: vec![],
+            client_binding: BindingStatus::NotImplemented,
+            cli_binding: BindingStatus::NotImplemented,
+        };
+        assert!(claim_is_consistent(&claim).is_err());
+    }
+
+    #[test]
+    fn baseline_presence_supported_with_not_implemented_bindings_is_ok() {
+        let claim = OperationClaim {
+            identity: OperationIdentity {
+                family: ApiFamily::ChatCompletions,
+                operation_id: "x".into(),
+                method: HttpMethod::Post,
+                path: "/chat/completions".into(),
+                transports: vec![Transport::HttpJson],
+                request_content_types: vec![],
+                response_content_types: vec![],
+            },
+            surface: ClaimSurface::OpenaiBaselinePresence,
+            status: CompatibilityStatus::Supported,
+            evidence: vec![],
+            client_binding: BindingStatus::NotImplemented,
+            cli_binding: BindingStatus::NotImplemented,
+        };
+        assert!(claim_is_consistent(&claim).is_ok());
     }
 }

@@ -1,22 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic OpenRouter OpenAPI → endpoint_inventory.json generator.
 
-Invocation (exact):
-
-  python3 generate_inventory.py \\
-      --input /path/to/openrouter-openapi.json \\
-      --output endpoint_inventory.json \\
-      --fetched-at-utc 2026-07-24T22:27:00Z
-
-Rules are pinned in this file:
-  - endpoint enumeration: every path + HTTP method (skip x-*, parameters)
-  - coding-agent schema allowlist (KEY_SCHEMAS)
-  - coding-agent priority endpoints (PRIORITY_ENDPOINTS) — must exist in source
-  - stable ordering (sorted paths/methods/fields)
-  - canonical JSON (indent=2, trailing newline, sorted object keys where applicable)
-  - content_sha256 + content_bytes of the exact input blob
-
-No network I/O. Tests pass --input to a local file (full pin or mini fixture).
+Verifies the exact input blob SHA/size before writing. No network I/O.
 """
 
 from __future__ import annotations
@@ -28,7 +13,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Pinned coding-agent schema allowlist (order preserved in output).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_shared"))
+from openapi_contract import enumerate_endpoints, schema_fields  # noqa: E402
+
+FORMAT_VERSION = 2
+PROVIDER = "openrouter"
+SOURCE_URL = "https://openrouter.ai/openapi.json"
+YAML_URL = "https://openrouter.ai/openapi.yaml"
+DOCS_URL = "https://openrouter.ai/docs/api_reference/overview"
+
 KEY_SCHEMAS: list[str] = [
     "ChatRequest",
     "ResponsesRequest",
@@ -46,8 +39,6 @@ KEY_SCHEMAS: list[str] = [
     "GenerationResponse",
 ]
 
-# Priority endpoints for Grok coding-agent coverage. Every entry MUST exist
-# in the source OpenAPI or generation fails.
 PRIORITY_ENDPOINTS: list[str] = [
     "POST /chat/completions",
     "POST /responses",
@@ -59,84 +50,33 @@ PRIORITY_ENDPOINTS: list[str] = [
     "POST /embeddings",
 ]
 
-FORMAT_VERSION = 1
-PROVIDER = "openrouter"
-SOURCE_URL = "https://openrouter.ai/openapi.json"
-YAML_URL = "https://openrouter.ai/openapi.yaml"
-DOCS_URL = "https://openrouter.ai/docs/api_reference/overview"
 
-HTTP_METHODS = {
-    "get",
-    "put",
-    "post",
-    "delete",
-    "options",
-    "head",
-    "patch",
-    "trace",
-}
+def build_inventory(
+    raw: bytes,
+    fetched_at_utc: str,
+    *,
+    expect_sha256: str | None = None,
+    expect_bytes: int | None = None,
+) -> dict[str, Any]:
+    sha = hashlib.sha256(raw).hexdigest()
+    if expect_sha256 is not None and sha != expect_sha256:
+        raise SystemExit(f"input sha mismatch: got {sha} expected {expect_sha256}")
+    if expect_bytes is not None and len(raw) != expect_bytes:
+        raise SystemExit(
+            f"input size mismatch: got {len(raw)} expected {expect_bytes}"
+        )
 
-
-def schema_fields(schemas: dict[str, Any], name: str) -> dict[str, Any] | None:
-    s = schemas.get(name)
-    if not s or not isinstance(s, dict):
-        return None
-    props: dict[str, Any] = dict(s.get("properties") or {})
-    required = set(s.get("required") or [])
-    for part in s.get("allOf") or []:
-        if isinstance(part, dict) and "properties" in part:
-            props = {**props, **part["properties"]}
-            required |= set(part.get("required") or [])
-    fields: list[dict[str, Any]] = []
-    for fname in sorted(props.keys()):
-        fdef = props[fname]
-        entry: dict[str, Any] = {"name": fname, "required": fname in required}
-        if isinstance(fdef, dict):
-            if "type" in fdef:
-                entry["type"] = fdef["type"]
-            if "$ref" in fdef and isinstance(fdef["$ref"], str):
-                entry["ref"] = fdef["$ref"].rsplit("/", 1)[-1]
-            if "anyOf" in fdef or "oneOf" in fdef:
-                entry["union"] = True
-            if "enum" in fdef:
-                entry["enum"] = fdef["enum"]
-        fields.append(entry)
-    return {"schema": name, "field_count": len(fields), "fields": fields}
-
-
-def build_inventory(raw: bytes, fetched_at_utc: str) -> dict[str, Any]:
     data = json.loads(raw)
     info = data.get("info") or {}
     paths = data.get("paths") or {}
-    schemas = (data.get("components") or {}).get("schemas") or {}
-    if not isinstance(paths, dict) or not isinstance(schemas, dict):
-        raise SystemExit("invalid OpenAPI: paths/schemas must be objects")
-
-    endpoints: list[dict[str, Any]] = []
-    for path in sorted(paths.keys()):
-        methods = paths[path]
-        if not isinstance(methods, dict):
-            continue
-        for method in sorted(methods.keys()):
-            if method not in HTTP_METHODS:
-                continue
-            op = methods[method]
-            if not isinstance(op, dict):
-                continue
-            endpoints.append(
-                {
-                    "method": method.upper(),
-                    "path": path,
-                    "operation_id": op.get("operationId"),
-                    "tags": list(op.get("tags") or []),
-                    "summary": op.get("summary"),
-                }
-            )
+    endpoints, schemas = enumerate_endpoints(data)
 
     endpoint_keys = {f"{e['method']} {e['path']}" for e in endpoints}
+    if len(endpoint_keys) != len(endpoints):
+        raise SystemExit("duplicate method+path identities")
     missing = [p for p in PRIORITY_ENDPOINTS if p not in endpoint_keys]
     if missing:
-        raise SystemExit(f"priority endpoints missing from source OpenAPI: {missing}")
+        raise SystemExit(f"priority endpoints missing: {missing}")
 
     field_inventory = []
     for name in KEY_SCHEMAS:
@@ -144,8 +84,7 @@ def build_inventory(raw: bytes, fetched_at_utc: str) -> dict[str, Any]:
         if inv is not None:
             field_inventory.append(inv)
 
-    sha = hashlib.sha256(raw).hexdigest()
-    inventory = {
+    return {
         "format_version": FORMAT_VERSION,
         "provider": PROVIDER,
         "baseline": {
@@ -158,7 +97,7 @@ def build_inventory(raw: bytes, fetched_at_utc: str) -> dict[str, Any]:
             "fetched_at_utc": fetched_at_utc,
             "content_sha256": sha,
             "content_bytes": len(raw),
-            "path_count": len(paths),
+            "path_count": len(paths) if isinstance(paths, dict) else 0,
             "endpoint_count": len(endpoints),
             "schema_count": len(schemas),
         },
@@ -167,11 +106,13 @@ def build_inventory(raw: bytes, fetched_at_utc: str) -> dict[str, Any]:
         "coding_agent_priority_endpoints": list(PRIORITY_ENDPOINTS),
         "notes": [
             "Compact inventory only; full OpenAPI is not vendored.",
+            "transports is a multi-label set; stream-flag ops include http_json + http_sse.",
+            "Binary response ops are never collapsed to sole http_json.",
+            "OpenRouter is not a full OpenAI platform clone.",
             "Regenerate with generate_inventory.py from a local OpenAPI file.",
             "No network I/O in the generator or in unit tests.",
         ],
     }
-    return inventory
 
 
 def canonical_json(obj: Any) -> str:
@@ -180,36 +121,34 @@ def canonical_json(obj: Any) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path, help="Local OpenAPI JSON path")
+    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--fetched-at-utc", required=True)
     parser.add_argument(
-        "--output",
-        required=True,
-        type=Path,
-        help="Destination endpoint_inventory.json path",
+        "--expect-source-sha256",
+        help="When set, require the input blob SHA-256 to match exactly",
     )
     parser.add_argument(
-        "--fetched-at-utc",
-        required=True,
-        help="ISO-8601 UTC timestamp recorded in baseline.fetched_at_utc",
+        "--expect-source-bytes",
+        type=int,
+        help="When set, require the input blob size to match exactly",
     )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Compare generated inventory to --output and exit 1 on diff",
-    )
+    parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
 
     raw = args.input.read_bytes()
-    inventory = build_inventory(raw, args.fetched_at_utc)
+    inventory = build_inventory(
+        raw,
+        args.fetched_at_utc,
+        expect_sha256=args.expect_source_sha256,
+        expect_bytes=args.expect_source_bytes,
+    )
     text = canonical_json(inventory)
 
     if args.check:
         existing = args.output.read_text(encoding="utf-8")
         if existing != text:
-            print(
-                "inventory differs from generator output; re-run without --check to refresh",
-                file=sys.stderr,
-            )
+            print("inventory differs from generator output", file=sys.stderr)
             return 1
         print("OK: inventory matches generator for", args.input)
         return 0
@@ -218,8 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     args.output.write_text(text, encoding="utf-8")
     print(
         f"wrote {args.output} endpoints={inventory['baseline']['endpoint_count']} "
-        f"sha256={inventory['baseline']['content_sha256']} "
-        f"bytes={inventory['baseline']['content_bytes']}"
+        f"sha256={inventory['baseline']['content_sha256']}"
     )
     return 0
 
