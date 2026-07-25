@@ -2923,7 +2923,8 @@ mod inline_auto_compact_flow_tests {
     }
 
     /// Auto-compaction 401 on an OpenRouter model emits provider-scoped
-    /// credential failure (no `/providers`, no global auth_required).
+    /// credential failure (`/providers` repair, no `/login`, no global
+    /// auth_required).
     #[tokio::test(flavor = "current_thread")]
     async fn surface_compact_auth_failure_openrouter_provider_scoped() {
         use crate::agent::config::{ModelEntry, ModelInfo};
@@ -2989,8 +2990,14 @@ mod inline_auto_compact_flow_tests {
                     {
                         assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
                         assert!(message.contains("OpenRouter"));
-                        assert!(message.contains("/providers"));
-                        assert!(!message.contains("/providers"));
+                        assert!(
+                            message.contains("/providers"),
+                            "OpenRouter repair must direct to /providers: {message}"
+                        );
+                        assert!(
+                            !message.contains("/login") && !message.contains("grok login"),
+                            "must not mention global login: {message}"
+                        );
                         assert_eq!(
                             provider.as_ref().map(|p| p.provider_id.as_str()),
                             Some("openrouter")
@@ -3073,7 +3080,14 @@ mod inline_auto_compact_flow_tests {
                         ) = &notif.update
                     {
                         assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
-                        assert!(!message.contains("/providers"));
+                        assert!(
+                            message.contains("/providers"),
+                            "OpenRouter repair must direct to /providers: {message}"
+                        );
+                        assert!(
+                            !message.contains("/login") && !message.contains("grok login"),
+                            "must not mention global login: {message}"
+                        );
                         assert_eq!(p.provider_id, "openrouter");
                         saw = true;
                     }
