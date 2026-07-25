@@ -1067,6 +1067,85 @@ mod tests {
         }
     }
 
+    /// Keepalives are absorbed at L1 before Layer-2, so a keepalive-only
+    /// Responses wire presents here as a permanently pending stream. The
+    /// semantic idle deadline must still fire — transport heartbeats must
+    /// not keep a dead stream alive indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_when_only_transport_activity_then_stalls() {
+        let raw = stream::pending::<Result<rs::ResponseStreamEvent, InferenceError>>().boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_millis(100),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            InferenceEvent::Failed { error, .. } => {
+                assert_eq!(error.kind, crate::events::InferenceErrorKind::IdleTimeout);
+            }
+            other => panic!("expected Failed(IdleTimeout), got {other:?}"),
+        }
+        // No model output / completion from a keepalive-only wire.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, InferenceEvent::Completed { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, InferenceEvent::ChannelToken { .. }))
+        );
+    }
+
+    /// Non-content status transitions (L2 analogue of filtered keepalives:
+    /// they wake the outer poll but do not reset content progress) must not
+    /// prevent the content-aware idle deadline from firing.
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_on_repeated_non_content_status_events() {
+        use async_stream::stream as async_stream;
+
+        let idle = Duration::from_millis(100);
+        // Emit non-content status events spaced beyond the idle window.
+        // `start_paused` advances virtual time on each sleep so this is
+        // deterministic (no wall-clock flakiness). After the gap, the second
+        // non-content event trips content-aware idle before any completion.
+        let raw = async_stream! {
+            yield Ok(rs::ResponseStreamEvent::ResponseQueued(
+                rs_types::ResponseQueuedEvent {
+                    sequence_number: 0,
+                    response: empty_completed_response(),
+                },
+            ));
+            tokio::time::sleep(idle + Duration::from_millis(10)).await;
+            yield Ok(rs::ResponseStreamEvent::ResponseInProgress(
+                rs_types::ResponseInProgressEvent {
+                    sequence_number: 1,
+                    response: empty_completed_response(),
+                },
+            ));
+        }
+        .boxed();
+
+        let events = collect(stream_responses(raw, None, rid(), idle, None)).await;
+
+        match events.last().unwrap() {
+            InferenceEvent::Failed { error, .. } => {
+                assert_eq!(error.kind, crate::events::InferenceErrorKind::IdleTimeout);
+            }
+            other => panic!("expected Failed(IdleTimeout), got {other:?}"),
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, InferenceEvent::Completed { .. }))
+        );
+    }
+
     #[tokio::test]
     async fn model_metadata_yielded_after_stream_started() {
         let raw = stream::iter(vec![Ok(completed_event())]).boxed();

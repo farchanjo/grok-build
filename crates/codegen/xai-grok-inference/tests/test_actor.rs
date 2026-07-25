@@ -21,8 +21,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
 use xai_grok_inference::{
-    ApiBackend, RequestId, RetryPolicy, InferenceActor, InferenceConfig, InferenceChannel,
-    InferenceErrorKind, InferenceEvent,
+    ApiBackend, InferenceActor, InferenceChannel, InferenceConfig, InferenceErrorKind,
+    InferenceEvent, RequestId, RetryPolicy,
 };
 use xai_grok_inference_types::{
     ConversationItem, ConversationRequest, DoomLoopRecoveryPolicy, UserItem,
@@ -774,7 +774,10 @@ async fn update_config_changes_subsequent_request_model() {
 // Responses doom-loop check signals
 // ---------------------------------------------------------------------------
 
-fn responses_config(base_url: String, doom_loop: Option<DoomLoopRecoveryPolicy>) -> InferenceConfig {
+fn responses_config(
+    base_url: String,
+    doom_loop: Option<DoomLoopRecoveryPolicy>,
+) -> InferenceConfig {
     let mut cfg = test_config(base_url, "test-model");
     cfg.api_backend = ApiBackend::Responses;
     cfg.doom_loop_recovery = doom_loop;
@@ -965,21 +968,26 @@ async fn responses_unknown_semantic_event_fails_closed() {
     );
 
     let result = handle
-        .submit_and_collect(
-            RequestId::from("req-unknown-semantic"),
-            user_request("hi"),
-        )
+        .submit_and_collect(RequestId::from("req-unknown-semantic"), user_request("hi"))
         .await;
     server.shutdown();
 
     let err = result.expect_err("unknown semantic response.* must fail the request");
+    assert!(
+        matches!(
+            err,
+            xai_grok_inference_types::InferenceError::Serialization(_)
+        ),
+        "expected InferenceError::Serialization, got: {err:?}"
+    );
     let msg = err.to_string();
     assert!(
-        matches!(err, xai_grok_inference_types::InferenceError::Serialization(_))
-            || msg.contains("serialization error")
-            || msg.contains("unknown variant")
-            || msg.contains("brand_new_semantic"),
-        "expected serialization failure, got: {err:?} / {msg}"
+        msg.contains("serialization error:"),
+        "expected serialization error display prefix, got: {msg}"
+    );
+    assert!(
+        msg.contains("response.brand_new_semantic_event") || msg.contains("unknown variant"),
+        "expected unknown-event detail, got: {msg}"
     );
 }
 

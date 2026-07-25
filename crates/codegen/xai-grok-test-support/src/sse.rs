@@ -801,6 +801,65 @@ pub fn chat_completions_reasoning_then_tool_call_events(
 mod tests {
     use super::*;
 
+    /// Pin the insertion layout of [`responses_api_with_keepalive_frames`]:
+    /// named keepalive after `response.created`, data-only keepalive after the
+    /// first text delta, and another named keepalive immediately before
+    /// `response.completed`. Regression guard so index math stays explicit.
+    #[test]
+    fn responses_api_with_keepalive_frames_insertion_shape() {
+        fn json_type(data: &str) -> Option<String> {
+            serde_json::from_str::<serde_json::Value>(data)
+                .ok()
+                .and_then(|v| v.get("type")?.as_str().map(str::to_owned))
+        }
+
+        let events = responses_api_with_keepalive_frames("hello world", "m");
+        assert!(
+            events.len() >= 6,
+            "created + 3 keepalives + ≥1 delta + completed + DONE"
+        );
+        assert_eq!(events.last().map(|e| e.data.as_str()), Some("[DONE]"));
+
+        assert_eq!(
+            json_type(&events[0].data).as_deref(),
+            Some("response.created")
+        );
+        // Index 1 (after created): named keepalive.
+        assert_eq!(
+            events[1].event.as_deref(),
+            Some(RESPONSES_KEEPALIVE_EVENT),
+            "first splice must be event: keepalive"
+        );
+        assert_eq!(json_type(&events[1].data).as_deref(), Some("keepalive"));
+
+        // A data-only keepalive (no SSE event name) must appear mid-stream.
+        assert!(
+            events.iter().any(|e| {
+                e.event.is_none() && json_type(&e.data).as_deref() == Some("keepalive")
+            }),
+            "fixture must include an unnamed data-only keepalive"
+        );
+
+        // Named keepalive immediately before completed.
+        let completed_idx = events
+            .iter()
+            .position(|e| json_type(&e.data).as_deref() == Some("response.completed"))
+            .expect("completed present");
+        assert_eq!(
+            events[completed_idx - 1].event.as_deref(),
+            Some(RESPONSES_KEEPALIVE_EVENT),
+            "named keepalive must sit immediately before response.completed"
+        );
+
+        // Semantic text delta still present after keepalives.
+        assert!(
+            events
+                .iter()
+                .any(|e| json_type(&e.data).as_deref() == Some("response.output_text.delta")),
+            "text deltas must survive keepalive splicing"
+        );
+    }
+
     /// Both byte-exact delta encoders must reconstruct a multi-line response
     /// (incl. a ```mermaid fence) byte-for-byte. This is load-bearing:
     /// `split_whitespace` would collapse the fence's newlines onto one line,
@@ -815,9 +874,11 @@ mod tests {
 
         // The reconstruction preserves the fence as a real, newline-delimited
         // code block (the property diagram detection depends on).
-        assert!(chat_completion_deltas(text)
-            .concat()
-            .contains("```mermaid\nflowchart TD\n"));
+        assert!(
+            chat_completion_deltas(text)
+                .concat()
+                .contains("```mermaid\nflowchart TD\n")
+        );
     }
 
     /// Multiple consecutive spaces and a trailing newline survive too (no

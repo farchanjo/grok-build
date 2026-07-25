@@ -85,18 +85,8 @@ impl GrokRequestHeaders<'_> {
     }
 }
 
-/// Parse the `Retry-After` response header as delta-seconds.
-/// Our inference backends only emit integer seconds (never HTTP-date),
-/// so we only handle that form. HTTP-dates silently return `None` and
-/// the caller falls back to exponential backoff.
-/// Capped at 120s to prevent absurdly long sleeps from a misbehaving upstream.
-///
-/// SSE `event:` name and JSON `type` tag used for Responses-stream transport
-/// heartbeats (OpenAI OAuth / Codex and async-openai wire convention).
-///
-/// These frames are not model API events: they must never reach the strict
-/// `ResponseStreamEvent` deserializer (which would surface a user-facing
-/// `serialization error: unknown variant 'keepalive', ...`).
+/// SSE `event:` name and JSON `type` tag for Responses transport heartbeats
+/// (OpenAI OAuth / Codex / async-openai). Not a model API event.
 const RESPONSES_KEEPALIVE_TYPE: &str = "keepalive";
 
 /// True when an SSE frame is a Responses transport keepalive / heartbeat.
@@ -118,9 +108,8 @@ fn is_responses_keepalive(event_name: &str, data: &str) -> bool {
     // Confirm via the typed `type` tag so a legitimate delta whose text
     // merely quotes "keepalive" is not swallowed.
     data.contains(RESPONSES_KEEPALIVE_TYPE)
-        && serde_json::from_str::<serde_json::Value>(data).is_ok_and(|v| {
-            v.get("type").and_then(|t| t.as_str()) == Some(RESPONSES_KEEPALIVE_TYPE)
-        })
+        && serde_json::from_str::<serde_json::Value>(data)
+            .is_ok_and(|v| v.get("type").and_then(|t| t.as_str()) == Some(RESPONSES_KEEPALIVE_TYPE))
 }
 
 /// Deserialize a Responses API SSE event, with a fallback for xAI-specific
@@ -252,6 +241,11 @@ fn record_stream_request_failure(err: &reqwest::Error) {
     span.record("error", err.to_string().as_str());
 }
 
+/// Parse the `Retry-After` response header as delta-seconds.
+/// Our inference backends only emit integer seconds (never HTTP-date),
+/// so we only handle that form. HTTP-dates silently return `None` and
+/// the caller falls back to exponential backoff.
+/// Capped at 120s to prevent absurdly long sleeps from a misbehaving upstream.
 fn extract_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -1719,21 +1713,11 @@ impl InferenceClient {
                             return std::future::ready(None);
                         }
 
-                        tracing::info!(
-                            target: crate::inference_log::TARGET,
-                            event = "sse_chunk",
-                            backend = "responses",
-                            data = %data,
-                        );
-
-                        // Transport heartbeats (OpenAI OAuth / Codex
-                        // `keepalive`, async-openai `event: keepalive`) are
-                        // not API events. Swallow before typed
-                        // deserialization so they never become a user-facing
-                        // serialization failure or model output. Filtering
-                        // here still allows the underlying byte stream to
-                        // progress; Layer-2 idle timers continue to bound
-                        // streams that produce no semantic progress.
+                        // Transport heartbeats first — before the info-level
+                        // `sse_chunk` log that dumps the payload. Keepalives
+                        // can arrive often on long OAuth streams; logging them
+                        // at info would flood the journal and must never echo
+                        // response body data.
                         if is_responses_keepalive(&event.event, data) {
                             tracing::debug!(
                                 target: crate::inference_log::TARGET,
@@ -1742,25 +1726,32 @@ impl InferenceClient {
                                 sse_event = %event.event,
                                 "ignoring Responses transport keepalive"
                             );
+                            return std::future::ready(Some(None));
+                        }
+
+                        tracing::info!(
+                            target: crate::inference_log::TARGET,
+                            event = "sse_chunk",
+                            backend = "responses",
+                            data = %data,
+                        );
+
+                        // Intercept the non-standard doom-loop event before
+                        // typed deserialization; async-openai's event enum
+                        // does not know it and would fail to parse it. With
+                        // the check disabled, the shared name-or-payload-type
+                        // predicate guards against a server emitting it
+                        // despite no opt-in (rollout skew), named or not.
+                        let swallow = match &doom_loop_for_stream {
+                            Some(collector) => collector.absorb(&event.event, data),
+                            None => is_check_event(&event.event, data),
+                        };
+                        if swallow {
                             Some(None)
+                        } else if let Some(stream_error) = try_parse_stream_error(data) {
+                            Some(Some(Err(stream_error)))
                         } else {
-                            // Intercept the non-standard doom-loop event before
-                            // typed deserialization; async-openai's event enum
-                            // does not know it and would fail to parse it. With
-                            // the check disabled, the shared name-or-payload-type
-                            // predicate guards against a server emitting it
-                            // despite no opt-in (rollout skew), named or not.
-                            let swallow = match &doom_loop_for_stream {
-                                Some(collector) => collector.absorb(&event.event, data),
-                                None => is_check_event(&event.event, data),
-                            };
-                            if swallow {
-                                Some(None)
-                            } else if let Some(stream_error) = try_parse_stream_error(data) {
-                                Some(Some(Err(stream_error)))
-                            } else {
-                                Some(Some(deserialize_response_event(data)))
-                            }
+                            Some(Some(deserialize_response_event(data)))
                         }
                     }
                     Err(e) => {
@@ -3540,10 +3531,7 @@ mod tests {
         ));
 
         // Unnamed / default `message` frames with JSON `type: "keepalive"`.
-        assert!(is_responses_keepalive(
-            "message",
-            r#"{"type":"keepalive"}"#
-        ));
+        assert!(is_responses_keepalive("message", r#"{"type":"keepalive"}"#));
         assert!(is_responses_keepalive(
             "message",
             r#"{"type":"keepalive","sequence_number":42}"#
