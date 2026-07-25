@@ -1,6 +1,6 @@
 # Z.ai Model API
 
-Profile id: `zai-model-api`  
+Profile id: `zai-model-api`
 Base URL: `https://api.z.ai/api/paas/v4` (general API; Coding Plan is a separate
 configured instance if needed)
 
