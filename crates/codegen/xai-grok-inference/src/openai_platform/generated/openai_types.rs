@@ -15390,12 +15390,11 @@ pub struct CreateRealtimeCallParams {
     pub body: RealtimeCallCreateRequest,
 }
 
-/// WebSocket session result for `create-realtime-call`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// Text result for `create-realtime-call`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct CreateRealtimeCallResult {
-    pub session_id: String,
-    #[serde(default, flatten)]
-    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+    pub body: String,
 }
 
 /// Typed params for `POST /realtime/client_secrets` (`create-realtime-client-secret`).
@@ -17885,10 +17884,10 @@ pub struct DownloadFileParams {
     pub file_id: String,
 }
 
-/// JSON result for `downloadFile`.
+/// Text result for `downloadFile`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct DownloadFileResult {
-    #[serde(flatten)]
     pub body: String,
 }
 
@@ -21475,10 +21474,10 @@ pub struct GetSkillContentParams {
     pub skill_id: String,
 }
 
-/// JSON result for `GetSkillContent`.
+/// Text result for `GetSkillContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct GetSkillContentResult {
-    #[serde(flatten)]
     pub body: String,
 }
 
@@ -21502,10 +21501,10 @@ pub struct GetSkillVersionContentParams {
     pub version: String,
 }
 
-/// JSON result for `GetSkillVersionContent`.
+/// Text result for `GetSkillVersionContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct GetSkillVersionContentResult {
-    #[serde(flatten)]
     pub body: String,
 }
 

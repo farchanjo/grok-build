@@ -138,12 +138,15 @@ impl crate::openai_platform::client::OpenRouterClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_audio_transcriptions(
         &self,
-        _request: CreateAudioTranscriptionsParams,
+        request: CreateAudioTranscriptionsParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateAudioTranscriptionsResult> {
         let path = String::from("/audio/transcriptions");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -792,7 +795,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         if let Some(v) = request.workspace_id.as_ref() {
             query.insert("workspace_id".into(), query_value(v));
         }
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,

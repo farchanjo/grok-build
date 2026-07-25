@@ -234,12 +234,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart, http_sse.
     pub async fn create_transcription(
         &self,
-        _request: CreateTranscriptionParams,
+        request: CreateTranscriptionParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateTranscriptionResult> {
         let path = String::from("/audio/transcriptions");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -288,12 +291,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_translation(
         &self,
-        _request: CreateTranslationParams,
+        request: CreateTranslationParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateTranslationResult> {
         let path = String::from("/audio/translations");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -314,12 +320,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_voice_consent(
         &self,
-        _request: CreateVoiceConsentParams,
+        request: CreateVoiceConsentParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateVoiceConsentResult> {
         let path = String::from("/audio/voice_consents");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -461,12 +470,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_voice(
         &self,
-        _request: CreateVoiceParams,
+        request: CreateVoiceParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateVoiceResult> {
         let path = String::from("/audio/voices");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -1184,7 +1196,10 @@ impl crate::openai_platform::client::OpenAiClient {
             &crate::openai_platform::url_policy::encode_path_segment(&request.container_id),
         );
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -2061,12 +2076,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_file(
         &self,
-        _request: CreateFileParams,
+        request: CreateFileParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateFileResult> {
         let path = String::from("/files");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -2588,12 +2606,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart, http_sse.
     pub async fn create_image_edit(
         &self,
-        _request: CreateImageEditParams,
+        request: CreateImageEditParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateImageEditResult> {
         let path = String::from("/images/edits");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -2698,12 +2719,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_image_variation(
         &self,
-        _request: CreateImageVariationParams,
+        request: CreateImageVariationParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateImageVariationResult> {
         let path = String::from("/images/variations");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -3308,15 +3332,18 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/calls` — `create-realtime-call` (multipart).
-    /// Transports: http_multipart, websocket.
+    /// Transports: http_multipart.
     pub async fn create_realtime_call(
         &self,
-        _request: CreateRealtimeCallParams,
+        request: CreateRealtimeCallParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateRealtimeCallResult> {
         let path = String::from("/realtime/calls");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -3334,7 +3361,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/calls/{call_id}/accept` — `accept-realtime-call` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn accept_realtime_call(
         &self,
         request: AcceptRealtimeCallParams,
@@ -3366,7 +3393,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/calls/{call_id}/hangup` — `hangup-realtime-call` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn hangup_realtime_call(
         &self,
         request: HangupRealtimeCallParams,
@@ -3395,7 +3422,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/calls/{call_id}/refer` — `refer-realtime-call` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn refer_realtime_call(
         &self,
         request: ReferRealtimeCallParams,
@@ -3427,7 +3454,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/calls/{call_id}/reject` — `reject-realtime-call` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn reject_realtime_call(
         &self,
         request: RejectRealtimeCallParams,
@@ -3459,7 +3486,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/client_secrets` — `create-realtime-client-secret` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn create_realtime_client_secret(
         &self,
         request: CreateRealtimeClientSecretParams,
@@ -3487,7 +3514,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/sessions` — `create-realtime-session` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn create_realtime_session(
         &self,
         request: CreateRealtimeSessionParams,
@@ -3515,7 +3542,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/transcription_sessions` — `create-realtime-transcription-session` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn create_realtime_transcription_session(
         &self,
         request: CreateRealtimeTranscriptionSessionParams,
@@ -3543,7 +3570,7 @@ impl crate::openai_platform::client::OpenAiClient {
     }
 
     /// `POST /realtime/translations/client_secrets` — `create-realtime-translation-client-secret` (json).
-    /// Transports: http_json, websocket.
+    /// Transports: http_json.
     pub async fn create_realtime_translation_client_secret(
         &self,
         request: CreateRealtimeTranslationClientSecretParams,
@@ -4078,12 +4105,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_skill(
         &self,
-        _request: CreateSkillParams,
+        request: CreateSkillParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateSkillResult> {
         let path = String::from("/skills");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -4260,7 +4290,10 @@ impl crate::openai_platform::client::OpenAiClient {
             &crate::openai_platform::url_policy::encode_path_segment(&request.skill_id),
         );
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -5121,7 +5154,10 @@ impl crate::openai_platform::client::OpenAiClient {
             &crate::openai_platform::url_policy::encode_path_segment(&request.upload_id),
         );
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -5688,12 +5724,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_video(
         &self,
-        _request: CreateVideoParams,
+        request: CreateVideoParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateVideoResult> {
         let path = String::from("/videos");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -5745,12 +5784,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_video_character(
         &self,
-        _request: CreateVideoCharacterParams,
+        request: CreateVideoCharacterParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateVideoCharacterResult> {
         let path = String::from("/videos/characters");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -5800,12 +5842,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_video_edit(
         &self,
-        _request: CreateVideoEditParams,
+        request: CreateVideoEditParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateVideoEditResult> {
         let path = String::from("/videos/edits");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -5826,12 +5871,15 @@ impl crate::openai_platform::client::OpenAiClient {
     /// Transports: http_json, http_multipart.
     pub async fn create_video_extend(
         &self,
-        _request: CreateVideoExtendParams,
+        request: CreateVideoExtendParams,
         files: MultipartFiles,
     ) -> PlatformResult<CreateVideoExtendResult> {
         let path = String::from("/videos/extensions");
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,
@@ -5952,7 +6000,10 @@ impl crate::openai_platform::client::OpenAiClient {
             &crate::openai_platform::url_policy::encode_path_segment(&request.video_id),
         );
         let query: BTreeMap<String, String> = BTreeMap::new();
-        let body: Option<serde_json::Value> = None;
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
         let spec = HttpRequestSpec {
             method: "POST",
             path,

@@ -6,20 +6,42 @@ exact local copies of the pinned OpenAPI documents described in the baseline
 provenance files.
 """
 from __future__ import annotations
+import hashlib
 import json, re
 import subprocess
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 ROOT = Path('crates/codegen/xai-grok-inference')
 OUT = ROOT / 'src' / 'openai_platform' / 'generated'
-OPENAI_JSON = Path('/tmp/openai-baseline-pin/openapi.json')
+OPENAI_SPEC = Path('/tmp/openai-baseline-pin/openapi.yaml')
+OPENAI_SHA256 = 'b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da'
 OR_JSON = Path('/tmp/openrouter-baseline-pin/openapi.json')
+OPENROUTER_SHA256 = '90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203'
 if not OR_JSON.exists():
     OR_JSON = Path('/tmp/openrouter-openapi.json')
 
-def load_openapi(p: Path) -> dict:
-    return json.loads(p.read_text())
+def json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(type(value))
+
+def load_openapi(p: Path, expected_sha256: str) -> dict:
+    content = p.read_bytes()
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f'pinned schema hash mismatch for {p}: expected {expected_sha256}, got {actual_sha256}'
+        )
+    if p.suffix in {'.yaml', '.yml'}:
+        try:
+            import yaml
+        except ImportError as error:
+            raise SystemExit('PyYAML is required to parse the pinned OpenAI schema') from error
+        data = yaml.safe_load(content)
+        return json.loads(json.dumps(data, default=json_default))
+    return json.loads(content)
 
 def camel_to_snake(name: str) -> str:
     if not name: return 'op'
@@ -311,7 +333,7 @@ def gen_provider(namespace: str, openapi: dict, ops_path: Path, types_path: Path
                     if resp_schema is None:
                         s,_=content_schema(content); resp_schema=s
             transports = classify_transports(req_media, resp_media)
-            if 'realtime' in path:
+            if op.get('x-websocket') is True:
                 transports = sorted(set(transports)|{'websocket'})
 
             multipart = 'http_multipart' in transports
@@ -361,14 +383,7 @@ pub struct {resp_json_ty} {{
 }}
 '''
             elif websocket and not has_json and not has_sse:
-                gen.emitted[resp_json_ty]=f'''/// WebSocket session result for `{op_id}`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct {resp_json_ty} {{
-    pub session_id: String,
-    #[serde(default, flatten)]
-    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
-}}
-'''
+                resp_json_ty = 'RealtimeSession'
             else:
                 if resp_schema is not None:
                     if isinstance(resp_schema, dict) and '$ref' in resp_schema:
@@ -378,7 +393,16 @@ pub struct {resp_json_ty} {{
                     # Never allow recursive same-name.
                     if inner == resp_json_ty:
                         inner = 'serde_json::Value'
-                    gen.emitted[resp_json_ty]=f'''/// JSON result for `{op_id}`.
+                    if inner == 'String':
+                        gen.emitted[resp_json_ty]=f'''/// Text result for `{op_id}`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct {resp_json_ty} {{
+    pub body: {inner},
+}}
+'''
+                    else:
+                        gen.emitted[resp_json_ty]=f'''/// JSON result for `{op_id}`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct {resp_json_ty} {{
     #[serde(flatten)]
@@ -409,7 +433,7 @@ pub struct {resp_sse_ty} {{
 
             def emit_method(fn_name, resp_ty, mode):
                 meth=[f'    /// `{m} {path}` — `{op_id}` ({mode}).', f'    /// Transports: {", ".join(transports)}.']
-                request_is_used = bool(path_params(path) or query_ps or (has_body and mode != 'multipart'))
+                request_is_used = bool(path_params(path) or query_ps or has_body)
                 request_name = 'request' if request_is_used else '_request'
                 if mode=='multipart':
                     meth.append(f'    pub async fn {fn_name}(&self, {request_name}: {req_ty}, files: MultipartFiles) -> PlatformResult<{resp_ty}> {{')
@@ -430,7 +454,7 @@ pub struct {resp_sse_ty} {{
                         meth.append(f'        query.insert({json.dumps(name)}.into(), query_value(&request.{field}));')
                     else:
                         meth.append(f'        if let Some(v) = request.{field}.as_ref() {{ query.insert({json.dumps(name)}.into(), query_value(v)); }}')
-                if has_body and mode != 'multipart':
+                if has_body:
                     meth.append('        let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);')
                 else:
                     meth.append('        let body: Option<serde_json::Value> = None;')
@@ -449,8 +473,7 @@ pub struct {resp_sse_ty} {{
                     meth.append('        let events = self.transport.execute_sse(spec).await?;')
                     meth.append(f'        Ok({resp_ty} {{ events }})')
                 elif mode=='websocket':
-                    meth.append('        self.transport.execute_websocket_handshake(spec).await?;')
-                    meth.append(f'        Ok({resp_ty} {{ session_id: uuid::Uuid::new_v4().to_string(), extra: Default::default() }})')
+                    meth.append('        self.transport.connect_realtime(spec).await')
                 else:
                     meth.append('        let raw = self.transport.execute_json(spec).await?;')
                     meth.append(f'        serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))')
@@ -497,6 +520,8 @@ pub struct {resp_json_ty} {{
     transport_imports = ['CredentialKind', 'HttpRequestSpec']
     if any(meta['is_multipart'] for meta in ops_meta):
         transport_imports.append('MultipartFiles')
+    if any(meta['is_websocket'] for meta in ops_meta):
+        transport_imports.append('RealtimeSession')
     transport_imports_source = ', '.join(transport_imports)
     ops_path.write_text(f'''//! Generated typed operations for {namespace}.
 //! DO NOT EDIT BY HAND.
@@ -530,8 +555,8 @@ def meta_row(namespace, op_id, m, path, client, fn, req_ty, resp_ty, body_ty, tr
         'generic_value_body': body_ty == 'serde_json::Value' if body_ty else False,
     }
 
-openai = load_openapi(OPENAI_JSON)
-orouter = load_openapi(OR_JSON)
+openai = load_openapi(OPENAI_SPEC, OPENAI_SHA256)
+orouter = load_openapi(OR_JSON, OPENROUTER_SHA256)
 meta_app, gen_app = gen_provider('openai', openai, OUT/'openai_ops.rs', OUT/'openai_types.rs')
 meta_admin, gen_admin = gen_provider('openai_admin', openai, OUT/'openai_admin_ops.rs', OUT/'openai_admin_types.rs')
 meta_or, gen_or = gen_provider('openrouter', orouter, OUT/'openrouter_ops.rs', OUT/'openrouter_types.rs')

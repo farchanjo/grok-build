@@ -2532,8 +2532,7 @@
       "body_type": "RealtimeCallCreateRequest",
       "cli_route": "openai.create_realtime_call",
       "transports": [
-        "http_multipart",
-        "websocket"
+        "http_multipart"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2557,8 +2556,7 @@
       "body_type": "RealtimeSessionCreateRequestGA",
       "cli_route": "openai.accept_realtime_call",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2582,8 +2580,7 @@
       "body_type": null,
       "cli_route": "openai.hangup_realtime_call",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2607,8 +2604,7 @@
       "body_type": "RealtimeCallReferRequest",
       "cli_route": "openai.refer_realtime_call",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2632,8 +2628,7 @@
       "body_type": "RealtimeCallRejectRequest",
       "cli_route": "openai.reject_realtime_call",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2657,8 +2652,7 @@
       "body_type": "RealtimeCreateClientSecretRequest",
       "cli_route": "openai.create_realtime_client_secret",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2682,8 +2676,7 @@
       "body_type": "RealtimeSessionCreateRequest",
       "cli_route": "openai.create_realtime_session",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2707,8 +2700,7 @@
       "body_type": "RealtimeTranscriptionSessionCreateRequest",
       "cli_route": "openai.create_realtime_transcription_session",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
@@ -2732,8 +2724,7 @@
       "body_type": "RealtimeTranslationClientSecretCreateRequest",
       "cli_route": "openai.create_realtime_translation_client_secret",
       "transports": [
-        "http_json",
-        "websocket"
+        "http_json"
       ],
       "is_admin": false,
       "is_deprecated": false,
