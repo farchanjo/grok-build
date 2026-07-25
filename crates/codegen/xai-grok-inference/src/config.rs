@@ -308,6 +308,14 @@ pub struct InferenceConfig {
     /// gated on identity only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub openrouter_pacing: bool,
+    /// Z.ai Model API: enable fragmented tool argument streaming (`tool_stream`).
+    /// Only serialized for Z.ai-profiled configs; never for other providers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zai_tool_stream: bool,
+    /// Z.ai Model API: thinking object (`thinking.type` / `clear_thinking`).
+    /// Only serialized when present and the Z.ai profile is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zai_thinking: Option<serde_json::Value>,
     pub api_backend: ApiBackend,
     /// Whether Chat Completions history may include xAI's non-standard
     /// `messages[].model_id` metadata. OpenAI-compatible third-party
@@ -409,6 +417,8 @@ impl Default for InferenceConfig {
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            zai_tool_stream: false,
+            zai_thinking: None,
             api_backend: ApiBackend::default(),
             include_message_model_id: true,
             auth_scheme: AuthScheme::default(),

@@ -27,5 +27,7 @@ pub use generated::{
 pub use inventory_coverage::{
     assert_zero_uncovered_operations, coverage_report_json, uncovered_operations,
 };
-pub use transport::{CredentialKind, HttpRequestSpec, PlatformTransport, TransportPolicy};
-pub use types::{DeleteStatus, EmptyBody, JsonObject, ListQuery, PathParams, PlatformPage};
+pub use transport::{
+    CredentialKind, HttpRequestSpec, MultipartFiles, PlatformTransport, SseEvent, TransportPolicy,
+};
+pub use types::{DeleteStatus, JsonObject, ListQuery, PathParams, PlatformPage};

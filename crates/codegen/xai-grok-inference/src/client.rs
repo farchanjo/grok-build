@@ -497,6 +497,12 @@ struct StreamingChatRequest<'a> {
     /// identities; derived from flat `reasoning_effort` when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<&'a crate::config::OpenRouterReasoning>,
+    /// Z.ai extension: fragmented tool argument streaming.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tool_stream: bool,
+    /// Z.ai extension: thinking object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<&'a serde_json::Value>,
     stream: bool,
     stream_options: StreamOptions,
 }
@@ -518,6 +524,12 @@ struct ChatRequestWithFallbacks<'a> {
     /// OpenRouter normalized `reasoning` object. Absent for non-OpenRouter.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<&'a crate::config::OpenRouterReasoning>,
+    /// Z.ai extension: fragmented tool argument streaming.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tool_stream: bool,
+    /// Z.ai extension: thinking object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<&'a serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -629,6 +641,8 @@ struct ClientDefaults {
     openrouter_fallback_models: Vec<String>,
     openrouter_provider_preferences: Option<crate::config::OpenRouterProviderPreferences>,
     openrouter_plugins: Vec<crate::config::OpenRouterPlugin>,
+    zai_tool_stream: bool,
+    zai_thinking: Option<serde_json::Value>,
     api_backend: ApiBackend,
     include_message_model_id: bool,
     auth_scheme: AuthScheme,
@@ -846,6 +860,8 @@ impl InferenceClient {
             openrouter_fallback_models: config.openrouter_fallback_models,
             openrouter_provider_preferences: config.openrouter_provider_preferences,
             openrouter_plugins: config.openrouter_plugins,
+            zai_tool_stream: config.zai_tool_stream,
+            zai_thinking: config.zai_thinking,
             api_backend: config.api_backend,
             include_message_model_id: config.include_message_model_id,
             auth_scheme: config.auth_scheme,
@@ -1225,6 +1241,8 @@ impl InferenceClient {
                 provider: self.openrouter_provider_preferences(),
                 plugins: self.openrouter_plugins(),
                 reasoning: reasoning.as_ref(),
+                tool_stream: self.defaults.zai_tool_stream,
+                thinking: self.defaults.zai_thinking.as_ref(),
             });
 
         let response = http_request.send().await.map_err(|e| {
@@ -1270,6 +1288,8 @@ impl InferenceClient {
             provider: self.openrouter_provider_preferences(),
             plugins: self.openrouter_plugins(),
             reasoning: reasoning.as_ref(),
+            tool_stream: self.defaults.zai_tool_stream,
+            thinking: self.defaults.zai_thinking.as_ref(),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -2546,6 +2566,8 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: None,
+            tool_stream: false,
+            thinking: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -2597,6 +2619,8 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: None,
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         assert_eq!(
@@ -2612,6 +2636,8 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: None,
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         assert!(
@@ -2667,6 +2693,8 @@ mod tests {
             provider: Some(&prefs),
             plugins: None,
             reasoning: None,
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -2697,6 +2725,8 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: None,
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         assert!(
@@ -2727,6 +2757,8 @@ mod tests {
             provider: Some(&prefs),
             plugins: None,
             reasoning: None,
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -2852,6 +2884,8 @@ mod tests {
             provider: client.openrouter_provider_preferences(),
             plugins: client.openrouter_plugins(),
             reasoning: None,
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         let wire = serialized
@@ -3948,6 +3982,8 @@ mod tests {
             provider: Some(&prefs),
             plugins: None,
             reasoning: None,
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -3985,6 +4021,8 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: Some(&reasoning),
+                    tool_stream: false,
+            thinking: None,
         })
         .unwrap();
         assert_eq!(

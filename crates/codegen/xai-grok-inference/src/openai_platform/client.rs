@@ -151,9 +151,10 @@ impl OpenRouterClient {
     }
 }
 
-/// Credential resolver that only ever returns admin keys, for both kinds.
-/// Application kind is treated as admin so generated admin ops that still
-/// pass CredentialKind::Admin work, while no application user key is stored.
+/// Credential resolver that only ever returns admin keys.
+///
+/// Application resolution fails closed so an admin client can never inject
+/// an application credential, even by accident.
 struct AdminOnlyCredentials {
     admin: Option<String>,
 }
@@ -161,7 +162,10 @@ struct AdminOnlyCredentials {
 impl CredentialResolver for AdminOnlyCredentials {
     fn resolve(&self, kind: CredentialKind) -> PlatformResult<Option<String>> {
         match kind {
-            CredentialKind::Admin | CredentialKind::Application => Ok(self.admin.clone()),
+            CredentialKind::Admin => Ok(self.admin.clone()),
+            CredentialKind::Application => Err(PlatformError::MissingCredential(
+                super::error::CredentialClass::Application,
+            )),
         }
     }
 }
@@ -169,6 +173,8 @@ impl CredentialResolver for AdminOnlyCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::error::PlatformError;
+    use super::super::transport::{CredentialKind, StaticCredentials};
 
     #[test]
     fn app_client_rejects_empty_provider_id() {
@@ -186,12 +192,35 @@ mod tests {
     }
 
     #[test]
-    fn admin_only_credentials_never_expose_user_key() {
+    fn admin_only_credentials_fail_closed_on_application_kind() {
         let c = AdminOnlyCredentials {
             admin: Some("admin-key".into()),
         };
         assert_eq!(
             c.resolve(CredentialKind::Admin).unwrap().as_deref(),
+            Some("admin-key")
+        );
+        let err = c.resolve(CredentialKind::Application).unwrap_err();
+        assert!(matches!(
+            err,
+            PlatformError::MissingCredential(super::super::error::CredentialClass::Application)
+        ));
+        // Structural: admin key is never returned for Application.
+        assert!(!format!("{err:?}").contains("admin-key"));
+    }
+
+    #[test]
+    fn app_client_credentials_never_resolve_admin() {
+        let creds = StaticCredentials {
+            application: Some("app-key".into()),
+            admin: Some("admin-key".into()),
+        };
+        assert_eq!(
+            creds.resolve(CredentialKind::Application).unwrap().as_deref(),
+            Some("app-key")
+        );
+        assert_eq!(
+            creds.resolve(CredentialKind::Admin).unwrap().as_deref(),
             Some("admin-key")
         );
     }

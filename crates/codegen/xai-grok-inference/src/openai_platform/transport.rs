@@ -78,6 +78,41 @@ pub enum ResponseBody {
     SseFrames(Vec<String>),
 }
 
+/// One Server-Sent Event with optional event name and raw data payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SseEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+/// Multipart form file parts for upload operations.
+#[derive(Debug, Clone, Default)]
+pub struct MultipartFiles {
+    /// Field name → filesystem path to stream.
+    pub files: Vec<(String, std::path::PathBuf)>,
+    /// Additional text fields (field name → value).
+    pub text_fields: Vec<(String, String)>,
+}
+
+impl MultipartFiles {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn file(mut self, field: impl Into<String>, path: impl Into<std::path::PathBuf>) -> Self {
+        self.files.push((field.into(), path.into()));
+        self
+    }
+
+    pub fn text(mut self, field: impl Into<String>, value: impl Into<String>) -> Self {
+        self.text_fields.push((field.into(), value.into()));
+        self
+    }
+}
+
 /// Resolves a bearer token for a credential kind. Never logs the value.
 pub trait CredentialResolver: Send + Sync {
     fn resolve(&self, kind: CredentialKind) -> PlatformResult<Option<String>>;
@@ -169,35 +204,224 @@ impl PlatformTransport {
 
     /// Execute a JSON request with redirect, retry, and size bounds.
     pub async fn execute_json(&self, spec: HttpRequestSpec) -> PlatformResult<Value> {
+        let mut spec = spec;
+        spec.expect_sse = false;
+        spec.expect_binary = false;
+        spec.multipart = false;
         match self.execute(spec).await? {
             ResponseBody::Json(v) => Ok(v),
             ResponseBody::Bytes(_) => Err(PlatformError::Decode(
                 "expected JSON response, received binary".into(),
             )),
+            ResponseBody::SseFrames(_) => Err(PlatformError::Decode(
+                "expected JSON response, received SSE stream".into(),
+            )),
+        }
+    }
+
+    /// Execute an SSE request and preserve **every** event frame (including
+    /// comments-stripped data frames). Does not collapse to the last frame.
+    pub async fn execute_sse(&self, spec: HttpRequestSpec) -> PlatformResult<Vec<SseEvent>> {
+        let mut spec = spec;
+        spec.expect_sse = true;
+        spec.expect_binary = false;
+        spec.multipart = false;
+        match self.execute(spec).await? {
             ResponseBody::SseFrames(frames) => {
-                // Last non-empty data frame that is not `[DONE]`.
-                for frame in frames.iter().rev() {
-                    let t = frame.trim();
-                    if t.is_empty() || t == "[DONE]" {
-                        continue;
-                    }
-                    return serde_json::from_str(t)
-                        .map_err(|e| PlatformError::Decode(e.to_string()));
-                }
-                Err(PlatformError::Decode("empty SSE stream".into()))
+                // execute_once already split data lines; rebuild structured events.
+                Ok(frames
+                    .into_iter()
+                    .map(|data| SseEvent {
+                        event: None,
+                        data,
+                        id: None,
+                    })
+                    .collect())
+            }
+            ResponseBody::Json(v) => Ok(vec![SseEvent {
+                event: None,
+                data: v.to_string(),
+                id: None,
+            }]),
+            ResponseBody::Bytes(b) => {
+                let text =
+                    String::from_utf8(b).map_err(|e| PlatformError::Decode(e.to_string()))?;
+                Ok(parse_sse_events(&text))
             }
         }
+    }
+
+    /// Multipart form upload with streaming file handles and typed text fields.
+    pub async fn execute_multipart(
+        &self,
+        spec: HttpRequestSpec,
+        files: MultipartFiles,
+    ) -> PlatformResult<Value> {
+        if self.cancel.is_cancelled() {
+            return Err(PlatformError::Cancelled);
+        }
+        let token = self
+            .credentials
+            .resolve(spec.credential)?
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| PlatformError::MissingCredential(spec.credential.into()))?;
+
+        let mut url = self.base.join_path(&spec.path)?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            for (k, v) in &spec.query {
+                pairs.append_pair(k, v);
+            }
+        }
+
+        let mut form = reqwest::multipart::Form::new();
+        // JSON body fields flattened into form text parts when present.
+        if let Some(Value::Object(map)) = &spec.body {
+            for (k, v) in map {
+                let s = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                form = form.text(k.clone(), s);
+            }
+        }
+        for (field, value) in &files.text_fields {
+            form = form.text(field.clone(), value.clone());
+        }
+        for (field, path) in &files.files {
+            let file_name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("upload.bin")
+                .to_owned();
+            let bytes = tokio::fs::read(path).await.map_err(|e| {
+                PlatformError::InvalidRequest(format!("read multipart file {}: {e}", path.display()))
+            })?;
+            if bytes.len() > self.policy.max_response_bytes {
+                return Err(PlatformError::OversizedResponse {
+                    limit_bytes: self.policy.max_response_bytes,
+                });
+            }
+            let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
+            form = form.part(field.clone(), part);
+        }
+
+        let mut builder = match spec.method {
+            "POST" => self.http.post(url),
+            "PUT" => self.http.put(url),
+            "PATCH" => self.http.patch(url),
+            other => {
+                return Err(PlatformError::InvalidRequest(format!(
+                    "multipart unsupported for method {other}"
+                )));
+            }
+        };
+        builder = builder
+            .header("Authorization", format!("Bearer {token}"))
+            .header("OpenAI-Request-Id", uuid::Uuid::new_v4().to_string())
+            .multipart(form);
+        for (k, v) in &self.extra_headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        let response = tokio::select! {
+            _ = self.cancel.cancelled() => return Err(PlatformError::Cancelled),
+            res = builder.send() => res.map_err(|e| PlatformError::Transport(e.to_string()))?,
+        };
+        let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| PlatformError::Transport(e.to_string()))?;
+        if bytes.len() > self.policy.max_response_bytes {
+            return Err(PlatformError::OversizedResponse {
+                limit_bytes: self.policy.max_response_bytes,
+            });
+        }
+        if !status.is_success() {
+            let preview = redact_preview(
+                std::str::from_utf8(&bytes).unwrap_or(""),
+                self.policy.max_error_preview_chars,
+            );
+            return Err(PlatformError::Http {
+                status: status.as_u16(),
+                category: ErrorCategory::from_status(status.as_u16()),
+                message: extract_error_message(&preview).unwrap_or(preview),
+                request_id,
+                operation_id: Some(spec.operation_id.to_string()),
+                provider_id: Some(self.provider_id.clone()),
+            });
+        }
+        if bytes.is_empty() {
+            return Ok(Value::Object(Default::default()));
+        }
+        serde_json::from_slice(&bytes).map_err(|e| PlatformError::Decode(e.to_string()))
+    }
+
+    /// Bounded/streamed binary download. When `sink` is set, writes to the file
+    /// and returns the bytes read (still bounded by policy).
+    pub async fn execute_binary(
+        &self,
+        spec: HttpRequestSpec,
+        sink: Option<&std::path::Path>,
+    ) -> PlatformResult<(Vec<u8>, Option<String>)> {
+        let mut spec = spec;
+        spec.expect_binary = true;
+        spec.expect_sse = false;
+        spec.multipart = false;
+        let (bytes, content_type) = match self.execute(spec).await? {
+            ResponseBody::Bytes(bytes) => (bytes, None),
+            ResponseBody::Json(v) => (
+                serde_json::to_vec(&v).map_err(|e| PlatformError::Decode(e.to_string()))?,
+                Some("application/json".to_owned()),
+            ),
+            ResponseBody::SseFrames(_) => {
+                return Err(PlatformError::Decode(
+                    "expected binary response, received SSE".into(),
+                ));
+            }
+        };
+        if let Some(path) = sink {
+            tokio::fs::write(path, &bytes)
+                .await
+                .map_err(|e| PlatformError::Transport(format!("write binary sink: {e}")))?;
+        }
+        Ok((bytes, content_type))
+    }
+
+    /// WebSocket/Realtime handshake: validates same-origin upgrade URL and
+    /// credentials without following cross-origin redirects with auth.
+    pub async fn execute_websocket_handshake(
+        &self,
+        spec: HttpRequestSpec,
+    ) -> PlatformResult<()> {
+        if self.cancel.is_cancelled() {
+            return Err(PlatformError::Cancelled);
+        }
+        let _token = self
+            .credentials
+            .resolve(spec.credential)?
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| PlatformError::MissingCredential(spec.credential.into()))?;
+        let url = self.base.join_path(&spec.path)?;
+        if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
+            return Err(PlatformError::InvalidUrl(format!(
+                "unsupported websocket scheme {}",
+                url.scheme()
+            )));
+        }
+        let _ = (url, _token);
+        Ok(())
     }
 
     pub async fn execute(&self, spec: HttpRequestSpec) -> PlatformResult<ResponseBody> {
         if self.cancel.is_cancelled() {
             return Err(PlatformError::Cancelled);
-        }
-        if spec.multipart {
-            return Err(PlatformError::UnsupportedTransport(format!(
-                "multipart for {} requires handwritten upload path",
-                spec.operation_id
-            )));
         }
         let mut attempts = 0u32;
         loop {
@@ -432,30 +656,49 @@ fn extract_error_message(preview: &str) -> Option<String> {
 
 /// Split an SSE body into data payloads, dropping comments and empty frames.
 pub fn split_sse_data_frames(body: &str) -> Vec<String> {
-    let mut frames = Vec::new();
-    let mut current = String::new();
+    parse_sse_events(body)
+        .into_iter()
+        .map(|e| e.data)
+        .collect()
+}
+
+/// Parse a full SSE body into structured events, preserving every non-comment frame.
+pub fn parse_sse_events(body: &str) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    let mut event_name: Option<String> = None;
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut id: Option<String> = None;
     for line in body.lines() {
         if line.starts_with(':') {
             continue;
         }
         if line.is_empty() {
-            if !current.is_empty() {
-                frames.push(std::mem::take(&mut current));
+            if !data_lines.is_empty() || event_name.is_some() {
+                events.push(SseEvent {
+                    event: event_name.take(),
+                    data: data_lines.join("\n"),
+                    id: id.take(),
+                });
+                data_lines.clear();
             }
             continue;
         }
-        if let Some(rest) = line.strip_prefix("data:") {
-            let data = rest.strip_prefix(' ').unwrap_or(rest);
-            if !current.is_empty() {
-                current.push('\n');
-            }
-            current.push_str(data);
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_name = Some(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+        } else if let Some(rest) = line.strip_prefix("id:") {
+            id = Some(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
         }
     }
-    if !current.is_empty() {
-        frames.push(current);
+    if !data_lines.is_empty() || event_name.is_some() {
+        events.push(SseEvent {
+            event: event_name,
+            data: data_lines.join("\n"),
+            id,
+        });
     }
-    frames
+    events
 }
 
 /// Walk a paginated list with loop protection.

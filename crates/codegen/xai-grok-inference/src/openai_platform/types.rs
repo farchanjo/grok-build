@@ -4,10 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Empty JSON body placeholder.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EmptyBody {}
-
 /// Generic JSON object with additive field tolerance.
 pub type JsonObject = BTreeMap<String, Value>;
 

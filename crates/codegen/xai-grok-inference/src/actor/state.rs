@@ -95,6 +95,8 @@ mod tests {
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
             openrouter_pacing: false,
+            zai_tool_stream: false,
+            zai_thinking: None,
             api_backend: ApiBackend::ChatCompletions,
             include_message_model_id: true,
             auth_scheme: Default::default(),

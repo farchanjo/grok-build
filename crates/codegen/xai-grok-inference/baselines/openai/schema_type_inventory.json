@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "provider": "openai",
+  "schema_types_emitted": 2626,
+  "operations": 287,
+  "source_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da"
+}
