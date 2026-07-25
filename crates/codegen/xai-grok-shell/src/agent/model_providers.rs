@@ -182,6 +182,8 @@ impl Default for ModelProviderConfig {
             provider_preferences: None,
             plugins: Vec::new(),
             openrouter_pacing: false,
+            zai_tool_stream: false,
+            zai_thinking: None,
             extra_headers: IndexMap::new(),
             auth_provider: None,
             auth: None,

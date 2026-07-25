@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+pub mod fixtures;
+
 /// Stable config / CLI / TUI provider id for the built-in Z.ai profile.
 pub const ZAI_PROVIDER_ID: &str = "zai-model-api";
 
