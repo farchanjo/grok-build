@@ -17,3 +17,11 @@ Please report security issues through the process described in
 By downloading or using this source, you agree that your use is governed by
 the Apache License, Version 2.0. No contributor license agreement is offered
 because external contributions are not accepted.
+
+## Workbench terminal backend (downstream)
+
+Selectable external ACP backend for Workbench orchestration is documented in
+[`docs/workbench-backend.md`](docs/workbench-backend.md). Default GrokShell
+behavior is unchanged unless `WORKBENCH_TERMINAL_BACKEND=1` (or
+`GROK_AGENT_BACKEND=workbench`) and an absolute workbench executable path are
+set.

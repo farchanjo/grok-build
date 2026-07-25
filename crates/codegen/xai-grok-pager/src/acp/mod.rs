@@ -8,6 +8,7 @@ pub mod meta;
 pub mod model_state;
 pub mod spawn;
 pub mod tracker;
+pub mod workbench_backend;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -143,13 +144,43 @@ pub struct ConnectFlags {
     /// Seed agent sessions with auto (classifier) permission mode.
     /// Ignored when `default_yolo_mode` is true.
     pub default_auto_mode: bool,
+    /// Absolute path to the `workbench` CLI for external ACP backend mode
+    /// (`--workbench-executable` / `WORKBENCH_EXECUTABLE`). Selection still
+    /// requires `WORKBENCH_TERMINAL_BACKEND=1` or `GROK_AGENT_BACKEND=workbench`.
+    pub workbench_executable: Option<std::path::PathBuf>,
 }
 
 /// Connect to an agent: spawn, initialize, authenticate.
 ///
 /// This is the main entry point for establishing an ACP connection.
 /// After this returns, the agent is ready to create sessions and receive prompts.
+///
+/// Backend selection (default remains in-process GrokShell):
+/// - `WORKBENCH_TERMINAL_BACKEND=1` or `GROK_AGENT_BACKEND=workbench`, plus an
+///   absolute `WORKBENCH_EXECUTABLE` / `--workbench-executable` → external
+///   `workbench agent stdio` (see [`workbench_backend`]).
 pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<AcpConnection> {
+    let workspace = std::env::current_dir().ok();
+    let (backend_kind, workbench_plan) = workbench_backend::resolve_agent_backend(
+        flags.workbench_executable.as_deref(),
+        workspace.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("Workbench backend selection failed: {e}"))?;
+
+    match backend_kind {
+        workbench_backend::AgentBackendKind::Workbench => {
+            let plan = workbench_plan.expect("Workbench plan present when kind is Workbench");
+            connect_workbench(cancel, flags, plan).await
+        }
+        workbench_backend::AgentBackendKind::GrokShell => connect_grok_shell(cancel, flags).await,
+    }
+}
+
+/// In-process GrokShell path (upstream default).
+async fn connect_grok_shell(
+    cancel: &CancellationToken,
+    flags: ConnectFlags,
+) -> Result<AcpConnection> {
     // Load agent config from disk
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
@@ -190,6 +221,30 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     // Spawn the agent
     let memory_config = agent_config.memory_config.clone();
     let spawned = spawn::spawn_grok_shell(agent_config, cancel, memory_config).await?;
+    finish_connection(spawned, flags).await
+}
+
+/// External Workbench ACP stdio path (`workbench agent stdio`).
+async fn connect_workbench(
+    cancel: &CancellationToken,
+    flags: ConnectFlags,
+    plan: workbench_backend::WorkbenchBackend,
+) -> Result<AcpConnection> {
+    apply_config_writes(&flags);
+    tracing::info!(
+        executable = %plan.executable().display(),
+        workspace = %plan.workspace().display(),
+        "Connecting via WorkbenchBackend (workbench agent stdio)"
+    );
+    let spawned = workbench_backend::spawn_workbench_agent(&plan, cancel).await?;
+    finish_connection(spawned, flags).await
+}
+
+/// Shared initialize + authenticate after any backend spawn.
+async fn finish_connection(
+    spawned: spawn::SpawnedAgent,
+    flags: ConnectFlags,
+) -> Result<AcpConnection> {
     let auth_manager = spawned.auth_manager.clone();
     let (tx, rx) = (spawned.channel.tx, spawned.channel.rx);
 

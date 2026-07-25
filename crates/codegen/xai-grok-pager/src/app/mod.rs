@@ -494,13 +494,22 @@ pub async fn run(
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let prefetch_elapsed = startup_start.elapsed();
-    let (use_leader, policy_disable_reason) = resolve_use_leader(
-        args.leader,
-        args.no_leader,
-        &raw_config,
-        remote_settings.as_ref(),
-        true,
+    // Workbench external ACP backend is mutually exclusive with leader mode:
+    // the pager speaks ACP to `workbench agent stdio`, not the Grok leader.
+    let workbench_requested = crate::acp::workbench_backend::workbench_backend_requested(
+        args.workbench_executable.as_deref(),
     );
+    let (use_leader, policy_disable_reason) = if workbench_requested {
+        (false, None)
+    } else {
+        resolve_use_leader(
+            args.leader,
+            args.no_leader,
+            &raw_config,
+            remote_settings.as_ref(),
+            true,
+        )
+    };
     tracing::info!(
         use_leader,
         ?policy_disable_reason,
@@ -631,6 +640,7 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
+        workbench_executable: args.workbench_executable.clone(),
     };
     let connection = if use_leader {
         let conn = crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await?;
