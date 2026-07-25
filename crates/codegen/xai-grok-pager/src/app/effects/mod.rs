@@ -4658,11 +4658,12 @@ async fn run_provider_operation(
         ProviderCredentialSource, ProviderId, ProviderManager,
     };
 
-    fn backend_id(provider: ProviderKind) -> ProviderId {
+    fn backend_id(provider: &ProviderKind) -> Option<ProviderId> {
         match provider {
-            ProviderKind::Xai => ProviderId::Xai,
-            ProviderKind::OpenAi => ProviderId::OpenAi,
-            ProviderKind::OpenRouter => ProviderId::OpenRouter,
+            ProviderKind::Xai => Some(ProviderId::Xai),
+            ProviderKind::OpenAi => Some(ProviderId::OpenAi),
+            ProviderKind::OpenRouter => Some(ProviderId::OpenRouter),
+            ProviderKind::Configured(_) => None,
         }
     }
 
@@ -4770,54 +4771,125 @@ async fn run_provider_operation(
                     Ok(status) => display_status(status),
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
-            } else if matches!(provider, ProviderKind::OpenAi | ProviderKind::OpenRouter) {
+            } else if matches!(
+                provider,
+                ProviderKind::OpenAi | ProviderKind::OpenRouter
+            ) {
                 // An explicit refresh is also the user's request to refresh
                 // the discovered API-provider catalog. The manager verifies
                 // that a credential exists and falls back to its last valid
                 // cache before we report the regular connection status.
-                let backend = backend_id(provider);
+                let backend = backend_id(&provider).expect("built-in");
                 if matches!(
                     manager.status(backend).state,
                     ProviderConnectionState::Configured
                 ) {
-                    match provider {
+                    match &provider {
                         ProviderKind::OpenAi => {
                             let _ = manager.refresh_openai_catalog().await;
                         }
                         ProviderKind::OpenRouter => {
                             let _ = manager.refresh_openrouter_catalog().await;
                         }
-                        ProviderKind::Xai => unreachable!(),
+                        ProviderKind::Xai | ProviderKind::Configured(_) => unreachable!(),
                     }
                 }
                 display_status(manager.status(backend))
+            } else if let Some(backend) = backend_id(&provider) {
+                display_status(manager.status(backend))
             } else {
-                display_status(manager.status(backend_id(provider)))
+                // Configured providers: connection state is driven by scoped secrets.
+                ProviderStatus::Missing
             };
             (provider, status)
         }
         ProviderOperation::SaveAndTest { provider, api_key } => {
-            let result = manager.set_api_key(backend_id(provider), &api_key.into_inner());
-            let status = match result {
-                Ok(()) => match manager.test_connection(backend_id(provider)).await {
-                    Ok(test) => connection_test_status(test, true),
+            let key = api_key.into_inner();
+            let status = if let Some(backend) = backend_id(&provider) {
+                let result = manager.set_api_key(backend, &key);
+                match result {
+                    Ok(()) => match manager.test_connection(backend).await {
+                        Ok(test) => connection_test_status(test, true),
+                        Err(error) => ProviderStatus::Error(error.to_string()),
+                    },
                     Err(error) => ProviderStatus::Error(error.to_string()),
-                },
-                Err(error) => ProviderStatus::Error(error.to_string()),
+                }
+            } else if let ProviderKind::Configured(id) = &provider {
+                // Store under openai_compatible::<id>::api_key without logging.
+                use xai_grok_shell::provider_registry::id::ProviderId as CfgId;
+                use xai_grok_shell::provider_registry::secrets::{
+                    application_key_scope, store_provider_secret,
+                };
+                let home = std::env::var("GROK_HOME").unwrap_or_else(|_| {
+                    dirs::home_dir()
+                        .map(|h| h.join(".grokdev").display().to_string())
+                        .unwrap_or_else(|| ".".into())
+                });
+                match CfgId::new(id) {
+                    Ok(pid) => {
+                        match store_provider_secret(
+                            std::path::Path::new(&home),
+                            &application_key_scope(&pid),
+                            &key,
+                        ) {
+                            Ok(()) => ProviderStatus::Connected {
+                                detail: Some("API key saved securely".into()),
+                            },
+                            Err(e) => ProviderStatus::Error(e.to_string()),
+                        }
+                    }
+                    Err(e) => ProviderStatus::Error(e.to_string()),
+                }
+            } else {
+                ProviderStatus::Error("unsupported provider for API key".into())
             };
             (provider, status)
         }
         ProviderOperation::Test(provider) => {
-            let status = match manager.test_connection(backend_id(provider)).await {
-                Ok(test) => connection_test_status(test, false),
-                Err(error) => ProviderStatus::Error(error.to_string()),
+            let status = if let Some(backend) = backend_id(&provider) {
+                match manager.test_connection(backend).await {
+                    Ok(test) => connection_test_status(test, false),
+                    Err(error) => ProviderStatus::Error(error.to_string()),
+                }
+            } else {
+                ProviderStatus::Connected {
+                    detail: Some(
+                        "Use `grok openai --provider <id> models list` to probe configured providers"
+                            .into(),
+                    ),
+                }
             };
             (provider, status)
         }
         ProviderOperation::Disconnect(provider) => {
-            let status = match manager.remove_api_key(backend_id(provider)) {
-                Ok(()) => display_status(manager.status(backend_id(provider))),
-                Err(error) => ProviderStatus::Error(error.to_string()),
+            let status = if let Some(backend) = backend_id(&provider) {
+                match manager.remove_api_key(backend) {
+                    Ok(()) => display_status(manager.status(backend)),
+                    Err(error) => ProviderStatus::Error(error.to_string()),
+                }
+            } else if let ProviderKind::Configured(id) = &provider {
+                use xai_grok_shell::provider_registry::id::ProviderId as CfgId;
+                use xai_grok_shell::provider_registry::secrets::{
+                    admin_key_scope, application_key_scope, clear_provider_secret,
+                };
+                let home = std::env::var("GROK_HOME").unwrap_or_else(|_| {
+                    dirs::home_dir()
+                        .map(|h| h.join(".grokdev").display().to_string())
+                        .unwrap_or_else(|| ".".into())
+                });
+                if let Ok(pid) = CfgId::new(id) {
+                    let _ = clear_provider_secret(
+                        std::path::Path::new(&home),
+                        &application_key_scope(&pid),
+                    );
+                    let _ = clear_provider_secret(
+                        std::path::Path::new(&home),
+                        &admin_key_scope(&pid),
+                    );
+                }
+                ProviderStatus::Missing
+            } else {
+                ProviderStatus::Missing
             };
             (provider, status)
         }

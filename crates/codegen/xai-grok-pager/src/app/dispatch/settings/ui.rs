@@ -183,12 +183,24 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
         return effects;
     }
     let mut state = ProviderModalState::new();
+    // Load configured provider rows from config.toml (best effort).
+    if let Ok(home) = std::env::var("GROK_HOME") {
+        let path = std::path::Path::new(&home).join("config.toml");
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(val) = raw.parse::<toml::Value>()
+            && let Some(table) = val.get("model_providers").and_then(|v| v.as_table())
+        {
+            let configured: Vec<String> = table.keys().cloned().collect();
+            state.set_configured_providers(configured);
+        }
+    }
     // Focus xAI row so connect/disconnect is one Enter away from welcome.
     state.selected = 0;
+    let refresh_rows = state.rows.clone();
     agent.active_modal = Some(ActiveModal::Providers {
         state: Box::new(state),
     });
-    effects.extend(ProviderKind::ALL.into_iter().map(|provider| {
+    effects.extend(refresh_rows.into_iter().map(|provider| {
         Effect::ProviderOperation {
             agent_id: id,
             operation: crate::app::actions::ProviderOperation::Refresh(provider),
@@ -228,13 +240,9 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
         return vec![];
     }
 
-    let provider_for_repair: Option<&'static str> = match &command {
-        ProviderCommand::Connect(p) | ProviderCommand::ReplaceKey(p) => Some(match p {
-            ProviderKind::Xai => "xai",
-            ProviderKind::OpenAi => "openai",
-            ProviderKind::OpenRouter => "openrouter",
-        }),
-        ProviderCommand::LoginCodex => Some("openai"),
+    let provider_for_repair: Option<String> = match &command {
+        ProviderCommand::Connect(p) | ProviderCommand::ReplaceKey(p) => Some(p.id_str().to_owned()),
+        ProviderCommand::LoginCodex => Some("openai".into()),
         // Test / Refresh / Disconnect never resume stashes.
         _ => None,
     };
@@ -246,7 +254,7 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
         };
         match command {
             ProviderCommand::Connect(provider) | ProviderCommand::ReplaceKey(provider) => {
-                let Some(api_key) = state.take_submitted_secret(provider) else {
+                let Some(api_key) = state.take_submitted_secret(&provider) else {
                     state.set_status(
                         provider,
                         ProviderStatus::Error("No API key was submitted".to_owned()),
@@ -264,11 +272,18 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
             ProviderCommand::LoginXai | ProviderCommand::LogoutXai => unreachable!(),
             ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
+            ProviderCommand::AddConfigured
+            | ProviderCommand::RefreshCatalog(_)
+            | ProviderCommand::RefreshCapabilities(_) => {
+                // Config editor / capability refresh: no secret path.
+                return vec![];
+            }
         }
     };
 
     // Mint repair token only for connect/save/oauth against a matching stash.
     let repair = provider_for_repair
+        .as_deref()
         .and_then(|pid| begin_credential_repair(app, pid))
         .map(|(_, scope)| scope);
 

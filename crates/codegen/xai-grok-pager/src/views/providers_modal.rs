@@ -21,34 +21,62 @@ use crate::views::modal_window::{
 };
 
 /// Provider displayed by the management surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Built-ins remain first-class. Configured OpenAI-compatible instances are
+/// owned rows identified by a validated slug (`Configured`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     Xai,
     OpenAi,
     OpenRouter,
+    /// User-configured provider id (e.g. `local_vllm`, `zai-model-api`).
+    Configured(String),
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 3] = [Self::Xai, Self::OpenAi, Self::OpenRouter];
+    pub const BUILTINS: [Self; 3] = [Self::Xai, Self::OpenAi, Self::OpenRouter];
 
-    pub const fn label(self) -> &'static str {
+    /// Default browse list before configured providers are loaded.
+    pub const ALL: [Self; 3] = Self::BUILTINS;
+
+    pub fn label(&self) -> String {
         match self {
-            Self::Xai => "xAI",
-            Self::OpenAi => "OpenAI",
-            Self::OpenRouter => "OpenRouter",
+            Self::Xai => "xAI".into(),
+            Self::OpenAi => "OpenAI".into(),
+            Self::OpenRouter => "OpenRouter".into(),
+            Self::Configured(id) => id.clone(),
         }
     }
 
-    pub const fn detail(self) -> &'static str {
+    pub fn detail(&self) -> String {
         match self {
-            Self::Xai => "Grok/xAI account (OAuth) or xAI API key",
-            Self::OpenAi => "ChatGPT OAuth or API key · Responses",
-            Self::OpenRouter => "Chat Completions · key stored securely",
+            Self::Xai => "Grok/xAI account (OAuth) or xAI API key".into(),
+            Self::OpenAi => "ChatGPT OAuth or API key · Responses".into(),
+            Self::OpenRouter => "Chat Completions · key stored securely".into(),
+            Self::Configured(id) if id == "zai-model-api" || id == "zai" => {
+                "Z.ai Model API · Chat Completions · key stored securely".into()
+            }
+            Self::Configured(_) => {
+                "OpenAI-compatible · app/admin keys · catalog & capabilities".into()
+            }
         }
     }
 
-    pub const fn needs_api_key(self) -> bool {
-        matches!(self, Self::OpenAi | Self::OpenRouter)
+    pub fn needs_api_key(&self) -> bool {
+        matches!(self, Self::OpenAi | Self::OpenRouter | Self::Configured(_))
+    }
+
+    pub fn id_str(&self) -> &str {
+        match self {
+            Self::Xai => "xai",
+            Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
+            Self::Configured(id) => id.as_str(),
+        }
+    }
+
+    pub fn is_built_in(&self) -> bool {
+        !matches!(self, Self::Configured(_))
     }
 }
 
@@ -64,7 +92,7 @@ pub enum ProviderStatus {
 impl ProviderStatus {
     fn label(&self) -> &str {
         match self {
-            Self::Missing => "Key/login missing",
+            Self::Missing => "Key/connect missing",
             Self::Connecting => "Checking…",
             Self::Connected { .. } => "Connected",
             Self::Error(_) => "Connection error",
@@ -73,7 +101,7 @@ impl ProviderStatus {
 }
 
 /// Safe reducer intent. It contains no credentials; see the module docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderCommand {
     Connect(ProviderKind),
     ReplaceKey(ProviderKind),
@@ -84,6 +112,12 @@ pub enum ProviderCommand {
     LoginXai,
     LogoutXai,
     RefreshStatus(ProviderKind),
+    /// Open the add-provider editor for a new OpenAI-compatible instance.
+    AddConfigured,
+    /// Refresh catalog for the selected configured provider.
+    RefreshCatalog(ProviderKind),
+    /// Refresh capability profile for the selected provider.
+    RefreshCapabilities(ProviderKind),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,8 +169,12 @@ impl std::fmt::Debug for ProviderModalMode {
 pub struct ProviderModalState {
     pub window: ModalWindowState,
     pub selected: usize,
+    /// Dynamic row list: built-ins first, then configured providers.
+    pub rows: Vec<ProviderKind>,
     pub statuses: Vec<ProviderStatus>,
     pub(crate) mode: ProviderModalMode,
+    /// When set, browse focus jumps to this provider id (provider-scoped 401).
+    pub focus_provider_id: Option<String>,
     /// A key submitted by the UI but not yet picked up by the integration.
     /// It is cleared on close and never rendered or logged.
     submitted_secret: Option<(ProviderKind, String)>,
@@ -149,6 +187,14 @@ impl std::fmt::Debug for ProviderModalState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderModalState")
             .field("selected", &self.selected)
+            .field(
+                "rows",
+                &self
+                    .rows
+                    .iter()
+                    .map(ProviderKind::id_str)
+                    .collect::<Vec<_>>(),
+            )
             .field("statuses", &self.statuses)
             .field(
                 "mode",
@@ -159,6 +205,7 @@ impl std::fmt::Debug for ProviderModalState {
                     ProviderModalMode::EditingKey { .. } => "editing_key_redacted",
                 },
             )
+            .field("focus_provider_id", &self.focus_provider_id)
             .field("has_submitted_secret", &self.submitted_secret.is_some())
             .finish_non_exhaustive()
     }
@@ -172,37 +219,82 @@ impl Default for ProviderModalState {
 
 impl ProviderModalState {
     pub fn new() -> Self {
+        let rows: Vec<ProviderKind> = ProviderKind::BUILTINS.to_vec();
+        let n = rows.len();
         Self {
             window: ModalWindowState::new(),
             selected: 0,
-            statuses: vec![ProviderStatus::Missing; ProviderKind::ALL.len()],
+            rows,
+            statuses: vec![ProviderStatus::Missing; n],
             mode: ProviderModalMode::Browse,
+            focus_provider_id: None,
             submitted_secret: None,
         }
     }
 
-    pub fn selected_provider(&self) -> ProviderKind {
-        ProviderKind::ALL[self.selected.min(ProviderKind::ALL.len() - 1)]
+    /// Replace the configured tail of the row list (built-ins stay first).
+    pub fn set_configured_providers(&mut self, configured: Vec<String>) {
+        let mut rows = ProviderKind::BUILTINS.to_vec();
+        for id in configured {
+            if !id.is_empty() {
+                rows.push(ProviderKind::Configured(id));
+            }
+        }
+        let old_selected_id = self.selected_provider().id_str().to_owned();
+        self.rows = rows;
+        self.statuses
+            .resize(self.rows.len(), ProviderStatus::Missing);
+        if let Some(idx) = self.rows.iter().position(|r| r.id_str() == old_selected_id) {
+            self.selected = idx;
+        } else {
+            self.selected = 0;
+        }
+        if let Some(focus) = self.focus_provider_id.clone() {
+            self.focus_provider(&focus);
+        }
     }
 
-    pub fn status(&self, provider: ProviderKind) -> &ProviderStatus {
-        &self.statuses[provider_index(provider)]
+    /// Focus a provider by id (used for provider-scoped 401 recovery).
+    pub fn focus_provider(&mut self, id: &str) {
+        self.focus_provider_id = Some(id.to_owned());
+        if let Some(idx) = self.rows.iter().position(|r| r.id_str() == id) {
+            self.selected = idx;
+        }
+    }
+
+    pub fn selected_provider(&self) -> ProviderKind {
+        self.rows
+            .get(self.selected.min(self.rows.len().saturating_sub(1)))
+            .cloned()
+            .unwrap_or(ProviderKind::Xai)
+    }
+
+    pub fn status(&self, provider: &ProviderKind) -> &ProviderStatus {
+        static MISSING: ProviderStatus = ProviderStatus::Missing;
+        self.provider_index(provider)
+            .and_then(|i| self.statuses.get(i))
+            .unwrap_or(&MISSING)
     }
 
     /// Called by the provider backend after a status probe or connection task.
     pub fn set_status(&mut self, provider: ProviderKind, status: ProviderStatus) {
-        self.statuses[provider_index(provider)] = status;
+        if let Some(idx) = self.provider_index(&provider) {
+            if idx >= self.statuses.len() {
+                self.statuses.resize(idx + 1, ProviderStatus::Missing);
+            }
+            self.statuses[idx] = status;
+        }
     }
 
     /// Returns the newly submitted key exactly once.
     ///
     /// Backend integration must move it into the platform secret store and
     /// should immediately overwrite/drop the returned `String` after use.
-    pub fn take_submitted_secret(&mut self, provider: ProviderKind) -> Option<String> {
+    pub fn take_submitted_secret(&mut self, provider: &ProviderKind) -> Option<String> {
         let matches_provider = self
             .submitted_secret
             .as_ref()
-            .is_some_and(|(pending, _)| *pending == provider);
+            .is_some_and(|(pending, _)| pending == provider);
         matches_provider
             .then(|| self.submitted_secret.take().map(|(_, key)| key))
             .flatten()
@@ -214,13 +306,13 @@ impl ProviderModalState {
             self.mode = ProviderModalMode::Browse;
         }
     }
-}
 
-fn provider_index(provider: ProviderKind) -> usize {
-    match provider {
-        ProviderKind::Xai => 0,
-        ProviderKind::OpenAi => 1,
-        ProviderKind::OpenRouter => 2,
+    fn provider_index(&self, provider: &ProviderKind) -> Option<usize> {
+        self.rows.iter().position(|r| r == provider)
+    }
+
+    fn row_count(&self) -> usize {
+        self.rows.len().max(1)
     }
 }
 
@@ -334,15 +426,15 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
                     if editor.text().trim().is_empty() {
                         return ProviderModalOutcome::Unchanged;
                     }
-                    let provider = *provider;
+                    let provider = provider.clone();
                     let secret = editor.text().to_owned();
                     editor.reset();
                     (provider, secret)
                 };
-                state.submitted_secret = Some((provider, secret));
-                let command = match state.status(provider) {
-                    ProviderStatus::Connected { .. } => ProviderCommand::ReplaceKey(provider),
-                    _ => ProviderCommand::Connect(provider),
+                state.submitted_secret = Some((provider.clone(), secret));
+                let command = match state.status(&provider) {
+                    ProviderStatus::Connected { .. } => ProviderCommand::ReplaceKey(provider.clone()),
+                    _ => ProviderCommand::Connect(provider.clone()),
                 };
                 state.set_status(provider, ProviderStatus::Connecting);
                 state.mode = ProviderModalMode::Browse;
@@ -364,13 +456,13 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
             ProviderModalOutcome::Changed
         }
         KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
-            state.selected = (state.selected + 1).min(ProviderKind::ALL.len() - 1);
+            state.selected = (state.selected + 1).min(state.row_count() - 1);
             ProviderModalOutcome::Changed
         }
         KeyCode::Enter | KeyCode::Char('c') if key.modifiers.is_empty() => start_connect(state),
         KeyCode::Char('t') if key.modifiers.is_empty() => {
             let provider = state.selected_provider();
-            state.set_status(provider, ProviderStatus::Connecting);
+            state.set_status(provider.clone(), ProviderStatus::Connecting);
             ProviderModalOutcome::Command(ProviderCommand::Test(provider))
         }
         KeyCode::Char('d') if key.modifiers.is_empty() => {
@@ -382,7 +474,7 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
                 };
                 return ProviderModalOutcome::Changed;
             }
-            state.set_status(provider, ProviderStatus::Missing);
+            state.set_status(provider.clone(), ProviderStatus::Missing);
             // OpenAI: clear ChatGPT OAuth and/or API key (mutual exclusion store).
             ProviderModalOutcome::Command(if provider == ProviderKind::OpenAi {
                 ProviderCommand::LogoutCodex
@@ -392,6 +484,9 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
         }
         KeyCode::Char('r') if key.modifiers.is_empty() => {
             ProviderModalOutcome::Command(ProviderCommand::RefreshStatus(state.selected_provider()))
+        }
+        KeyCode::Char('a') if key.modifiers.is_empty() => {
+            ProviderModalOutcome::Command(ProviderCommand::AddConfigured)
         }
         _ => ProviderModalOutcome::Unchanged,
     }
@@ -415,7 +510,7 @@ fn start_connect(state: &mut ProviderModalState) -> ProviderModalOutcome {
             editor: LineEditor::default(),
         };
         ProviderModalOutcome::Changed
-    } else if matches!(state.status(provider), ProviderStatus::Connected { .. }) {
+    } else if matches!(state.status(&provider), ProviderStatus::Connected { .. }) {
         ProviderModalOutcome::Command(ProviderCommand::RefreshStatus(provider))
     } else {
         state.set_status(provider, ProviderStatus::Connecting);
@@ -501,7 +596,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         "Configure model providers. Keys are masked and are never written to config.toml.",
         Style::default().fg(theme.gray),
     );
-    for (idx, provider) in ProviderKind::ALL.iter().copied().enumerate() {
+    for (idx, provider) in state.rows.iter().enumerate() {
         if y.saturating_add(2) >= content.content.y.saturating_add(content.content.height) {
             break;
         }
@@ -528,7 +623,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         let status_text = format!(" [{:>18}]", status.label());
         let x = content.content.x;
         buf.set_string(x, y, prefix, title);
-        buf.set_string(x + 2, y, provider.label(), title);
+        buf.set_string(x + 2, y, &provider.label(), title);
         let sx =
             (content.content.x + content.content.width).saturating_sub(status_text.len() as u16);
         buf.set_string(sx, y, &status_text, status_style);
@@ -537,12 +632,13 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         if let Some(bg) = bg {
             detail_style = detail_style.bg(bg);
         }
+        let owned_detail = provider.detail();
         let detail = match status {
             ProviderStatus::Connected {
                 detail: Some(detail),
             } => detail.as_str(),
             ProviderStatus::Error(error) => error.as_str(),
-            _ => provider.detail(),
+            _ => owned_detail.as_str(),
         };
         put_line(
             buf,
@@ -689,14 +785,14 @@ mod tests {
             ProviderModalOutcome::Command(ProviderCommand::Connect(ProviderKind::OpenAi))
         );
         assert_eq!(
-            state.status(ProviderKind::OpenAi),
+            state.status(&ProviderKind::OpenAi),
             &ProviderStatus::Connecting
         );
         assert_eq!(
-            state.take_submitted_secret(ProviderKind::OpenAi).as_deref(),
+            state.take_submitted_secret(&ProviderKind::OpenAi).as_deref(),
             Some("sk-secret")
         );
-        assert!(state.take_submitted_secret(ProviderKind::OpenAi).is_none());
+        assert!(state.take_submitted_secret(&ProviderKind::OpenAi).is_none());
     }
 
     #[test]
@@ -752,7 +848,7 @@ mod tests {
             ProviderModalOutcome::Command(ProviderCommand::Disconnect(ProviderKind::OpenRouter))
         );
         assert_eq!(
-            state.status(ProviderKind::OpenRouter),
+            state.status(&ProviderKind::OpenRouter),
             &ProviderStatus::Missing
         );
         state.set_status(
@@ -760,9 +856,30 @@ mod tests {
             ProviderStatus::Error("invalid key".into()),
         );
         assert_eq!(
-            state.status(ProviderKind::OpenRouter).label(),
+            state.status(&ProviderKind::OpenRouter).label(),
             "Connection error"
         );
+    }
+
+    #[test]
+    fn configured_providers_appear_in_dynamic_rows() {
+        let mut state = ProviderModalState::new();
+        state.set_configured_providers(vec!["local_vllm".into(), "zai-model-api".into()]);
+        assert!(state.rows.iter().any(|r| r.id_str() == "local_vllm"));
+        assert!(state.rows.iter().any(|r| r.id_str() == "zai-model-api"));
+        state.focus_provider("zai-model-api");
+        assert_eq!(state.selected_provider().id_str(), "zai-model-api");
+    }
+
+    #[test]
+    fn secret_debug_never_leaks_configured_key() {
+        let mut state = ProviderModalState::new();
+        state.set_configured_providers(vec!["local_vllm".into()]);
+        state.focus_provider("local_vllm");
+        handle_key(&mut state, &key(KeyCode::Enter));
+        handle_paste(&mut state, "sk-configured-secret");
+        let dbg = format!("{state:?}");
+        assert!(!dbg.contains("sk-configured-secret"));
     }
 
     #[test]
