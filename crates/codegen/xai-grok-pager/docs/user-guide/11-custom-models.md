@@ -841,3 +841,10 @@ tail -f /tmp/grok.log
 ```
 
 Look for log entries containing `model` or `sampling` to trace model selection and API calls.
+
+
+## Namespaced model IDs
+
+Discovered catalog models use `{provider_id}:{upstream_slug}` so identical
+upstream IDs from different providers can coexist. Un-namespaced legacy aliases
+remain valid only when exactly one configured provider advertises that slug.

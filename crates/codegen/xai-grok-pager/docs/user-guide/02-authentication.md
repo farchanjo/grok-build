@@ -362,3 +362,23 @@ RUST_LOG=debug grok -p "hello" 2> /tmp/grok.log
 - **Token expires too quickly** -- Set `auth_token_ttl` or return `expires_in` in your auth provider's JSON output.
 - **OIDC redirect fails** -- Ensure your IdP allows loopback redirect URIs (`http://127.0.0.1/callback`).
 - **External auth provider not found** -- Check that the `auth_provider_command` path is correct and the binary is executable.
+
+
+## Provider-scoped authentication
+
+Grok Build does **not** use a global login. Authenticate each provider from
+`/providers` in the TUI or with:
+
+```bash
+grok provider connect xai
+grok provider connect openai
+grok provider set-key openrouter --from-env OPENROUTER_API_KEY
+grok provider set-key zai-model-api --from-env ZAI_API_KEY
+```
+
+Deprecated: `grok login`, `grok logout`, `/login`, and `/logout` are removed.
+They print an actionable error naming the replacement provider command.
+
+A 401 always names the resolved provider (for example OpenRouter or Z.ai) and
+focuses that row in `/providers`. It never starts xAI OAuth for a third-party
+failure.

@@ -782,3 +782,33 @@ When the same server name comes from more than one source, it resolves highest-p
 3. **Plugins** — file-based `.lsp.json`, then inline `lspServers`, in plugin load order
 
 Project and user entries replace lower-priority ones of the same name. Plugin entries only add servers whose names aren't already defined by a local file, so a local `lsp.json` always wins over a plugin. Plugin LSP servers load only after the plugin is trusted (see [Plugins](09-plugins.md)).
+
+
+## Dynamic OpenAI-compatible providers
+
+```toml
+[model_providers.local_vllm]
+kind = "openai_compatible"   # legacy alias: custom
+display_name = "Local vLLM"
+base_url = "http://127.0.0.1:8000/v1"
+enabled = true
+default_backend = "chat_completions"
+auth_scheme = "bearer"
+catalog_enabled = true
+capability_mode = "auto"
+env_key = "LOCAL_VLLM_KEY"
+
+[model_providers.local_vllm.extra_headers]
+X-Tenant = "development"
+
+[model_providers.local_vllm.capabilities]
+chat_completions = true
+responses = false
+embeddings = true
+```
+
+Legacy `kind = "custom"` still loads as `openai_compatible`. Application and
+administration keys live in the owner-only `auth.json` vault under
+`openai_compatible::<id>::api_key` / `::admin_key`, never in `config.toml`.
+
+Hot reload watches `[model_providers]` as well as `[model]` / `[models]`.

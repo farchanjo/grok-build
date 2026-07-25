@@ -253,3 +253,6 @@ Deeper files take precedence. Grok also reads `CLAUDE.md` files for compatibilit
 | [Keyboard Shortcuts](03-keyboard-shortcuts.md) | Complete reference for all key bindings |
 | [Slash Commands](04-slash-commands.md) | All available `/` commands |
 | [Configuration](05-configuration.md) | config.toml, pager.toml, environment variables |
+
+
+Authenticate providers via `/providers` or `grok provider connect <id>`. There is no global login.
