@@ -958,12 +958,159 @@ impl SessionActor {
         )
     }
 
+    /// Issue the next provider-credential failure generation.
+    ///
+    /// Counter starts at `0` (none issued). Issued values are always
+    /// nonzero (`1, 2, …`). Uses `checked_add` so overflow fails closed
+    /// without wrapping or reusing prior ids. On exhaustion returns `None`
+    /// and leaves the counter unchanged — callers emit a non-resumable
+    /// event with generation `0` (reserved).
+    ///
+    /// # Contract
+    /// - `0` is never issued and means "non-resumable" on the wire.
+    /// - Remote-triggerable 401 storms must not panic: exhaustion is
+    ///   fail-closed, not an invariant panic.
+    pub(crate) fn mint_provider_credential_generation(&self) -> Option<u64> {
+        let last = self.provider_credential_generation.get();
+        let next = last.checked_add(1)?;
+        // Defensive: never issue zero even if the cell was corrupted.
+        if next == 0 {
+            return None;
+        }
+        self.provider_credential_generation.set(next);
+        Some(next)
+    }
+
+    /// Derive [`ProviderCredentialKind`] / [`ProviderCredentialAction`] from
+    /// resolved auth method and model credential shape — never from free-form
+    /// error text or URL substrings.
+    ///
+    /// | Case | Kind | Action |
+    /// |------|------|--------|
+    /// | xAI session/OIDC/external refreshable (`cached_token`/`grok.com`/`oidc`) | Oauth | RefreshOauth |
+    /// | xAI API key (`xai.api_key`, `XAI_API_KEY`, model BYOK key) | ApiKey | OpenProviders |
+    /// | OpenAI ChatGPT Codex OAuth base URL | Oauth | RefreshOauth |
+    /// | OpenAI API key / OpenRouter | ApiKey | OpenProviders |
+    /// | Custom with `[auth_provider.*]` helper | Oauth | RefreshOauth |
+    /// | Custom static key | ApiKey | OpenProviders |
+    fn resolve_credential_kind_action(
+        &self,
+        failed_model_id: &str,
+        base_url: &str,
+        for_xai: bool,
+        provider_kind: Option<crate::agent::model_providers::ModelProviderKind>,
+    ) -> (
+        crate::extensions::notification::ProviderCredentialKind,
+        crate::extensions::notification::ProviderCredentialAction,
+    ) {
+        use crate::agent::auth_method::{AuthMethodKind, ModelByok};
+        use crate::agent::model_providers::ModelProviderKind;
+        use crate::extensions::notification::{ProviderCredentialAction, ProviderCredentialKind};
+
+        if for_xai {
+            // Model-level BYOK / own key on an xAI-hosted model is API key,
+            // even if the ACP session method is still session-based.
+            let byok = self.resolve_session_model_byok(failed_model_id, base_url);
+            if byok == ModelByok::Byok {
+                return (
+                    ProviderCredentialKind::ApiKey,
+                    ProviderCredentialAction::OpenProviders,
+                );
+            }
+            let method = self.auth_method_id.load();
+            let kind = method
+                .as_ref()
+                .map(|id| AuthMethodKind::from_id(id.as_ref()))
+                .unwrap_or(AuthMethodKind::Unknown);
+            return if kind.is_session_based() {
+                (
+                    ProviderCredentialKind::Oauth,
+                    ProviderCredentialAction::RefreshOauth,
+                )
+            } else {
+                // xai.api_key method, unknown, or non-session: treat as API key.
+                (
+                    ProviderCredentialKind::ApiKey,
+                    ProviderCredentialAction::OpenProviders,
+                )
+            };
+        }
+
+        // ChatGPT Codex subscription OAuth (exact host+path only).
+        if is_chatgpt_codex_base_url(base_url) {
+            return (
+                ProviderCredentialKind::Oauth,
+                ProviderCredentialAction::RefreshOauth,
+            );
+        }
+
+        // Catalog OpenRouter / official OpenAI API hosts are always API keys.
+        // (ChatGPT already returned above.)
+        match provider_kind {
+            Some(ModelProviderKind::OpenRouter) | Some(ModelProviderKind::OpenAi) => {
+                return (
+                    ProviderCredentialKind::ApiKey,
+                    ProviderCredentialAction::OpenProviders,
+                );
+            }
+            _ => {}
+        }
+
+        // Custom (or unknown): an auth_provider helper is refreshable OAuth-like.
+        if self.model_auth_provider(failed_model_id).is_some() {
+            (
+                ProviderCredentialKind::Oauth,
+                ProviderCredentialAction::RefreshOauth,
+            )
+        } else {
+            (
+                ProviderCredentialKind::ApiKey,
+                ProviderCredentialAction::OpenProviders,
+            )
+        }
+    }
+
+    /// Build a structured provider credential failure with a minted (or
+    /// reserved-zero non-resumable) generation.
+    fn build_provider_credential_failure(
+        &self,
+        provider_id: String,
+        provider_name: String,
+        failed_model_id: &str,
+        credential_kind: crate::extensions::notification::ProviderCredentialKind,
+        recommended_action: crate::extensions::notification::ProviderCredentialAction,
+        status_code: Option<u16>,
+        error_category: &str,
+        diagnostics: Option<&xai_grok_inference_types::ApiErrorDiagnostics>,
+        backend: Option<String>,
+    ) -> crate::extensions::notification::ProviderCredentialFailure {
+        use crate::extensions::notification::{
+            ProviderCredentialFailure, bound_safe_id, sanitize_error_category,
+        };
+        // Fail closed on exhaustion: generation 0 is reserved / non-resumable.
+        let generation = self.mint_provider_credential_generation().unwrap_or(0);
+        ProviderCredentialFailure {
+            provider_id,
+            provider_name,
+            failed_model_id: (!failed_model_id.is_empty()).then(|| failed_model_id.to_owned()),
+            credential_kind,
+            recommended_action,
+            credential_generation: generation,
+            http_status: status_code,
+            request_id: None,
+            generation_id: bound_safe_id(diagnostics.and_then(|d| d.generation_id.as_deref())),
+            backend,
+            error_category: Some(sanitize_error_category(error_category).to_owned()),
+        }
+    }
+
     /// Resolve provider-scoped credential failure for the active/failed model.
     ///
-    /// Returns `None` for first-party xAI session auth (uses the xAI-specific
-    /// reauth banner with `/providers` guidance). Third-party and ChatGPT
-    /// OAuth routes always return structured identity from the resolved
-    /// model provider — never from free-form error text.
+    /// Returns `None` for first-party xAI so session recovery can run first;
+    /// after recovery is exhausted the call site synthesizes structured xAI
+    /// identity via [`Self::synthesize_xai_credential_failure`]. Third-party
+    /// and ChatGPT OAuth routes always return structured identity from the
+    /// resolved model provider — never from free-form error text.
     pub(crate) async fn provider_credential_failure_context(
         &self,
         failed_model_id: &str,
@@ -973,9 +1120,7 @@ impl SessionActor {
     ) -> Option<crate::extensions::notification::ProviderCredentialFailure> {
         use crate::agent::model_providers::ModelProviderKind;
         use crate::extensions::notification::{
-            ProviderCredentialAction, ProviderCredentialFailure, ProviderCredentialKind,
-            approved_provider_for_exact_host, bound_safe_id, host_from_base_url,
-            sanitize_error_category,
+            approved_provider_for_exact_host, host_from_base_url,
         };
         use xai_grok_inference::config::ProviderIdentity;
 
@@ -1052,37 +1197,50 @@ impl SessionActor {
             ModelProviderKind::Custom => default_name.to_owned(),
         };
 
-        // Structured credential kind from provider identity + base URL shape —
-        // never from free-form error text.
-        let is_chatgpt_oauth = xai_grok_inference_types::is_chatgpt_codex_base_url(base_url);
-        let (credential_kind, recommended_action) = if is_chatgpt_oauth {
-            (
-                ProviderCredentialKind::Oauth,
-                ProviderCredentialAction::RefreshOauth,
-            )
-        } else {
-            (
-                ProviderCredentialKind::ApiKey,
-                ProviderCredentialAction::OpenProviders,
-            )
-        };
+        let (credential_kind, recommended_action) =
+            self.resolve_credential_kind_action(failed_model_id, base_url, false, provider_kind);
 
-        let generation = self.provider_credential_generation.get().wrapping_add(1);
-        self.provider_credential_generation.set(generation);
-
-        Some(ProviderCredentialFailure {
+        Some(self.build_provider_credential_failure(
             provider_id,
             provider_name,
-            failed_model_id: (!failed_model_id.is_empty()).then(|| failed_model_id.to_owned()),
+            failed_model_id,
             credential_kind,
             recommended_action,
-            credential_generation: generation,
-            http_status: status_code,
-            request_id: None,
-            generation_id: bound_safe_id(diagnostics.and_then(|d| d.generation_id.as_deref())),
+            status_code,
+            error_category,
+            diagnostics,
             backend,
-            error_category: Some(sanitize_error_category(error_category).to_owned()),
-        })
+        ))
+    }
+
+    /// Terminal first-party xAI credential failure after recovery exhausted.
+    /// Kind/action come from the resolved ACP auth method and model BYOK
+    /// status — never hard-coded to OAuth.
+    pub(crate) fn synthesize_xai_credential_failure(
+        &self,
+        failed_model_id: &str,
+        base_url: &str,
+        status_code: Option<u16>,
+        diagnostics: Option<&xai_grok_inference_types::ApiErrorDiagnostics>,
+        backend: Option<String>,
+    ) -> crate::extensions::notification::ProviderCredentialFailure {
+        let (credential_kind, recommended_action) = self.resolve_credential_kind_action(
+            failed_model_id,
+            base_url,
+            true,
+            Some(crate::agent::model_providers::ModelProviderKind::Xai),
+        );
+        self.build_provider_credential_failure(
+            "xai".into(),
+            "xAI".into(),
+            failed_model_id,
+            credential_kind,
+            recommended_action,
+            status_code,
+            crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE,
+            diagnostics,
+            backend,
+        )
     }
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
@@ -1461,25 +1619,20 @@ impl SessionActor {
                     )
                     .await;
             }
-            // First-party path without catalog entry: synthesize xAI identity.
-            let generation = self.provider_credential_generation.get().wrapping_add(1);
-            self.provider_credential_generation.set(generation);
-            let provider_ctx = crate::extensions::notification::ProviderCredentialFailure {
-                provider_id: "xai".into(),
-                provider_name: "xAI".into(),
-                failed_model_id: (!failed_model_id.is_empty()).then(|| failed_model_id.clone()),
-                credential_kind: crate::extensions::notification::ProviderCredentialKind::Oauth,
-                recommended_action:
-                    crate::extensions::notification::ProviderCredentialAction::RefreshOauth,
-                credential_generation: generation,
-                http_status: error.status_code,
-                request_id: None,
-                generation_id: None,
-                backend: None,
-                error_category: Some(
-                    crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE.to_owned(),
-                ),
-            };
+            // First-party path without catalog entry: synthesize xAI identity
+            // with kind/action from resolved auth method (API key vs OAuth).
+            let backend = self
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .map(|c| format!("{:?}", c.api_backend).to_ascii_lowercase());
+            let provider_ctx = self.synthesize_xai_credential_failure(
+                &failed_model_id,
+                &failed_base_url,
+                error.status_code,
+                error.diagnostics.as_ref(),
+                backend,
+            );
             return self
                 .surface_provider_credential_failure(provider_ctx, error.status_code, error.kind)
                 .await;

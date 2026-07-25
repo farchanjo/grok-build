@@ -701,10 +701,12 @@ pub(crate) struct SessionActor {
     /// Explicit OpenRouter request-pacing opt-in for the active model. Kept
     /// outside chat-state because it is provider transport configuration.
     pub(crate) openrouter_pacing: std::cell::Cell<bool>,
-    /// Monotonic generation for provider-scoped credential failures.
-    /// Bumped whenever a provider credential failure is surfaced so blocked
-    /// prompt resumption can require a matching generation (sibling-provider
-    /// reconnect cannot resubmit).
+    /// Monotonic allocator state for provider-scoped credential failures.
+    /// Holds the last issued generation (starts at `0` = none issued).
+    /// Allocation uses checked arithmetic via
+    /// [`SessionActor::mint_provider_credential_generation`]; issued values
+    /// are always nonzero. `0` on the wire means non-resumable (exhaustion /
+    /// reserved). Never wraps or reuses.
     pub(crate) provider_credential_generation: std::cell::Cell<u64>,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,

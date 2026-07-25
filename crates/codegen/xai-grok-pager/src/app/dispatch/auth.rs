@@ -251,13 +251,18 @@ pub(in crate::app::dispatch) fn begin_credential_repair(
             if stashed.provider_id != provider_id {
                 return None;
             }
+            // Generation 0 is reserved / non-resumable — never mint a repair token.
+            if stashed.credential_generation == 0 {
+                return None;
+            }
             (id, stashed.credential_generation)
         }
         _ => {
-            // Not on an agent view: first agent with a matching stash.
+            // Not on an agent view: first agent with a matching resumable stash.
             app.agents.iter().find_map(|(id, agent)| {
                 agent.reauth_stashed_prompt.as_ref().and_then(|s| {
-                    (s.provider_id == provider_id).then_some((*id, s.credential_generation))
+                    (s.provider_id == provider_id && s.credential_generation != 0)
+                        .then_some((*id, s.credential_generation))
                 })
             })?
         }

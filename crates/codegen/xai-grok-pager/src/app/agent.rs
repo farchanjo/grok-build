@@ -807,9 +807,13 @@ pub struct ProviderScopedStashedPrompt {
 impl ProviderScopedStashedPrompt {
     /// Whether a successful repair for `provider_id` at exact `generation`
     /// may resubmit this stash. Sibling providers and generation mismatches
-    /// never match.
+    /// never match. Generation `0` is reserved (non-resumable) and never
+    /// matches.
     pub fn matches_repair(&self, provider_id: &str, generation: u64) -> bool {
-        self.provider_id == provider_id && self.credential_generation == generation
+        generation != 0
+            && self.credential_generation != 0
+            && self.provider_id == provider_id
+            && self.credential_generation == generation
     }
 }
 
@@ -857,6 +861,10 @@ mod provider_scoped_stash_tests {
         assert!(stash.matches_repair("openrouter", 3));
         assert!(!stash.matches_repair("openrouter", 4));
         assert!(!stash.matches_repair("openrouter", 0));
+        // Generation 0 is reserved / non-resumable on both sides.
+        let zero = sample("openrouter", 0);
+        assert!(!zero.matches_repair("openrouter", 0));
+        assert!(!zero.matches_repair("openrouter", 1));
     }
 
     #[test]

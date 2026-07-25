@@ -574,7 +574,8 @@ async fn legacy_auth_hint_on_401_unauthorized() {
         .await;
 }
 
-/// 401 with OIDC auth must NOT append the legacy hint.
+/// 401 with OIDC auth must NOT append the legacy WebLogin hint; terminal path
+/// is structured xAI OAuth repair via `/providers` (no global `/login`).
 #[tokio::test(flavor = "current_thread")]
 async fn no_legacy_hint_on_401_for_oidc_auth() {
     let local = tokio::task::LocalSet::new();
@@ -609,8 +610,12 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
                 "OIDC auth must NOT trigger WebLogin deprecation on 401, got: {msg}"
             );
             assert!(
-                msg.contains("Auth:      Oidc"),
-                "OIDC 401 must show auth mode in enriched message, got: {msg}"
+                msg.contains("/providers") && msg.contains("xAI") && msg.contains("OAuth"),
+                "OIDC 401 terminal must be structured xAI OAuth /providers repair, got: {msg}"
+            );
+            assert!(
+                !msg.contains("/login") && !msg.contains("grok login"),
+                "must not mention global login, got: {msg}"
             );
         })
         .await;
@@ -2498,6 +2503,273 @@ async fn preturn_chatgpt_oauth_active_model_updates_own_credential() {
             );
 
             crate::agent::providers::set_stored_key_home_for_tests(None);
+        })
+        .await;
+}
+
+/// Table: credential kind/action distinctions for terminal provider failures.
+///
+/// | Case | provider | kind | action | generation |
+/// |------|----------|------|--------|------------|
+/// | OpenRouter API key | openrouter | ApiKey | OpenProviders | nonzero |
+/// | OpenAI API key | openai | ApiKey | OpenProviders | nonzero |
+/// | ChatGPT OAuth Codex | openai | Oauth | RefreshOauth | nonzero |
+/// | xAI session OAuth (terminal, no recovery) | xai | Oauth | RefreshOauth | nonzero |
+/// | xAI API key method | xai | ApiKey | OpenProviders | nonzero |
+#[tokio::test(flavor = "current_thread")]
+async fn provider_credential_kind_action_table() {
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+    use crate::extensions::notification::{
+        ProviderCredentialAction, ProviderCredentialKind, PROVIDER_CREDENTIAL_ERROR_TYPE,
+        SessionUpdate as XaiSessionUpdate,
+    };
+    use crate::session::storage::SessionUpdate;
+
+    #[derive(Clone, Copy)]
+    struct Case {
+        name: &'static str,
+        auth_method: &'static str,
+        auth_type: xai_chat_state::AuthType,
+        model: &'static str,
+        base_url: &'static str,
+        provider_kind: Option<ModelProviderKind>,
+        provider_id: &'static str,
+        provider_name: &'static str,
+        expect_kind: ProviderCredentialKind,
+        expect_action: ProviderCredentialAction,
+        /// When true, attach an always-failing AuthManager so xAI recovery is
+        /// exhausted and the terminal structured event fires.
+        xai_terminal: bool,
+    }
+
+    let cases = [
+        Case {
+            name: "openrouter_api_key",
+            auth_method: "xai.api_key",
+            auth_type: xai_chat_state::AuthType::ApiKey,
+            model: "moonshotai/kimi-k2",
+            base_url: "https://openrouter.ai/api/v1",
+            provider_kind: Some(ModelProviderKind::OpenRouter),
+            provider_id: "openrouter",
+            provider_name: "OpenRouter",
+            expect_kind: ProviderCredentialKind::ApiKey,
+            expect_action: ProviderCredentialAction::OpenProviders,
+            xai_terminal: false,
+        },
+        Case {
+            name: "openai_api_key",
+            auth_method: "xai.api_key",
+            auth_type: xai_chat_state::AuthType::ApiKey,
+            model: "gpt-4o",
+            base_url: "https://api.openai.com/v1",
+            provider_kind: Some(ModelProviderKind::OpenAi),
+            provider_id: "openai",
+            provider_name: "OpenAI",
+            expect_kind: ProviderCredentialKind::ApiKey,
+            expect_action: ProviderCredentialAction::OpenProviders,
+            xai_terminal: false,
+        },
+        Case {
+            name: "chatgpt_oauth",
+            auth_method: "xai.api_key",
+            auth_type: xai_chat_state::AuthType::ApiKey,
+            model: "gpt-5",
+            base_url: "https://chatgpt.com/backend-api/codex/responses",
+            provider_kind: Some(ModelProviderKind::OpenAi),
+            provider_id: "openai",
+            provider_name: "OpenAI",
+            expect_kind: ProviderCredentialKind::Oauth,
+            expect_action: ProviderCredentialAction::RefreshOauth,
+            xai_terminal: false,
+        },
+        Case {
+            name: "xai_session_oauth_terminal",
+            auth_method: "cached_token",
+            auth_type: xai_chat_state::AuthType::SessionToken,
+            model: "grok-3",
+            base_url: "https://api.x.ai/v1",
+            provider_kind: None,
+            provider_id: "xai",
+            provider_name: "xAI",
+            expect_kind: ProviderCredentialKind::Oauth,
+            expect_action: ProviderCredentialAction::RefreshOauth,
+            xai_terminal: true,
+        },
+        Case {
+            name: "xai_api_key_terminal",
+            auth_method: "xai.api_key",
+            auth_type: xai_chat_state::AuthType::ApiKey,
+            model: "grok-3",
+            base_url: "https://api.x.ai/v1",
+            provider_kind: None,
+            provider_id: "xai",
+            provider_name: "xAI",
+            expect_kind: ProviderCredentialKind::ApiKey,
+            expect_action: ProviderCredentialAction::OpenProviders,
+            xai_terminal: true,
+        },
+    ];
+
+    for case in cases {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (actor, mut persistence_rx) = if case.xai_terminal {
+                    // No AuthManager → recovery cannot run; terminal path fires.
+                    make_actor_with_method_and_credentials(
+                        None,
+                        case.auth_method,
+                        case.auth_type,
+                        "test-key".into(),
+                    )
+                    .await
+                } else {
+                    make_actor_with_method_and_credentials(
+                        None,
+                        case.auth_method,
+                        case.auth_type,
+                        "test-key".into(),
+                    )
+                    .await
+                };
+
+                if let Some(kind) = case.provider_kind {
+                    let mut entry = ModelEntry {
+                        info: ModelInfo::fallback(case.model),
+                        model_provider: Some(ResolvedModelProvider {
+                            id: case.provider_id.to_string(),
+                            kind,
+                            openrouter_fallback_models: Vec::new(),
+                            openrouter_provider_preferences: None,
+                            openrouter_plugins: Vec::new(),
+                            openrouter_pacing: false,
+                            command: Vec::new(),
+                        }),
+                        api_key: None,
+                        env_key: None,
+                        auth_provider: None,
+                        api_base_url: Some(case.base_url.to_string()),
+                    };
+                    entry.info.base_url = case.base_url.to_string();
+                    entry.info.model = case.model.to_string();
+                    actor.models_manager.insert_test_entry(case.model, entry);
+                }
+
+                let mut settings = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
+                settings.model = case.model.to_string();
+                settings.base_url = case.base_url.to_string();
+                actor.chat_state_handle.update_inference_settings(settings);
+
+                let result = actor.handle_sampling_failure(auth_error()).await;
+                assert!(
+                    result.is_err(),
+                    "{}: expected terminal Err, got Ok(recovery)",
+                    case.name
+                );
+
+                let mut saw = false;
+                while let Ok(msg) = persistence_rx.try_recv() {
+                    if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                        && let XaiSessionUpdate::RetryState(
+                            crate::extensions::notification::RetryState::Failed {
+                                error_type,
+                                message,
+                                provider,
+                            },
+                        ) = &notif.update
+                    {
+                        assert_eq!(
+                            error_type, PROVIDER_CREDENTIAL_ERROR_TYPE,
+                            "{}: error_type",
+                            case.name
+                        );
+                        assert!(
+                            !message.contains("/login"),
+                            "{}: must not mention /login: {message}",
+                            case.name
+                        );
+                        let p = provider
+                            .as_ref()
+                            .unwrap_or_else(|| panic!("{}: missing provider context", case.name));
+                        assert_eq!(p.provider_id, case.provider_id, "{}", case.name);
+                        assert_eq!(p.provider_name, case.provider_name, "{}", case.name);
+                        assert_eq!(
+                            p.failed_model_id.as_deref(),
+                            Some(case.model),
+                            "{}",
+                            case.name
+                        );
+                        assert_eq!(p.credential_kind, case.expect_kind, "{}", case.name);
+                        assert_eq!(p.recommended_action, case.expect_action, "{}", case.name);
+                        assert_ne!(
+                            p.credential_generation, 0,
+                            "{}: generation must be nonzero",
+                            case.name
+                        );
+                        assert_eq!(p.http_status, Some(401), "{}", case.name);
+                        saw = true;
+                    }
+                }
+                assert!(saw, "{}: expected RetryState::Failed with provider", case.name);
+            })
+            .await;
+    }
+}
+
+/// Generation allocator is monotonic, nonzero, and fails closed without reuse.
+#[tokio::test(flavor = "current_thread")]
+async fn mint_provider_credential_generation_is_monotonic_and_fails_closed() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = make_actor_with_auth_and_credentials(
+                None,
+                xai_chat_state::AuthType::ApiKey,
+                "k".into(),
+            )
+            .await;
+            assert_eq!(actor.provider_credential_generation.get(), 0);
+            let a = actor
+                .mint_provider_credential_generation()
+                .expect("first");
+            let b = actor
+                .mint_provider_credential_generation()
+                .expect("second");
+            assert_eq!(a, 1);
+            assert_eq!(b, 2);
+            assert_ne!(a, b);
+
+            // Exhaustion: leave counter at MAX so checked_add fails.
+            actor.provider_credential_generation.set(u64::MAX);
+            assert!(
+                actor.mint_provider_credential_generation().is_none(),
+                "exhaustion must fail closed"
+            );
+            assert_eq!(
+                actor.provider_credential_generation.get(),
+                u64::MAX,
+                "counter unchanged on exhaustion"
+            );
+
+            // Subsequent build uses reserved 0 (non-resumable) without panic.
+            let ctx = actor.synthesize_xai_credential_failure(
+                "grok-3",
+                "https://api.x.ai/v1",
+                Some(401),
+                None,
+                None,
+            );
+            assert_eq!(ctx.credential_generation, 0, "exhausted mint → gen 0");
+            assert_eq!(ctx.provider_id, "xai");
+            assert_eq!(
+                ctx.credential_kind,
+                crate::extensions::notification::ProviderCredentialKind::ApiKey
+            );
         })
         .await;
 }

@@ -1141,6 +1141,10 @@ pub struct ProviderCredentialFailure {
     /// Bumped when a credential failure is recorded; a sibling-provider
     /// reconnect cannot resubmit a prompt stashed under a different
     /// `(provider_id, credential_generation)` pair.
+    ///
+    /// **`0` is reserved** and means non-resumable (allocator exhaustion or
+    /// missing generation). Issued values are always nonzero. Pagers must
+    /// not mint a repair token or auto-resume for generation `0`.
     #[serde(default)]
     pub credential_generation: u64,
     /// HTTP status when known (typically 401).
