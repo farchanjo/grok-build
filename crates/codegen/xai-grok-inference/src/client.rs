@@ -26,11 +26,11 @@ use xai_grok_inference_types::error::{
 use xai_grok_inference_types::{
     ApiErrorDiagnostics, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
     ConversationRequest, ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER,
-    MessagesRequestWrapper, ResponseModelMetadata, Result, InferenceError, build_messages_request,
+    InferenceError, MessagesRequestWrapper, ResponseModelMetadata, Result, build_messages_request,
     is_check_event, messages, rs,
 };
 
-use crate::config::{AuthScheme, OriginClientInfo, InferenceConfig};
+use crate::config::{AuthScheme, InferenceConfig, OriginClientInfo};
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_inference_types::ApiBackend;
@@ -2524,19 +2524,7 @@ mod tests {
         let empty_prefs = crate::config::OpenRouterProviderPreferences::default();
         assert!(empty_prefs.is_empty());
 
-        let serialized = serde_json::to_value(ChatRequestWithFallbacks {
-            inner: &request,
-            models: None,
-            provider: Some(&empty_prefs),
-            plugins: None,
-        })
-        .unwrap();
-        // serde still serializes the object because the field is `Some`, but
-        // the wire path uses `openrouter_provider_preferences()` which filters
-        // empty objects to `None`. Here we verify the `is_empty` gate works:
-        assert!(empty_prefs.is_empty());
-
-        // Now simulate the wire gate: empty prefs produce `None`.
+        // Simulate the wire gate: empty preferences produce `None`.
         let wire_serialized = serde_json::to_value(ChatRequestWithFallbacks {
             inner: &request,
             models: None,
@@ -2932,7 +2920,8 @@ mod tests {
             .insert("x-test-header".to_string(), "test-value".to_string());
         cfg.extra_headers
             .insert("x-XAI-token-auth".to_string(), "xai-grok-cli".to_string());
-        let _client = InferenceClient::new(cfg).expect("client with extra headers should construct");
+        let _client =
+            InferenceClient::new(cfg).expect("client with extra headers should construct");
     }
 
     #[test]

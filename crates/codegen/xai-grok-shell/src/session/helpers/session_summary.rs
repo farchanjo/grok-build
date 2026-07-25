@@ -4,7 +4,6 @@ use crate::inference::{
     Client as OaiCompatClient, ConversationItem, ConversationRequest, ConversationToolChoice,
     ToolSpec,
 };
-use crate::session::helpers::chat::floor_char_boundary;
 
 /// Upper bound on the user text that feeds title generation; titles only need
 /// the opening, and this keeps the request well under the model prompt limit.
@@ -49,7 +48,7 @@ fn title_source_text(user_message: &str) -> String {
     let mut display =
         xai_grok_tools::implementations::skills::skill::extract_skill_display_text(base)
             .unwrap_or_else(|| base.to_string());
-    display.truncate(floor_char_boundary(&display, TITLE_SOURCE_MAX_BYTES));
+    display.truncate(display.floor_char_boundary(TITLE_SOURCE_MAX_BYTES));
     display
 }
 

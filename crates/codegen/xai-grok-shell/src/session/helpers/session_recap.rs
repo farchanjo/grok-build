@@ -12,7 +12,6 @@
 //! (`handle_recap`).
 
 use crate::inference::ConversationItem;
-use crate::session::helpers::chat::floor_char_boundary;
 use xai_chat_state::{compaction_utils, estimate_conversation_tokens, estimate_item_tokens};
 
 /// Hard cap on the recap text length (characters). Generous headroom: the recap
@@ -271,7 +270,7 @@ pub(crate) fn clean_recap_text(raw: &str) -> String {
     }
 
     if out.len() > RECAP_MAX_CHARS {
-        let cut = floor_char_boundary(&out, RECAP_MAX_CHARS);
+        let cut = out.floor_char_boundary(RECAP_MAX_CHARS);
         out.truncate(cut);
         out = out.trim_end().to_string();
         out.push('\u{2026}'); // …

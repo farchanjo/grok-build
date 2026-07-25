@@ -249,19 +249,10 @@ pub fn next_registration_seq() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let candidate = now_ms << 10;
-    let mut prev = REGISTRATION_CLOCK.load(Ordering::Relaxed);
-    loop {
-        let next = candidate.max(prev + 1);
-        match REGISTRATION_CLOCK.compare_exchange_weak(
-            prev,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return next,
-            Err(actual) => prev = actual,
-        }
-    }
+    let previous = REGISTRATION_CLOCK.update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        candidate.max(current + 1)
+    });
+    candidate.max(previous + 1)
 }
 
 #[cfg(test)]

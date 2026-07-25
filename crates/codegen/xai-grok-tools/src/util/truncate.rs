@@ -154,33 +154,13 @@ pub fn truncate_str_with_marker(s: &str, max_bytes: usize) -> Cow<'_, str> {
 }
 
 /// Find the largest byte index `<= index` that is a char boundary in `s`.
-///
-/// Polyfill for [`str::floor_char_boundary`] (stabilized in Rust 1.91; repo
-/// toolchain is 1.90). Remove once the toolchain is bumped.
 pub fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut i = index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+    s.floor_char_boundary(index)
 }
 
 /// Find the smallest byte index `>= index` that is a char boundary in `s`.
-///
-/// Polyfill for [`str::ceil_char_boundary`] (stabilized in Rust 1.91; repo
-/// toolchain is 1.90). Remove once the toolchain is bumped.
 pub fn ceil_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut i = index;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
+    s.ceil_char_boundary(index)
 }
 
 /// Estimate the number of tokens in a string using the bytes/4 heuristic.

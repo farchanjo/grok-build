@@ -92,8 +92,8 @@ impl InferenceLatencyStats {
 
         // Compute inter-token intervals
         let intervals: Vec<u64> = chunk_timestamps
-            .windows(2)
-            .map(|w| w[1].duration_since(w[0]).as_millis() as u64)
+            .array_windows()
+            .map(|[previous, current]| current.duration_since(*previous).as_millis() as u64)
             .collect();
 
         let (itl_p50, itl_p99, itl_max, itl_mean) = if intervals.is_empty() {
