@@ -433,6 +433,8 @@ impl ProviderManager {
                     ..Default::default()
                 }
             });
+        // First-class Z.ai Model API profile (credentials never inlined).
+        super::zai::install_zai_provider(model_providers);
         let openrouter_configured = credential_lookup_manager()
             .api_key(ProviderId::OpenRouter)
             .ok()
@@ -1278,7 +1280,9 @@ pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Opt
     let provider = match model.model_provider.as_ref()?.kind {
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
-        ModelProviderKind::Custom | ModelProviderKind::Xai => {
+        ModelProviderKind::OpenAiCompatible
+        | ModelProviderKind::Zai
+        | ModelProviderKind::Xai => {
             return None;
         }
     };
