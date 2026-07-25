@@ -47,6 +47,45 @@ pub enum ProviderIdentity {
     OpenRouter,
 }
 
+/// OpenRouter routing `sort`: string shorthand (`"latency"`) or object form
+/// (`{ "by": "latency", ... }`) per the pinned OpenAPI `ProviderPreferences`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OpenRouterSort {
+    /// Documented string form: `"price"`, `"throughput"`, or `"latency"`.
+    Name(String),
+    /// Object form with a primary `by` key and additive vendor fields.
+    Object {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+        #[serde(flatten)]
+        extra: indexmap::IndexMap<String, serde_json::Value>,
+    },
+}
+
+impl OpenRouterSort {
+    /// String-form constructor used by tests and simple TOML configs.
+    pub fn name(value: impl Into<String>) -> Self {
+        Self::Name(value.into())
+    }
+
+    /// Object-form constructor with a required `by` dimension.
+    pub fn by(value: impl Into<String>) -> Self {
+        Self::Object {
+            by: Some(value.into()),
+            extra: indexmap::IndexMap::new(),
+        }
+    }
+
+    /// Primary sort dimension when represented as a string or `{ by }`.
+    pub fn as_name(&self) -> Option<&str> {
+        match self {
+            Self::Name(s) => Some(s.as_str()),
+            Self::Object { by, .. } => by.as_deref(),
+        }
+    }
+}
+
 /// OpenRouter's native `provider` request-body object. All fields are
 /// optional; OpenRouter applies its own defaults when a field is absent. The
 /// sampler omits the entire `provider` key when no preferences are configured,
@@ -58,9 +97,9 @@ pub enum ProviderIdentity {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenRouterProviderPreferences {
-    /// Routing sort: `"price"`, `"throughput"`, or `"latency"`.
+    /// Routing sort: string (`"latency"`) or object (`{ "by": "latency" }`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sort: Option<String>,
+    pub sort: Option<OpenRouterSort>,
     /// Preferred provider slugs, in descending priority.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order: Vec<String>,
@@ -88,6 +127,43 @@ pub struct OpenRouterProviderPreferences {
     /// Maximum price caps per token kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_price: Option<OpenRouterMaxPrice>,
+    /// Prefer providers that serve distillable text (OpenAPI field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforce_distillable_text: Option<bool>,
+    /// Preferred maximum latency budget. OpenAPI allows number or object;
+    /// kept as JSON so both shapes round-trip without schema lag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_max_latency: Option<serde_json::Value>,
+    /// Preferred minimum throughput. OpenAPI allows number or object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_min_throughput: Option<serde_json::Value>,
+}
+
+/// Normalized OpenRouter Chat `reasoning` object (effort + optional knobs).
+/// Distinct from flat `reasoning_effort` so OpenRouter receives the documented
+/// object form while other providers keep OpenAI-compatible flat effort.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenRouterReasoning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<bool>,
+}
+
+impl OpenRouterReasoning {
+    pub fn from_effort(effort: xai_grok_inference_types::ReasoningEffort) -> Self {
+        Self {
+            effort: Some(effort.as_str().to_owned()),
+            max_tokens: None,
+            exclude: None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.effort.is_none() && self.max_tokens.is_none() && self.exclude.is_none()
+    }
 }
 
 /// Per-kind price cap for [`OpenRouterProviderPreferences::max_price`].
@@ -137,6 +213,9 @@ impl OpenRouterProviderPreferences {
                 .as_ref()
                 .map(|m| m.prompt.is_none() && m.completion.is_none())
                 .unwrap_or(true)
+            && self.enforce_distillable_text.is_none()
+            && self.preferred_max_latency.is_none()
+            && self.preferred_min_throughput.is_none()
     }
 }
 
@@ -222,6 +301,13 @@ pub struct InferenceConfig {
     /// providers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openrouter_plugins: Vec<OpenRouterPlugin>,
+    /// Explicit OpenRouter request pacing opt-in for OpenRouter-compatible
+    /// proxies that keep a non-`OpenRouter` [`ProviderIdentity`]. Built-in
+    /// OpenRouter identity always paces; hostname `openrouter.ai` remains a
+    /// legacy fallback. Extensions (provider/plugins/reasoning object) stay
+    /// gated on identity only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub openrouter_pacing: bool,
     pub api_backend: ApiBackend,
     /// Whether Chat Completions history may include xAI's non-standard
     /// `messages[].model_id` metadata. OpenAI-compatible third-party
@@ -322,6 +408,7 @@ impl Default for InferenceConfig {
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             api_backend: ApiBackend::default(),
             include_message_model_id: true,
             auth_scheme: AuthScheme::default(),

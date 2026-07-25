@@ -3646,6 +3646,7 @@ fn openrouter_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             openrouter_fallback_models: vec!["fallback-1".to_string()],
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         }),
         ..test_model_entry(model_id)
@@ -3660,6 +3661,7 @@ fn openai_provider_model_entry(model_id: &str) -> crate::agent::config::ModelEnt
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         }),
         ..test_model_entry(model_id)

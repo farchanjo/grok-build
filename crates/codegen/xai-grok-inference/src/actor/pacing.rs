@@ -205,10 +205,37 @@ impl InferencePacer {
     }
 }
 
+/// Whether OpenRouter request pacing applies to this config.
+///
+/// Precedence:
+/// 1. [`ProviderIdentity::OpenRouter`] — always paces (identity gate).
+/// 2. Explicit [`InferenceConfig::openrouter_pacing`] — opt-in for
+///    OpenRouter-compatible proxies that keep a different identity.
+/// 3. Legacy hostname match on `openrouter.ai` — transitional fallback when
+///    identity was not propagated; does **not** enable OpenRouter request
+///    extensions (provider/plugins/reasoning), only spacing.
+pub(crate) fn openrouter_pacing_applies(config: &InferenceConfig) -> bool {
+    if config.provider_identity.is_openrouter() {
+        return true;
+    }
+    if config.openrouter_pacing {
+        return true;
+    }
+    host_is_openrouter(&config.base_url)
+}
+
+fn host_is_openrouter(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host == "openrouter.ai" || host.ends_with(".openrouter.ai")
+}
+
 fn route_key(config: &InferenceConfig) -> Option<RouteKey> {
-    let url = reqwest::Url::parse(&config.base_url).ok()?;
-    let host = url.host_str()?;
-    if host != "openrouter.ai" && !host.ends_with(".openrouter.ai") {
+    if !openrouter_pacing_applies(config) {
         return None;
     }
     Some(RouteKey {
@@ -247,6 +274,16 @@ mod tests {
         }
     }
 
+    fn openrouter_identity_config(base_url: &str) -> InferenceConfig {
+        InferenceConfig {
+            base_url: base_url.to_owned(),
+            model: "openai/gpt-oss-120b".to_owned(),
+            api_backend: ApiBackend::ChatCompletions,
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            ..InferenceConfig::default()
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn non_openrouter_routes_are_not_delayed() {
         let pacer = InferencePacer::new(Duration::from_secs(30), 8);
@@ -261,9 +298,42 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn openrouter_requests_are_spaced() {
         let pacer = InferencePacer::new(Duration::from_secs(2), 8);
+        // Host fallback still applies when identity is Custom.
         let config = config("https://openrouter.ai/api/v1");
         let cancel = CancellationToken::new();
 
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        let started = Instant::now();
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert_eq!(
+            Instant::now().duration_since(started),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn openrouter_identity_paces_even_on_proxy_host() {
+        let pacer = InferencePacer::new(Duration::from_secs(2), 8);
+        let config = openrouter_identity_config("https://or-proxy.example/api/v1");
+        let cancel = CancellationToken::new();
+        assert!(openrouter_pacing_applies(&config));
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        let started = Instant::now();
+        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert_eq!(
+            Instant::now().duration_since(started),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_pacing_flag_opts_in_custom_proxy() {
+        let pacer = InferencePacer::new(Duration::from_secs(2), 8);
+        let mut config = config("https://custom-proxy.example/v1");
+        assert!(!openrouter_pacing_applies(&config));
+        config.openrouter_pacing = true;
+        assert!(openrouter_pacing_applies(&config));
+        let cancel = CancellationToken::new();
         assert!(pacer.wait_for_slot(&config, &cancel).await);
         let started = Instant::now();
         assert!(pacer.wait_for_slot(&config, &cancel).await);

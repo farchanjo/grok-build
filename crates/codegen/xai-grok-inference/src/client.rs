@@ -493,6 +493,10 @@ struct StreamingChatRequest<'a> {
     /// OpenAI/xAI/Codex requests and when no plugins are configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     plugins: Option<&'a [crate::config::OpenRouterPlugin]>,
+    /// OpenRouter normalized `reasoning` object. Absent for non-OpenRouter
+    /// identities; derived from flat `reasoning_effort` when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<&'a crate::config::OpenRouterReasoning>,
     stream: bool,
     stream_options: StreamOptions,
 }
@@ -511,6 +515,9 @@ struct ChatRequestWithFallbacks<'a> {
     /// OpenAI/xAI/Codex requests and when no plugins are configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     plugins: Option<&'a [crate::config::OpenRouterPlugin]>,
+    /// OpenRouter normalized `reasoning` object. Absent for non-OpenRouter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<&'a crate::config::OpenRouterReasoning>,
 }
 
 #[derive(Serialize)]
@@ -528,6 +535,37 @@ fn add_openrouter_fallback_models(
 ) {
     if let Some(models) = fallback_models.filter(|models| !models.is_empty()) {
         request_body["models"] = serde_json::json!(models);
+    }
+}
+
+/// Attach OpenRouter-native `provider` / `plugins` when present.
+///
+/// These member types implement [`Serialize`] with only string-keyed maps and
+/// plain scalars, so conversion is infallible in practice. A panic here would
+/// indicate a programming error (not a user config problem); silently omitting
+/// requested routing policy is forbidden.
+fn add_openrouter_provider_and_plugins(
+    request_body: &mut serde_json::Value,
+    provider: Option<&crate::config::OpenRouterProviderPreferences>,
+    plugins: Option<&[crate::config::OpenRouterPlugin]>,
+) {
+    if let Some(prefs) = provider {
+        request_body["provider"] =
+            serde_json::to_value(prefs).expect("OpenRouterProviderPreferences must serialize");
+    }
+    if let Some(list) = plugins.filter(|p| !p.is_empty()) {
+        request_body["plugins"] =
+            serde_json::to_value(list).expect("OpenRouterPlugin list must serialize");
+    }
+}
+
+/// OpenRouter Responses beta is stateless: always `store = false` and never
+/// send `previous_response_id` (null or otherwise). Full conversation history
+/// is kept locally and re-sent as `input` each turn.
+fn enforce_openrouter_responses_stateless(request_body: &mut serde_json::Value) {
+    request_body["store"] = serde_json::json!(false);
+    if let Some(obj) = request_body.as_object_mut() {
+        obj.remove("previous_response_id");
     }
 }
 
@@ -1050,10 +1088,13 @@ impl InferenceClient {
     }
 
     /// OpenRouter's `models` extension contains fallback models only; the
-    /// normal request `model` remains the primary. The shell only populates
-    /// this configuration for an OpenRouter provider, so other API-compatible
-    /// endpoints retain their exact existing request bodies.
+    /// normal request `model` remains the primary. Identity-gated: only
+    /// [`ProviderIdentity::OpenRouter`] emits the extension so other
+    /// OpenAI-compatible bodies stay unchanged even if a list is configured.
     fn openrouter_fallback_models(&self) -> Option<&[String]> {
+        if !self.openrouter_metadata_requested {
+            return None;
+        }
         (!self.defaults.openrouter_fallback_models.is_empty())
             .then_some(self.defaults.openrouter_fallback_models.as_slice())
     }
@@ -1084,6 +1125,18 @@ impl InferenceClient {
         }
         (!self.defaults.openrouter_plugins.is_empty())
             .then_some(self.defaults.openrouter_plugins.as_slice())
+    }
+
+    /// Normalized OpenRouter Chat `reasoning` object derived from flat effort.
+    /// Identity-gated: non-OpenRouter providers keep only `reasoning_effort`.
+    fn openrouter_reasoning_object(
+        &self,
+        effort: Option<xai_grok_inference_types::ReasoningEffort>,
+    ) -> Option<crate::config::OpenRouterReasoning> {
+        if !self.openrouter_metadata_requested {
+            return None;
+        }
+        effort.map(crate::config::OpenRouterReasoning::from_effort)
     }
 
     async fn handle_response(&self, response: reqwest::Response) -> Result<ChatCompletionResponse> {
@@ -1163,6 +1216,7 @@ impl InferenceClient {
             user_id: payload.x_grok_user_id.as_deref(),
             first_party: self.first_party,
         };
+        let reasoning = self.openrouter_reasoning_object(payload.reasoning_effort);
         let http_request = grok_headers
             .apply(self.post(self.endpoint("chat/completions")))
             .json(&ChatRequestWithFallbacks {
@@ -1170,6 +1224,7 @@ impl InferenceClient {
                 models: self.openrouter_fallback_models(),
                 provider: self.openrouter_provider_preferences(),
                 plugins: self.openrouter_plugins(),
+                reasoning: reasoning.as_ref(),
             });
 
         let response = http_request.send().await.map_err(|e| {
@@ -1208,11 +1263,13 @@ impl InferenceClient {
         // Wrap the request with streaming fields and serialize once.
         // Previously this path serialized twice: first to serde_json::Value
         // (to inject `stream` and `stream_options`), then to HTTP body bytes.
+        let reasoning = self.openrouter_reasoning_object(payload.reasoning_effort);
         let streaming_request = StreamingChatRequest {
             inner: &payload,
             models: self.openrouter_fallback_models(),
             provider: self.openrouter_provider_preferences(),
             plugins: self.openrouter_plugins(),
+            reasoning: reasoning.as_ref(),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -1417,6 +1474,13 @@ impl InferenceClient {
             }
         }
 
+        // OpenRouter Responses beta is always stateless — force store=false
+        // even if a caller set store=true, and never retain previous_response_id.
+        if self.openrouter_metadata_requested {
+            request.inner.store = Some(false);
+            request.inner.previous_response_id = None;
+        }
+
         // Include encrypted reasoning content if not specified
         let includes = request.inner.include.get_or_insert_with(Vec::new);
         if !includes.contains(&rs::IncludeEnum::ReasoningEncryptedContent) {
@@ -1438,6 +1502,15 @@ impl InferenceClient {
             request_body["stream_tool_calls"] = serde_json::json!(true);
         }
         add_openrouter_fallback_models(request_body, self.openrouter_fallback_models());
+        // OpenRouter-native extensions (identity-gated, shared with Chat).
+        if self.openrouter_metadata_requested {
+            add_openrouter_provider_and_plugins(
+                request_body,
+                self.openrouter_provider_preferences(),
+                self.openrouter_plugins(),
+            );
+            enforce_openrouter_responses_stateless(request_body);
+        }
         if !extra_tool_entries.is_empty() {
             if let Some(tools) = request_body.get_mut("tools").and_then(|v| v.as_array_mut()) {
                 tools.extend(extra_tool_entries);
@@ -2410,6 +2483,7 @@ mod tests {
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
 
             api_backend: ApiBackend::ChatCompletions,
             include_message_model_id: true,
@@ -2471,6 +2545,7 @@ mod tests {
             models: None,
             provider: None,
             plugins: None,
+            reasoning: None,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -2521,6 +2596,7 @@ mod tests {
             models: Some(&fallbacks),
             provider: None,
             plugins: None,
+            reasoning: None,
         })
         .unwrap();
         assert_eq!(
@@ -2535,6 +2611,7 @@ mod tests {
             models: None,
             provider: None,
             plugins: None,
+            reasoning: None,
         })
         .unwrap();
         assert!(
@@ -2570,7 +2647,7 @@ mod tests {
             vec![ChatRequestMessage::user("hello")],
         );
         let prefs = crate::config::OpenRouterProviderPreferences {
-            sort: Some("latency".to_string()),
+            sort: Some(crate::config::OpenRouterSort::name("latency")),
             order: vec!["deepinfra/turbo".to_string()],
             allow_fallbacks: Some(true),
             require_parameters: Some(true),
@@ -2589,6 +2666,7 @@ mod tests {
             models: None,
             provider: Some(&prefs),
             plugins: None,
+            reasoning: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -2612,13 +2690,13 @@ mod tests {
         // An all-empty preferences object must not produce a `provider` key.
         let empty_prefs = crate::config::OpenRouterProviderPreferences::default();
         assert!(empty_prefs.is_empty());
-
-        // Simulate the wire gate: empty preferences produce `None`.
+        // Wire gate: empty prefs produce `None` via openrouter_provider_preferences().
         let wire_serialized = serde_json::to_value(ChatRequestWithFallbacks {
             inner: &request,
             models: None,
             provider: None,
             plugins: None,
+            reasoning: None,
         })
         .unwrap();
         assert!(
@@ -2634,7 +2712,7 @@ mod tests {
             vec![ChatRequestMessage::user("hello")],
         );
         let prefs = crate::config::OpenRouterProviderPreferences {
-            sort: Some("latency".to_string()),
+            sort: Some(crate::config::OpenRouterSort::name("latency")),
             // only and ignore are empty arrays — must be omitted
             only: vec![],
             ignore: vec![],
@@ -2648,6 +2726,7 @@ mod tests {
             models: None,
             provider: Some(&prefs),
             plugins: None,
+            reasoning: None,
         })
         .unwrap();
         let provider = &serialized["provider"];
@@ -2772,6 +2851,7 @@ mod tests {
             models: client.openrouter_fallback_models(),
             provider: client.openrouter_provider_preferences(),
             plugins: client.openrouter_plugins(),
+            reasoning: None,
         })
         .unwrap();
         let wire = serialized
@@ -3844,5 +3924,285 @@ mod tests {
                 "first_party mismatch for {identity:?}"
             );
         }
+    }
+
+    // ── Change 2: Chat/Responses conformance ─────────────────────────────
+
+    #[test]
+    fn provider_preferences_serializes_object_sort_and_performance_fields() {
+        let request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("hello")],
+        );
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            sort: Some(crate::config::OpenRouterSort::by("latency")),
+            enforce_distillable_text: Some(true),
+            preferred_max_latency: Some(serde_json::json!(250)),
+            preferred_min_throughput: Some(serde_json::json!({ "p50": 100 })),
+            data_collection: Some("deny".into()),
+            ..Default::default()
+        };
+        let serialized = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &request,
+            models: None,
+            provider: Some(&prefs),
+            plugins: None,
+            reasoning: None,
+        })
+        .unwrap();
+        let provider = &serialized["provider"];
+        assert_eq!(provider["sort"]["by"], "latency");
+        assert_eq!(provider["enforce_distillable_text"], true);
+        assert_eq!(provider["preferred_max_latency"], 250);
+        assert_eq!(provider["preferred_min_throughput"]["p50"], 100);
+        assert_eq!(provider["data_collection"], "deny");
+    }
+
+    #[test]
+    fn openrouter_chat_emits_normalized_reasoning_object() {
+        use xai_grok_inference_types::ReasoningEffort;
+        // Pinned OpenRouter ChatRequest inventory includes both `reasoning`
+        // (object) and flat `reasoning_effort` (string enum). Dual emission is
+        // schema-correct; assert exact wire shapes rather than presence alone.
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let mut request = ChatCompletionRequest::new(
+            "openai/gpt-oss-120b",
+            vec![ChatRequestMessage::user("think")],
+        );
+        request.reasoning_effort = Some(ReasoningEffort::High);
+        let payload = client.apply_defaults(request).unwrap();
+        let reasoning = client
+            .openrouter_reasoning_object(payload.reasoning_effort)
+            .expect("OpenRouter should normalize reasoning");
+        assert_eq!(reasoning.effort.as_deref(), Some("high"));
+        let serialized = serde_json::to_value(ChatRequestWithFallbacks {
+            inner: &payload,
+            models: None,
+            provider: None,
+            plugins: None,
+            reasoning: Some(&reasoning),
+        })
+        .unwrap();
+        assert_eq!(
+            serialized["reasoning"],
+            serde_json::json!({ "effort": "high" }),
+            "normalized reasoning object must serialize only effort when \
+             derived from flat ReasoningEffort"
+        );
+        assert_eq!(
+            serialized["reasoning_effort"],
+            serde_json::json!("high"),
+            "flat reasoning_effort remains for OpenAI-compatible clients \
+             (pinned ChatRequest inventory lists both fields)"
+        );
+        let reasoning_obj = serialized["reasoning"]
+            .as_object()
+            .expect("reasoning must be an object");
+        assert!(
+            !reasoning_obj.contains_key("max_tokens") && !reasoning_obj.contains_key("exclude"),
+            "unset optional reasoning knobs must be omitted"
+        );
+    }
+
+    #[test]
+    fn non_openrouter_chat_omits_reasoning_object() {
+        use xai_grok_inference_types::ReasoningEffort;
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenAi,
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        assert!(
+            client
+                .openrouter_reasoning_object(Some(ReasoningEffort::High))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn responses_finalize_adds_provider_plugins_and_enforces_stateless() {
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            data_collection: Some("deny".into()),
+            require_parameters: Some(true),
+            ..Default::default()
+        };
+        let plugins = vec![crate::config::OpenRouterPlugin {
+            id: "response-healing".into(),
+            ..Default::default()
+        }];
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            openrouter_provider_preferences: Some(prefs),
+            openrouter_plugins: plugins,
+            openrouter_fallback_models: vec!["openai/gpt-5-mini".into()],
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let mut body = serde_json::json!({
+            "model": "openai/gpt-oss-120b",
+            "input": "hello",
+            "store": true,
+            "previous_response_id": "resp_should_not_leave"
+        });
+        client.finalize_responses_request_body(&mut body, Vec::new());
+        assert_eq!(body["store"], false);
+        assert!(
+            body.get("previous_response_id").is_none(),
+            "OpenRouter Responses must strip previous_response_id"
+        );
+        assert_eq!(body["models"], serde_json::json!(["openai/gpt-5-mini"]));
+        assert_eq!(body["provider"]["data_collection"], "deny");
+        assert_eq!(body["plugins"][0]["id"], "response-healing");
+    }
+
+    #[test]
+    fn responses_finalize_skips_openrouter_extensions_for_openai() {
+        let prefs = crate::config::OpenRouterProviderPreferences {
+            data_collection: Some("deny".into()),
+            ..Default::default()
+        };
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenAi,
+            openrouter_provider_preferences: Some(prefs),
+            openrouter_plugins: vec![crate::config::OpenRouterPlugin {
+                id: "web".into(),
+                ..Default::default()
+            }],
+            openrouter_fallback_models: vec!["should-not-emit".into()],
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let mut body = serde_json::json!({
+            "model": "gpt-5",
+            "input": "hello",
+            "store": true,
+            "previous_response_id": "resp_keep_for_non_or"
+        });
+        client.finalize_responses_request_body(&mut body, Vec::new());
+        assert!(body.get("provider").is_none());
+        assert!(body.get("plugins").is_none());
+        assert!(
+            body.get("models").is_none(),
+            "fallback models are identity-gated to OpenRouter"
+        );
+        // Non-OpenRouter keeps caller store / previous_response_id.
+        assert_eq!(body["store"], true);
+        assert_eq!(body["previous_response_id"], "resp_keep_for_non_or");
+    }
+
+    #[test]
+    fn apply_response_defaults_forces_store_false_for_openrouter() {
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let mut wrapper = CreateResponseWrapper::new(rs::CreateResponse {
+            model: Some("openai/gpt-oss-120b".into()),
+            store: Some(true),
+            previous_response_id: Some("resp_x".into()),
+            ..Default::default()
+        });
+        client.apply_response_defaults(&mut wrapper).unwrap();
+        assert_eq!(wrapper.inner.store, Some(false));
+        assert!(wrapper.inner.previous_response_id.is_none());
+    }
+
+    #[test]
+    fn openrouter_chat_and_responses_tool_loop_preserve_tool_and_reasoning_fields() {
+        use std::sync::Arc;
+        use xai_grok_inference_types::{
+            AssistantItem, ConversationItem, ConversationRequest, ConversationToolChoice, ToolCall,
+            ToolSpec, conversation_to_chat_messages,
+        };
+
+        let detail = serde_json::json!({
+            "type": "reasoning.text",
+            "text": "plan the tool call"
+        });
+        let assistant = ConversationItem::Assistant(AssistantItem {
+            content: Arc::from("calling tool"),
+            tool_calls: vec![ToolCall {
+                id: Arc::from("call_1"),
+                name: "run_terminal_command".into(),
+                arguments: Arc::from(r#"{"command":"echo hi"}"#),
+            }],
+            model_id: None,
+            model_fingerprint: None,
+            reasoning_effort: None,
+            reasoning_details: vec![detail.clone()],
+        });
+        let items = vec![
+            ConversationItem::user("use the tool"),
+            assistant,
+            ConversationItem::tool_result("call_1", "hi\n"),
+        ];
+
+        // Chat path: reasoning_details + tool_calls round-trip on wire messages.
+        let chat_msgs = conversation_to_chat_messages(items.clone());
+        let asst = chat_msgs
+            .iter()
+            .find(|m| matches!(m.role, xai_grok_inference_types::Role::Assistant))
+            .expect("assistant message");
+        assert_eq!(asst.tool_calls.len(), 1);
+        assert_eq!(asst.reasoning_details, vec![detail.clone()]);
+
+        // Responses path: tools + reasoning effort convert without previous_response_id.
+        let mut req = ConversationRequest {
+            model: Some("openai/gpt-oss-120b".into()),
+            items,
+            tools: vec![ToolSpec {
+                name: "run_terminal_command".into(),
+                description: Some("run a shell command".into()),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "command": { "type": "string" } }
+                }),
+            }],
+            tool_choice: Some(ConversationToolChoice::Auto),
+            reasoning_effort: Some(xai_grok_inference_types::ReasoningEffort::Medium),
+            ..ConversationRequest::default()
+        };
+        let responses: rs::CreateResponse = (&req).into();
+        assert!(responses.previous_response_id.is_none());
+        assert!(responses.tools.as_ref().is_some_and(|t| !t.is_empty()));
+        assert!(
+            responses
+                .reasoning
+                .as_ref()
+                .and_then(|r| r.effort.as_ref())
+                .is_some()
+        );
+
+        // OpenRouter finalize keeps tools and enforces statelessness.
+        let cfg = InferenceConfig {
+            provider_identity: crate::config::ProviderIdentity::OpenRouter,
+            openrouter_provider_preferences: Some(crate::config::OpenRouterProviderPreferences {
+                require_parameters: Some(true),
+                ..Default::default()
+            }),
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).unwrap();
+        let mut wrapper = CreateResponseWrapper::new(responses);
+        client.apply_response_defaults(&mut wrapper).unwrap();
+        let mut body = serde_json::to_value(&wrapper.inner).unwrap();
+        client.finalize_responses_request_body(&mut body, Vec::new());
+        assert_eq!(body["store"], false);
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["provider"]["require_parameters"], true);
+        assert!(body.get("tools").is_some());
+        // Chat completion conversion still carries tools.
+        req.reasoning_effort = Some(xai_grok_inference_types::ReasoningEffort::Medium);
+        let chat: ChatCompletionRequest = req.into();
+        assert!(chat.tools.as_ref().is_some_and(|t| !t.is_empty()));
+        assert_eq!(
+            chat.reasoning_effort,
+            Some(xai_grok_inference_types::ReasoningEffort::Medium)
+        );
     }
 }

@@ -683,6 +683,7 @@ mod tests {
             openrouter_fallback_models: Some(vec!["openai/gpt-5-mini".into()]),
             provider_preferences: None,
             plugins: None,
+            openrouter_pacing: None,
             extra_headers: [("x-team".to_owned(), "codegen".to_owned())]
                 .into_iter()
                 .collect(),

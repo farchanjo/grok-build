@@ -617,6 +617,7 @@ impl SessionActor {
             openrouter_fallback_models: self.openrouter_fallback_models.borrow().clone(),
             openrouter_provider_preferences: self.openrouter_provider_preferences.borrow().clone(),
             openrouter_plugins: self.openrouter_plugins.borrow().clone(),
+            openrouter_pacing: self.openrouter_pacing.get(),
             api_backend: cfg.api_backend,
             include_message_model_id: model_facts.include_message_model_id,
             auth_scheme,

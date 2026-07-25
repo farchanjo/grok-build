@@ -75,6 +75,7 @@ async fn create_test_actor(
         openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
         openrouter_provider_preferences: std::cell::RefCell::new(None),
         openrouter_plugins: std::cell::RefCell::new(Vec::new()),
+        openrouter_pacing: std::cell::Cell::new(false),
         attribution_callback: None,
         auth_manager: None,
         state,
@@ -520,6 +521,7 @@ async fn create_test_actor_with_memory(
         openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
         openrouter_provider_preferences: std::cell::RefCell::new(None),
         openrouter_plugins: std::cell::RefCell::new(Vec::new()),
+        openrouter_pacing: std::cell::Cell::new(false),
         attribution_callback: None,
         auth_manager: None,
         state,
@@ -1289,6 +1291,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
                 openrouter_provider_preferences: std::cell::RefCell::new(None),
                 openrouter_plugins: std::cell::RefCell::new(Vec::new()),
+                openrouter_pacing: std::cell::Cell::new(false),
                 auth_manager: {
                     let dir = tempfile::tempdir().unwrap();
                     let mgr = std::sync::Arc::new(crate::auth::AuthManager::new(

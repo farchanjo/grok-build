@@ -41,8 +41,8 @@ pub use attribution::{
 pub use client::{ApiBackend, InferenceClient, user_agent_string_for};
 pub use config::{
     AuthScheme, BearerResolver, HeaderInjector, InferenceConfig, OpenRouterMaxPrice,
-    OpenRouterPlugin, OpenRouterProviderPreferences, OriginClientInfo, RetryPolicy,
-    SharedBearerResolver, SharedHeaderInjector,
+    OpenRouterPlugin, OpenRouterProviderPreferences, OpenRouterReasoning, OpenRouterSort,
+    OriginClientInfo, RetryPolicy, SharedBearerResolver, SharedHeaderInjector,
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent};

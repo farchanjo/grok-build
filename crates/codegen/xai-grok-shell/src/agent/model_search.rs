@@ -325,6 +325,7 @@ mod tests {
                 openrouter_fallback_models: vec![],
                 openrouter_provider_preferences: None,
                 openrouter_plugins: vec![],
+                openrouter_pacing: false,
                 command: vec![],
             }),
             api_key: Some("test-key".into()),

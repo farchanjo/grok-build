@@ -1424,6 +1424,12 @@ struct OpenRouterModel {
     top_provider: Option<OpenRouterTopProvider>,
     #[serde(default)]
     supported_parameters: Vec<String>,
+    /// Optional provider-advertised defaults (effort, temperature, …).
+    #[serde(default)]
+    default_parameters: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Optional advertised reasoning-effort levels when present.
+    #[serde(default)]
+    reasoning_effort_options: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1431,6 +1437,10 @@ struct OpenRouterTopProvider {
     #[serde(default)]
     max_completion_tokens: Option<u64>,
 }
+
+/// Default effort ladder for OpenRouter models that advertise reasoning but
+/// do not publish an explicit option list. Matches common OR tiers.
+const OPENROUTER_DEFAULT_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OpenRouterCatalogCache {
@@ -1470,6 +1480,8 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
                     "reasoning" | "reasoning_effort" | "include_reasoning"
                 )
             });
+            let (reasoning_efforts, default_reasoning_effort) =
+                openrouter_effort_metadata(&model, supports_reasoning_effort);
             Some(ProviderModelPreset {
                 // The upstream id is preserved verbatim after a stable local
                 // namespace; it is the value sent to OpenRouter.
@@ -1487,8 +1499,8 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
                     .and_then(|tokens| u32::try_from(tokens).ok()),
                 supports_tools,
                 supports_reasoning_effort,
-                reasoning_efforts: Vec::new(),
-                default_reasoning_effort: None,
+                reasoning_efforts,
+                default_reasoning_effort,
             })
         })
         .collect::<Vec<_>>();
@@ -1501,6 +1513,51 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
         return Err(());
     }
     Ok(models)
+}
+
+/// Extract advertised reasoning-effort options and default from an OpenRouter
+/// catalog entry. Falls back to a standard low/medium/high ladder when the
+/// model supports reasoning but omits an explicit list.
+fn openrouter_effort_metadata(
+    model: &OpenRouterModel,
+    supports_reasoning: bool,
+) -> (Vec<String>, Option<String>) {
+    if !supports_reasoning {
+        return (Vec::new(), None);
+    }
+    let mut efforts = model
+        .reasoning_effort_options
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if efforts.is_empty() {
+        efforts = OPENROUTER_DEFAULT_REASONING_EFFORTS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+    }
+    let default = model
+        .default_parameters
+        .as_ref()
+        .and_then(|params| {
+            params
+                .get("reasoning_effort")
+                .or_else(|| params.get("reasoningEffort"))
+        })
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            if efforts.iter().any(|e| e == "medium") {
+                Some("medium".to_owned())
+            } else {
+                efforts.first().cloned()
+            }
+        });
+    (efforts, default)
 }
 
 fn openrouter_cache_path(grok_home: &Path) -> PathBuf {
@@ -2333,6 +2390,36 @@ mod tests {
         assert_eq!(reasoner.max_completion_tokens, Some(8192));
         assert!(reasoner.supports_tools);
         assert!(reasoner.supports_reasoning_effort);
+        assert_eq!(
+            reasoner.reasoning_efforts,
+            ["low", "medium", "high"],
+            "reasoning models without explicit options get the standard ladder"
+        );
+        assert_eq!(reasoner.default_reasoning_effort.as_deref(), Some("medium"));
+        let basic = models
+            .iter()
+            .find(|model| model.id == "openrouter:acme/basic")
+            .unwrap();
+        assert!(basic.reasoning_efforts.is_empty());
+        assert!(basic.default_reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn openrouter_catalog_preserves_explicit_effort_options_and_defaults() {
+        let fixture = br#"{
+          "data": [
+            {
+              "id": "acme/explicit",
+              "supported_parameters": ["reasoning"],
+              "reasoning_effort_options": ["minimal", "low", "high"],
+              "default_parameters": { "reasoning_effort": "low" }
+            }
+          ]
+        }"#;
+        let models = parse_openrouter_catalog(fixture).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].reasoning_efforts, ["minimal", "low", "high"]);
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("low"));
     }
 
     #[tokio::test]

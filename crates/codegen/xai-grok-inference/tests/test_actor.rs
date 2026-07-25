@@ -22,10 +22,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use xai_grok_inference::{
     ApiBackend, InferenceActor, InferenceChannel, InferenceConfig, InferenceErrorKind,
-    InferenceEvent, RequestId, RetryPolicy,
+    InferenceEvent, OpenRouterPlugin, OpenRouterProviderPreferences, RequestId, RetryPolicy,
 };
 use xai_grok_inference_types::{
-    ConversationItem, ConversationRequest, DoomLoopRecoveryPolicy, UserItem,
+    ConversationItem, ConversationRequest, ConversationToolChoice, DoomLoopRecoveryPolicy,
+    ReasoningEffort, ToolSpec, UserItem,
 };
 use xai_grok_test_support::{SseEvent, sse};
 
@@ -79,6 +80,7 @@ fn test_config(base_url: String, model: &str) -> InferenceConfig {
         openrouter_fallback_models: Vec::new(),
         openrouter_provider_preferences: None,
         openrouter_plugins: Vec::new(),
+        openrouter_pacing: false,
         api_backend: ApiBackend::ChatCompletions,
         include_message_model_id: true,
         auth_scheme: Default::default(),
@@ -1081,6 +1083,542 @@ async fn responses_unknown_semantic_event_fails_closed() {
         msg.contains("response.brand_new_semantic_event") || msg.contains("unknown variant"),
         "expected unknown-event detail, got: {msg}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// OpenRouter production tool-loop / cancel / backend-switch (actor path)
+// ---------------------------------------------------------------------------
+//
+// These drive `InferenceActor` + `InferenceClient` against a local Axum mock
+// (no network). They are not conversion-only unit tests: each turn goes
+// through submit_and_collect / submit+events so stream decode, OpenRouter
+// request extensions, and completion collection run for real.
+
+const OR_MODEL: &str = "openai/gpt-oss-120b";
+const OR_FALLBACK: &str = "openai/gpt-5-mini";
+const TOOL_NAME: &str = "run_terminal_command";
+const TOOL_CALL_ID: &str = "call_or_1";
+const TOOL_ARGS: &str = r#"{"command":"echo hi"}"#;
+const TOOL_RESULT: &str = "hi\n";
+
+fn openrouter_config(base_url: String, backend: ApiBackend) -> InferenceConfig {
+    let mut cfg = test_config(base_url, OR_MODEL);
+    cfg.api_backend = backend;
+    cfg.provider_identity = xai_grok_inference::config::ProviderIdentity::OpenRouter;
+    cfg.openrouter_fallback_models = vec![OR_FALLBACK.into()];
+    cfg.openrouter_provider_preferences = Some(OpenRouterProviderPreferences {
+        require_parameters: Some(true),
+        data_collection: Some("deny".into()),
+        ..Default::default()
+    });
+    cfg.openrouter_plugins = vec![OpenRouterPlugin {
+        id: "response-healing".into(),
+        ..Default::default()
+    }];
+    cfg.reasoning_effort = Some(ReasoningEffort::Medium);
+    // OpenRouter Chat rejects message model_id metadata.
+    cfg.include_message_model_id = false;
+    cfg
+}
+
+fn tool_round_request(items: Vec<ConversationItem>) -> ConversationRequest {
+    ConversationRequest {
+        model: Some(OR_MODEL.into()),
+        items,
+        tools: vec![ToolSpec {
+            name: TOOL_NAME.into(),
+            description: Some("run a shell command".into()),
+            parameters: json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } }
+            }),
+        }],
+        tool_choice: Some(ConversationToolChoice::Auto),
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        ..ConversationRequest::default()
+    }
+}
+
+fn assert_openrouter_chat_wire(body: &serde_json::Value) {
+    assert_eq!(body["model"], OR_MODEL);
+    assert_eq!(body["models"], json!([OR_FALLBACK]));
+    assert_eq!(body["provider"]["require_parameters"], true);
+    assert_eq!(body["provider"]["data_collection"], "deny");
+    assert_eq!(body["plugins"][0]["id"], "response-healing");
+    assert_eq!(body["reasoning"]["effort"], "medium");
+    assert_eq!(body["reasoning_effort"], "medium");
+    assert!(
+        body["tools"].as_array().is_some_and(|t| !t.is_empty()),
+        "tools must be present on the wire: {body}"
+    );
+}
+
+fn assert_openrouter_responses_wire(body: &serde_json::Value) {
+    assert_eq!(body["model"], OR_MODEL);
+    assert_eq!(body["models"], json!([OR_FALLBACK]));
+    assert_eq!(body["provider"]["require_parameters"], true);
+    assert_eq!(body["provider"]["data_collection"], "deny");
+    assert_eq!(body["plugins"][0]["id"], "response-healing");
+    assert_eq!(body["store"], false);
+    assert!(
+        body.get("previous_response_id").is_none(),
+        "stateless OpenRouter Responses must omit previous_response_id: {body}"
+    );
+    assert!(
+        body["tools"].as_array().is_some_and(|t| !t.is_empty()),
+        "tools must be present on the wire: {body}"
+    );
+}
+
+/// Full Chat Completions tool round through the actor: streamed tool call,
+/// local tool result continuation, final answer — with OpenRouter extensions
+/// on both request bodies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openrouter_chat_tool_round_trip_through_actor() {
+    use std::sync::Mutex;
+
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_h = Arc::clone(&captured);
+    let turn = Arc::new(AtomicU32::new(0));
+    let turn_h = Arc::clone(&turn);
+
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let captured = Arc::clone(&captured_h);
+            let turn = Arc::clone(&turn_h);
+            async move {
+                captured.lock().unwrap().push(body);
+                let n = turn.fetch_add(1, Ordering::SeqCst);
+                let events = if n == 0 {
+                    sse_events_to_axum(sse::chat_completions_reasoning_then_tool_call_events(
+                        "plan the call",
+                        TOOL_CALL_ID,
+                        TOOL_NAME,
+                        TOOL_ARGS,
+                        OR_MODEL,
+                    ))
+                } else {
+                    // Final assistant answer after tool result (axum Events).
+                    sse::chat_completion_events("tool said hi", OR_MODEL)
+                };
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        openrouter_config(server.base_url(), ApiBackend::ChatCompletions),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    // Turn 1: user asks for a tool.
+    let (resp1, _m1) = handle
+        .submit_and_collect(
+            RequestId::from("or-chat-tool-1"),
+            tool_round_request(vec![ConversationItem::user("use the tool")]),
+        )
+        .await
+        .expect("tool-call turn");
+    let calls = resp1.tool_calls();
+    assert_eq!(calls.len(), 1, "expected one tool call: {:?}", resp1.items);
+    assert_eq!(calls[0].id.as_ref(), TOOL_CALL_ID);
+    assert_eq!(calls[0].name, TOOL_NAME);
+    assert_eq!(calls[0].arguments.as_ref(), TOOL_ARGS);
+    let usage1 = resp1.usage.expect("usage on tool-call turn");
+    assert!(usage1.total_tokens > 0);
+
+    // Simulate local tool execution and continue the conversation.
+    let mut history = vec![ConversationItem::user("use the tool")];
+    history.extend(resp1.items.clone());
+    history.push(ConversationItem::tool_result(TOOL_CALL_ID, TOOL_RESULT));
+
+    let (resp2, _m2) = handle
+        .submit_and_collect(
+            RequestId::from("or-chat-tool-2"),
+            tool_round_request(history),
+        )
+        .await
+        .expect("tool-result turn");
+    assert!(
+        resp2.assistant_text().contains("tool said hi"),
+        "final answer missing, got {:?}",
+        resp2.assistant_text()
+    );
+    assert!(resp2.tool_calls().is_empty());
+    let usage2 = resp2.usage.expect("usage on final turn");
+    assert!(usage2.total_tokens > 0);
+
+    server.shutdown();
+
+    let bodies = captured.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2, "exactly two HTTP requests");
+    assert_openrouter_chat_wire(&bodies[0]);
+    assert_openrouter_chat_wire(&bodies[1]);
+    // Follow-up must re-send local history including the tool result correlation.
+    let msgs = bodies[1]["messages"]
+        .as_array()
+        .expect("chat messages array");
+    let joined = serde_json::to_string(msgs).unwrap();
+    assert!(
+        joined.contains(TOOL_CALL_ID) && joined.contains(TOOL_RESULT.trim()),
+        "follow-up must carry call id and tool result: {joined}"
+    );
+}
+
+/// Full Responses tool round through the actor with OpenRouter identity:
+/// stateless store=false, no previous_response_id, provider/plugins/models
+/// retained on both turns, tool correlation and final text/usage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openrouter_responses_tool_round_trip_through_actor() {
+    use std::sync::Mutex;
+
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_h = Arc::clone(&captured);
+    let turn = Arc::new(AtomicU32::new(0));
+    let turn_h = Arc::clone(&turn);
+
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let captured = Arc::clone(&captured_h);
+            let turn = Arc::clone(&turn_h);
+            async move {
+                captured.lock().unwrap().push(body);
+                let n = turn.fetch_add(1, Ordering::SeqCst);
+                let events = if n == 0 {
+                    sse_events_to_axum(sse::responses_api_reasoning_then_tool_call_events(
+                        "plan the call",
+                        TOOL_CALL_ID,
+                        TOOL_NAME,
+                        TOOL_ARGS,
+                        OR_MODEL,
+                    ))
+                } else {
+                    sse_events_to_axum(sse::responses_api_script_exact("tool said hi", OR_MODEL))
+                };
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        openrouter_config(server.base_url(), ApiBackend::Responses),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let (resp1, _m1) = handle
+        .submit_and_collect(
+            RequestId::from("or-resp-tool-1"),
+            tool_round_request(vec![ConversationItem::user("use the tool")]),
+        )
+        .await
+        .expect("responses tool-call turn");
+    let calls = resp1.tool_calls();
+    assert_eq!(calls.len(), 1, "expected one tool call: {:?}", resp1.items);
+    assert_eq!(calls[0].id.as_ref(), TOOL_CALL_ID);
+    assert_eq!(calls[0].name, TOOL_NAME);
+    assert_eq!(calls[0].arguments.as_ref(), TOOL_ARGS);
+    // Reasoning continuity: tool-call turn should surface reasoning items.
+    assert!(
+        resp1.reasoning_items().next().is_some()
+            || resp1
+                .items
+                .iter()
+                .any(|i| matches!(i, ConversationItem::Reasoning(_))),
+        "expected reasoning continuity on tool-call turn: {:?}",
+        resp1.items
+    );
+    let usage1 = resp1.usage.expect("usage on tool-call turn");
+    assert!(usage1.total_tokens > 0);
+
+    let mut history = vec![ConversationItem::user("use the tool")];
+    history.extend(resp1.items.clone());
+    history.push(ConversationItem::tool_result(TOOL_CALL_ID, TOOL_RESULT));
+
+    let (resp2, _m2) = handle
+        .submit_and_collect(
+            RequestId::from("or-resp-tool-2"),
+            tool_round_request(history),
+        )
+        .await
+        .expect("responses tool-result turn");
+    assert!(
+        resp2.assistant_text().contains("tool said hi"),
+        "final answer missing, got {:?}",
+        resp2.assistant_text()
+    );
+    assert!(resp2.usage.is_some());
+
+    server.shutdown();
+
+    let bodies = captured.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2);
+    assert_openrouter_responses_wire(&bodies[0]);
+    assert_openrouter_responses_wire(&bodies[1]);
+    // Full local history re-sent as input (stateless); call id must appear.
+    let input = serde_json::to_string(&bodies[1]["input"]).unwrap();
+    assert!(
+        input.contains(TOOL_CALL_ID),
+        "follow-up input must re-send tool call id: {input}"
+    );
+}
+
+/// Cancel mid-stream under OpenRouter Chat identity: no Completed event and
+/// active count returns to zero (no post-cancel tool execution completion).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openrouter_chat_cancel_under_identity() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let first = sse_events_to_axum(vec![SseEvent::data(
+                json!({
+                    "id": "chatcmpl-or",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": OR_MODEL,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "role": "assistant", "content": "starting" },
+                        "finish_reason": null
+                    }]
+                })
+                .to_string(),
+            )]);
+            let stream = stream::iter(first.into_iter().map(Ok::<_, std::convert::Infallible>))
+                .chain(stream::pending());
+            Sse::new(stream)
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        openrouter_config(server.base_url(), ApiBackend::ChatCompletions),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let rid = RequestId::from("or-chat-cancel");
+    handle.submit(
+        rid.clone(),
+        tool_round_request(vec![ConversationItem::user("hi")]),
+    );
+    let _ = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, InferenceEvent::FirstToken { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("first token under OpenRouter chat");
+    handle.cancel(rid);
+
+    let failed = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, InferenceEvent::Failed { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed after cancel");
+    match failed {
+        InferenceEvent::Failed { error, .. } => {
+            assert!(error.message.contains("cancelled"));
+        }
+        InferenceEvent::Completed { .. } => panic!("cancel must not complete"),
+        other => panic!("expected Failed after cancel, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(handle.active_count().await, 0);
+    server.shutdown();
+}
+
+/// Cancel mid-stream under OpenRouter Responses identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openrouter_responses_cancel_under_identity() {
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            let mut events = sse_events_to_axum(sse::responses_api_script_exact(
+                "should not finish",
+                OR_MODEL,
+            ));
+            // Keep only the first frames then hang so cancel is observable.
+            events.truncate(2);
+            let stream = stream::iter(events.into_iter().map(Ok::<_, std::convert::Infallible>))
+                .chain(stream::pending());
+            Sse::new(stream)
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        openrouter_config(server.base_url(), ApiBackend::Responses),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let rid = RequestId::from("or-resp-cancel");
+    handle.submit(
+        rid.clone(),
+        tool_round_request(vec![ConversationItem::user("hi")]),
+    );
+    let _ = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, InferenceEvent::StreamStarted { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("stream started");
+    // Give the stream a moment to attach, then cancel.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    handle.cancel(rid);
+
+    let failed = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, InferenceEvent::Failed { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed after cancel");
+    if let InferenceEvent::Failed { error, .. } = failed {
+        assert!(error.message.contains("cancelled"));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(handle.active_count().await, 0);
+    server.shutdown();
+}
+
+/// Backend switch Chat → Responses at the inference config/conversation layer:
+/// reconstruct a tool-round conversation, switch `ApiBackend` via
+/// `update_config`, and assert OpenRouter identity extensions + tool-call
+/// correlation survive on the next wire request.
+///
+/// Token usage is per-response only (not re-sent as request state); each
+/// completed turn carries its own `usage` and is not persisted into the next
+/// request body by design.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openrouter_backend_switch_preserves_tool_conversation_and_identity() {
+    use std::sync::Mutex;
+
+    let captured: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_h = Arc::clone(&captured);
+
+    // Dual-route mock: Chat then Responses after config switch.
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post({
+                let captured = Arc::clone(&captured_h);
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let captured = Arc::clone(&captured);
+                    async move {
+                        captured.lock().unwrap().push(("chat".into(), body));
+                        let events = sse_events_to_axum(
+                            sse::chat_completions_reasoning_then_tool_call_events(
+                                "plan",
+                                TOOL_CALL_ID,
+                                TOOL_NAME,
+                                TOOL_ARGS,
+                                OR_MODEL,
+                            ),
+                        );
+                        Sse::new(stream::iter(
+                            events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                        ))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/responses",
+            post({
+                let captured = Arc::clone(&captured_h);
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let captured = Arc::clone(&captured);
+                    async move {
+                        captured.lock().unwrap().push(("responses".into(), body));
+                        let events = sse_events_to_axum(sse::responses_api_script_exact(
+                            "switched", OR_MODEL,
+                        ));
+                        Sse::new(stream::iter(
+                            events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                        ))
+                    }
+                }
+            }),
+        );
+
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let chat_cfg = openrouter_config(server.base_url(), ApiBackend::ChatCompletions);
+    let handle = InferenceActor::spawn(chat_cfg, RetryPolicy::default(), event_tx);
+
+    let (resp_chat, _) = handle
+        .submit_and_collect(
+            RequestId::from("or-switch-1"),
+            tool_round_request(vec![ConversationItem::user("use the tool")]),
+        )
+        .await
+        .expect("chat tool turn");
+    assert_eq!(resp_chat.tool_calls()[0].id.as_ref(), TOOL_CALL_ID);
+    // Usage is turn-local, not a session field.
+    assert!(resp_chat.usage.is_some());
+
+    // Reconstruct the conversation the session would keep after a tool round.
+    let mut conversation = vec![ConversationItem::user("use the tool")];
+    conversation.extend(resp_chat.items.clone());
+    conversation.push(ConversationItem::tool_result(TOOL_CALL_ID, TOOL_RESULT));
+
+    // Switch backend while keeping the same OpenRouter identity/extensions.
+    let mut resp_cfg = openrouter_config(server.base_url(), ApiBackend::Responses);
+    resp_cfg.api_key = Some("test-key".into());
+    handle.update_config(resp_cfg);
+
+    let (resp_switched, _) = handle
+        .submit_and_collect(
+            RequestId::from("or-switch-2"),
+            tool_round_request(conversation.clone()),
+        )
+        .await
+        .expect("responses follow-up after switch");
+    assert!(
+        resp_switched.assistant_text().contains("switched"),
+        "got {:?}",
+        resp_switched.assistant_text()
+    );
+    // New turn has its own usage; prior usage is not rehydrated into the request.
+    assert!(resp_switched.usage.is_some());
+
+    server.shutdown();
+
+    let bodies = captured.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0].0, "chat");
+    assert_eq!(bodies[1].0, "responses");
+    assert_openrouter_chat_wire(&bodies[0].1);
+    assert_openrouter_responses_wire(&bodies[1].1);
+
+    // Conversation tool IDs and result content survive into the switched backend body.
+    let wire = serde_json::to_string(&bodies[1].1).unwrap();
+    assert!(
+        wire.contains(TOOL_CALL_ID),
+        "tool call id must survive backend switch: {wire}"
+    );
+    // Usage is not a request-body field (documented: per-response only).
+    assert!(
+        bodies[1].1.get("usage").is_none(),
+        "usage must not be re-sent as request state"
+    );
+    // Identity-gated extensions still present after switch.
+    assert_eq!(bodies[1].1["provider"]["data_collection"], "deny");
+    assert_eq!(bodies[1].1["plugins"][0]["id"], "response-healing");
 }
 
 // ---------------------------------------------------------------------------

@@ -332,6 +332,7 @@ pub fn test_inference_config(
         openrouter_fallback_models: Vec::new(),
         openrouter_provider_preferences: None,
         openrouter_plugins: Vec::new(),
+        openrouter_pacing: false,
         api_backend,
         include_message_model_id: true,
         auth_scheme: Default::default(),

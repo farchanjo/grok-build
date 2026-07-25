@@ -82,6 +82,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
         openrouter_provider_preferences: std::cell::RefCell::new(None),
         openrouter_plugins: std::cell::RefCell::new(Vec::new()),
+        openrouter_pacing: std::cell::Cell::new(false),
         attribution_callback: None,
         auth_manager: None,
         state,

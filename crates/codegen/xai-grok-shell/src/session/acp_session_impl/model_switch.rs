@@ -42,6 +42,8 @@ impl SessionActor {
             .replace(inference_config.openrouter_provider_preferences.clone());
         self.openrouter_plugins
             .replace(inference_config.openrouter_plugins.clone());
+        self.openrouter_pacing
+            .set(inference_config.openrouter_pacing);
         xai_grok_telemetry::unified_log::info(
             "backend_search: model switch",
             Some(self.session_info.id.0.as_ref()),

@@ -3970,6 +3970,12 @@ pub struct ConfigModelOverride {
     /// plugins). Ignored unless the provider is `kind = "openrouter"`.
     #[serde(default)]
     pub plugins: Option<Vec<crate::agent::model_providers::OpenRouterPlugin>>,
+    /// Per-model override of OpenRouter request pacing. `None` inherits the
+    /// provider-level flag; `Some(true)`/`Some(false)` replaces it. Used for
+    /// OpenRouter-compatible proxies that keep a non-`openrouter` identity;
+    /// native OpenRouter identity always paces regardless of this flag.
+    #[serde(default)]
+    pub openrouter_pacing: Option<bool>,
     #[serde(default)]
     pub extra_headers: IndexMap<String, String>,
     pub context_window: Option<u64>,
@@ -5280,6 +5286,13 @@ pub fn inference_config_for_model(
         .filter(|provider| provider.kind == ModelProviderKind::OpenRouter)
         .map(|provider| provider.openrouter_plugins.clone())
         .unwrap_or_default();
+    // Pacing opt-in is not identity-gated: proxies with a non-openrouter kind
+    // still propagate an explicit `openrouter_pacing = true` from the provider
+    // or model override. Native OpenRouter identity paces even when false.
+    let openrouter_pacing = model
+        .model_provider
+        .as_ref()
+        .is_some_and(|provider| provider.openrouter_pacing);
     let provider_identity = provider_identity_for_model(model);
     // Wire shaping (H4): when the resolved model explicitly disclaims
     // reasoning-effort support (`supports_reasoning_effort == Some(false)`),
@@ -5309,6 +5322,7 @@ pub fn inference_config_for_model(
         openrouter_fallback_models,
         openrouter_provider_preferences,
         openrouter_plugins,
+        openrouter_pacing,
         api_backend,
         include_message_model_id: !model
             .model_provider
@@ -7208,6 +7222,7 @@ reasoning_effort = "low"
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         });
         assert!(!openrouter.has_own_credentials());
@@ -7224,6 +7239,7 @@ reasoning_effort = "low"
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         });
         assert!(openai.is_provider_scoped_byok());
@@ -7239,6 +7255,7 @@ reasoning_effort = "low"
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         });
         assert!(!custom.is_provider_scoped_byok());
@@ -7267,6 +7284,7 @@ reasoning_effort = "low"
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         });
         assert!(!or.has_own_credentials());
@@ -7284,6 +7302,7 @@ reasoning_effort = "low"
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         });
         assert!(!oai.has_own_credentials());
@@ -7303,6 +7322,7 @@ reasoning_effort = "low"
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         });
         chatgpt.auth_provider = Some(crate::auth::AuthProviderRef::unresolved(
@@ -7324,6 +7344,7 @@ reasoning_effort = "low"
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
             command: Vec::new(),
         });
         assert!(!custom.is_provider_scoped_byok());

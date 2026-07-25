@@ -56,6 +56,12 @@ pub struct ResolvedModelProvider {
     /// `kind = "openrouter"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openrouter_plugins: Vec<OpenRouterPlugin>,
+    /// Explicit OpenRouter request-pacing opt-in for OpenRouter-compatible
+    /// proxies that keep a non-`openrouter` provider identity. Native
+    /// `kind = "openrouter"` always paces regardless of this flag. Model-level
+    /// override replaces the provider-level value; absent override inherits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub openrouter_pacing: bool,
     /// Unused; retained for forward-compatible TOML round-trips only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
@@ -84,6 +90,12 @@ pub struct ModelProviderConfig {
     /// that model.
     #[serde(default)]
     pub plugins: Vec<OpenRouterPlugin>,
+    /// Opt into OpenRouter request pacing for OpenRouter-compatible proxies
+    /// that use a non-`openrouter` `kind`. Native OpenRouter identity always
+    /// paces; hostname `openrouter.ai` remains a legacy fallback. A model-level
+    /// override replaces this value for that model.
+    #[serde(default)]
+    pub openrouter_pacing: bool,
     pub extra_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
@@ -99,6 +111,7 @@ impl ModelProviderConfig {
         openrouter_fallback_models: Vec<String>,
         provider_preferences: Option<OpenRouterProviderPreferences>,
         plugins: Vec<OpenRouterPlugin>,
+        openrouter_pacing: bool,
     ) -> ResolvedModelProvider {
         ResolvedModelProvider {
             id: id.to_string(),
@@ -118,6 +131,11 @@ impl ModelProviderConfig {
             } else {
                 Vec::new()
             },
+            // Pacing opt-in is intentionally not identity-gated: proxies that
+            // keep `kind = "custom"` (or another non-openrouter kind) still
+            // need an explicit way to enable spacing without claiming native
+            // OpenRouter request extensions.
+            openrouter_pacing,
             command: self.command.clone(),
         }
     }
@@ -283,6 +301,7 @@ impl ConfigModelOverride {
             openrouter_fallback_models,
             provider_preferences,
             plugins,
+            openrouter_pacing,
             extra_headers,
             auth_provider,
             auth,
@@ -310,11 +329,15 @@ impl ConfigModelOverride {
             .clone()
             .or_else(|| Some(plugins.clone()))
             .unwrap_or_default();
+        // Model-level openrouter_pacing replaces the provider-level flag;
+        // absent override inherits the provider-level value.
+        let effective_openrouter_pacing = self.openrouter_pacing.unwrap_or(*openrouter_pacing);
         merged.resolved_model_provider = Some(provider.resolved(
             provider_id,
             effective_openrouter_fallback_models,
             effective_provider_preferences,
             effective_plugins,
+            effective_openrouter_pacing,
         ));
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
@@ -1239,7 +1262,10 @@ mod tests {
             .openrouter_provider_preferences
             .as_ref()
             .expect("preferences should be retained");
-        assert_eq!(prefs.sort.as_deref(), Some("latency"));
+        assert_eq!(
+            prefs.sort.as_ref().and_then(|s| s.as_name()),
+            Some("latency")
+        );
         assert_eq!(prefs.order, ["deepinfra/turbo"]);
         assert!(prefs.only.is_empty());
         assert!(prefs.ignore.is_empty());
@@ -1264,7 +1290,10 @@ mod tests {
             .openrouter_provider_preferences
             .as_ref()
             .expect("preferences thread to InferenceConfig");
-        assert_eq!(wire_prefs.sort.as_deref(), Some("latency"));
+        assert_eq!(
+            wire_prefs.sort.as_ref().and_then(|s| s.as_name()),
+            Some("latency")
+        );
         assert_eq!(wire_prefs.data_collection.as_deref(), Some("deny"));
     }
 
@@ -1305,7 +1334,10 @@ mod tests {
             .openrouter_provider_preferences
             .as_ref()
             .expect("inherited preferences");
-        assert_eq!(inherited_prefs.sort.as_deref(), Some("price"));
+        assert_eq!(
+            inherited_prefs.sort.as_ref().and_then(|s| s.as_name()),
+            Some("price")
+        );
         assert_eq!(inherited_prefs.data_collection.as_deref(), Some("allow"));
 
         let overridden = resolved["overridden"]
@@ -1316,7 +1348,10 @@ mod tests {
             .openrouter_provider_preferences
             .as_ref()
             .expect("model override replaces provider-level");
-        assert_eq!(overridden_prefs.sort.as_deref(), Some("throughput"));
+        assert_eq!(
+            overridden_prefs.sort.as_ref().and_then(|s| s.as_name()),
+            Some("throughput")
+        );
         assert_eq!(
             overridden_prefs.data_collection.as_deref(),
             Some("deny"),
@@ -1558,5 +1593,155 @@ mod tests {
             provider.openrouter_plugins.is_empty(),
             "non-OpenRouter providers must never carry plugins"
         );
+    }
+
+    #[test]
+    fn openrouter_pacing_parse_and_threads_to_inference_config() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.or-proxy]
+            kind = "custom"
+            base_url = "https://or-proxy.example/v1"
+            openrouter_pacing = true
+
+            [model.proxied]
+            model = "openai/gpt-oss-120b"
+            model_provider = "or-proxy"
+            context_window = 128000
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let provider = resolved["proxied"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert_eq!(provider.kind, super::ModelProviderKind::Custom);
+        assert!(
+            provider.openrouter_pacing,
+            "custom proxy may opt into pacing without openrouter kind"
+        );
+        assert!(
+            provider.openrouter_plugins.is_empty(),
+            "pacing opt-in must not enable identity-gated plugins"
+        );
+        assert!(
+            provider.openrouter_provider_preferences.is_none(),
+            "pacing opt-in must not enable identity-gated provider prefs"
+        );
+
+        let sampling = inference_config_for_model(
+            &resolved["proxied"],
+            resolve_credentials(&resolved["proxied"], None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            sampling.openrouter_pacing,
+            "openrouter_pacing must thread to InferenceConfig"
+        );
+        assert_eq!(
+            sampling.provider_identity,
+            xai_grok_inference::config::ProviderIdentity::Custom
+        );
+    }
+
+    #[test]
+    fn openrouter_pacing_model_override_replaces_provider_level() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.or-proxy]
+            kind = "custom"
+            base_url = "https://or-proxy.example/v1"
+            openrouter_pacing = true
+
+            [model.inherited]
+            model = "openai/gpt-oss-120b"
+            model_provider = "or-proxy"
+            context_window = 128000
+
+            [model.overridden]
+            model = "openai/gpt-oss-120b"
+            model_provider = "or-proxy"
+            context_window = 128000
+            openrouter_pacing = false
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        assert!(
+            resolved["inherited"]
+                .model_provider
+                .as_ref()
+                .expect("provider retained")
+                .openrouter_pacing,
+            "absent model override inherits provider-level true"
+        );
+        assert!(
+            !resolved["overridden"]
+                .model_provider
+                .as_ref()
+                .expect("provider retained")
+                .openrouter_pacing,
+            "model-level false replaces provider-level true"
+        );
+
+        let inherited = inference_config_for_model(
+            &resolved["inherited"],
+            resolve_credentials(&resolved["inherited"], None),
+            None,
+            None,
+            None,
+            None,
+        );
+        let overridden = inference_config_for_model(
+            &resolved["overridden"],
+            resolve_credentials(&resolved["overridden"], None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(inherited.openrouter_pacing);
+        assert!(!overridden.openrouter_pacing);
+    }
+
+    #[test]
+    fn openrouter_pacing_defaults_false_when_absent() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.openai]
+            kind = "openai"
+            base_url = "https://api.openai.com/v1"
+
+            [model.plain]
+            model = "gpt-5.6"
+            model_provider = "openai"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let provider = resolved["plain"]
+            .model_provider
+            .as_ref()
+            .expect("provider retained");
+        assert!(!provider.openrouter_pacing);
+        let sampling = inference_config_for_model(
+            &resolved["plain"],
+            resolve_credentials(&resolved["plain"], None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!sampling.openrouter_pacing);
     }
 }

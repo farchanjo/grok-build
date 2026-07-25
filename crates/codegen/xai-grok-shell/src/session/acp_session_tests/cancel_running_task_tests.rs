@@ -48,6 +48,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 openrouter_fallback_models: Vec::new(),
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
+                openrouter_pacing: false,
                 api_backend: Default::default(),
                 include_message_model_id: true,
                 auth_scheme: Default::default(),
@@ -118,6 +119,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
                 openrouter_provider_preferences: std::cell::RefCell::new(None),
                 openrouter_plugins: std::cell::RefCell::new(Vec::new()),
+                openrouter_pacing: std::cell::Cell::new(false),
                 attribution_callback: None,
                 auth_manager: None,
                 state: TokioMutex::new(State {
@@ -364,6 +366,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     openrouter_fallback_models: Vec::new(),
                     openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
                     api_backend: Default::default(),
                     include_message_model_id: true,
                     auth_scheme: Default::default(),
@@ -499,6 +502,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 openrouter_fallback_models: Vec::new(),
                 openrouter_provider_preferences: None,
                 openrouter_plugins: Vec::new(),
+                openrouter_pacing: false,
                 api_backend: Default::default(),
                 include_message_model_id: true,
                 auth_scheme: Default::default(),
@@ -589,6 +593,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
                 openrouter_provider_preferences: std::cell::RefCell::new(None),
                 openrouter_plugins: std::cell::RefCell::new(Vec::new()),
+                openrouter_pacing: std::cell::Cell::new(false),
                 attribution_callback: None,
                 auth_manager: None,
                 state: TokioMutex::new(State {
@@ -875,6 +880,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
                 openrouter_provider_preferences: std::cell::RefCell::new(None),
                 openrouter_plugins: std::cell::RefCell::new(Vec::new()),                attribution_callback: None,
+                openrouter_pacing: std::cell::Cell::new(false),
                 auth_manager: None,
                 state,
                 notifications: NotificationSender {
@@ -2046,6 +2052,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 openrouter_fallback_models: Vec::new(),
                 openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
                 api_backend: xai_grok_inference::ApiBackend::Responses,
                 include_message_model_id: true,
                 auth_scheme: Default::default(),
@@ -2136,6 +2143,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 openrouter_fallback_models: std::cell::RefCell::new(Vec::new()),
                 openrouter_provider_preferences: std::cell::RefCell::new(None),
                 openrouter_plugins: std::cell::RefCell::new(Vec::new()),                attribution_callback: None,
+                openrouter_pacing: std::cell::Cell::new(false),
                 auth_manager: None,
                 state,
                 notifications: NotificationSender {

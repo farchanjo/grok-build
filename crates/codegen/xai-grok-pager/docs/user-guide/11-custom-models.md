@@ -437,6 +437,31 @@ explicit `Some(true)` or unknown (`None`) keeps the field, so hand-written
 TOML models without a `supports_reasoning_effort` flag still honor an
 explicit user-set effort.
 
+For OpenRouter Chat Completions, Grok Build also emits the normalized
+`reasoning` object (`{ "effort": "high" }`) derived from flat
+`reasoning_effort`, matching the pinned OpenAPI `ChatRequest.reasoning`
+field while keeping the flat field for OpenAI-compatible dual support.
+
+OpenRouter catalog entries that advertise reasoning but omit explicit effort
+options receive a standard `low` / `medium` / `high` ladder with default
+`medium`. Explicit `reasoning_effort_options` and
+`default_parameters.reasoning_effort` from the catalog are preserved when
+present.
+
+#### OpenRouter Responses beta (stateless)
+
+When `api_backend = "responses"` on an OpenRouter model, Grok Build enforces
+OpenRouter's stateless Responses contract:
+
+- always sends `store = false` (even if a caller set `true`);
+- strips any non-null `previous_response_id`;
+- re-sends full local conversation history as `input` each turn;
+- attaches the same identity-gated `models` / `provider` / `plugins`
+  extensions used on Chat Completions.
+
+Do not configure a stateful OpenRouter Responses mode; the sampler rejects
+server-side response chaining for OpenRouter.
+
 #### `provider_preferences`
 
 OpenRouter's native `provider` request-body field lets you control routing,
@@ -455,7 +480,8 @@ env_key = "OPENROUTER_API_KEY"
 api_backend = "chat_completions"
 
 [model_providers.openrouter.provider_preferences]
-sort = "latency"                    # "price" | "throughput" | "latency"
+sort = "latency"                    # string: "price" | "throughput" | "latency"
+# sort = { by = "latency" }         # object form also accepted
 order = ["deepinfra/turbo"]         # preferred provider slugs, descending priority
 only = []                           # provider slugs to use exclusively
 ignore = []                         # provider slugs to skip
@@ -465,6 +491,9 @@ data_collection = "deny"            # "allow" | "deny" — training on requests
 zdr = true                          # zero-data retention (opt-in)
 quantizations = ["int8"]            # quantization preferences
 max_price = { prompt = 0.5, completion = 2.0 }  # per-token-kind USD caps
+enforce_distillable_text = true     # prefer distillable-text providers
+preferred_max_latency = 250         # number or object (OpenAPI PreferredMaxLatency)
+preferred_min_throughput = 100      # number or object (OpenAPI PreferredMinThroughput)
 
 # A model-level table replaces the provider-level object for this model:
 [model.my-model.provider_preferences]
@@ -481,6 +510,37 @@ them explicitly there.
 `zdr` is opt-in. Zero-data retention narrows the pool of compliant providers,
 so enabling it may reduce routing options or raise cost. Set it only when
 your compliance posture requires it.
+
+OpenRouter request extensions (`models` fallbacks, `provider`, `plugins`, and
+the normalized Chat `reasoning` object) are gated by **provider identity**
+(`kind = "openrouter"`), not by the hostname alone. Request pacing also
+prefers identity; the host `openrouter.ai` remains a legacy pacing fallback.
+
+#### `openrouter_pacing`
+
+OpenRouter-compatible proxies that keep a non-`openrouter` identity can opt
+into request spacing without claiming native OpenRouter extensions:
+
+```toml
+[model_providers.or-proxy]
+kind = "custom"
+base_url = "https://or-proxy.example/v1"
+env_key = "OR_PROXY_API_KEY"
+# Opt into OpenRouter-style request spacing (identity still Custom, so
+# provider/plugins/reasoning extensions stay off):
+openrouter_pacing = true
+
+[model.proxy-model]
+model = "openai/gpt-oss-120b"
+model_provider = "or-proxy"
+
+# Optional per-model override (replaces the provider-level flag):
+# openrouter_pacing = false
+```
+
+Native `kind = "openrouter"` always paces regardless of this flag. Prefer
+`kind = "openrouter"` with a custom `base_url` when the proxy should also emit
+OpenRouter request extensions.
 
 #### `plugins`
 
