@@ -343,6 +343,7 @@ fn auth_complete_opens_deferred_dashboard() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -390,6 +391,7 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );

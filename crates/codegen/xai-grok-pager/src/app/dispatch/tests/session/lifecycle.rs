@@ -1096,6 +1096,7 @@ fn auth_complete_defers_startup_until_trust_resolved() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -1160,6 +1161,7 @@ fn trust_answered_first_defers_startup_until_auth_completes() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -1492,6 +1494,7 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -1538,6 +1541,7 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );

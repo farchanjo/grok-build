@@ -239,6 +239,7 @@ fn auth_complete_triggers_bundle_status_fetch() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -273,6 +274,7 @@ fn auth_complete_with_deferred_load_also_fetches_status() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -399,12 +401,21 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
         "PromptResponse must stash the compact-held prompt for AuthComplete"
     );
 
-    dispatch(Action::Login, &mut app);
+    let login_effects = dispatch(Action::Login, &mut app);
     let seq = authenticating_seq(&app);
+    let repair = login_effects.iter().find_map(|e| match e {
+        Effect::Authenticate { repair, .. } => repair.clone(),
+        _ => None,
+    });
+    assert!(
+        repair.is_some(),
+        "Login against xAI stash must mint a repair token: {login_effects:?}"
+    );
     let effects = dispatch(
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
+            repair,
         }),
         &mut app,
     );
@@ -686,6 +697,7 @@ fn stale_auth_complete_after_relogin_is_ignored() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: first_seq,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -781,160 +793,68 @@ fn cancel_login_noop_without_stashed_view() {
     assert_eq!(app.auth_return_view, None);
 }
 
-/// Same-provider `/providers` repair resumes a matching stash once;
-/// sibling-provider connect does not.
+/// Token-bound repair race safety for ProviderOperationComplete.
 #[test]
-fn provider_operation_complete_resumes_only_matching_provider_stash() {
+fn provider_operation_complete_token_race_safety() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
     use crate::views::providers_modal::{ProviderKind, ProviderStatus};
 
+    fn scope(token: u64, provider_id: &str, generation: u64) -> CredentialRepairScope {
+        CredentialRepairScope {
+            token: CredentialRepairToken(token),
+            provider_id: provider_id.into(),
+            credential_generation: generation,
+        }
+    }
+    fn connected(detail: &str) -> ProviderStatus {
+        ProviderStatus::Connected {
+            detail: Some(detail.into()),
+        }
+    }
+    fn stash(
+        agent: &mut crate::app::agent_view::AgentView,
+        provider_id: &str,
+        generation: u64,
+        text: &str,
+    ) {
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: provider_id.into(),
+            credential_generation: generation,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: text.into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+    }
+
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.session_id = Some(acp::SessionId::new("sess-provider-resume"));
+        agent.session.session_id = Some(acp::SessionId::new("sess-token-race"));
         agent.session.state = crate::app::agent::AgentState::Idle;
-        agent.pending_credential_repair = Some(("openrouter".into(), 7));
-        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
-            provider_id: "openrouter".into(),
-            credential_generation: 7,
-            prompt: crate::app::agent::InFlightPrompt {
-                text: "moonshot via openrouter".into(),
-                images: Vec::new(),
-                scrollback_entry: crate::scrollback::EntryId::new(0),
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            },
-        });
+        stash(agent, "openrouter", 1, "prompt-gen1");
+        // Op A started for gen 1.
+        agent.in_flight_repair = Some(scope(10, "openrouter", 1));
     }
 
-    // Sibling OpenAI connect must not consume the OpenRouter stash.
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ProviderOperationComplete {
-            agent_id: id,
-            provider: ProviderKind::OpenAi,
-            status: ProviderStatus::Connected {
-                detail: Some("ok".into()),
-            },
-        }),
-        &mut app,
-    );
-    assert!(
-        app.agents[&id].reauth_stashed_prompt.is_some(),
-        "sibling provider must leave the OpenRouter stash"
-    );
-    assert!(
-        app.agents[&id].pending_credential_repair.is_some(),
-        "sibling must leave pending repair"
-    );
-    assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        )),
-        "sibling connect must not resubmit: {effects:?}"
-    );
-
-    // Stale generation for same provider must not resume.
-    app.agents.get_mut(&id).unwrap().pending_credential_repair =
-        Some(("openrouter".into(), 99));
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ProviderOperationComplete {
-            agent_id: id,
-            provider: ProviderKind::OpenRouter,
-            status: ProviderStatus::Connected {
-                detail: Some("ok".into()),
-            },
-        }),
-        &mut app,
-    );
-    assert!(
-        app.agents[&id].reauth_stashed_prompt.is_some(),
-        "stale generation must not consume stash"
-    );
-    assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        )),
-        "stale generation must not resubmit: {effects:?}"
-    );
-
-    // Exact generation match resumes once.
-    app.agents.get_mut(&id).unwrap().pending_credential_repair =
-        Some(("openrouter".into(), 7));
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ProviderOperationComplete {
-            agent_id: id,
-            provider: ProviderKind::OpenRouter,
-            status: ProviderStatus::Connected {
-                detail: Some("ok".into()),
-            },
-        }),
-        &mut app,
-    );
-    assert!(
-        app.agents[&id].reauth_stashed_prompt.is_none(),
-        "exact same-provider generation must consume the stash"
-    );
-    assert!(
-        app.agents[&id].pending_credential_repair.is_none(),
-        "pending repair cleared after one resume"
-    );
-    assert!(
-        effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        )),
-        "same-provider connect must resubmit once: {effects:?}"
-    );
-
-    // Duplicate completion must not resubmit again.
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ProviderOperationComplete {
-            agent_id: id,
-            provider: ProviderKind::OpenRouter,
-            status: ProviderStatus::Connected {
-                detail: Some("ok".into()),
-            },
-        }),
-        &mut app,
-    );
-    assert!(
-        !effects.iter().any(|e| matches!(
-            e,
-            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
-        )),
-        "duplicate completion must not resubmit: {effects:?}"
-    );
-}
-
-/// xAI AuthComplete must not resubmit a third-party provider stash.
-#[test]
-fn auth_complete_does_not_resubmit_openrouter_stash() {
-    let mut app = test_app_with_agent();
-    let id = AgentId(0);
+    // Newer failure gen 2 replaces stash; op B starts with token 20.
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.pending_credential_repair = Some(("openrouter".into(), 2));
-        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
-            provider_id: "openrouter".into(),
-            credential_generation: 2,
-            prompt: crate::app::agent::InFlightPrompt {
-                text: "keep me".into(),
-                images: Vec::new(),
-                scrollback_entry: crate::scrollback::EntryId::new(0),
-                combined_scrollback_entries: Vec::new(),
-                chip_elements: Vec::new(),
-            },
-        });
+        stash(agent, "openrouter", 2, "prompt-gen2");
+        agent.in_flight_repair = Some(scope(20, "openrouter", 2));
     }
-    // Internal xAI OAuth path (from /providers LoginXai), not global /login.
-    dispatch(Action::Login, &mut app);
-    let seq = authenticating_seq(&app);
+
+    // Delayed completion A (token 10, gen 1) must NOT resume gen-2 stash.
     let effects = dispatch(
-        Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: seq,
-            meta: None,
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: connected("a"),
+            repair: Some(scope(10, "openrouter", 1)),
         }),
         &mut app,
     );
@@ -942,29 +862,254 @@ fn auth_complete_does_not_resubmit_openrouter_stash() {
         app.agents[&id]
             .reauth_stashed_prompt
             .as_ref()
-            .map(|s| s.provider_id.as_str()),
-        Some("openrouter"),
-        "xAI AuthComplete must preserve third-party stash"
+            .map(|s| s.prompt.text.as_str()),
+        Some("prompt-gen2"),
+        "delayed prior completion must not release newer stash"
     );
     assert!(
         !effects.iter().any(|e| matches!(
             e,
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
-        "xAI reconnect must not resubmit OpenRouter stash: {effects:?}"
+        "delayed A must not resubmit: {effects:?}"
+    );
+
+    // Sibling provider completion with its own token cannot resume OpenRouter.
+    let sibling = scope(99, "openai", 2);
+    app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope(20, "openrouter", 2));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: connected("openai"),
+            repair: Some(sibling),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        ))
+    );
+
+    // Test/Refresh without repair token never resumes.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: connected("refresh"),
+            repair: None,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "unbound Test/Refresh must not resubmit"
+    );
+
+    // Exact completion B resumes once.
+    app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope(20, "openrouter", 2));
+    let b = scope(20, "openrouter", 2);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: connected("b"),
+            repair: Some(b.clone()),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert!(app.agents[&id].in_flight_repair.is_none());
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "exact B must resume once: {effects:?}"
+    );
+
+    // Duplicate B must not resubmit.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: connected("b-dup"),
+            repair: Some(b),
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "duplicate B must not resubmit: {effects:?}"
     );
 }
 
-/// xAI AuthComplete resumes only when pending repair is exact xAI generation.
+/// OpenAI ChatGPT repair cannot resume xAI/OpenRouter; exact OpenAI works once.
 #[test]
-fn auth_complete_resumes_exact_xai_generation_once() {
+fn openai_repair_token_does_not_resume_other_providers() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let openai_scope = CredentialRepairScope {
+        token: CredentialRepairToken(7),
+        provider_id: "openai".into(),
+        credential_generation: 3,
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-openai"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 3,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "or".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(openai_scope.clone());
+    }
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("ok".into()),
+            },
+            repair: Some(openai_scope.clone()),
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "OpenAI completion must not resume OpenRouter stash"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        ))
+    );
+
+    // Exact OpenAI stash + token resumes once.
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openai".into(),
+            credential_generation: 3,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "openai prompt".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(openai_scope.clone());
+    }
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("ok".into()),
+            },
+            repair: Some(openai_scope),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "exact OpenAI repair must resume once: {effects:?}"
+    );
+}
+
+/// Startup / unbound AuthComplete never resubmits a stash.
+#[test]
+fn unbound_auth_complete_does_not_resubmit_stash() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.session_id = Some(acp::SessionId::new("sess-xai-resume"));
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 1,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "keep".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+    }
+    // Mid-session path needs auth_return_view so handle reaches resume logic.
+    app.auth_return_view = Some(ActiveView::Agent(id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 1,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 1,
+            meta: None,
+            repair: None, // startup / unbound
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.prompt.text.as_str()),
+        Some("keep"),
+        "unbound AuthComplete must not resubmit"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        ))
+    );
+}
+
+/// xAI repair AuthComplete with exact token resumes once.
+#[test]
+fn auth_complete_xai_repair_token_resumes_once() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let scope = CredentialRepairScope {
+        token: CredentialRepairToken(5),
+        provider_id: "xai".into(),
+        credential_generation: 5,
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-xai-token"));
         agent.session.state = crate::app::agent::AgentState::Idle;
-        agent.pending_credential_repair = Some(("xai".into(), 5));
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 5,
@@ -976,24 +1121,55 @@ fn auth_complete_resumes_exact_xai_generation_once() {
                 chip_elements: Vec::new(),
             },
         });
+        agent.in_flight_repair = Some(scope.clone());
     }
-    dispatch(Action::Login, &mut app);
-    let seq = authenticating_seq(&app);
+    app.auth_return_view = Some(ActiveView::Agent(id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 3,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
     let effects = dispatch(
         Action::TaskComplete(TaskResult::AuthComplete {
-            request_seq: seq,
+            request_seq: 3,
             meta: None,
+            repair: Some(scope.clone()),
         }),
         &mut app,
     );
     assert!(app.agents[&id].reauth_stashed_prompt.is_none());
-    assert!(app.agents[&id].pending_credential_repair.is_none());
+    assert!(app.agents[&id].in_flight_repair.is_none());
     assert!(
         effects.iter().any(|e| matches!(
             e,
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
-        "exact xAI generation must resume once: {effects:?}"
+        "xAI repair token must resume once: {effects:?}"
+    );
+
+    // Duplicate with same token after clear: no second resume.
+    app.auth_return_view = Some(ActiveView::Agent(id));
+    app.auth_state = AuthState::Authenticating {
+        request_seq: 4,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::Pending,
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: 4,
+            meta: None,
+            repair: Some(scope),
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "duplicate xAI repair completion must not resubmit"
     );
 }
 
@@ -1012,6 +1188,7 @@ fn auth_complete_extracts_show_resolved_model_from_meta() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: Some(serde_json::json!({ "show_resolved_model": false })),
+            repair: None,
         }),
         &mut app,
     );
@@ -1034,6 +1211,7 @@ fn auth_complete_preserves_show_resolved_model_when_absent() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: Some(serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap()),
+            repair: None,
         }),
         &mut app,
     );

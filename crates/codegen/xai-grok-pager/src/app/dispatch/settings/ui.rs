@@ -192,6 +192,7 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
         Effect::ProviderOperation {
             agent_id: id,
             operation: crate::app::actions::ProviderOperation::Refresh(provider),
+            repair: None, // status refresh never resumes a stash
         }
     }));
     effects
@@ -205,8 +206,9 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
     command: crate::views::providers_modal::ProviderCommand,
 ) -> Vec<Effect> {
     use crate::app::actions::{ProviderApiKey, ProviderOperation};
+    use crate::app::dispatch::auth::begin_credential_repair;
     use crate::views::modal::ActiveModal;
-    use crate::views::providers_modal::{ProviderCommand, ProviderStatus};
+    use crate::views::providers_modal::{ProviderCommand, ProviderKind, ProviderStatus};
 
     if command == ProviderCommand::LoginXai {
         return crate::app::dispatch::auth::dispatch_login(app);
@@ -218,37 +220,60 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
     let ActiveView::Agent(agent_id) = app.active_view else {
         return vec![];
     };
-    let Some(agent) = app.agents.get_mut(&agent_id) else {
+    if !app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|a| matches!(a.active_modal, Some(ActiveModal::Providers { .. })))
+    {
         return vec![];
-    };
-    let Some(ActiveModal::Providers { state }) = agent.active_modal.as_mut() else {
-        return vec![];
+    }
+
+    let provider_for_repair: Option<&'static str> = match &command {
+        ProviderCommand::Connect(p) | ProviderCommand::ReplaceKey(p) => Some(match p {
+            ProviderKind::Xai => "xai",
+            ProviderKind::OpenAi => "openai",
+            ProviderKind::OpenRouter => "openrouter",
+        }),
+        ProviderCommand::LoginCodex => Some("openai"),
+        // Test / Refresh / Disconnect never resume stashes.
+        _ => None,
     };
 
-    let operation = match command {
-        ProviderCommand::Connect(provider) | ProviderCommand::ReplaceKey(provider) => {
-            let Some(api_key) = state.take_submitted_secret(provider) else {
-                state.set_status(
+    let operation = {
+        let agent = app.agents.get_mut(&agent_id).unwrap();
+        let ActiveModal::Providers { state } = agent.active_modal.as_mut().unwrap() else {
+            return vec![];
+        };
+        match command {
+            ProviderCommand::Connect(provider) | ProviderCommand::ReplaceKey(provider) => {
+                let Some(api_key) = state.take_submitted_secret(provider) else {
+                    state.set_status(
+                        provider,
+                        ProviderStatus::Error("No API key was submitted".to_owned()),
+                    );
+                    return vec![];
+                };
+                ProviderOperation::SaveAndTest {
                     provider,
-                    ProviderStatus::Error("No API key was submitted".to_owned()),
-                );
-                return vec![];
-            };
-            ProviderOperation::SaveAndTest {
-                provider,
-                api_key: ProviderApiKey::new(api_key),
+                    api_key: ProviderApiKey::new(api_key),
+                }
             }
+            ProviderCommand::Test(provider) => ProviderOperation::Test(provider),
+            ProviderCommand::Disconnect(provider) => ProviderOperation::Disconnect(provider),
+            ProviderCommand::LoginCodex => ProviderOperation::LoginCodex,
+            ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
+            ProviderCommand::LoginXai | ProviderCommand::LogoutXai => unreachable!(),
+            ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
         }
-        ProviderCommand::Test(provider) => ProviderOperation::Test(provider),
-        ProviderCommand::Disconnect(provider) => ProviderOperation::Disconnect(provider),
-        ProviderCommand::LoginCodex => ProviderOperation::LoginCodex,
-        ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
-        ProviderCommand::LoginXai | ProviderCommand::LogoutXai => unreachable!(),
-        ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
     };
+
+    // Mint repair token only for connect/save/oauth against a matching stash.
+    let repair = provider_for_repair.and_then(|pid| begin_credential_repair(app, pid));
+
     vec![Effect::ProviderOperation {
         agent_id,
         operation,
+        repair,
     }]
 }
 

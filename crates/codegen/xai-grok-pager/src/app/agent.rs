@@ -750,14 +750,31 @@ pub struct InFlightPrompt {
     pub chip_elements: Vec<ChipElement>,
 }
 
+/// Opaque pager-owned token that binds one credential-repair operation to a
+/// failure scope. Monotonic, secret-free, never reused for a later op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CredentialRepairToken(pub u64);
+
+/// Immutable scope captured when a repair operation **starts** and echoed on
+/// completion. Resume requires this exact scope to match both the in-flight
+/// op and the stashed prompt — delayed prior completions cannot release a
+/// newer stash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRepairScope {
+    pub token: CredentialRepairToken,
+    /// Stable provider slug (`xai`, `openai`, `openrouter`, …).
+    pub provider_id: String,
+    /// Failure-side generation frozen at operation start (not re-read on complete).
+    pub credential_generation: u64,
+}
+
 /// Prompt blocked on a provider credential failure, keyed so only the same
 /// provider and generation may resubmit it after repair.
 #[derive(Debug, Clone)]
 pub struct ProviderScopedStashedPrompt {
     /// Stable provider slug that rejected the request (`openrouter`, `xai`, …).
     pub provider_id: String,
-    /// Generation from [`ProviderCredentialFailure::credential_generation`]
-    /// (or `0` for first-party xAI session reauth without a generation).
+    /// Generation from [`ProviderCredentialFailure::credential_generation`].
     pub credential_generation: u64,
     pub prompt: InFlightPrompt,
 }
@@ -765,9 +782,22 @@ pub struct ProviderScopedStashedPrompt {
 impl ProviderScopedStashedPrompt {
     /// Whether a successful repair for `provider_id` at exact `generation`
     /// may resubmit this stash. Sibling providers and generation mismatches
-    /// never match. `generation` is required (no wildcard).
+    /// never match.
     pub fn matches_repair(&self, provider_id: &str, generation: u64) -> bool {
         self.provider_id == provider_id && self.credential_generation == generation
+    }
+}
+
+impl CredentialRepairScope {
+    /// Whether this completion may resume `stashed` given the agent's current
+    /// `in_flight_repair`. All of: same token, same provider, same generation.
+    pub fn allows_resume(
+        &self,
+        in_flight: Option<&CredentialRepairScope>,
+        stashed: &ProviderScopedStashedPrompt,
+    ) -> bool {
+        in_flight.is_some_and(|f| f == self)
+            && stashed.matches_repair(&self.provider_id, self.credential_generation)
     }
 }
 

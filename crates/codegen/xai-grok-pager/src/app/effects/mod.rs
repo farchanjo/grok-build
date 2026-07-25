@@ -69,9 +69,10 @@ pub(crate) fn execute(
         Effect::ProviderOperation {
             agent_id,
             operation,
+            repair,
         } => {
             let tx = acp_tx.clone();
-            tasks.spawn(run_provider_operation(agent_id, operation, tx));
+            tasks.spawn(run_provider_operation(agent_id, operation, repair, tx));
         }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
@@ -124,7 +125,14 @@ pub(crate) fn execute(
             let abort_handle = tasks
                 .spawn(async move {
                     send_logout(&tx).await;
-                    send_authenticate(&tx, request_seq, method_id, use_oauth, false)
+                    send_authenticate(
+                        &tx,
+                        request_seq,
+                        method_id,
+                        use_oauth,
+                        false,
+                        None, // SwitchAccount is not a stash-bound repair
+                    )
                         .await
                 });
             meta.auth_abort_handle = Some((request_seq, abort_handle));
@@ -2027,6 +2035,7 @@ pub(crate) fn execute(
             method_id,
             use_oauth,
             force_interactive,
+            repair,
         } => {
             let tx = acp_tx.clone();
             let abort_handle = tasks
@@ -2037,6 +2046,7 @@ pub(crate) fn execute(
                             method_id,
                             use_oauth,
                             force_interactive,
+                            repair,
                         )
                         .await
                 });
@@ -4638,6 +4648,7 @@ fn build_interject_params(
 async fn run_provider_operation(
     agent_id: agent::AgentId,
     operation: actions::ProviderOperation,
+    repair: Option<crate::app::agent::CredentialRepairScope>,
     acp_tx: AcpAgentTx,
 ) -> TaskResult {
     use crate::views::providers_modal::{ProviderKind, ProviderStatus};
@@ -4851,6 +4862,7 @@ async fn run_provider_operation(
         agent_id,
         provider,
         status,
+        repair,
     }
 }
 

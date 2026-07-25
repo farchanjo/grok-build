@@ -695,6 +695,7 @@ fn auth_complete_restores_view_after_mid_session_login() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );

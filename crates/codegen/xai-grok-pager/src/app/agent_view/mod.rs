@@ -835,11 +835,10 @@ pub struct AgentView {
     /// same-provider recovery (xAI session reconnect or `/providers` key
     /// repair for the same generation).
     pub reauth_stashed_prompt: Option<crate::app::agent::ProviderScopedStashedPrompt>,
-    /// Exact `(provider_id, credential_generation)` that must match for a
-    /// successful repair to resume the stashed prompt. Set when stashing;
-    /// cleared on resume or cancel. Prevents wildcard same-provider resumes
-    /// and duplicate completion fires.
-    pub pending_credential_repair: Option<(String, u64)>,
+    /// Repair op currently in flight for this agent, minted when the user
+    /// starts connect/reconnect/save from a matching failure context.
+    /// Echoed on completion; delayed prior tokens never match after replace.
+    pub in_flight_repair: Option<crate::app::agent::CredentialRepairScope>,
     /// Currently active modal dialog (blocks all other input).
     pub active_modal: Option<ActiveModal>,
     /// Hit areas for modal buttons (from last render).

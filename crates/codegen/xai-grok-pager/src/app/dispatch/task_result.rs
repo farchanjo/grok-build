@@ -738,9 +738,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::AuthComplete { request_seq, meta } => {
-            handle_auth_complete(app, request_seq, meta)
-        }
+        TaskResult::AuthComplete {
+            request_seq,
+            meta,
+            repair,
+        } => handle_auth_complete(app, request_seq, meta, repair),
         TaskResult::AuthFailed { request_seq, error } => {
             if let AuthState::Authenticating {
                 request_seq: current_seq,
@@ -1302,11 +1304,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             provider,
             status,
+            repair,
         } => {
             use super::auth::strip_trailing_auth_error_blocks;
             use super::queue::{maybe_drain_queue, note_peek_page_flip};
             use crate::scrollback::block::RenderBlock;
-            use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+            use crate::views::providers_modal::ProviderStatus;
 
             let fallback_error = match &status {
                 ProviderStatus::Error(error) => Some(error.clone()),
@@ -1326,48 +1329,44 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 app.show_toast(&format!("Provider action failed: {error}"));
             }
 
-            // Exact provider + generation resume only. Sibling / stale /
-            // duplicate completions never resubmit.
+            // Resume only when completion echoes the immutable repair scope
+            // captured at op start. Refresh/Test without token, delayed prior
+            // tokens, sibling providers, and duplicates never resubmit.
+            let Some(repair_scope) = repair else {
+                return vec![];
+            };
             if !connected {
                 return vec![];
             }
-            let provider_id = match provider {
-                ProviderKind::Xai => "xai",
-                ProviderKind::OpenAi => "openai",
-                ProviderKind::OpenRouter => "openrouter",
-            };
             let mut retry_effects = Vec::new();
             let mut page_flips = Vec::new();
             for agent in app.agents.values_mut() {
-                let Some((pending_id, pending_gen)) = agent.pending_credential_repair.clone()
-                else {
-                    continue;
-                };
-                if pending_id != provider_id {
-                    continue;
-                }
                 let Some(stashed) = agent.reauth_stashed_prompt.take() else {
-                    agent.pending_credential_repair = None;
+                    if agent
+                        .in_flight_repair
+                        .as_ref()
+                        .is_some_and(|f| f.token == repair_scope.token)
+                    {
+                        agent.in_flight_repair = None;
+                    }
                     continue;
                 };
-                if !stashed.matches_repair(provider_id, pending_gen) {
-                    // Stale generation or wrong provider on stash — keep for
-                    // a later matching repair if pending still applies.
+                if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed) {
+                    agent.in_flight_repair = None;
+                    strip_trailing_auth_error_blocks(agent);
+                    agent.scrollback.push_block(RenderBlock::system(format!(
+                        "Reconnected {}. Retrying\u{2026}",
+                        provider.label()
+                    )));
+                    agent
+                        .session
+                        .enqueue_in_flight_prompt_front(stashed.prompt);
+                    let drain = maybe_drain_queue(agent);
+                    retry_effects.extend(drain.effects);
+                    page_flips.push((agent.session.id, drain.page_flip_entry));
+                } else {
                     agent.reauth_stashed_prompt = Some(stashed);
-                    continue;
                 }
-                agent.pending_credential_repair = None;
-                strip_trailing_auth_error_blocks(agent);
-                agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Reconnected {}. Retrying\u{2026}",
-                    provider.label()
-                )));
-                agent
-                    .session
-                    .enqueue_in_flight_prompt_front(stashed.prompt);
-                let drain = maybe_drain_queue(agent);
-                retry_effects.extend(drain.effects);
-                page_flips.push((agent.session.id, drain.page_flip_entry));
             }
             for (id, page_flip_entry) in page_flips {
                 note_peek_page_flip(app, id, page_flip_entry);

@@ -275,6 +275,7 @@ fn auth_complete_dispatches_deferred_worktree() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );
@@ -309,6 +310,7 @@ fn auth_complete_resume_plus_worktree_creates_worktree_with_session() {
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: 1,
             meta: None,
+            repair: None,
         }),
         &mut app,
     );

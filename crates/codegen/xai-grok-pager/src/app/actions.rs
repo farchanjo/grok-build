@@ -1429,6 +1429,9 @@ pub enum Effect {
     ProviderOperation {
         agent_id: AgentId,
         operation: ProviderOperation,
+        /// When set, this op was launched as a credential repair; completion
+        /// must echo the same scope to resume a stashed prompt.
+        repair: Option<crate::app::agent::CredentialRepairScope>,
     },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
@@ -1762,6 +1765,9 @@ pub enum Effect {
         method_id: acp::AuthMethodId,
         use_oauth: bool,
         force_interactive: bool,
+        /// When set, this OAuth was launched as a provider-scoped credential
+        /// repair (xAI via `/providers`). Startup auth leaves this `None`.
+        repair: Option<crate::app::agent::CredentialRepairScope>,
     },
     /// Poll for auth URL from the agent (ext request).
     PollAuthUrl { request_seq: u64 },
@@ -2428,6 +2434,9 @@ pub enum TaskResult {
         agent_id: AgentId,
         provider: crate::views::providers_modal::ProviderKind,
         status: crate::views::providers_modal::ProviderStatus,
+        /// Echo of the repair scope attached when the op started (`None` for
+        /// status refresh / unbound connect).
+        repair: Option<crate::app::agent::CredentialRepairScope>,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {
@@ -2452,6 +2461,8 @@ pub enum TaskResult {
     AuthComplete {
         request_seq: u64,
         meta: Option<serde_json::Value>,
+        /// Echo of the repair scope from [`Effect::Authenticate`], if any.
+        repair: Option<crate::app::agent::CredentialRepairScope>,
     },
     /// Authentication failed.
     AuthFailed {

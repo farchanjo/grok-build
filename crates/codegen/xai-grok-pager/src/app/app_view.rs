@@ -1017,6 +1017,8 @@ pub struct AppView {
     pub(crate) auth_code_input: LineEditor,
     /// Monotonically increasing sequence number for auth requests.
     pub next_auth_request_seq: u64,
+    /// Monotonically increasing sequence for [`crate::app::agent::CredentialRepairToken`].
+    pub next_credential_repair_token: u64,
     /// Abort handle for the in-flight `PollAuthUrl` task (with its request_seq).
     /// Aborted alongside the Authenticate task in single-flight re-login.
     pub auth_url_poll_handle: Option<(u64, tokio::task::AbortHandle)>,
@@ -1467,6 +1469,7 @@ impl AppView {
             auth_start_mode: AuthMode::Pending,
             auth_code_input: LineEditor::default(),
             next_auth_request_seq: 1,
+            next_credential_repair_token: 1,
             auth_url_poll_handle: None,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
@@ -5536,6 +5539,7 @@ pub(crate) mod tests {
             auth_start_mode: AuthMode::Pending,
             auth_code_input: LineEditor::default(),
             next_auth_request_seq: 1,
+            next_credential_repair_token: 1,
             auth_url_poll_handle: None,
             deferred_startup: Default::default(),
             auth_use_oauth: false,

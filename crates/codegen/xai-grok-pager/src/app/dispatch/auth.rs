@@ -234,6 +234,51 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
     }
 }
 
+/// Mint a repair scope if the active agent has a stashed failure for
+/// `provider_id`. Binds a fresh token to the stash's frozen generation.
+pub(in crate::app::dispatch) fn begin_credential_repair(
+    app: &mut AppView,
+    provider_id: &str,
+) -> Option<crate::app::agent::CredentialRepairScope> {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        // Prefer the agent that holds a matching stash when not focused.
+        for agent in app.agents.values_mut() {
+            let Some(stashed) = agent.reauth_stashed_prompt.as_ref() else {
+                continue;
+            };
+            if stashed.provider_id != provider_id {
+                continue;
+            }
+            let token = CredentialRepairToken(app.next_credential_repair_token);
+            app.next_credential_repair_token =
+                app.next_credential_repair_token.wrapping_add(1);
+            let scope = CredentialRepairScope {
+                token,
+                provider_id: provider_id.to_owned(),
+                credential_generation: stashed.credential_generation,
+            };
+            agent.in_flight_repair = Some(scope.clone());
+            return Some(scope);
+        }
+        return None;
+    };
+    let agent = app.agents.get_mut(&agent_id)?;
+    let stashed = agent.reauth_stashed_prompt.as_ref()?;
+    if stashed.provider_id != provider_id {
+        return None;
+    }
+    let token = CredentialRepairToken(app.next_credential_repair_token);
+    app.next_credential_repair_token = app.next_credential_repair_token.wrapping_add(1);
+    let scope = CredentialRepairScope {
+        token,
+        provider_id: provider_id.to_owned(),
+        credential_generation: stashed.credential_generation,
+    };
+    agent.in_flight_repair = Some(scope.clone());
+    Some(scope)
+}
+
 /// Start an interactive xAI OAuth flow. Called only from `/providers`
 /// (LoginXai) or equivalent provider-scoped paths — never a global slash
 /// command.
@@ -252,6 +297,9 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
         };
         return vec![];
     };
+
+    // Bind repair token only when launched against a matching xAI stash.
+    let repair = begin_credential_repair(app, "xai");
 
     // Surface the auth UI when triggered from inside a session. `show_welcome`
     // resets ephemeral state here, covering the AuthComplete / cancel-login
@@ -279,6 +327,7 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
             method_id,
             use_oauth: app.auth_use_oauth,
             force_interactive: true,
+            repair,
         },
         Effect::PollAuthUrl { request_seq },
     ]
@@ -314,7 +363,7 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     // silently resubmit it. Mirrors the strip in the `AuthComplete` path.
     for agent in app.agents.values_mut() {
         agent.reauth_stashed_prompt = None;
-        agent.pending_credential_repair = None;
+        agent.in_flight_repair = None;
         strip_trailing_auth_error_blocks(agent);
     }
     // Ask the shell to cancel its in-flight interactive auth (device poll /
@@ -341,6 +390,7 @@ pub(super) fn handle_auth_complete(
     app: &mut AppView,
     request_seq: u64,
     meta: Option<serde_json::Value>,
+    repair: Option<crate::app::agent::CredentialRepairScope>,
 ) -> Vec<Effect> {
     if let AuthState::Authenticating {
         request_seq: current_seq,
@@ -360,50 +410,42 @@ pub(super) fn handle_auth_complete(
         app.welcome_prompt_focused = !app.is_access_blocked();
         app.auth_code_input.reset();
 
-        // Mid-session re-auth (`/login` or a 401 prompt): restore the
-        // view the user was on instead of running the startup
-        // load-session flow. The session state lives in `app.agents`,
-        // independent of `active_view`, so it is preserved across the
-        // auth detour.
+        // Mid-session re-auth (provider-scoped OAuth): restore the view the
+        // user was on instead of running the startup load-session flow.
         if let Some(return_view) = app.auth_return_view.take() {
             restore_auth_return_view(app, return_view);
-            // Mid-session re-auth returns to the existing session, NOT
-            // the startup flow, so discard any deferred startup stash
-            // (e.g. an incidental `Ctrl+N` pressed during /login that the
-            // chokepoint deferred) rather than leaving it to fire later.
             clear_startup_actions(app);
-            // Re-auth succeeded — hide the now-stale re-auth prompt
-            // (and any trailing error blocks) so the user returns to
-            // a clean session. Mirrors the credit-limit upsell's
-            // stale-block strip.
-            // Auth is global, so handle every agent (the login may
-            // have been started from the dashboard, not the agent
-            // that 401'd).
             let mut retry_effects = Vec::new();
             let mut page_flips = Vec::new();
             for agent in app.agents.values_mut() {
                 strip_trailing_auth_error_blocks(agent);
-                // Auto-resubmit only when pending repair is exact xAI + generation.
-                // Third-party stashes wait for matching `/providers` repair.
-                if let Some(stashed) = agent.reauth_stashed_prompt.take() {
-                    let resume = agent
-                        .pending_credential_repair
+                // Resume only when completion carries the exact repair token
+                // minted at op start. Startup / unbound AuthComplete has
+                // repair=None and never resubmits.
+                let Some(repair_scope) = repair.as_ref() else {
+                    continue;
+                };
+                let Some(stashed) = agent.reauth_stashed_prompt.take() else {
+                    if agent
+                        .in_flight_repair
                         .as_ref()
-                        .is_some_and(|(pid, generation)| {
-                            pid == "xai" && stashed.matches_repair("xai", *generation)
-                        });
-                    if resume {
-                        agent.pending_credential_repair = None;
-                        agent.scrollback.push_block(RenderBlock::system(
-                            "Reconnected xAI. Retrying\u{2026}".to_string(),
-                        ));
-                        agent.session.enqueue_in_flight_prompt_front(stashed.prompt);
-                        let drain = maybe_drain_queue(agent);
-                        retry_effects.extend(drain.effects);
-                        page_flips.push((agent.session.id, drain.page_flip_entry));
-                    } else {
-                        agent.reauth_stashed_prompt = Some(stashed);
+                        .is_some_and(|f| f.token == repair_scope.token)
+                    {
+                        agent.in_flight_repair = None;
                     }
+                    continue;
+                };
+                if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed) {
+                    agent.in_flight_repair = None;
+                    agent.scrollback.push_block(RenderBlock::system(
+                        "Reconnected xAI. Retrying\u{2026}".to_string(),
+                    ));
+                    agent.session.enqueue_in_flight_prompt_front(stashed.prompt);
+                    let drain = maybe_drain_queue(agent);
+                    retry_effects.extend(drain.effects);
+                    page_flips.push((agent.session.id, drain.page_flip_entry));
+                } else {
+                    agent.reauth_stashed_prompt = Some(stashed);
                 }
             }
             for (id, page_flip_entry) in page_flips {

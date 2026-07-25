@@ -759,6 +759,7 @@ pub(super) async fn send_authenticate(
     method_id: acp::AuthMethodId,
     use_oauth: bool,
     force_interactive: bool,
+    repair: Option<crate::app::agent::CredentialRepairScope>,
 ) -> TaskResult {
     let mut meta = serde_json::json!({
         "use_oauth": use_oauth,
@@ -774,6 +775,7 @@ pub(super) async fn send_authenticate(
             TaskResult::AuthComplete {
                 request_seq,
                 meta: resp.meta.map(serde_json::Value::Object),
+                repair,
             }
         }
         Err(e) => {
