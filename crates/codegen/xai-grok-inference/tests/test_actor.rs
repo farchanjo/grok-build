@@ -887,6 +887,103 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
 }
 
 // ---------------------------------------------------------------------------
+// Responses transport keepalive (OpenAI OAuth / Codex)
+// ---------------------------------------------------------------------------
+
+/// Keepalive frames (`event: keepalive` and JSON `type: "keepalive"`) must not
+/// abort the stream with a serialization error. The turn continues through
+/// subsequent text deltas and `response.completed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_keepalive_frames_do_not_abort_stream() {
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async move {
+            let events = sse_events_to_axum(sse::responses_api_with_keepalive_frames(
+                "hello after keepalive",
+                "test-model",
+            ));
+            Sse::new(stream::iter(
+                events.into_iter().map(Ok::<_, std::convert::Infallible>),
+            ))
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let result = handle
+        .submit_and_collect(RequestId::from("req-keepalive"), user_request("hi"))
+        .await;
+    server.shutdown();
+
+    let (response, _metrics) = result.expect("keepalive must not surface as serialization error");
+    assert!(
+        response.assistant_text().contains("hello after keepalive"),
+        "expected streamed text after keepalive frames, got {:?}",
+        response.assistant_text()
+    );
+}
+
+/// An unknown semantic `response.*` event still fails closed (not silently
+/// swallowed like transport keepalives).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_unknown_semantic_event_fails_closed() {
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async move {
+            let mut events = sse::responses_api_script_exact("should not complete", "test-model");
+            // Inject an unknown semantic event after response.created.
+            events.insert(
+                1,
+                SseEvent::data(
+                    r#"{"type":"response.brand_new_semantic_event","sequence_number":1}"#,
+                ),
+            );
+            let events = sse_events_to_axum(events);
+            Sse::new(stream::iter(
+                events.into_iter().map(Ok::<_, std::convert::Infallible>),
+            ))
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let mut cfg = responses_config(server.base_url(), None);
+    // Serialization is non-retryable; keep retries low so the test is fast.
+    cfg.max_retries = Some(0);
+    let handle = InferenceActor::spawn(
+        cfg,
+        RetryPolicy {
+            max_retries: 0,
+            rate_limit_retry_threshold: 0,
+            retry_only_before_output: false,
+        },
+        event_tx,
+    );
+
+    let result = handle
+        .submit_and_collect(
+            RequestId::from("req-unknown-semantic"),
+            user_request("hi"),
+        )
+        .await;
+    server.shutdown();
+
+    let err = result.expect_err("unknown semantic response.* must fail the request");
+    let msg = err.to_string();
+    assert!(
+        matches!(err, xai_grok_inference_types::InferenceError::Serialization(_))
+            || msg.contains("serialization error")
+            || msg.contains("unknown variant")
+            || msg.contains("brand_new_semantic"),
+        "expected serialization failure, got: {err:?} / {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers for draining the event channel
 // ---------------------------------------------------------------------------
 

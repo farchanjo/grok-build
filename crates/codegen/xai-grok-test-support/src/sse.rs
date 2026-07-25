@@ -168,6 +168,47 @@ pub fn responses_api_script_exact(text: &str, model: &str) -> Vec<SseEvent> {
     responses_api_script_from_deltas(&responses_api_deltas(text), text, model)
 }
 
+/// SSE `event:` name for Responses-stream transport heartbeats (OpenAI OAuth /
+/// Codex / async-openai convention).
+pub const RESPONSES_KEEPALIVE_EVENT: &str = "keepalive";
+
+/// JSON body OpenAI OAuth / Codex may place on a keepalive frame.
+pub const RESPONSES_KEEPALIVE_JSON: &str = r#"{"type":"keepalive"}"#;
+
+/// Splice Responses transport keepalive frames into an otherwise-normal text
+/// turn (after `response.created`, between text deltas, and before completed).
+///
+/// Covers both wire forms the client must tolerate:
+/// - named `event: keepalive` with a JSON `type: "keepalive"` body
+/// - unnamed data-only `{"type":"keepalive"}` (default SSE event name)
+///
+/// Used to prove the stream continues to subsequent text / completed events
+/// without a serialization failure.
+pub fn responses_api_with_keepalive_frames(text: &str, model: &str) -> Vec<SseEvent> {
+    let mut events = responses_api_script_exact(text, model);
+    // After response.created.
+    events.insert(
+        1,
+        SseEvent::with_event(RESPONSES_KEEPALIVE_EVENT, RESPONSES_KEEPALIVE_JSON),
+    );
+    // Between the first text delta (now at index 2) and the rest / completed:
+    // insert a data-only keepalive after the first delta when one exists.
+    // Layout after the first insert: [created, named-ka, delta..., completed, DONE]
+    if events.len() > 4 {
+        events.insert(3, SseEvent::data(RESPONSES_KEEPALIVE_JSON));
+    }
+    // Immediately before response.completed (index len-2 is completed, len-1 is DONE).
+    let before_completed = events.len().saturating_sub(2);
+    events.insert(
+        before_completed,
+        SseEvent::with_event(
+            RESPONSES_KEEPALIVE_EVENT,
+            r#"{"type":"keepalive","sequence_number":0}"#,
+        ),
+    );
+    events
+}
+
 /// `split_inclusive(' ')` keeps each chunk's trailing space, so concatenating
 /// the chunks reconstructs `text` byte-for-byte (newlines included).
 fn responses_api_deltas(text: &str) -> Vec<String> {
@@ -774,11 +815,9 @@ mod tests {
 
         // The reconstruction preserves the fence as a real, newline-delimited
         // code block (the property diagram detection depends on).
-        assert!(
-            chat_completion_deltas(text)
-                .concat()
-                .contains("```mermaid\nflowchart TD\n")
-        );
+        assert!(chat_completion_deltas(text)
+            .concat()
+            .contains("```mermaid\nflowchart TD\n"));
     }
 
     /// Multiple consecutive spaces and a trailing newline survive too (no

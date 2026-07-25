@@ -90,6 +90,39 @@ impl GrokRequestHeaders<'_> {
 /// so we only handle that form. HTTP-dates silently return `None` and
 /// the caller falls back to exponential backoff.
 /// Capped at 120s to prevent absurdly long sleeps from a misbehaving upstream.
+///
+/// SSE `event:` name and JSON `type` tag used for Responses-stream transport
+/// heartbeats (OpenAI OAuth / Codex and async-openai wire convention).
+///
+/// These frames are not model API events: they must never reach the strict
+/// `ResponseStreamEvent` deserializer (which would surface a user-facing
+/// `serialization error: unknown variant 'keepalive', ...`).
+const RESPONSES_KEEPALIVE_TYPE: &str = "keepalive";
+
+/// True when an SSE frame is a Responses transport keepalive / heartbeat.
+///
+/// Matches either:
+/// - the SSE `event:` field `keepalive` (async-openai skips these the same way), or
+/// - a JSON payload whose `"type"` tag is exactly `"keepalive"`
+///   (OpenAI OAuth / Codex long-lived Responses streams).
+///
+/// Unknown semantic `response.*` events are intentionally NOT matched here —
+/// those must still fail closed at typed deserialization so forward-incompatible
+/// API changes remain observable. SSE comments and empty-data frames never
+/// reach this check (`eventsource-stream` discards them).
+fn is_responses_keepalive(event_name: &str, data: &str) -> bool {
+    if event_name == RESPONSES_KEEPALIVE_TYPE {
+        return true;
+    }
+    // Cheap substring precheck so ordinary traffic never pays a JSON parse.
+    // Confirm via the typed `type` tag so a legitimate delta whose text
+    // merely quotes "keepalive" is not swallowed.
+    data.contains(RESPONSES_KEEPALIVE_TYPE)
+        && serde_json::from_str::<serde_json::Value>(data).is_ok_and(|v| {
+            v.get("type").and_then(|t| t.as_str()) == Some(RESPONSES_KEEPALIVE_TYPE)
+        })
+}
+
 /// Deserialize a Responses API SSE event, with a fallback for xAI-specific
 /// tool types (e.g., `x_search`) that `async_openai` can't parse.
 ///
@@ -108,6 +141,10 @@ impl GrokRequestHeaders<'_> {
 /// `ResponseUsage` unchanged so billing telemetry stays correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
+///
+/// Callers must filter transport control frames (see
+/// [`is_responses_keepalive`]) before invoking this; keepalives are not
+/// representable as `ResponseStreamEvent`.
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
@@ -1689,22 +1726,41 @@ impl InferenceClient {
                             data = %data,
                         );
 
-                        // Intercept the non-standard doom-loop event before
-                        // typed deserialization; async-openai's event enum
-                        // does not know it and would fail to parse it. With
-                        // the check disabled, the shared name-or-payload-type
-                        // predicate guards against a server emitting it
-                        // despite no opt-in (rollout skew), named or not.
-                        let swallow = match &doom_loop_for_stream {
-                            Some(collector) => collector.absorb(&event.event, data),
-                            None => is_check_event(&event.event, data),
-                        };
-                        if swallow {
+                        // Transport heartbeats (OpenAI OAuth / Codex
+                        // `keepalive`, async-openai `event: keepalive`) are
+                        // not API events. Swallow before typed
+                        // deserialization so they never become a user-facing
+                        // serialization failure or model output. Filtering
+                        // here still allows the underlying byte stream to
+                        // progress; Layer-2 idle timers continue to bound
+                        // streams that produce no semantic progress.
+                        if is_responses_keepalive(&event.event, data) {
+                            tracing::debug!(
+                                target: crate::inference_log::TARGET,
+                                event = "sse_keepalive",
+                                backend = "responses",
+                                sse_event = %event.event,
+                                "ignoring Responses transport keepalive"
+                            );
                             Some(None)
-                        } else if let Some(stream_error) = try_parse_stream_error(data) {
-                            Some(Some(Err(stream_error)))
                         } else {
-                            Some(Some(deserialize_response_event(data)))
+                            // Intercept the non-standard doom-loop event before
+                            // typed deserialization; async-openai's event enum
+                            // does not know it and would fail to parse it. With
+                            // the check disabled, the shared name-or-payload-type
+                            // predicate guards against a server emitting it
+                            // despite no opt-in (rollout skew), named or not.
+                            let swallow = match &doom_loop_for_stream {
+                                Some(collector) => collector.absorb(&event.event, data),
+                                None => is_check_event(&event.event, data),
+                            };
+                            if swallow {
+                                Some(None)
+                            } else if let Some(stream_error) = try_parse_stream_error(data) {
+                                Some(Some(Err(stream_error)))
+                            } else {
+                                Some(Some(deserialize_response_event(data)))
+                            }
                         }
                     }
                     Err(e) => {
@@ -3469,6 +3525,78 @@ mod tests {
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
         ));
+    }
+
+    /// OpenAI OAuth / Codex transport heartbeats must be recognized before the
+    /// strict `ResponseStreamEvent` deserializer (which does not know them).
+    #[test]
+    fn is_responses_keepalive_matches_event_name_and_json_type() {
+        // async-openai wire: `event: keepalive` (payload may be empty or minimal).
+        assert!(is_responses_keepalive("keepalive", ""));
+        assert!(is_responses_keepalive("keepalive", "{}"));
+        assert!(is_responses_keepalive(
+            "keepalive",
+            r#"{"type":"keepalive"}"#
+        ));
+
+        // Unnamed / default `message` frames with JSON `type: "keepalive"`.
+        assert!(is_responses_keepalive(
+            "message",
+            r#"{"type":"keepalive"}"#
+        ));
+        assert!(is_responses_keepalive(
+            "message",
+            r#"{"type":"keepalive","sequence_number":42}"#
+        ));
+
+        // Ordinary API events must not match — including deltas whose text
+        // merely quotes the word "keepalive".
+        assert!(!is_responses_keepalive(
+            "response.output_text.delta",
+            r#"{"type":"response.output_text.delta","delta":"keepalive"}"#
+        ));
+        assert!(!is_responses_keepalive(
+            "message",
+            r#"{"type":"response.created","sequence_number":0,"response":{"id":"r"}}"#
+        ));
+        assert!(!is_responses_keepalive("message", "not json at all"));
+        assert!(!is_responses_keepalive(
+            "response.completed",
+            r#"{"type":"response.completed"}"#
+        ));
+    }
+
+    /// Keepalives are not representable as `ResponseStreamEvent`; the SSE scan
+    /// path must filter them first. Calling the deserializer directly reproduces
+    /// the historical user-facing failure mode.
+    #[test]
+    fn deserialize_response_event_rejects_keepalive_json_type() {
+        let err = deserialize_response_event(r#"{"type":"keepalive"}"#)
+            .expect_err("keepalive is not a ResponseStreamEvent");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("serialization error:") && msg.contains("keepalive"),
+            "expected serialization error mentioning keepalive, got: {msg}"
+        );
+    }
+
+    /// Unknown semantic `response.*` events must remain fail-closed so API
+    /// drift is observable (do not silently swallow every unknown type).
+    #[test]
+    fn deserialize_response_event_rejects_unknown_semantic_response_event() {
+        let err = deserialize_response_event(
+            r#"{"type":"response.brand_new_semantic_event","sequence_number":1}"#,
+        )
+        .expect_err("unknown semantic response.* must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("serialization error:"),
+            "expected serialization error, got: {msg}"
+        );
+        assert!(
+            msg.contains("response.brand_new_semantic_event") || msg.contains("unknown variant"),
+            "expected unknown-variant detail, got: {msg}"
+        );
     }
 
     /// `GrokRequestHeaders::apply` injects the full `x-grok-*` header set only
