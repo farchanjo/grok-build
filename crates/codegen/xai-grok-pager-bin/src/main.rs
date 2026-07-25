@@ -31,7 +31,9 @@ use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::{
     AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderTargetArgs,
-    PagerArgs, ProviderCliArgs, ProviderCliCommand, join_early_prefetch, resolve_use_leader,
+    OpenAiAdminCommand, OpenAiChatCommand, OpenAiEmbeddingsCommand, OpenAiModelsCommand,
+    OpenAiPlatformCommand, OpenAiResponsesCommand, OpenRouterNativeCommand, PagerArgs,
+    ProviderCliArgs, ProviderCliCommand, join_early_prefetch, resolve_use_leader,
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
@@ -147,89 +149,292 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
         ),
     );
 }
-/// Narrow built-in provider CLI facade (`grok provider connect|reconnect|disconnect <id>`).
+async fn run_openai_platform_cli(args: &xai_grok_pager::app::OpenAiPlatformCliArgs) -> i32 {
+    use xai_grok_shell::cli::openai_cmd as shell_oa;
+    let mapped = shell_oa::OpenAiCliArgs {
+        provider: args.provider.clone(),
+        admin: args.admin,
+        dry_run: args.dry_run,
+        yes: args.yes,
+        output: args.output.clone(),
+        stream: args.stream,
+        command: match &args.command {
+            OpenAiPlatformCommand::Ops { json } => shell_oa::OpenAiCliCommand::Ops { json: *json },
+            OpenAiPlatformCommand::Call {
+                operation_id,
+                path_params,
+                query,
+                input,
+            } => shell_oa::OpenAiCliCommand::Call {
+                operation_id: operation_id.clone(),
+                path_params: path_params.clone(),
+                query: query.clone(),
+                input: input.clone(),
+            },
+            OpenAiPlatformCommand::Models { command } => shell_oa::OpenAiCliCommand::Models {
+                command: match command {
+                    OpenAiModelsCommand::List { input } => shell_oa::ModelsCommand::List {
+                        input: input.clone(),
+                    },
+                    OpenAiModelsCommand::Retrieve { model_id } => shell_oa::ModelsCommand::Retrieve {
+                        model_id: model_id.clone(),
+                    },
+                    OpenAiModelsCommand::Delete { model_id } => shell_oa::ModelsCommand::Delete {
+                        model_id: model_id.clone(),
+                    },
+                },
+            },
+            OpenAiPlatformCommand::Chat { command } => shell_oa::OpenAiCliCommand::Chat {
+                command: match command {
+                    OpenAiChatCommand::Create { input } => shell_oa::ChatCommand::Create {
+                        input: input.clone(),
+                    },
+                },
+            },
+            OpenAiPlatformCommand::Responses { command } => shell_oa::OpenAiCliCommand::Responses {
+                command: match command {
+                    OpenAiResponsesCommand::Create { input } => shell_oa::ResponsesCommand::Create {
+                        input: input.clone(),
+                    },
+                },
+            },
+            OpenAiPlatformCommand::Embeddings { command } => shell_oa::OpenAiCliCommand::Embeddings {
+                command: match command {
+                    OpenAiEmbeddingsCommand::Create { input } => {
+                        shell_oa::EmbeddingsCommand::Create {
+                            input: input.clone(),
+                        }
+                    }
+                },
+            },
+            OpenAiPlatformCommand::Admin { command } => shell_oa::OpenAiCliCommand::Admin {
+                command: match command {
+                    OpenAiAdminCommand::Ops => shell_oa::AdminCommand::Ops,
+                    OpenAiAdminCommand::Call {
+                        operation_id,
+                        path_params,
+                        query,
+                        input,
+                    } => shell_oa::AdminCommand::Call {
+                        operation_id: operation_id.clone(),
+                        path_params: path_params.clone(),
+                        query: query.clone(),
+                        input: input.clone(),
+                    },
+                },
+            },
+        },
+    };
+    shell_oa::run_openai_cli(mapped).await
+}
+
+async fn run_openrouter_native_cli(args: &xai_grok_pager::app::OpenRouterNativeCliArgs) -> i32 {
+    use xai_grok_shell::cli::openrouter_cmd as shell_or;
+    let mapped = shell_or::OpenRouterCliArgs {
+        provider: args.provider.clone(),
+        dry_run: args.dry_run,
+        yes: args.yes,
+        command: match &args.command {
+            OpenRouterNativeCommand::Ops => shell_or::OpenRouterCliCommand::Ops,
+            OpenRouterNativeCommand::Call {
+                operation_id,
+                path_params,
+                query,
+                input,
+            } => shell_or::OpenRouterCliCommand::Call {
+                operation_id: operation_id.clone(),
+                path_params: path_params.clone(),
+                query: query.clone(),
+                input: input.clone(),
+            },
+            OpenRouterNativeCommand::Key => shell_or::OpenRouterCliCommand::Key,
+            OpenRouterNativeCommand::Credits => shell_or::OpenRouterCliCommand::Credits,
+        },
+    };
+    shell_or::run_openrouter_cli(mapped).await
+}
+
+/// Provider lifecycle CLI (`grok provider …`).
 async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
     use xai_grok_shell::agent::providers::{ProviderId, ProviderManager};
+    use xai_grok_shell::cli::provider_cmd::{
+        ProviderLifecycleArgs, ProviderLifecycleCommand, run_provider_lifecycle_cli,
+    };
 
-    let (action, id_raw) = match &args.command {
+    // Built-in OAuth connect/disconnect keep their interactive paths.
+    match &args.command {
         ProviderCliCommand::Connect { id } | ProviderCliCommand::Reconnect { id } => {
-            ("connect", id.as_str())
-        }
-        ProviderCliCommand::Disconnect { id } => ("disconnect", id.as_str()),
-    };
-    let id = id_raw.trim().to_ascii_lowercase();
-    let provider = match id.as_str() {
-        "xai" | "grok" => ProviderId::Xai,
-        "openai" | "chatgpt" | "codex" => ProviderId::OpenAi,
-        "openrouter" => ProviderId::OpenRouter,
-        other => {
-            eprintln!(
-                "error: unknown provider id `{other}`.\n\
-                 Built-in ids: xai, openai, openrouter.\n\
-                 Custom providers are managed in the TUI via /providers."
-            );
-            std::process::exit(2);
-        }
-    };
-
-    let home = xai_grok_config::grok_home();
-    let manager = ProviderManager::new(&home);
-
-    match (action, provider) {
-        ("connect", ProviderId::Xai) | ("reconnect", ProviderId::Xai) => {
-            let config = xai_grok_shell::config::load_effective_config_disk_only()
-                .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-            let config = AgentConfig::new_from_toml_cfg(&config)
-                .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-            // Interactive xAI OAuth (same as historical `grok login`).
-            xai_grok_shell::auth::run_cli_login(&config, true, false, false).await?;
-            println!("Connected xAI.");
-        }
-        ("disconnect", ProviderId::Xai) => {
-            let config = xai_grok_shell::config::load_effective_config_disk_only()
-                .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-            let config = AgentConfig::new_from_toml_cfg(&config)
-                .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-            xai_grok_shell::auth::run_cli_logout(&config)?;
-            let _ = manager.remove_api_key(ProviderId::Xai);
-            println!("Disconnected xAI.");
-        }
-        ("connect", ProviderId::OpenAi) | ("reconnect", ProviderId::OpenAi) => {
-            // Prefer ChatGPT OAuth browser flow for CLI connect.
-            match manager.chatgpt_oauth_login().await {
-                Ok(()) => println!("Connected OpenAI (ChatGPT OAuth)."),
-                Err(e) => {
+            let id = id.trim().to_ascii_lowercase();
+            match id.as_str() {
+                "xai" | "grok" => {
+                    let config = xai_grok_shell::config::load_effective_config_disk_only()
+                        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+                    let config = AgentConfig::new_from_toml_cfg(&config)
+                        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                    xai_grok_shell::auth::run_cli_login(&config, true, false, false).await?;
+                    println!("Connected xAI.");
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
+                "openai" | "chatgpt" | "codex" => {
+                    let home = xai_grok_config::grok_home();
+                    let manager = ProviderManager::new(&home);
+                    match manager.chatgpt_oauth_login().await {
+                        Ok(()) => println!("Connected OpenAI (ChatGPT OAuth)."),
+                        Err(e) => {
+                            eprintln!(
+                                "error: OpenAI connect failed: {e}\n\
+                                 For an API key, open /providers or use `grok provider set-key openai --from-env OPENAI_API_KEY`."
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
+                "openrouter" => {
                     eprintln!(
-                        "error: OpenAI connect failed: {e}\n\
-                         For an API key, open /providers in the TUI or set OPENAI_API_KEY."
+                        "OpenRouter uses an API key. Use `grok provider set-key openrouter --from-env OPENROUTER_API_KEY` \
+                         or open /providers in the TUI. Keys are never accepted on the command line."
                     );
-                    std::process::exit(1);
+                    std::process::exit(2);
+                }
+                other => {
+                    eprintln!(
+                        "error: `connect` for configured provider `{other}` is key-based. \
+                         Use `grok provider set-key {other} --from-env <VAR>` or /providers."
+                    );
+                    std::process::exit(2);
                 }
             }
         }
-        ("disconnect", ProviderId::OpenAi) => {
-            let _ = manager.chatgpt_oauth_logout().await;
-            manager
-                .remove_api_key(ProviderId::OpenAi)
-                .map_err(|e| anyhow::anyhow!("Failed to clear OpenAI credentials: {e}"))?;
-            println!("Disconnected OpenAI.");
+        ProviderCliCommand::Disconnect { id } => {
+            let id = id.trim().to_ascii_lowercase();
+            let home = xai_grok_config::grok_home();
+            let manager = ProviderManager::new(&home);
+            match id.as_str() {
+                "xai" | "grok" => {
+                    let config = xai_grok_shell::config::load_effective_config_disk_only()
+                        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+                    let config = AgentConfig::new_from_toml_cfg(&config)
+                        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                    xai_grok_shell::auth::run_cli_logout(&config)?;
+                    let _ = manager.remove_api_key(ProviderId::Xai);
+                    println!("Disconnected xAI.");
+                }
+                "openai" | "chatgpt" | "codex" => {
+                    let _ = manager.chatgpt_oauth_logout().await;
+                    manager
+                        .remove_api_key(ProviderId::OpenAi)
+                        .map_err(|e| anyhow::anyhow!("Failed to clear OpenAI credentials: {e}"))?;
+                    println!("Disconnected OpenAI.");
+                }
+                "openrouter" => {
+                    manager
+                        .remove_api_key(ProviderId::OpenRouter)
+                        .map_err(|e| anyhow::anyhow!("Failed to clear OpenRouter credentials: {e}"))?;
+                    println!("Disconnected OpenRouter.");
+                }
+                other => {
+                    let code = run_provider_lifecycle_cli(ProviderLifecycleArgs {
+                        command: ProviderLifecycleCommand::ClearKey { id: other.into() },
+                    })
+                    .await;
+                    xai_grok_shell::instrumentation::finalize_and_exit(code);
+                }
+            }
+            xai_grok_shell::instrumentation::finalize_and_exit(0);
         }
-        ("connect", ProviderId::OpenRouter) | ("reconnect", ProviderId::OpenRouter) => {
-            eprintln!(
-                "OpenRouter uses an API key. Set OPENROUTER_API_KEY, or open /providers in the TUI \
-                 to paste and test a key. This CLI does not accept keys on the command line."
-            );
-            std::process::exit(2);
+        other => {
+            // Forward dynamic registry commands to the shell lifecycle CLI.
+            let mapped = match other {
+                ProviderCliCommand::List => ProviderLifecycleCommand::List,
+                ProviderCliCommand::Show { id } => ProviderLifecycleCommand::Show { id: id.clone() },
+                ProviderCliCommand::Add {
+                    id,
+                    base_url,
+                    display_name,
+                    kind,
+                    env_key,
+                } => ProviderLifecycleCommand::Add {
+                    id: id.clone(),
+                    base_url: base_url.clone(),
+                    display_name: display_name.clone(),
+                    kind: kind.clone(),
+                    admin_base_url: None,
+                    env_key: env_key.clone(),
+                    admin_env_key: None,
+                    config: None,
+                },
+                ProviderCliCommand::Edit {
+                    id,
+                    base_url,
+                    display_name,
+                } => ProviderLifecycleCommand::Edit {
+                    id: id.clone(),
+                    base_url: base_url.clone(),
+                    display_name: display_name.clone(),
+                    admin_base_url: None,
+                    env_key: None,
+                    admin_env_key: None,
+                    config: None,
+                },
+                ProviderCliCommand::Enable { id } => ProviderLifecycleCommand::Enable {
+                    id: id.clone(),
+                    config: None,
+                },
+                ProviderCliCommand::Disable { id } => ProviderLifecycleCommand::Disable {
+                    id: id.clone(),
+                    config: None,
+                },
+                ProviderCliCommand::Remove {
+                    id,
+                    yes,
+                    remove_secrets,
+                    remove_caches,
+                } => ProviderLifecycleCommand::Remove {
+                    id: id.clone(),
+                    config: None,
+                    remove_secrets: *remove_secrets,
+                    remove_caches: *remove_caches,
+                    yes: *yes,
+                },
+                ProviderCliCommand::SetKey { id, from_env } => ProviderLifecycleCommand::SetKey {
+                    id: id.clone(),
+                    from_env: from_env.clone(),
+                    value: None,
+                },
+                ProviderCliCommand::ClearKey { id } => {
+                    ProviderLifecycleCommand::ClearKey { id: id.clone() }
+                }
+                ProviderCliCommand::SetAdminKey { id, from_env } => {
+                    ProviderLifecycleCommand::SetAdminKey {
+                        id: id.clone(),
+                        from_env: from_env.clone(),
+                        value: None,
+                    }
+                }
+                ProviderCliCommand::ClearAdminKey { id } => {
+                    ProviderLifecycleCommand::ClearAdminKey { id: id.clone() }
+                }
+                ProviderCliCommand::Capabilities { id, json } => {
+                    ProviderLifecycleCommand::Capabilities {
+                        id: id.clone(),
+                        json: *json,
+                    }
+                }
+                ProviderCliCommand::RefreshModels { id } => {
+                    ProviderLifecycleCommand::RefreshModels { id: id.clone() }
+                }
+                ProviderCliCommand::Test { id } => {
+                    ProviderLifecycleCommand::Test { id: id.clone() }
+                }
+                ProviderCliCommand::Connect { .. }
+                | ProviderCliCommand::Reconnect { .. }
+                | ProviderCliCommand::Disconnect { .. } => unreachable!("handled above"),
+            };
+            let code = run_provider_lifecycle_cli(ProviderLifecycleArgs { command: mapped }).await;
+            xai_grok_shell::instrumentation::finalize_and_exit(code);
         }
-        ("disconnect", ProviderId::OpenRouter) => {
-            manager
-                .remove_api_key(ProviderId::OpenRouter)
-                .map_err(|e| anyhow::anyhow!("Failed to clear OpenRouter credentials: {e}"))?;
-            println!("Disconnected OpenRouter.");
-        }
-        _ => unreachable!(),
     }
-    xai_grok_shell::instrumentation::finalize_and_exit(0);
 }
 
 /// `grok setup`: rendering + exit codes only; fetch logic lives in `xai_grok_shell::managed_config`.
@@ -2060,6 +2265,18 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return run_provider_cli(provider_args).await;
+            }
+            Command::Openai(ref openai_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                let code = run_openai_platform_cli(openai_args).await;
+                xai_grok_shell::instrumentation::finalize_and_exit(code);
+            }
+            Command::Openrouter(ref or_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                let code = run_openrouter_native_cli(or_args).await;
+                xai_grok_shell::instrumentation::finalize_and_exit(code);
             }
             Command::Wrap(ref wrap_args) => {
                 return xai_grok_pager::wrap_cmd::run(wrap_args);

@@ -6,10 +6,11 @@ use clap::{ArgAction, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-/// Built-in provider-scoped credential commands (`grok provider …`).
+/// Provider lifecycle commands (`grok provider …`).
 ///
-/// Narrow facade for Change 3: only the well-known built-in provider ids are
-/// accepted. Full dynamic registry work is deferred to a later milestone.
+/// Built-in OAuth connect/disconnect remains available. Full dynamic registry
+/// lifecycle (add/edit/enable/disable/keys/capabilities) is forwarded to
+/// `xai_grok_shell::cli::provider_cmd`.
 #[derive(Debug, Clone, Parser)]
 pub struct ProviderCliArgs {
     #[command(subcommand)]
@@ -18,21 +19,207 @@ pub struct ProviderCliArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum ProviderCliCommand {
+    /// List providers (built-in + configured).
+    List,
+    /// Show one provider.
+    Show { id: String },
+    /// Add an OpenAI-compatible provider to config.toml.
+    Add {
+        id: String,
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long, default_value = "openai_compatible")]
+        kind: String,
+        #[arg(long)]
+        env_key: Option<String>,
+    },
+    /// Edit an existing configured provider.
+    Edit {
+        id: String,
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long)]
+        display_name: Option<String>,
+    },
+    Enable { id: String },
+    Disable { id: String },
+    Remove {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        remove_secrets: bool,
+        #[arg(long)]
+        remove_caches: bool,
+    },
     /// Connect or re-authenticate a provider (opens interactive auth when needed).
     Connect {
-        /// Provider id: `xai`, `openai`, or `openrouter`.
+        /// Provider id: `xai`, `openai`, `openrouter`, or a configured slug.
         id: String,
     },
     /// Alias for `connect` (re-auth after a credential rejection).
     Reconnect {
-        /// Provider id: `xai`, `openai`, or `openrouter`.
         id: String,
     },
     /// Disconnect and clear stored credentials for a provider.
     Disconnect {
-        /// Provider id: `xai`, `openai`, or `openrouter`.
         id: String,
     },
+    /// Store an application API key from an environment variable.
+    SetKey {
+        id: String,
+        #[arg(long)]
+        from_env: Option<String>,
+    },
+    ClearKey { id: String },
+    SetAdminKey {
+        id: String,
+        #[arg(long)]
+        from_env: Option<String>,
+    },
+    ClearAdminKey { id: String },
+    Capabilities {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    RefreshModels { id: String },
+    Test { id: String },
+}
+
+/// Typed OpenAI platform CLI (`grok openai --provider <id> …`).
+#[derive(Debug, Clone, Parser)]
+pub struct OpenAiPlatformCliArgs {
+    #[arg(long)]
+    pub provider: String,
+    #[arg(long)]
+    pub admin: bool,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub stream: bool,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[command(subcommand)]
+    pub command: OpenAiPlatformCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum OpenAiPlatformCommand {
+    Ops {
+        #[arg(long)]
+        json: bool,
+    },
+    Call {
+        operation_id: String,
+        #[arg(long = "path-param", value_name = "NAME=VALUE")]
+        path_params: Vec<String>,
+        #[arg(long = "query", value_name = "NAME=VALUE")]
+        query: Vec<String>,
+        #[arg(long)]
+        input: Option<String>,
+    },
+    Models {
+        #[command(subcommand)]
+        command: OpenAiModelsCommand,
+    },
+    Chat {
+        #[command(subcommand)]
+        command: OpenAiChatCommand,
+    },
+    Responses {
+        #[command(subcommand)]
+        command: OpenAiResponsesCommand,
+    },
+    Embeddings {
+        #[command(subcommand)]
+        command: OpenAiEmbeddingsCommand,
+    },
+    Admin {
+        #[command(subcommand)]
+        command: OpenAiAdminCommand,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum OpenAiModelsCommand {
+    List {
+        #[arg(long)]
+        input: Option<String>,
+    },
+    Retrieve { model_id: String },
+    Delete { model_id: String },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum OpenAiChatCommand {
+    Create {
+        #[arg(long)]
+        input: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum OpenAiResponsesCommand {
+    Create {
+        #[arg(long)]
+        input: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum OpenAiEmbeddingsCommand {
+    Create {
+        #[arg(long)]
+        input: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum OpenAiAdminCommand {
+    Ops,
+    Call {
+        operation_id: String,
+        #[arg(long = "path-param", value_name = "NAME=VALUE")]
+        path_params: Vec<String>,
+        #[arg(long = "query", value_name = "NAME=VALUE")]
+        query: Vec<String>,
+        #[arg(long)]
+        input: Option<String>,
+    },
+}
+
+/// OpenRouter-native CLI namespace (distinct from OpenAI administration).
+#[derive(Debug, Clone, Parser)]
+pub struct OpenRouterNativeCliArgs {
+    #[arg(long, default_value = "openrouter")]
+    pub provider: String,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub yes: bool,
+    #[command(subcommand)]
+    pub command: OpenRouterNativeCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum OpenRouterNativeCommand {
+    Ops,
+    Call {
+        operation_id: String,
+        #[arg(long = "path-param", value_name = "NAME=VALUE")]
+        path_params: Vec<String>,
+        #[arg(long = "query", value_name = "NAME=VALUE")]
+        query: Vec<String>,
+        #[arg(long)]
+        input: Option<String>,
+    },
+    Key,
+    Credits,
 }
 
 /// Top-level commands for the pager binary.
@@ -80,8 +267,12 @@ pub enum Command {
         #[arg(skip)]
         devbox: bool,
     },
-    /// Connect, reconnect, or disconnect a built-in provider (xAI, OpenAI, OpenRouter).
+    /// Manage providers and credentials (built-in + configured OpenAI-compatible).
     Provider(ProviderCliArgs),
+    /// Typed OpenAI platform operations against a configured provider.
+    Openai(OpenAiPlatformCliArgs),
+    /// OpenRouter-native operations (not OpenAI administration).
+    Openrouter(OpenRouterNativeCliArgs),
     /// Manage MCP server configurations
     Mcp(crate::mcp_cmd::McpArgs),
     /// Manage plugins and marketplace sources
