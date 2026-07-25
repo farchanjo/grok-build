@@ -96,7 +96,7 @@ Credentials are stored in `~/.grok/auth.json` and persist across sessions. Token
 To switch accounts or fix authentication issues:
 
 ```bash
-grok login
+grok provider connect xai
 ```
 
 ### API Key
@@ -311,7 +311,7 @@ export GROK_AUTH_EARLY_INVALIDATION_SECS=300
 ```
 
 **Keep in mind:**
-- When using `auth_provider_command`, you don't need to run `grok login` before starting — Grok runs your binary automatically on first launch. You _can_ run `grok login` to explicitly hydrate `auth.json` ahead of time if you prefer.
+- When using `auth_provider_command`, you don't need to connect xAI in /providers before starting — Grok runs your binary automatically on first launch. You _can_ run `grok provider connect xai` to explicitly hydrate `auth.json` ahead of time if you prefer.
 - If both OIDC and `auth_provider_command` are configured: at **login** time, Grok tries OIDC silent refresh first (if a `refresh_token` exists), then the external binary, then browser-based login. During a **session**, whichever method is configured is used exclusively — if `auth_provider_command` is set it handles all mid-session refreshes; otherwise OIDC silent refresh is used.
 - Your binary's stderr output is displayed to the user but interactive stdin is not supported. This works well for browser-based SSO flows where the binary displays a URL and you complete authentication in the browser.
 
@@ -374,7 +374,7 @@ auth_provider = "litellm"
 
 ### Using auth.json for API Access
 
-If you've authenticated with `grok login`, you can use the stored credentials to call the CLI chat proxy directly via curl. The proxy requires specific headers that mirror what the grok CLI sends internally:
+If you've connected xAI via `/providers`, you can use the stored credentials to call the CLI chat proxy directly via curl. The proxy requires specific headers that mirror what the grok CLI sends internally:
 
 ```bash
 curl -s -N -X POST "https://cli-chat-proxy.grok.com/v1/chat/completions" \
@@ -393,7 +393,7 @@ curl -s -N -X POST "https://cli-chat-proxy.grok.com/v1/chat/completions" \
 
 | Header                           | Required | Purpose                                                                                                                                                                                   |
 | -------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Authorization: Bearer <token>`  | Yes      | Session token from `~/.grok/auth.json` (set by `grok login`)                                                                                                                              |
+| `Authorization: Bearer <token>`  | Yes      | Session token from `~/.grok/auth.json` (set by connecting xAI in /providers)                                                                                                                              |
 | `X-XAI-Token-Auth: xai-grok-cli` | Yes      | Tells the auth middleware to validate as a CLI session token                                                                                                                              |
 | `x-grok-model-override: <model>` | Yes\*    | The proxy uses this header (not the JSON body) to route to the correct backend. \*Can be omitted for `grok-build` which is on the default route, but always safe to include. |
 
@@ -405,7 +405,7 @@ Most models behind the proxy only support streaming. Always use `"stream": true`
 | --------------------- | -------------- | ------------ |
 | `grok-build`    | ✅ Supported   | ✅ Supported |
 
-> **Note:** `auth.json` tokens expire after 7 days. Run `grok login` to refresh.
+> **Note:** `auth.json` tokens expire after 7 days. Connect xAI in /providers to refresh.
 
 ---
 
@@ -1891,7 +1891,7 @@ api_key = "my-api-key"
 
 When using `[endpoints]` with partial model overrides, the `base_url` is inherited from the endpoints config — you don't need to specify it in each `[model.*]` section.
 
-**Auth behavior:** When `models_base_url` is set, Grok uses API key auth (`Authorization: Bearer`) instead of session auth. `grok login` is not required — only the API key.
+**Auth behavior:** When `models_base_url` is set, Grok uses API key auth (`Authorization: Bearer`) instead of session auth. interactive xAI connect is not required — only the API key.
 
 ---
 
@@ -2545,8 +2545,9 @@ GROK_LOG_FILE=/tmp/grok-debug.log RUST_LOG="info,xai_grok_shell::auth=debug" gro
 ### Authentication fails
 
 ```bash
-# Clear credentials and re-login
-grok login
+# Clear and reconnect xAI
+grok provider disconnect xai
+grok provider connect xai
 
 # Debug auth issues — check the log for "auth:" entries
 grok --debug-file /tmp/grok-auth.log -p "hello"

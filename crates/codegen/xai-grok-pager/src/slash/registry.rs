@@ -940,22 +940,22 @@ mod tests {
     #[test]
     fn acp_nonplugin_skill_colliding_with_builtin_is_requalified() {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
+            name: "help",
             aliases: &[],
         });
         let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[acp_skill("login", "local")]);
+        registry.set_acp_commands(&[acp_skill("help", "local")]);
 
-        assert!(registry.get("login").is_some());
-        assert!(registry.is_builtin("login"));
-        assert!(registry.get("local:login").is_some());
-        assert!(!registry.is_builtin("local:login"));
+        assert!(registry.get("help").is_some());
+        assert!(registry.is_builtin("help"));
+        assert!(registry.get("local:help").is_some());
+        assert!(!registry.is_builtin("local:help"));
         assert_eq!(registry.command_count(), 2, "builtin + re-homed skill");
         assert!(
             registry
                 .triggers()
                 .iter()
-                .any(|t| t.canonical == "local:login"),
+                .any(|t| t.canonical == "local:help"),
             "re-homed skill should have a dropdown trigger"
         );
     }
@@ -963,7 +963,7 @@ mod tests {
     #[test]
     fn acp_malformed_skill_meta_colliding_with_builtin_is_dropped() {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
+            name: "help",
             aliases: &[],
         });
         let mut registry = CommandRegistry::new(vec![builtin]);
@@ -972,7 +972,7 @@ mod tests {
             .cloned()
             .unwrap();
         let cmd = agent_client_protocol::AvailableCommand::new(
-            "login".to_string(),
+            "help".to_string(),
             "malformed".to_string(),
         )
         .meta(meta);
@@ -982,7 +982,7 @@ mod tests {
             1,
             "malformed-meta collision drops"
         );
-        assert!(registry.get("local:login").is_none());
+        assert!(registry.get("local:help").is_none());
     }
 
     #[test]
@@ -1000,16 +1000,16 @@ mod tests {
     #[test]
     fn acp_plugin_skill_colliding_with_builtin_is_dropped_not_requalified() {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
+            name: "help",
             aliases: &[],
         });
         let mut registry = CommandRegistry::new(vec![builtin]);
-        registry.set_acp_commands(&[acp_skill("login", "plugin")]);
+        registry.set_acp_commands(&[acp_skill("help", "plugin")]);
 
-        assert!(registry.get("login").is_some());
-        assert!(registry.is_builtin("login"));
+        assert!(registry.get("help").is_some());
+        assert!(registry.is_builtin("help"));
         assert!(
-            registry.get("plugin:login").is_none(),
+            registry.get("plugin:help").is_none(),
             "pager must not fabricate a plugin-qualified name"
         );
         assert_eq!(registry.command_count(), 1, "only the builtin remains");
@@ -1018,16 +1018,32 @@ mod tests {
     #[test]
     fn acp_nonskill_colliding_with_builtin_is_dropped() {
         let builtin: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "login",
+            name: "help",
             aliases: &[],
         });
         let mut registry = CommandRegistry::new(vec![builtin]);
         registry.set_acp_commands(&[agent_client_protocol::AvailableCommand::new(
-            "login".to_string(),
-            "shell login".to_string(),
+            "help".to_string(),
+            "shell help".to_string(),
         )]);
         assert_eq!(registry.command_count(), 1);
-        assert!(registry.is_builtin("login"));
+        assert!(registry.is_builtin("help"));
+    }
+
+    #[test]
+    fn login_and_logout_are_not_registered_builtins() {
+        let registry = CommandRegistry::new(crate::slash::commands::builtin_commands());
+        assert!(
+            registry.get("login").is_none(),
+            "global /login must not be a registered slash command"
+        );
+        assert!(
+            registry.get("logout").is_none(),
+            "global /logout must not be a registered slash command"
+        );
+        assert!(!registry.is_builtin("login"));
+        assert!(!registry.is_builtin("logout"));
+        assert!(registry.get("providers").is_some());
     }
 
     #[test]

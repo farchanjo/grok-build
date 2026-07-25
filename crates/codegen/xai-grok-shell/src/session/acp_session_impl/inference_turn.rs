@@ -1024,8 +1024,9 @@ impl SessionActor {
             });
         }
 
-        // First-party xAI session auth keeps the dedicated reauth path
-        // (OAuth may auto-refresh). Never treat xAI as a third-party key.
+        // First-party xAI is handled after session recovery is exhausted
+        // (call site synthesizes structured xAI identity). Early routing here
+        // is third-party / ChatGPT only so OAuth refresh is not short-circuited.
         if matches!(identity, ProviderIdentity::Xai)
             || matches!(provider_kind, Some(ModelProviderKind::Xai))
         {
@@ -1036,18 +1037,23 @@ impl SessionActor {
             ProviderIdentity::OpenRouter => ("openrouter", "OpenRouter"),
             ProviderIdentity::OpenAi => ("openai", "OpenAI"),
             ProviderIdentity::Xai => return None,
-            ProviderIdentity::Custom => return None,
+            ProviderIdentity::Custom => {
+                if provider_id.is_none() {
+                    return None;
+                }
+                ("custom", "Custom")
+            }
         };
         let provider_id = provider_id.unwrap_or_else(|| default_id.to_owned());
         let provider_name = match provider_kind.unwrap_or(ModelProviderKind::Custom) {
             ModelProviderKind::OpenRouter => "OpenRouter".to_owned(),
             ModelProviderKind::OpenAi => "OpenAI".to_owned(),
-            ModelProviderKind::Xai => "xAI".to_owned(),
+            ModelProviderKind::Xai => return None,
             ModelProviderKind::Custom => default_name.to_owned(),
         };
 
-        // ChatGPT subscription OAuth uses the Codex backend URL; API key uses
-        // api.openai.com. Prefer base_url structure over error-string guesswork.
+        // Structured credential kind from provider identity + base URL shape —
+        // never from free-form error text.
         let is_chatgpt_oauth = xai_grok_inference_types::is_chatgpt_codex_base_url(base_url);
         let (credential_kind, recommended_action) = if is_chatgpt_oauth {
             (
@@ -1435,6 +1441,50 @@ impl SessionActor {
         } else {
             detailed_message
         };
+        // Terminal auth after recovery exhausted: always structured provider
+        // identity (including xAI). Never bare error_type=auth without provider.
+        if is_auth_401 {
+            if let Some(provider_ctx) = self
+                .provider_credential_failure_context(
+                    &failed_model_id,
+                    error.status_code,
+                    crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE,
+                    error.diagnostics.as_ref(),
+                )
+                .await
+            {
+                return self
+                    .surface_provider_credential_failure(
+                        provider_ctx,
+                        error.status_code,
+                        error.kind,
+                    )
+                    .await;
+            }
+            // First-party path without catalog entry: synthesize xAI identity.
+            let generation = self.provider_credential_generation.get().wrapping_add(1);
+            self.provider_credential_generation.set(generation);
+            let provider_ctx = crate::extensions::notification::ProviderCredentialFailure {
+                provider_id: "xai".into(),
+                provider_name: "xAI".into(),
+                failed_model_id: (!failed_model_id.is_empty()).then(|| failed_model_id.clone()),
+                credential_kind: crate::extensions::notification::ProviderCredentialKind::Oauth,
+                recommended_action:
+                    crate::extensions::notification::ProviderCredentialAction::RefreshOauth,
+                credential_generation: generation,
+                http_status: error.status_code,
+                request_id: None,
+                generation_id: None,
+                backend: None,
+                error_category: Some(
+                    crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE.to_owned(),
+                ),
+            };
+            return self
+                .surface_provider_credential_failure(provider_ctx, error.status_code, error.kind)
+                .await;
+        }
+
         self.log_terminal_failure_safe(error_type, error.status_code, None);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::failed(

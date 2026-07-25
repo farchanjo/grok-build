@@ -15,7 +15,7 @@ use crate::scrollback::blocks::SessionEvent;
 // Auth dispatch
 // ---------------------------------------------------------------------------
 
-/// `/logout` -- ask the shell to clear auth, then return to the login screen.
+/// Internal xAI disconnect (from `/providers` LogoutXai). Not a global `/logout` route.
 pub(super) fn dispatch_logout(_app: &mut AppView) -> Vec<Effect> {
     vec![Effect::Logout]
 }
@@ -234,16 +234,16 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
     }
 }
 
-/// Start an interactive login flow. Triggered by pressing 'l' on the
-/// welcome screen or by the `/login` slash command.
+/// Start an interactive xAI OAuth flow. Called only from `/providers`
+/// (LoginXai) or equivalent provider-scoped paths — never a global slash
+/// command.
 ///
 /// When invoked mid-session (the active view is an agent/dashboard rather
 /// than the welcome screen), the auth UI — including the external auth
 /// provider's sign-in URL and status — is only rendered by the welcome
 /// view. We therefore stash the caller's view in `auth_return_view` and
 /// switch to `Welcome` so the flow is actually visible; the prior view is
-/// restored once auth completes or is cancelled. Without this, `/login`
-/// with an external auth provider configured appeared to do nothing.
+/// restored once auth completes or is cancelled.
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     ensure_login_method(app);
     let Some(method_id) = app.login_method_id.clone() else {
@@ -284,12 +284,10 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     ]
 }
 
-/// Cancel a login that was started from inside a session and restore the
-/// caller's view. Only meaningful when `auth_return_view` is set (a
-/// mid-session `/login` or 401 re-auth prompt). Aborts the in-flight auth
-/// task and tells the shell to cancel its device/loopback flow so a retry
-/// does not race a still-polling prior mint. Bump the seq so a fresh login
-/// does not collide with a late `AuthComplete`/`AuthFailed`.
+/// Cancel an in-session xAI OAuth detour and restore the caller's view.
+/// Only meaningful when `auth_return_view` is set (provider-scoped re-auth).
+/// Aborts the in-flight auth task and tells the shell to cancel its
+/// device/loopback flow so a retry does not race a still-polling prior mint.
 pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     let Some(return_view) = app.auth_return_view.take() else {
         return vec![];
@@ -316,6 +314,7 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     // silently resubmit it. Mirrors the strip in the `AuthComplete` path.
     for agent in app.agents.values_mut() {
         agent.reauth_stashed_prompt = None;
+        agent.pending_credential_repair = None;
         strip_trailing_auth_error_blocks(agent);
     }
     // Ask the shell to cancel its in-flight interactive auth (device poll /
@@ -384,15 +383,17 @@ pub(super) fn handle_auth_complete(
             let mut page_flips = Vec::new();
             for agent in app.agents.values_mut() {
                 strip_trailing_auth_error_blocks(agent);
-                // Auto-resubmit the prompt that failed on the expired
-                // login so the user doesn't have to retype it. The
-                // user couldn't have queued another prompt during the
-                // auth detour, so a plain front-enqueue + drain is safe.
-                // Only resubmit stashes keyed to xAI session reauth (generation 0).
-                // Provider API-key stashes require a matching `/providers` repair
-                // and must not fire on global xAI reconnect.
+                // Auto-resubmit only when pending repair is exact xAI + generation.
+                // Third-party stashes wait for matching `/providers` repair.
                 if let Some(stashed) = agent.reauth_stashed_prompt.take() {
-                    if stashed.matches_repair("xai", None) {
+                    let resume = agent
+                        .pending_credential_repair
+                        .as_ref()
+                        .is_some_and(|(pid, generation)| {
+                            pid == "xai" && stashed.matches_repair("xai", *generation)
+                        });
+                    if resume {
+                        agent.pending_credential_repair = None;
                         agent.scrollback.push_block(RenderBlock::system(
                             "Reconnected xAI. Retrying\u{2026}".to_string(),
                         ));
@@ -401,7 +402,6 @@ pub(super) fn handle_auth_complete(
                         retry_effects.extend(drain.effects);
                         page_flips.push((agent.session.id, drain.page_flip_entry));
                     } else {
-                        // Keep the stash for a later same-provider repair.
                         agent.reauth_stashed_prompt = Some(stashed);
                     }
                 }

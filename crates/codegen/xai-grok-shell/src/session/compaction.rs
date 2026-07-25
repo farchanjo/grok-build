@@ -694,7 +694,7 @@ impl SessionActor {
     }
 
     /// Provider-aware compact-auth suppress copy. OpenRouter/OpenAI name
-    /// `/providers`; first-party xAI keeps `/login`.
+    /// `/providers`; first-party xAI keeps `/providers`.
     async fn compact_auth_suppress_message(&self) -> String {
         use crate::extensions::notification::provider_credential_repair_message;
         let model_id = self
@@ -709,7 +709,7 @@ impl SessionActor {
         {
             return provider_credential_repair_message(&provider.provider_name);
         }
-        "authentication problem — re-authenticate using /login and retry.".to_owned()
+        "authentication problem — re-authenticate using /providers and retry.".to_owned()
     }
     /// Map a deterministic failure's error text to a fixed, content-free
     /// [`SuppressReason`] (drives telemetry + sticky-vs-per-turn scope).
@@ -752,7 +752,7 @@ impl SessionActor {
         )
     }
     /// Terminal auth compact failure: emit RetryState for reauth stash.
-    /// OpenRouter/OpenAI get provider-scoped credential failure (no `/login`,
+    /// OpenRouter/OpenAI get provider-scoped credential failure (no `/providers`,
     /// no xAI OAuth). First-party xAI keeps the legacy reauth path.
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
         use crate::extensions::notification::{
@@ -786,7 +786,7 @@ impl SessionActor {
                 provider,
             );
             // Provider-scoped: do not emit global auth_required (that triggers
-            // xAI OAuth /login flows in some clients).
+            // xAI OAuth /providers flows in some clients).
             let err =
                 acp::Error::internal_error().data(crate::inference::error::terminal_error_data(
                     msg.clone(),
@@ -799,7 +799,7 @@ impl SessionActor {
                 detailed
             } else {
                 format!(
-                    "Unauthorized (401): compaction failed — re-authenticate with /login \
+                    "Unauthorized (401): compaction failed — re-authenticate with /providers \
                      and retry. ({detailed})"
                 )
             };
@@ -2836,7 +2836,7 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    /// After /login, clearing auth suppress must re-arm pre-sampling compact
+    /// After /providers, clearing auth suppress must re-arm pre-sampling compact
     /// before the next sample (ordering that prepare_sampler-after-gate broke).
     #[tokio::test(flavor = "current_thread")]
     async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
@@ -2923,7 +2923,7 @@ mod inline_auto_compact_flow_tests {
     }
 
     /// Auto-compaction 401 on an OpenRouter model emits provider-scoped
-    /// credential failure (no `/login`, no global auth_required).
+    /// credential failure (no `/providers`, no global auth_required).
     #[tokio::test(flavor = "current_thread")]
     async fn surface_compact_auth_failure_openrouter_provider_scoped() {
         use crate::agent::config::{ModelEntry, ModelInfo};
@@ -2990,7 +2990,7 @@ mod inline_auto_compact_flow_tests {
                         assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
                         assert!(message.contains("OpenRouter"));
                         assert!(message.contains("/providers"));
-                        assert!(!message.contains("/login"));
+                        assert!(!message.contains("/providers"));
                         assert_eq!(
                             provider.as_ref().map(|p| p.provider_id.as_str()),
                             Some("openrouter")
@@ -3073,7 +3073,7 @@ mod inline_auto_compact_flow_tests {
                         ) = &notif.update
                     {
                         assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
-                        assert!(!message.contains("/login"));
+                        assert!(!message.contains("/providers"));
                         assert_eq!(p.provider_id, "openrouter");
                         saw = true;
                     }
@@ -3117,7 +3117,7 @@ mod inline_auto_compact_flow_tests {
                 let credit = notification_for(SuppressReason::CreditBlock).await;
                 assert!(credit.contains("spending limit"), "credit_block: {credit}");
                 let auth = notification_for(SuppressReason::Auth).await;
-                assert!(auth.contains("/login"), "auth: {auth}");
+                assert!(auth.contains("/providers"), "auth: {auth}");
                 let size = notification_for(SuppressReason::Size).await;
                 assert!(size.contains("too large to compact"), "size: {size}");
                 let schema = notification_for(SuppressReason::Schema).await;
@@ -3170,7 +3170,7 @@ mod inline_auto_compact_flow_tests {
         });
         format!("http://{addr}")
     }
-    /// 401 auto-compact: SUPPRESS_AUTH + reauthable RetryState (abort for /login).
+    /// 401 auto-compact: SUPPRESS_AUTH + reauthable RetryState (abort for /providers).
     #[tokio::test(flavor = "current_thread")]
     async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
@@ -3240,7 +3240,8 @@ mod inline_auto_compact_flow_tests {
                             }
                             XaiSessionUpdate::AutoCompactFailed { error } => {
                                 assert!(
-                                    error.contains("/login") || error.contains("authentication"),
+                                    error.contains("/providers")
+                                        || error.contains("authentication"),
                                     "auto-failed={error}"
                                 );
                                 saw_auto_failed = true;

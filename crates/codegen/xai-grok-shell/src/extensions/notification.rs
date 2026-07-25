@@ -1186,23 +1186,25 @@ impl RetryState {
     }
 }
 
-/// Whether a terminal retry failure is a recoverable authentication error
-/// (expired/invalid credentials, 401) that the user can fix by signing in
-/// again. Drives the actionable re-auth banner.
+/// **Legacy wire compatibility only.** New shells always attach a structured
+/// [`ProviderCredentialFailure`] on auth terminal failures (including xAI).
 ///
-/// `legacy_auth` is intentionally excluded: those failures carry their own
-/// detailed migration guidance (provider-scoped disconnect/connect) in the
-/// message, so we surface that verbatim instead of the generic prompt.
-///
-/// `provider_credential` is also excluded from *global* reauth: the pager
-/// must branch on the `provider` field first. Older pagers that ignore
-/// `provider` will treat this as a non-reauthable failure (RetryFailed),
-/// which is preferred over wrongly opening xAI `/login`.
-pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
-    if error_type == Some("legacy_auth") || error_type == Some(PROVIDER_CREDENTIAL_ERROR_TYPE) {
-        return false;
-    }
-    error_type == Some("auth") || message.contains("Unauthorized (401)")
+/// Returns true only for historic bare `error_type == "auth"` payloads that
+/// lack a `provider` field. Never inspects free-form message text. Callers
+/// must prefer the `provider` field when present; this helper is solely for
+/// the replay boundary that rewrites legacy payloads into neutral
+/// `/providers` guidance.
+#[deprecated(note = "New events carry ProviderCredentialFailure; use the provider field")]
+pub fn is_legacy_bare_auth_error_type(error_type: Option<&str>) -> bool {
+    error_type == Some("auth")
+}
+
+/// Retained name for older call sites; prefers structured provider data.
+/// Message-string classification is **not** performed.
+#[deprecated(note = "use is_legacy_bare_auth_error_type or structured provider field")]
+pub fn is_reauthable_failure(error_type: Option<&str>, _message: &str) -> bool {
+    #[allow(deprecated)]
+    is_legacy_bare_auth_error_type(error_type)
 }
 
 /// User-facing repair copy for a provider-scoped credential rejection.
@@ -1353,12 +1355,19 @@ mod provider_host_tests {
     }
 
     #[test]
-    fn is_reauthable_failure_excludes_provider_credential() {
+    #[allow(deprecated)]
+    fn legacy_bare_auth_type_only_matches_auth_error_type() {
+        assert!(is_legacy_bare_auth_error_type(Some("auth")));
+        assert!(!is_legacy_bare_auth_error_type(Some(
+            PROVIDER_CREDENTIAL_ERROR_TYPE
+        )));
+        assert!(!is_legacy_bare_auth_error_type(Some("api")));
+        // Message text must never drive classification.
         assert!(!is_reauthable_failure(
             Some(PROVIDER_CREDENTIAL_ERROR_TYPE),
-            &provider_credential_repair_message("OpenRouter")
+            "Unauthorized (401)"
         ));
-        assert!(is_reauthable_failure(Some("auth"), "Unauthorized (401)"));
+        assert!(!is_reauthable_failure(None, "Unauthorized (401)"));
     }
 
     #[test]

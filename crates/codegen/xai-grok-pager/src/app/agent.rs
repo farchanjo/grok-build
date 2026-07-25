@@ -763,18 +763,11 @@ pub struct ProviderScopedStashedPrompt {
 }
 
 impl ProviderScopedStashedPrompt {
-    /// Whether a successful repair for `provider_id` with optional generation
-    /// may resubmit this stash. Sibling providers never match.
-    pub fn matches_repair(&self, provider_id: &str, generation: Option<u64>) -> bool {
-        if self.provider_id != provider_id {
-            return false;
-        }
-        match generation {
-            Some(g) => self.credential_generation == g,
-            // First-party session reconnect has no generation counter; only
-            // allow when the stash itself used generation 0 (xAI path).
-            None => self.credential_generation == 0,
-        }
+    /// Whether a successful repair for `provider_id` at exact `generation`
+    /// may resubmit this stash. Sibling providers and generation mismatches
+    /// never match. `generation` is required (no wildcard).
+    pub fn matches_repair(&self, provider_id: &str, generation: u64) -> bool {
+        self.provider_id == provider_id && self.credential_generation == generation
     }
 }
 
@@ -799,22 +792,24 @@ mod provider_scoped_stash_tests {
     #[test]
     fn sibling_provider_cannot_resubmit() {
         let stash = sample("openrouter", 3);
-        assert!(!stash.matches_repair("openai", Some(3)));
-        assert!(!stash.matches_repair("xai", None));
+        assert!(!stash.matches_repair("openai", 3));
+        assert!(!stash.matches_repair("xai", 3));
     }
 
     #[test]
     fn same_provider_requires_matching_generation() {
         let stash = sample("openrouter", 3);
-        assert!(stash.matches_repair("openrouter", Some(3)));
-        assert!(!stash.matches_repair("openrouter", Some(4)));
+        assert!(stash.matches_repair("openrouter", 3));
+        assert!(!stash.matches_repair("openrouter", 4));
+        assert!(!stash.matches_repair("openrouter", 0));
     }
 
     #[test]
-    fn xai_session_path_uses_generation_zero() {
-        let stash = sample("xai", 0);
-        assert!(stash.matches_repair("xai", None));
-        assert!(!stash.matches_repair("xai", Some(1)));
+    fn xai_uses_exact_generation_like_other_providers() {
+        let stash = sample("xai", 2);
+        assert!(stash.matches_repair("xai", 2));
+        assert!(!stash.matches_repair("xai", 0));
+        assert!(!stash.matches_repair("xai", 1));
     }
 }
 /// Snapshot of a textarea chip element for rewind restore.

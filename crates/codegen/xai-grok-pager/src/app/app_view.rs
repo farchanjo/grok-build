@@ -586,7 +586,7 @@ pub struct AppView {
     /// Which view is currently active.
     pub active_view: ActiveView,
     /// View to return to after a mid-session login flow completes or is
-    /// cancelled. `Some` only while a `/login` (or 401-triggered re-auth)
+    /// cancelled. `Some` only while a provider-scoped re-auth detour
     /// initiated from an active session is in progress — it lets the auth
     /// UI take over the `Welcome` screen and then restore the caller's view
     /// (e.g. `Agent`) afterwards. `None` at startup so the normal
@@ -3466,7 +3466,8 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     return InputOutcome::Action(Action::QuitConfirmed);
                 }
                 if key!('l').matches(key) || key!(Enter).matches(key) {
-                    return InputOutcome::Action(Action::Login);
+                    // Supported TUI auth surface is /providers (xAI row).
+                    return InputOutcome::Action(Action::OpenProviders);
                 }
             }
             AuthState::Authenticating { .. } if *ctx.show_raw_url => {
@@ -3777,29 +3778,29 @@ fn handle_menu_nav(
     }
 }
 /// Dispatch an action for a welcome menu item when not yet authenticated.
-/// Menu layout: 0 = Login, 1 = Quit.
+/// Menu layout: 0 = Connect providers, 1 = Quit.
 fn dispatch_pending_menu_action(index: usize) -> InputOutcome {
     match index {
-        0 => InputOutcome::Action(Action::Login),
+        0 => InputOutcome::Action(Action::OpenProviders),
         1 => InputOutcome::Action(Action::Quit),
         _ => InputOutcome::Unchanged,
     }
 }
 /// Dispatch an action for a welcome menu item when ZDR-blocked.
-/// Menu layout: 0 = Switch account, 1 = Quit.
+/// Menu layout: 0 = Switch account (via /providers), 1 = Quit.
 fn dispatch_zdr_menu_action(index: usize) -> InputOutcome {
     match index {
-        0 => InputOutcome::Action(Action::SwitchAccount),
+        0 => InputOutcome::Action(Action::OpenProviders),
         1 => InputOutcome::Action(Action::Quit),
         _ => InputOutcome::Unchanged,
     }
 }
-/// Menu actions when user is access-gated: 0 = Subscribe CTA, 1 = Logout, 2 = Quit.
+/// Menu actions when user is access-gated: 0 = Subscribe CTA, 1 = Providers, 2 = Quit.
 /// "Refresh" (ctrl-r) is handled as a direct key shortcut, not a menu item.
 fn dispatch_access_gate_menu_action(index: usize) -> InputOutcome {
     match index {
         0 => InputOutcome::Action(Action::OpenSupergrokUrl),
-        1 => InputOutcome::Action(Action::Logout),
+        1 => InputOutcome::Action(Action::OpenProviders),
         2 => InputOutcome::Action(Action::Quit),
         _ => InputOutcome::Unchanged,
     }
@@ -8874,20 +8875,20 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn welcome_pending_l_triggers_login() {
+    fn welcome_pending_l_opens_providers() {
         let mut app = test_app();
         app.auth_state = AuthState::Pending { error: None };
         app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
+        assert!(matches!(outcome, InputOutcome::Action(Action::OpenProviders)));
     }
     #[test]
-    fn welcome_pending_enter_triggers_login() {
+    fn welcome_pending_enter_opens_providers() {
         let mut app = test_app();
         app.auth_state = AuthState::Pending { error: None };
         app.welcome_prompt_focused = false;
         let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
+        assert!(matches!(outcome, InputOutcome::Action(Action::OpenProviders)));
     }
     #[test]
     fn welcome_pending_n_is_unchanged() {

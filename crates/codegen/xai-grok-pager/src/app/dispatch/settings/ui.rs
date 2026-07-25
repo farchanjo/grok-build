@@ -146,30 +146,55 @@ pub(in crate::app::dispatch) fn dispatch_open_howto_guides(app: &mut AppView) ->
 /// integration is intentionally performed after `ProviderCommand` is emitted;
 /// credentials remain in this modal's ephemeral state until that bridge takes
 /// them into the secure store.
+///
+/// Supported from welcome (no session yet): creates a placeholder agent so
+/// the modal can mount. This is the only TUI authentication surface.
 pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
-    use crate::views::providers_modal::ProviderKind;
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
+    use crate::views::providers_modal::{ProviderKind, ProviderModalState};
+
+    let mut effects = Vec::new();
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => {
+            if let Some(existing) = app.agents.keys().next().copied() {
+                crate::app::dispatch::ctx::switch_to_agent(
+                    app,
+                    existing,
+                    crate::app::dispatch::ctx::SwitchCause::Picker,
+                );
+                existing
+            } else {
+                let (new_id, create_effects) =
+                    crate::app::dispatch::session::lifecycle::dispatch_new_session_inner_with_id(
+                        app, None,
+                    );
+                effects.extend(create_effects);
+                new_id
+            }
+        }
     };
     let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
+        return effects;
     };
     if let Some(ActiveModal::Providers { state }) = agent.active_modal.as_mut() {
         state.clear_sensitive_input();
         agent.active_modal = None;
-        return vec![];
+        return effects;
     }
+    let mut state = ProviderModalState::new();
+    // Focus xAI row so connect/disconnect is one Enter away from welcome.
+    state.selected = 0;
     agent.active_modal = Some(ActiveModal::Providers {
-        state: Box::new(crate::views::providers_modal::ProviderModalState::new()),
+        state: Box::new(state),
     });
-    ProviderKind::ALL
-        .into_iter()
-        .map(|provider| Effect::ProviderOperation {
+    effects.extend(ProviderKind::ALL.into_iter().map(|provider| {
+        Effect::ProviderOperation {
             agent_id: id,
             operation: crate::app::actions::ProviderOperation::Refresh(provider),
-        })
-        .collect()
+        }
+    }));
+    effects
 }
 
 /// Move a provider command from the modal into an async native-provider

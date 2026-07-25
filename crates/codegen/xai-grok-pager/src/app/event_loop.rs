@@ -984,7 +984,8 @@ pub(crate) async fn run(
             };
             vec![]
         } else {
-            dispatch::dispatch(Action::Login, &mut app)
+            // Enterprise pin: open /providers (xAI row) — no global /login.
+            dispatch::dispatch(Action::OpenProviders, &mut app)
         }
     } else {
         vec![]

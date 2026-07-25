@@ -1,6 +1,8 @@
 //! CLI argument parsing for the pager.
 pub use crate::headless::OutputFormat;
 use clap::{ArgAction, Parser, Subcommand, ValueHint};
+#[cfg(test)]
+use clap::CommandFactory;
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -1333,6 +1335,28 @@ mod tests {
                 command: ProviderCliCommand::Reconnect { .. }
             }))
         ));
+    }
+
+    #[test]
+    fn deprecated_login_and_logout_still_parse_as_hidden_commands() {
+        let login = PagerArgs::try_parse_from(["grok", "login"]).expect("login parses");
+        assert!(matches!(login.command, Some(Command::Login { .. })));
+        let logout = PagerArgs::try_parse_from(["grok", "logout"]).expect("logout parses");
+        assert!(matches!(logout.command, Some(Command::Logout)));
+        // Help must not list them as primary commands: clap hide=true.
+        let help = PagerArgs::command().render_long_help().to_string();
+        assert!(
+            !help.lines().any(|l| l.trim_start().starts_with("login ")),
+            "login must be hidden from long help:\n{help}"
+        );
+        assert!(
+            !help.lines().any(|l| l.trim_start().starts_with("logout ")),
+            "logout must be hidden from long help:\n{help}"
+        );
+        assert!(
+            help.contains("provider"),
+            "provider subcommand must appear in help"
+        );
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {

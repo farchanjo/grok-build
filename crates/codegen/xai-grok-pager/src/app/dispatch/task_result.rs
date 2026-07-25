@@ -1326,8 +1326,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 app.show_toast(&format!("Provider action failed: {error}"));
             }
 
-            // Same-provider successful connect/test: resubmit a prompt stashed
-            // for that provider only. Sibling providers never match.
+            // Exact provider + generation resume only. Sibling / stale /
+            // duplicate completions never resubmit.
             if !connected {
                 return vec![];
             }
@@ -1339,16 +1339,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             let mut retry_effects = Vec::new();
             let mut page_flips = Vec::new();
             for agent in app.agents.values_mut() {
-                let Some(stashed) = agent.reauth_stashed_prompt.take() else {
+                let Some((pending_id, pending_gen)) = agent.pending_credential_repair.clone()
+                else {
                     continue;
                 };
-                // Accept any generation for this provider: the repair is the
-                // successful credential write/test; generation only prevents
-                // sibling-provider races.
-                if stashed.provider_id != provider_id {
+                if pending_id != provider_id {
+                    continue;
+                }
+                let Some(stashed) = agent.reauth_stashed_prompt.take() else {
+                    agent.pending_credential_repair = None;
+                    continue;
+                };
+                if !stashed.matches_repair(provider_id, pending_gen) {
+                    // Stale generation or wrong provider on stash — keep for
+                    // a later matching repair if pending still applies.
                     agent.reauth_stashed_prompt = Some(stashed);
                     continue;
                 }
+                agent.pending_credential_repair = None;
                 strip_trailing_auth_error_blocks(agent);
                 agent.scrollback.push_block(RenderBlock::system(format!(
                     "Reconnected {}. Retrying\u{2026}",

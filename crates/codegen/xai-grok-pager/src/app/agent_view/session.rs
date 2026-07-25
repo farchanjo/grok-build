@@ -110,6 +110,7 @@ impl AgentView {
             stashed_prompt: None,
             credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
+            pending_credential_repair: None,
             active_modal: None,
             modal_buttons: Vec::new(),
             modal_hovered_key: None,

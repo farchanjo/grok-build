@@ -462,7 +462,7 @@ async fn run_headless_inner(
 
     // Headless's only transport is the relay (no IPC fallback), so a session is required.
     const HEADLESS_NO_SESSION: &str = "Headless mode requires a grok.com session. \
-        Run `grok login` to sign in, or use `grok agent stdio` for API-key access.";
+        Connect xAI in /providers to sign in, or use `grok agent stdio` for API-key access.";
 
     // Clean up orphaned upload queue temp files from previous sessions (best-effort).
     // Uses DEFAULT_MAX_AGE to stay in sync with the upload queue's retry policy.
@@ -481,9 +481,11 @@ async fn run_headless_inner(
         match auth_manager.current() {
             Some(auth) => (auth, false),
             None if auth_manager.is_expired() => {
-                anyhow::bail!("Session expired. Please run 'grok login' to re-authenticate.")
+                anyhow::bail!(
+                "Session expired. Connect xAI in /providers (or run `grok provider connect xai`)."
+            )
             }
-            None => anyhow::bail!("No cached credentials found. Run `grok login`."),
+            None => anyhow::bail!("No cached credentials found. Connect xAI in /providers."),
         }
     } else if reauthenticate {
         let auth_manager = Arc::new(AuthManager::new(&grok_home::grok_home(), ctx.clone()));

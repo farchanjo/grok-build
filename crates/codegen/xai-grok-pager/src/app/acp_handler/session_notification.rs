@@ -1282,10 +1282,9 @@ pub(super) fn apply_retry_state(
                 session.credit_limit_blocked = true;
             } else if is_free_usage {
                 session.free_usage_blocked = true;
-            } else if !*rate_limited && is_reauthable_failure(None, reason) {
-                is_reauth = true;
-                scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else {
+                // Exhausted path never string-classifies auth; new shells emit
+                // Failed+provider. Unstructured exhausted messages stay RetryFailed.
                 let error = if *rate_limited {
                     crate::app::effects::sanitize_user_error(&format_rate_limited_user_message(
                         Some(reason.as_str()),
@@ -1310,8 +1309,8 @@ pub(super) fn apply_retry_state(
                 session.model_incompatible = true;
             }
             is_credit_limit = super::super::dispatch::is_credit_limit_error(None, message);
-            // Branch on provider data *before* any global reauth classifier so
-            // OpenRouter/OpenAI never fall through to `/login`/xAI OAuth.
+            // Prefer structured `provider` for all credential failures (xAI and
+            // third-party). Never classify auth from free-form message text.
             if is_credit_limit {
                 session.credit_limit_blocked = true;
             } else if let Some(provider) = provider {
@@ -1333,7 +1332,9 @@ pub(super) fn apply_retry_state(
                         credential_generation: Some(provider.credential_generation),
                     },
                 ));
-            } else if is_reauthable_failure(Some(error_type.as_str()), message) {
+            } else if error_type == "auth" {
+                // Legacy wire only: historic bare auth without `provider`.
+                // Neutral /providers guidance — never /login.
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if crate::scrollback::blocks::is_image_input_unsupported_error(message) {

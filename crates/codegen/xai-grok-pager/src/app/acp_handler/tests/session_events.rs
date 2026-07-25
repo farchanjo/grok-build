@@ -421,31 +421,10 @@
         );
     }
 
+    /// Legacy bare `error_type=auth` (no provider) maps to neutral ReAuthRequired.
+    /// Message text alone must never open credential repair.
     #[test]
-    fn is_reauthable_failure_matrix() {
-        assert!(is_reauthable_failure(Some("auth"), "Unauthorized (401)"));
-        assert!(is_reauthable_failure(
-            Some("api"),
-            "Unauthorized (401) from https://proxy/v1/responses"
-        ));
-        assert!(is_reauthable_failure(None, "Unauthorized (401)"));
-        // legacy_auth carries its own migration guidance — excluded.
-        assert!(!is_reauthable_failure(
-            Some("legacy_auth"),
-            "Unauthorized (401) ... deprecated authentication method"
-        ));
-        // Unrelated failures must not be treated as re-authable.
-        assert!(!is_reauthable_failure(
-            Some("server_error"),
-            "internal server error"
-        ));
-        assert!(!is_reauthable_failure(Some("api"), "model not found"));
-    }
-
-    /// A 401 with `error_type == "auth"` surfaces the actionable re-auth
-    /// prompt instead of the raw "Retry failed: Unauthorized (401) …" dump.
-    #[test]
-    fn apply_retry_state_auth_failure_pushes_reauth_prompt() {
+    fn apply_retry_state_legacy_bare_auth_only_by_error_type() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
@@ -457,15 +436,77 @@
                 provider: None,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback,
+            false,
+        );
+        let event = last_session_event(&scrollback).expect("event");
+        assert!(
+            matches!(event, SessionEvent::ReAuthRequired),
+            "legacy bare auth type → ReAuthRequired (neutral /providers): {event:?}"
+        );
+        assert!(event.message().contains("/providers"), "{}", event.message());
+        assert!(!event.message().contains("/login"), "{}", event.message());
+        assert!(!session.credit_limit_blocked);
+
+        // Message-only 401 without error_type=auth must not open repair.
+        let mut scrollback2 = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "api".into(),
+                message: "Unauthorized (401) from somewhere".into(),
+                provider: None,
+            },
+            &mut session,
+            &mut scrollback2,
+            false,
+        );
         assert!(
             matches!(
-                last_session_event(&scrollback),
-                Some(SessionEvent::ReAuthRequired)
+                last_session_event(&scrollback2),
+                Some(SessionEvent::RetryFailed { .. })
             ),
-            "auth 401 must surface the actionable re-auth prompt"
+            "message-only 401 must not string-classify to reauth"
         );
-        assert!(!session.credit_limit_blocked);
+    }
+
+    /// Structured xAI credential failure (new path) uses ProviderCredentialRequired.
+    #[test]
+    fn apply_retry_state_xai_structured_provider_credential() {
+        use xai_grok_shell::extensions::notification::{
+            ProviderCredentialFailure, ProviderCredentialKind, PROVIDER_CREDENTIAL_ERROR_TYPE,
+        };
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: PROVIDER_CREDENTIAL_ERROR_TYPE.into(),
+                message: xai_grok_shell::extensions::notification::xai_session_repair_message(),
+                provider: Some(ProviderCredentialFailure {
+                    provider_id: "xai".into(),
+                    provider_name: "xAI".into(),
+                    failed_model_id: Some("grok-build".into()),
+                    credential_kind: ProviderCredentialKind::Oauth,
+                    recommended_action: Default::default(),
+                    credential_generation: 4,
+                    http_status: Some(401),
+                    request_id: None,
+                    generation_id: None,
+                    backend: None,
+                    error_category: Some(PROVIDER_CREDENTIAL_ERROR_TYPE.into()),
+                }),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match last_session_event(&scrollback).expect("event") {
+            SessionEvent::ProviderCredentialRequired {
+                provider_id,
+                credential_generation: Some(4),
+                ..
+            } if provider_id == "xai" => {}
+            other => panic!("expected ProviderCredentialRequired xai gen 4, got {other:?}"),
+        }
     }
 
     /// Milestone 1: Moonshot-through-OpenRouter 401 retains OpenRouter
@@ -651,8 +692,8 @@
         ));
     }
 
-    /// Legacy WebLogin auth keeps its verbose message (with `grok logout` /
-    /// `grok login` guidance), not the generic re-auth prompt.
+    /// Legacy WebLogin auth keeps its verbose message (provider-scoped
+    /// reconnect guidance), not the generic re-auth prompt.
     #[test]
     fn apply_retry_state_legacy_auth_keeps_detailed_message() {
         let mut session = make_session(Some("s1"));
@@ -661,12 +702,14 @@
             &RetryState::Failed {
                 error_type: "legacy_auth".into(),
                 message: "Unauthorized (401) ... deprecated authentication method (WebLogin) ... \
-                          run `grok logout` then `grok login`"
+                          disconnect and reconnect xAI in /providers"
                     .into(),
                 provider: None,
             },
             &mut session,
-            &mut scrollback, false);
+            &mut scrollback,
+            false,
+        );
         assert!(matches!(
             last_session_event(&scrollback),
             Some(SessionEvent::RetryFailed { .. })

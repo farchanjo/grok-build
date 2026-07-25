@@ -17,7 +17,7 @@ use super::notifications::NotificationSender;
 use crate::agent::update_chunk_merge::{BufferingSettings, ReplayBuffer};
 use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
 use crate::extensions::notification::{
-    RetryState, SessionNotification as XaiSessionNotification, is_reauthable_failure,
+    RetryState, SessionNotification as XaiSessionNotification,
 };
 use crate::inference::error::map_sampling_err_to_acp;
 use crate::inference::types::{ChatRequestMessage, ToolCallResponse, ToolDefinition};

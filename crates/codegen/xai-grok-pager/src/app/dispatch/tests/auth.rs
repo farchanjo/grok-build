@@ -793,6 +793,7 @@ fn provider_operation_complete_resumes_only_matching_provider_stash() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.session_id = Some(acp::SessionId::new("sess-provider-resume"));
         agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.pending_credential_repair = Some(("openrouter".into(), 7));
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 7,
@@ -822,6 +823,10 @@ fn provider_operation_complete_resumes_only_matching_provider_stash() {
         "sibling provider must leave the OpenRouter stash"
     );
     assert!(
+        app.agents[&id].pending_credential_repair.is_some(),
+        "sibling must leave pending repair"
+    );
+    assert!(
         !effects.iter().any(|e| matches!(
             e,
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
@@ -829,7 +834,34 @@ fn provider_operation_complete_resumes_only_matching_provider_stash() {
         "sibling connect must not resubmit: {effects:?}"
     );
 
-    // Matching OpenRouter connect consumes and resubmits once.
+    // Stale generation for same provider must not resume.
+    app.agents.get_mut(&id).unwrap().pending_credential_repair =
+        Some(("openrouter".into(), 99));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("ok".into()),
+            },
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "stale generation must not consume stash"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "stale generation must not resubmit: {effects:?}"
+    );
+
+    // Exact generation match resumes once.
+    app.agents.get_mut(&id).unwrap().pending_credential_repair =
+        Some(("openrouter".into(), 7));
     let effects = dispatch(
         Action::TaskComplete(TaskResult::ProviderOperationComplete {
             agent_id: id,
@@ -842,7 +874,11 @@ fn provider_operation_complete_resumes_only_matching_provider_stash() {
     );
     assert!(
         app.agents[&id].reauth_stashed_prompt.is_none(),
-        "same-provider repair must consume the stash"
+        "exact same-provider generation must consume the stash"
+    );
+    assert!(
+        app.agents[&id].pending_credential_repair.is_none(),
+        "pending repair cleared after one resume"
     );
     assert!(
         effects.iter().any(|e| matches!(
@@ -850,6 +886,25 @@ fn provider_operation_complete_resumes_only_matching_provider_stash() {
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
         "same-provider connect must resubmit once: {effects:?}"
+    );
+
+    // Duplicate completion must not resubmit again.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("ok".into()),
+            },
+        }),
+        &mut app,
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "duplicate completion must not resubmit: {effects:?}"
     );
 }
 
@@ -860,6 +915,7 @@ fn auth_complete_does_not_resubmit_openrouter_stash() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
+        agent.pending_credential_repair = Some(("openrouter".into(), 2));
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "openrouter".into(),
             credential_generation: 2,
@@ -872,6 +928,7 @@ fn auth_complete_does_not_resubmit_openrouter_stash() {
             },
         });
     }
+    // Internal xAI OAuth path (from /providers LoginXai), not global /login.
     dispatch(Action::Login, &mut app);
     let seq = authenticating_seq(&app);
     let effects = dispatch(
@@ -895,6 +952,48 @@ fn auth_complete_does_not_resubmit_openrouter_stash() {
             Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
         )),
         "xAI reconnect must not resubmit OpenRouter stash: {effects:?}"
+    );
+}
+
+/// xAI AuthComplete resumes only when pending repair is exact xAI generation.
+#[test]
+fn auth_complete_resumes_exact_xai_generation_once() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-xai-resume"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.pending_credential_repair = Some(("xai".into(), 5));
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 5,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "xai prompt".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+    }
+    dispatch(Action::Login, &mut app);
+    let seq = authenticating_seq(&app);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: seq,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert!(app.agents[&id].pending_credential_repair.is_none());
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "exact xAI generation must resume once: {effects:?}"
     );
 }
 

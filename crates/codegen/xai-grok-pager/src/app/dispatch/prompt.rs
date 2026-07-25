@@ -1310,6 +1310,8 @@ pub(super) fn handle_prompt_response(
                 let (provider_id, generation) =
                     scrollback_recent_credential_scope(&agent.scrollback)
                         .unwrap_or(("xai".to_string(), 0));
+                agent.pending_credential_repair =
+                    Some((provider_id.clone(), generation));
                 agent.reauth_stashed_prompt =
                     Some(crate::app::agent::ProviderScopedStashedPrompt {
                         provider_id,
