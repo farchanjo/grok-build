@@ -4,8 +4,12 @@ SHELL := /bin/sh
 CARGO ?= cargo
 CARGO_TARGET_DIR ?= target
 CARGO_INCREMENTAL ?= 0
+CARGO_BUILD_JOBS ?= 8
+RUSTC_WRAPPER ?= sccache
 export CARGO_TARGET_DIR
 export CARGO_INCREMENTAL
+export CARGO_BUILD_JOBS
+export RUSTC_WRAPPER
 
 PACKAGE ?= xai-grok-pager-bin
 PROFILE ?= release-dist
@@ -30,7 +34,7 @@ PYTHON3 ?= /usr/bin/python3
 .PHONY: build deploy deploy-binary deploy-wrapper verify help
 
 build:
-	$(CARGO) build --locked -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE)
+	$(CARGO) build --locked --jobs $(CARGO_BUILD_JOBS) -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE)
 
 deploy: deploy-binary
 	+$(MAKE) deploy-wrapper
