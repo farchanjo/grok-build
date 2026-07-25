@@ -367,13 +367,15 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 
 ## Account and Billing
 
-### `/login`
+### `/providers`
 
-Log in or re-authenticate without leaving the session.
+Connect, reconnect, or disconnect credentials for xAI, OpenAI/ChatGPT,
+OpenRouter, and custom providers. This is the supported path for all
+credential repair — there is no global `/login` or `/logout`.
 
-### `/logout`
-
-Log out and return to the login screen.
+When a third-party provider rejects its API key, the session names that
+provider and points here. For an expired xAI session, reconnect xAI under
+`/providers` as well.
 
 ### `/usage`
 

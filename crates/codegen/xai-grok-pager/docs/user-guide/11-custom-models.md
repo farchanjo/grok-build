@@ -6,7 +6,7 @@ Grok connects to custom model endpoints for alternative providers, self-hosted m
 
 ## Default Models
 
-By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Connect xAI from `/providers`, run `grok login`, or set an API key before sending prompts to first-party models. The TUI itself starts without a mandatory Grok login so you can also use OpenAI (ChatGPT OAuth or API key) or OpenRouter alone.
+By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Connect xAI from `/providers` (or `grok provider connect xai`), or set an API key before sending prompts to first-party models. The TUI itself starts without a mandatory Grok login so you can also use OpenAI (ChatGPT OAuth or API key) or OpenRouter alone.
 
 List all available models:
 
@@ -102,7 +102,7 @@ Grok resolves the API key in this order:
 
 1. The `api_key` field in the model config
 2. The environment variable(s) named by `env_key` — a single string or an array of names. The first set, non-empty value wins (for example `env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]` for SSH `LC_*` forwarding)
-3. Your signed-in session token (from `grok login`), for a model with no `api_key`/`env_key` of its own
+3. Your signed-in session token (from connecting xAI in `/providers`), for a model with no `api_key`/`env_key` of its own
 4. The `XAI_API_KEY` environment variable (global fallback; Grok also accepts `GROK_CODE_XAI_API_KEY` for backward compatibility)
 
 For a third-party `model_provider`, missing provider credentials fail closed:
@@ -734,7 +734,7 @@ When you use `[endpoints]` with partial model overrides, Grok inherits the `base
 
 ### Auth Behavior
 
-When you set `models_base_url`, Grok uses API key auth (`Authorization: Bearer`) instead of session auth. You do not need `grok login` -- the API key is enough.
+When you set `models_base_url`, Grok uses API key auth (`Authorization: Bearer`) instead of session auth. You do not need an interactive xAI connect — the API key is enough.
 
 ---
 

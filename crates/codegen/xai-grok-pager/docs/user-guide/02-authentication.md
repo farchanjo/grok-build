@@ -26,13 +26,17 @@ require interactive login at startup.
 ## Browser Login (xAI)
 
 To sign in to xAI with a browser from the TUI, open `/providers` and connect
-xAI, or run:
+xAI. From the CLI:
 
 ```bash
-grok login
+grok provider connect xai
 ```
 
-Grok stores credentials in `~/.grok/auth.json` and reuses them across sessions. Grok refreshes access tokens automatically in the background. When a token can't be refreshed, Grok prompts you to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
+There is no global `grok login` / `grok logout` (those invocations print a
+one-release deprecation error and do not start auth). Credential repair is
+always provider-scoped.
+
+Grok stores credentials in `~/.grok/auth.json` and reuses them across sessions. Grok refreshes access tokens automatically in the background. When a token can't be refreshed, Grok prompts you to reconnect xAI under `/providers`. Credentials without a server-provided expiry fall back to a 30-day lifetime.
 
 ### Credential storage
 
@@ -44,20 +48,22 @@ Tokens in `~/.grok/auth.json` (and MCP OAuth tokens in `~/.grok/mcp_credentials.
 
 ### Re-authenticate
 
-To switch accounts or resolve an authentication problem, run:
+To switch accounts or resolve an authentication problem, reconnect xAI:
 
 ```bash
-grok login
+grok provider reconnect xai
 ```
 
-Running `grok login` starts the sign-in flow again, replacing your cached session. By default, it opens your browser and signs in through SpaceXAI OAuth at `auth.x.ai`. Pass a flag to select a different flow:
+Or open `/providers` in the TUI and connect xAI again. That replaces the
+cached session. By default, connect opens your browser and signs in through
+SpaceXAI OAuth at `auth.x.ai`. For headless or remote environments, use the
+device-code path from `/providers` or an [External Auth Provider](#external-auth-provider).
 
-| Flag | Description |
-|------|-------------|
-| `--oauth` | Sign in through SpaceXAI OAuth at `auth.x.ai`. This is the default, so the flag is optional. |
-| `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
+To sign out of xAI only (preserving other providers):
 
-To sign out, run `grok logout`. It takes no flags and clears your cached credentials.
+```bash
+grok provider disconnect xai
+```
 
 ---
 
@@ -70,7 +76,7 @@ export XAI_API_KEY="xai-..."
 grok
 ```
 
-Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `grok logout` or delete `~/.grok/auth.json`.
+Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, disconnect xAI OAuth in `/providers` (`grok provider disconnect xai`) or delete `~/.grok/auth.json`.
 
 Stored API keys occupy distinct scopes in the owner-only `auth.json` vault.
 Disconnecting one API-key provider preserves the other providers and the xAI
@@ -245,10 +251,12 @@ echo "{\"access_token\": \"$TOKEN\", \"expires_in\": 3600}"
 For headless environments (SSH sessions, Docker containers, remote VMs) where no browser is available locally:
 
 ```bash
-grok login --device-auth    # or: grok login --device-code
+grok provider connect xai
 ```
 
-This prints a URL and code to the terminal. Open the URL on any device, enter the code, and complete authentication. Grok polls until the login is confirmed.
+In headless environments the connect flow prints a URL and code to the
+terminal (device-code path). Open the URL on any device, enter the code, and
+complete authentication. Grok polls until the login is confirmed.
 
 You can also implement the device-code flow through an [External Auth Provider](#external-auth-provider) for full control.
 
@@ -350,7 +358,7 @@ RUST_LOG=debug grok -p "hello" 2> /tmp/grok.log
 
 ### Common fixes
 
-- **"Authentication failed"** -- Run `grok logout` to clear cached credentials, then `grok login` to sign in again.
+- **"Authentication failed"** -- Disconnect and reconnect xAI in `/providers` (or `grok provider disconnect xai` then `grok provider connect xai`).
 - **Token expires too quickly** -- Set `auth_token_ttl` or return `expires_in` in your auth provider's JSON output.
 - **OIDC redirect fails** -- Ensure your IdP allows loopback redirect URIs (`http://127.0.0.1/callback`).
 - **External auth provider not found** -- Check that the `auth_provider_command` path is correct and the binary is executable.

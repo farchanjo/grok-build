@@ -483,9 +483,10 @@ grok -p "Run the test suite" --yolo
 For headless use, authenticate with one of:
 
 - **`XAI_API_KEY`** — simplest for CI. See [Environment Variables](#environment-variables-for-headless) above.
-- **`grok login --device-auth`** (or `--device-code`) — no browser needed on the target machine.
-  See [Authentication > Device Code Flow](02-authentication.md#device-code-flow).
-- **`grok login`** — browser-based OAuth2 on machines with a GUI.
+- **`grok provider connect xai`** — interactive OAuth for the xAI provider (browser when available).
+  See [Authentication](02-authentication.md).
+- Device-code / external auth providers for headless hosts without a browser —
+  see [Authentication > Device Code Flow](02-authentication.md#device-code-flow).
 
 If you've previously logged in, cached credentials are used automatically.
 
