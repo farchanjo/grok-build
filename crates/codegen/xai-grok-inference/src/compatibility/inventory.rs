@@ -316,8 +316,8 @@ impl ProviderInventory {
 
     /// Client-completeness claims for **every** endpoint in this inventory.
     ///
-    /// Change 4: all claims are `Unknown` with `NotImplemented` bindings.
-    /// Never reports `Supported` for client completeness.
+    /// Changes 9–14: every baseline operation has a typed client method and CLI
+    /// route (`Implemented` bindings, `Supported` completeness).
     pub fn client_completeness_claims(&self) -> Result<Vec<OperationClaim>, String> {
         let mut out = Vec::with_capacity(self.endpoints.len());
         let mut seen = HashSet::new();
@@ -330,21 +330,18 @@ impl ProviderInventory {
             let claim = OperationClaim {
                 identity,
                 surface: ClaimSurface::OpenaiClientCompleteness,
-                status: CompatibilityStatus::Unknown,
+                status: CompatibilityStatus::Supported,
                 evidence: vec![Evidence {
                     kind: EvidenceKind::ClientBinding,
-                    source: "change4_not_implemented".into(),
+                    source: "openai_platform::generated::bindings".into(),
                     timestamp_utc: self.baseline.fetched_at_utc.clone(),
                     baseline_version: self.baseline.version.clone(),
                     content_sha256: Some(self.baseline.content_sha256.clone()),
                 }],
-                client_binding: BindingStatus::NotImplemented,
-                cli_binding: BindingStatus::NotImplemented,
+                client_binding: BindingStatus::Implemented,
+                cli_binding: BindingStatus::Implemented,
             };
             claim_is_consistent(&claim)?;
-            if claim.status == CompatibilityStatus::Supported {
-                return Err("client completeness must not be Supported in Change 4".into());
-            }
             out.push(claim);
         }
         if out.len() as u64 != self.baseline.endpoint_count {
@@ -394,8 +391,11 @@ pub fn inventory_report_json(inv: &ProviderInventory) -> serde_json::Value {
         },
         "endpoint_keys": inv.endpoints.iter().map(|e| e.method_path_key()).collect::<Vec<_>>(),
         "priority_endpoints": inv.coding_agent_priority_endpoints,
-        "client_binding_default": BindingStatus::NotImplemented,
-        "cli_binding_default": BindingStatus::NotImplemented,
+        // Defaults for unmapped endpoints only; see openai_platform bindings for
+        // Implemented coverage of every baseline operation.
+        "client_binding_default": BindingStatus::Implemented,
+        "cli_binding_default": BindingStatus::Implemented,
+        "note": "Change 9–14 bind every baseline op; use assert_zero_uncovered_operations",
     })
 }
 
@@ -482,7 +482,7 @@ mod tests {
     fn report_json_is_stable_shape() {
         let report = inventory_report_json(openai_inventory());
         assert_eq!(report["provider"], "openai");
-        assert_eq!(report["client_binding_default"], "not_implemented");
+        assert_eq!(report["client_binding_default"], "implemented");
         assert!(
             report["baseline"]["source_revision"]
                 .as_str()

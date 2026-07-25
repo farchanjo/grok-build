@@ -22,6 +22,8 @@ pub mod client;
 pub mod commands;
 /// OpenAI / OpenRouter compatibility baselines and contracts (Change 4).
 pub mod compatibility;
+/// Reusable OpenAI / OpenRouter platform client (Changes 7–13).
+pub mod openai_platform;
 pub mod config;
 pub mod doom_loop;
 pub mod events;
@@ -61,6 +63,11 @@ pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use openrouter_baseline::{
     OpenRouterEndpoint, OpenRouterEndpointInventory, coding_agent_priority_endpoints,
     inventory_has_endpoint, openrouter_endpoint_inventory, schema_field_names,
+};
+pub use openai_platform::{
+    OpenAiAdminClient, OpenAiClient, OpenRouterClient, PlatformClientConfig, PlatformError,
+    PlatformResult, PlatformTransport, TransportPolicy, assert_zero_uncovered_operations,
+    coverage_report_json, OPERATION_BINDINGS, TOTAL_BINDING_COUNT,
 };
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,

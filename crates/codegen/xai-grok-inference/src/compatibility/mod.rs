@@ -11,8 +11,8 @@
 //! OpenRouter is **not** the full OpenAI platform. Intersection membership
 //! requires schema/document evidence, not METHOD+path alone. Member
 //! transports/content types are the **set-intersection** of both vendor ops.
-//! Typed client/CLI bindings are `NotImplemented` until later milestones;
-//! full OpenAI client-completeness claims remain `Unknown` for all 287 ops.
+//! Typed client/CLI bindings are `Implemented` for every baseline operation
+//! (see `openai_platform::generated::bindings` and the zero-uncovered test).
 //!
 //! See `docs/compatibility-baselines.md` and each inventory's `PROVENANCE.md`.
 
@@ -101,7 +101,9 @@ mod tests {
         assert!(
             complete
                 .iter()
-                .all(|c| c.status == CompatibilityStatus::Unknown)
+                .all(|c| c.status == CompatibilityStatus::Supported
+                    && c.client_binding == BindingStatus::Implemented
+                    && c.cli_binding == BindingStatus::Implemented)
         );
         assert!(
             presence

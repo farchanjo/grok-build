@@ -1,0 +1,5305 @@
+{
+  "format_version": 1,
+  "openai_app": 181,
+  "openai_admin": 106,
+  "openrouter": 89,
+  "total": 376,
+  "bindings": [
+    {
+      "provider": "openai",
+      "operation_id": "listAssistants",
+      "method": "GET",
+      "path": "/assistants",
+      "client_method": "list_assistants",
+      "request_type": "ListAssistantsRequest",
+      "response_type": "ListAssistantsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_assistants",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createAssistant",
+      "method": "POST",
+      "path": "/assistants",
+      "client_method": "create_assistant",
+      "request_type": "CreateAssistantRequest",
+      "response_type": "CreateAssistantResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_assistant",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteAssistant",
+      "method": "DELETE",
+      "path": "/assistants/{assistant_id}",
+      "client_method": "delete_assistant",
+      "request_type": "DeleteAssistantRequest",
+      "response_type": "DeleteAssistantResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_assistant",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getAssistant",
+      "method": "GET",
+      "path": "/assistants/{assistant_id}",
+      "client_method": "get_assistant",
+      "request_type": "GetAssistantRequest",
+      "response_type": "GetAssistantResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_assistant",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "modifyAssistant",
+      "method": "POST",
+      "path": "/assistants/{assistant_id}",
+      "client_method": "modify_assistant",
+      "request_type": "ModifyAssistantRequest",
+      "response_type": "ModifyAssistantResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.modify_assistant",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createSpeech",
+      "method": "POST",
+      "path": "/audio/speech",
+      "client_method": "create_speech",
+      "request_type": "CreateSpeechRequest",
+      "response_type": "CreateSpeechResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_speech",
+      "transports": [
+        "http_binary",
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createTranscription",
+      "method": "POST",
+      "path": "/audio/transcriptions",
+      "client_method": "create_transcription",
+      "request_type": "CreateTranscriptionRequest",
+      "response_type": "CreateTranscriptionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_transcription",
+      "transports": [
+        "http_json",
+        "http_multipart",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createTranslation",
+      "method": "POST",
+      "path": "/audio/translations",
+      "client_method": "create_translation",
+      "request_type": "CreateTranslationRequest",
+      "response_type": "CreateTranslationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_translation",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listVoiceConsents",
+      "method": "GET",
+      "path": "/audio/voice_consents",
+      "client_method": "list_voice_consents",
+      "request_type": "ListVoiceConsentsRequest",
+      "response_type": "ListVoiceConsentsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_voice_consents",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createVoiceConsent",
+      "method": "POST",
+      "path": "/audio/voice_consents",
+      "client_method": "create_voice_consent",
+      "request_type": "CreateVoiceConsentRequest",
+      "response_type": "CreateVoiceConsentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_voice_consent",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteVoiceConsent",
+      "method": "DELETE",
+      "path": "/audio/voice_consents/{consent_id}",
+      "client_method": "delete_voice_consent",
+      "request_type": "DeleteVoiceConsentRequest",
+      "response_type": "DeleteVoiceConsentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_voice_consent",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getVoiceConsent",
+      "method": "GET",
+      "path": "/audio/voice_consents/{consent_id}",
+      "client_method": "get_voice_consent",
+      "request_type": "GetVoiceConsentRequest",
+      "response_type": "GetVoiceConsentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_voice_consent",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "updateVoiceConsent",
+      "method": "POST",
+      "path": "/audio/voice_consents/{consent_id}",
+      "client_method": "update_voice_consent",
+      "request_type": "UpdateVoiceConsentRequest",
+      "response_type": "UpdateVoiceConsentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.update_voice_consent",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createVoice",
+      "method": "POST",
+      "path": "/audio/voices",
+      "client_method": "create_voice",
+      "request_type": "CreateVoiceRequest",
+      "response_type": "CreateVoiceResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_voice",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listBatches",
+      "method": "GET",
+      "path": "/batches",
+      "client_method": "list_batches",
+      "request_type": "ListBatchesRequest",
+      "response_type": "ListBatchesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_batches",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createBatch",
+      "method": "POST",
+      "path": "/batches",
+      "client_method": "create_batch",
+      "request_type": "CreateBatchRequest",
+      "response_type": "CreateBatchResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_batch",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieveBatch",
+      "method": "GET",
+      "path": "/batches/{batch_id}",
+      "client_method": "retrieve_batch",
+      "request_type": "RetrieveBatchRequest",
+      "response_type": "RetrieveBatchResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_batch",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "cancelBatch",
+      "method": "POST",
+      "path": "/batches/{batch_id}/cancel",
+      "client_method": "cancel_batch",
+      "request_type": "CancelBatchRequest",
+      "response_type": "CancelBatchResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_batch",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listChatCompletions",
+      "method": "GET",
+      "path": "/chat/completions",
+      "client_method": "list_chat_completions",
+      "request_type": "ListChatCompletionsRequest",
+      "response_type": "ListChatCompletionsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_chat_completions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createChatCompletion",
+      "method": "POST",
+      "path": "/chat/completions",
+      "client_method": "create_chat_completion",
+      "request_type": "CreateChatCompletionRequest",
+      "response_type": "CreateChatCompletionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_chat_completion",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteChatCompletion",
+      "method": "DELETE",
+      "path": "/chat/completions/{completion_id}",
+      "client_method": "delete_chat_completion",
+      "request_type": "DeleteChatCompletionRequest",
+      "response_type": "DeleteChatCompletionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_chat_completion",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getChatCompletion",
+      "method": "GET",
+      "path": "/chat/completions/{completion_id}",
+      "client_method": "get_chat_completion",
+      "request_type": "GetChatCompletionRequest",
+      "response_type": "GetChatCompletionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_chat_completion",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "updateChatCompletion",
+      "method": "POST",
+      "path": "/chat/completions/{completion_id}",
+      "client_method": "update_chat_completion",
+      "request_type": "UpdateChatCompletionRequest",
+      "response_type": "UpdateChatCompletionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.update_chat_completion",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getChatCompletionMessages",
+      "method": "GET",
+      "path": "/chat/completions/{completion_id}/messages",
+      "client_method": "get_chat_completion_messages",
+      "request_type": "GetChatCompletionMessagesRequest",
+      "response_type": "GetChatCompletionMessagesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_chat_completion_messages",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateChatSessionMethod",
+      "method": "POST",
+      "path": "/chatkit/sessions",
+      "client_method": "create_chat_session_method",
+      "request_type": "CreateChatSessionMethodRequest",
+      "response_type": "CreateChatSessionMethodResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_chat_session_method",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CancelChatSessionMethod",
+      "method": "POST",
+      "path": "/chatkit/sessions/{session_id}/cancel",
+      "client_method": "cancel_chat_session_method",
+      "request_type": "CancelChatSessionMethodRequest",
+      "response_type": "CancelChatSessionMethodResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_chat_session_method",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "ListThreadsMethod",
+      "method": "GET",
+      "path": "/chatkit/threads",
+      "client_method": "list_threads_method",
+      "request_type": "ListThreadsMethodRequest",
+      "response_type": "ListThreadsMethodResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_threads_method",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "DeleteThreadMethod",
+      "method": "DELETE",
+      "path": "/chatkit/threads/{thread_id}",
+      "client_method": "delete_thread_method",
+      "request_type": "DeleteThreadMethodRequest",
+      "response_type": "DeleteThreadMethodResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_thread_method",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "GetThreadMethod",
+      "method": "GET",
+      "path": "/chatkit/threads/{thread_id}",
+      "client_method": "get_thread_method",
+      "request_type": "GetThreadMethodRequest",
+      "response_type": "GetThreadMethodResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_thread_method",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "ListThreadItemsMethod",
+      "method": "GET",
+      "path": "/chatkit/threads/{thread_id}/items",
+      "client_method": "list_thread_items_method",
+      "request_type": "ListThreadItemsMethodRequest",
+      "response_type": "ListThreadItemsMethodResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_thread_items_method",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createCompletion",
+      "method": "POST",
+      "path": "/completions",
+      "client_method": "create_completion",
+      "request_type": "CreateCompletionRequest",
+      "response_type": "CreateCompletionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_completion",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "ListContainers",
+      "method": "GET",
+      "path": "/containers",
+      "client_method": "list_containers",
+      "request_type": "ListContainersRequest",
+      "response_type": "ListContainersResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_containers",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateContainer",
+      "method": "POST",
+      "path": "/containers",
+      "client_method": "create_container",
+      "request_type": "CreateContainerRequest",
+      "response_type": "CreateContainerResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_container",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "DeleteContainer",
+      "method": "DELETE",
+      "path": "/containers/{container_id}",
+      "client_method": "delete_container",
+      "request_type": "DeleteContainerRequest",
+      "response_type": "DeleteContainerResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_container",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "RetrieveContainer",
+      "method": "GET",
+      "path": "/containers/{container_id}",
+      "client_method": "retrieve_container",
+      "request_type": "RetrieveContainerRequest",
+      "response_type": "RetrieveContainerResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_container",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "ListContainerFiles",
+      "method": "GET",
+      "path": "/containers/{container_id}/files",
+      "client_method": "list_container_files",
+      "request_type": "ListContainerFilesRequest",
+      "response_type": "ListContainerFilesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_container_files",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateContainerFile",
+      "method": "POST",
+      "path": "/containers/{container_id}/files",
+      "client_method": "create_container_file",
+      "request_type": "CreateContainerFileRequest",
+      "response_type": "CreateContainerFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_container_file",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "DeleteContainerFile",
+      "method": "DELETE",
+      "path": "/containers/{container_id}/files/{file_id}",
+      "client_method": "delete_container_file",
+      "request_type": "DeleteContainerFileRequest",
+      "response_type": "DeleteContainerFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_container_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "RetrieveContainerFile",
+      "method": "GET",
+      "path": "/containers/{container_id}/files/{file_id}",
+      "client_method": "retrieve_container_file",
+      "request_type": "RetrieveContainerFileRequest",
+      "response_type": "RetrieveContainerFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_container_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "RetrieveContainerFileContent",
+      "method": "GET",
+      "path": "/containers/{container_id}/files/{file_id}/content",
+      "client_method": "retrieve_container_file_content",
+      "request_type": "RetrieveContainerFileContentRequest",
+      "response_type": "RetrieveContainerFileContentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_container_file_content",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createConversation",
+      "method": "POST",
+      "path": "/conversations",
+      "client_method": "create_conversation",
+      "request_type": "CreateConversationRequest",
+      "response_type": "CreateConversationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_conversation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteConversation",
+      "method": "DELETE",
+      "path": "/conversations/{conversation_id}",
+      "client_method": "delete_conversation",
+      "request_type": "DeleteConversationRequest",
+      "response_type": "DeleteConversationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_conversation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getConversation",
+      "method": "GET",
+      "path": "/conversations/{conversation_id}",
+      "client_method": "get_conversation",
+      "request_type": "GetConversationRequest",
+      "response_type": "GetConversationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_conversation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "updateConversation",
+      "method": "POST",
+      "path": "/conversations/{conversation_id}",
+      "client_method": "update_conversation",
+      "request_type": "UpdateConversationRequest",
+      "response_type": "UpdateConversationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.update_conversation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listConversationItems",
+      "method": "GET",
+      "path": "/conversations/{conversation_id}/items",
+      "client_method": "list_conversation_items",
+      "request_type": "ListConversationItemsRequest",
+      "response_type": "ListConversationItemsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_conversation_items",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createConversationItems",
+      "method": "POST",
+      "path": "/conversations/{conversation_id}/items",
+      "client_method": "create_conversation_items",
+      "request_type": "CreateConversationItemsRequest",
+      "response_type": "CreateConversationItemsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_conversation_items",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteConversationItem",
+      "method": "DELETE",
+      "path": "/conversations/{conversation_id}/items/{item_id}",
+      "client_method": "delete_conversation_item",
+      "request_type": "DeleteConversationItemRequest",
+      "response_type": "DeleteConversationItemResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_conversation_item",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getConversationItem",
+      "method": "GET",
+      "path": "/conversations/{conversation_id}/items/{item_id}",
+      "client_method": "get_conversation_item",
+      "request_type": "GetConversationItemRequest",
+      "response_type": "GetConversationItemResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_conversation_item",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createEmbedding",
+      "method": "POST",
+      "path": "/embeddings",
+      "client_method": "create_embedding",
+      "request_type": "CreateEmbeddingRequest",
+      "response_type": "CreateEmbeddingResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_embedding",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listEvals",
+      "method": "GET",
+      "path": "/evals",
+      "client_method": "list_evals",
+      "request_type": "ListEvalsRequest",
+      "response_type": "ListEvalsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_evals",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createEval",
+      "method": "POST",
+      "path": "/evals",
+      "client_method": "create_eval",
+      "request_type": "CreateEvalRequest",
+      "response_type": "CreateEvalResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_eval",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteEval",
+      "method": "DELETE",
+      "path": "/evals/{eval_id}",
+      "client_method": "delete_eval",
+      "request_type": "DeleteEvalRequest",
+      "response_type": "DeleteEvalResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_eval",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getEval",
+      "method": "GET",
+      "path": "/evals/{eval_id}",
+      "client_method": "get_eval",
+      "request_type": "GetEvalRequest",
+      "response_type": "GetEvalResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_eval",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "updateEval",
+      "method": "POST",
+      "path": "/evals/{eval_id}",
+      "client_method": "update_eval",
+      "request_type": "UpdateEvalRequest",
+      "response_type": "UpdateEvalResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.update_eval",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getEvalRuns",
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs",
+      "client_method": "get_eval_runs",
+      "request_type": "GetEvalRunsRequest",
+      "response_type": "GetEvalRunsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_eval_runs",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createEvalRun",
+      "method": "POST",
+      "path": "/evals/{eval_id}/runs",
+      "client_method": "create_eval_run",
+      "request_type": "CreateEvalRunRequest",
+      "response_type": "CreateEvalRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_eval_run",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteEvalRun",
+      "method": "DELETE",
+      "path": "/evals/{eval_id}/runs/{run_id}",
+      "client_method": "delete_eval_run",
+      "request_type": "DeleteEvalRunRequest",
+      "response_type": "DeleteEvalRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_eval_run",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getEvalRun",
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs/{run_id}",
+      "client_method": "get_eval_run",
+      "request_type": "GetEvalRunRequest",
+      "response_type": "GetEvalRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_eval_run",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "cancelEvalRun",
+      "method": "POST",
+      "path": "/evals/{eval_id}/runs/{run_id}",
+      "client_method": "cancel_eval_run",
+      "request_type": "CancelEvalRunRequest",
+      "response_type": "CancelEvalRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_eval_run",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getEvalRunOutputItems",
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs/{run_id}/output_items",
+      "client_method": "get_eval_run_output_items",
+      "request_type": "GetEvalRunOutputItemsRequest",
+      "response_type": "GetEvalRunOutputItemsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_eval_run_output_items",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getEvalRunOutputItem",
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs/{run_id}/output_items/{output_item_id}",
+      "client_method": "get_eval_run_output_item",
+      "request_type": "GetEvalRunOutputItemRequest",
+      "response_type": "GetEvalRunOutputItemResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_eval_run_output_item",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listFiles",
+      "method": "GET",
+      "path": "/files",
+      "client_method": "list_files",
+      "request_type": "ListFilesRequest",
+      "response_type": "ListFilesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_files",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createFile",
+      "method": "POST",
+      "path": "/files",
+      "client_method": "create_file",
+      "request_type": "CreateFileRequest",
+      "response_type": "CreateFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_file",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteFile",
+      "method": "DELETE",
+      "path": "/files/{file_id}",
+      "client_method": "delete_file",
+      "request_type": "DeleteFileRequest",
+      "response_type": "DeleteFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieveFile",
+      "method": "GET",
+      "path": "/files/{file_id}",
+      "client_method": "retrieve_file",
+      "request_type": "RetrieveFileRequest",
+      "response_type": "RetrieveFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "downloadFile",
+      "method": "GET",
+      "path": "/files/{file_id}/content",
+      "client_method": "download_file",
+      "request_type": "DownloadFileRequest",
+      "response_type": "DownloadFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.download_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "runGrader",
+      "method": "POST",
+      "path": "/fine_tuning/alpha/graders/run",
+      "client_method": "run_grader",
+      "request_type": "RunGraderRequest",
+      "response_type": "RunGraderResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.run_grader",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "validateGrader",
+      "method": "POST",
+      "path": "/fine_tuning/alpha/graders/validate",
+      "client_method": "validate_grader",
+      "request_type": "ValidateGraderRequest",
+      "response_type": "ValidateGraderResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.validate_grader",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listFineTuningCheckpointPermissions",
+      "method": "GET",
+      "path": "/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions",
+      "client_method": "list_fine_tuning_checkpoint_permissions",
+      "request_type": "ListFineTuningCheckpointPermissionsRequest",
+      "response_type": "ListFineTuningCheckpointPermissionsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_fine_tuning_checkpoint_permissions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createFineTuningCheckpointPermission",
+      "method": "POST",
+      "path": "/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions",
+      "client_method": "create_fine_tuning_checkpoint_permission",
+      "request_type": "CreateFineTuningCheckpointPermissionRequest",
+      "response_type": "CreateFineTuningCheckpointPermissionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_fine_tuning_checkpoint_permission",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteFineTuningCheckpointPermission",
+      "method": "DELETE",
+      "path": "/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions/{permission_id}",
+      "client_method": "delete_fine_tuning_checkpoint_permission",
+      "request_type": "DeleteFineTuningCheckpointPermissionRequest",
+      "response_type": "DeleteFineTuningCheckpointPermissionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_fine_tuning_checkpoint_permission",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listPaginatedFineTuningJobs",
+      "method": "GET",
+      "path": "/fine_tuning/jobs",
+      "client_method": "list_paginated_fine_tuning_jobs",
+      "request_type": "ListPaginatedFineTuningJobsRequest",
+      "response_type": "ListPaginatedFineTuningJobsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_paginated_fine_tuning_jobs",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createFineTuningJob",
+      "method": "POST",
+      "path": "/fine_tuning/jobs",
+      "client_method": "create_fine_tuning_job",
+      "request_type": "CreateFineTuningJobRequest",
+      "response_type": "CreateFineTuningJobResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_fine_tuning_job",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieveFineTuningJob",
+      "method": "GET",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}",
+      "client_method": "retrieve_fine_tuning_job",
+      "request_type": "RetrieveFineTuningJobRequest",
+      "response_type": "RetrieveFineTuningJobResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_fine_tuning_job",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "cancelFineTuningJob",
+      "method": "POST",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/cancel",
+      "client_method": "cancel_fine_tuning_job",
+      "request_type": "CancelFineTuningJobRequest",
+      "response_type": "CancelFineTuningJobResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_fine_tuning_job",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listFineTuningJobCheckpoints",
+      "method": "GET",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/checkpoints",
+      "client_method": "list_fine_tuning_job_checkpoints",
+      "request_type": "ListFineTuningJobCheckpointsRequest",
+      "response_type": "ListFineTuningJobCheckpointsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_fine_tuning_job_checkpoints",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listFineTuningEvents",
+      "method": "GET",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/events",
+      "client_method": "list_fine_tuning_events",
+      "request_type": "ListFineTuningEventsRequest",
+      "response_type": "ListFineTuningEventsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_fine_tuning_events",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "pauseFineTuningJob",
+      "method": "POST",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/pause",
+      "client_method": "pause_fine_tuning_job",
+      "request_type": "PauseFineTuningJobRequest",
+      "response_type": "PauseFineTuningJobResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.pause_fine_tuning_job",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "resumeFineTuningJob",
+      "method": "POST",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/resume",
+      "client_method": "resume_fine_tuning_job",
+      "request_type": "ResumeFineTuningJobRequest",
+      "response_type": "ResumeFineTuningJobResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.resume_fine_tuning_job",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createImageEdit",
+      "method": "POST",
+      "path": "/images/edits",
+      "client_method": "create_image_edit",
+      "request_type": "CreateImageEditRequest",
+      "response_type": "CreateImageEditResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_image_edit",
+      "transports": [
+        "http_json",
+        "http_multipart",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createImage",
+      "method": "POST",
+      "path": "/images/generations",
+      "client_method": "create_image",
+      "request_type": "CreateImageRequest",
+      "response_type": "CreateImageResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_image",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createImageVariation",
+      "method": "POST",
+      "path": "/images/variations",
+      "client_method": "create_image_variation",
+      "request_type": "CreateImageVariationRequest",
+      "response_type": "CreateImageVariationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_image_variation",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listModels",
+      "method": "GET",
+      "path": "/models",
+      "client_method": "list_models",
+      "request_type": "ListModelsRequest",
+      "response_type": "ListModelsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_models",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteModel",
+      "method": "DELETE",
+      "path": "/models/{model}",
+      "client_method": "delete_model",
+      "request_type": "DeleteModelRequest",
+      "response_type": "DeleteModelResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_model",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieveModel",
+      "method": "GET",
+      "path": "/models/{model}",
+      "client_method": "retrieve_model",
+      "request_type": "RetrieveModelRequest",
+      "response_type": "RetrieveModelResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_model",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createModeration",
+      "method": "POST",
+      "path": "/moderations",
+      "client_method": "create_moderation",
+      "request_type": "CreateModerationRequest",
+      "response_type": "CreateModerationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_moderation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "list-project-group-role-assignments",
+      "method": "GET",
+      "path": "/projects/{project_id}/groups/{group_id}/roles",
+      "client_method": "list_project_group_role_assignments",
+      "request_type": "ListProjectGroupRoleAssignmentsRequest",
+      "response_type": "ListProjectGroupRoleAssignmentsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_project_group_role_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "assign-project-group-role",
+      "method": "POST",
+      "path": "/projects/{project_id}/groups/{group_id}/roles",
+      "client_method": "assign_project_group_role",
+      "request_type": "AssignProjectGroupRoleRequest",
+      "response_type": "AssignProjectGroupRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.assign_project_group_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "unassign-project-group-role",
+      "method": "DELETE",
+      "path": "/projects/{project_id}/groups/{group_id}/roles/{role_id}",
+      "client_method": "unassign_project_group_role",
+      "request_type": "UnassignProjectGroupRoleRequest",
+      "response_type": "UnassignProjectGroupRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.unassign_project_group_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieve-project-group-role",
+      "method": "GET",
+      "path": "/projects/{project_id}/groups/{group_id}/roles/{role_id}",
+      "client_method": "retrieve_project_group_role",
+      "request_type": "RetrieveProjectGroupRoleRequest",
+      "response_type": "RetrieveProjectGroupRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_project_group_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "list-project-roles",
+      "method": "GET",
+      "path": "/projects/{project_id}/roles",
+      "client_method": "list_project_roles",
+      "request_type": "ListProjectRolesRequest",
+      "response_type": "ListProjectRolesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_project_roles",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "create-project-role",
+      "method": "POST",
+      "path": "/projects/{project_id}/roles",
+      "client_method": "create_project_role",
+      "request_type": "CreateProjectRoleRequest",
+      "response_type": "CreateProjectRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_project_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "delete-project-role",
+      "method": "DELETE",
+      "path": "/projects/{project_id}/roles/{role_id}",
+      "client_method": "delete_project_role",
+      "request_type": "DeleteProjectRoleRequest",
+      "response_type": "DeleteProjectRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_project_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieve-project-role",
+      "method": "GET",
+      "path": "/projects/{project_id}/roles/{role_id}",
+      "client_method": "retrieve_project_role",
+      "request_type": "RetrieveProjectRoleRequest",
+      "response_type": "RetrieveProjectRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_project_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "update-project-role",
+      "method": "POST",
+      "path": "/projects/{project_id}/roles/{role_id}",
+      "client_method": "update_project_role",
+      "request_type": "UpdateProjectRoleRequest",
+      "response_type": "UpdateProjectRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.update_project_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "list-project-user-role-assignments",
+      "method": "GET",
+      "path": "/projects/{project_id}/users/{user_id}/roles",
+      "client_method": "list_project_user_role_assignments",
+      "request_type": "ListProjectUserRoleAssignmentsRequest",
+      "response_type": "ListProjectUserRoleAssignmentsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_project_user_role_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "assign-project-user-role",
+      "method": "POST",
+      "path": "/projects/{project_id}/users/{user_id}/roles",
+      "client_method": "assign_project_user_role",
+      "request_type": "AssignProjectUserRoleRequest",
+      "response_type": "AssignProjectUserRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.assign_project_user_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "unassign-project-user-role",
+      "method": "DELETE",
+      "path": "/projects/{project_id}/users/{user_id}/roles/{role_id}",
+      "client_method": "unassign_project_user_role",
+      "request_type": "UnassignProjectUserRoleRequest",
+      "response_type": "UnassignProjectUserRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.unassign_project_user_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieve-project-user-role",
+      "method": "GET",
+      "path": "/projects/{project_id}/users/{user_id}/roles/{role_id}",
+      "client_method": "retrieve_project_user_role",
+      "request_type": "RetrieveProjectUserRoleRequest",
+      "response_type": "RetrieveProjectUserRoleResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_project_user_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "create-realtime-call",
+      "method": "POST",
+      "path": "/realtime/calls",
+      "client_method": "create_realtime_call",
+      "request_type": "CreateRealtimeCallRequest",
+      "response_type": "CreateRealtimeCallResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_realtime_call",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "accept-realtime-call",
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/accept",
+      "client_method": "accept_realtime_call",
+      "request_type": "AcceptRealtimeCallRequest",
+      "response_type": "AcceptRealtimeCallResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.accept_realtime_call",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "hangup-realtime-call",
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/hangup",
+      "client_method": "hangup_realtime_call",
+      "request_type": "HangupRealtimeCallRequest",
+      "response_type": "HangupRealtimeCallResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.hangup_realtime_call",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "refer-realtime-call",
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/refer",
+      "client_method": "refer_realtime_call",
+      "request_type": "ReferRealtimeCallRequest",
+      "response_type": "ReferRealtimeCallResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.refer_realtime_call",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "reject-realtime-call",
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/reject",
+      "client_method": "reject_realtime_call",
+      "request_type": "RejectRealtimeCallRequest",
+      "response_type": "RejectRealtimeCallResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.reject_realtime_call",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "create-realtime-client-secret",
+      "method": "POST",
+      "path": "/realtime/client_secrets",
+      "client_method": "create_realtime_client_secret",
+      "request_type": "CreateRealtimeClientSecretRequest",
+      "response_type": "CreateRealtimeClientSecretResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_realtime_client_secret",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "create-realtime-session",
+      "method": "POST",
+      "path": "/realtime/sessions",
+      "client_method": "create_realtime_session",
+      "request_type": "CreateRealtimeSessionRequest",
+      "response_type": "CreateRealtimeSessionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_realtime_session",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "create-realtime-transcription-session",
+      "method": "POST",
+      "path": "/realtime/transcription_sessions",
+      "client_method": "create_realtime_transcription_session",
+      "request_type": "CreateRealtimeTranscriptionSessionRequest",
+      "response_type": "CreateRealtimeTranscriptionSessionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_realtime_transcription_session",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "create-realtime-translation-client-secret",
+      "method": "POST",
+      "path": "/realtime/translations/client_secrets",
+      "client_method": "create_realtime_translation_client_secret",
+      "request_type": "CreateRealtimeTranslationClientSecretRequest",
+      "response_type": "CreateRealtimeTranslationClientSecretResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_realtime_translation_client_secret",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createResponse",
+      "method": "POST",
+      "path": "/responses",
+      "client_method": "create_response",
+      "request_type": "CreateResponseRequest",
+      "response_type": "CreateResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_response",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "Compactconversation",
+      "method": "POST",
+      "path": "/responses/compact",
+      "client_method": "compactconversation",
+      "request_type": "CompactconversationRequest",
+      "response_type": "CompactconversationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.compactconversation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "beta_Compactconversation",
+      "method": "POST",
+      "path": "/responses/compact?beta=true",
+      "client_method": "beta_compactconversation",
+      "request_type": "BetaCompactconversationRequest",
+      "response_type": "BetaCompactconversationResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.beta_compactconversation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "Getinputtokencounts",
+      "method": "POST",
+      "path": "/responses/input_tokens",
+      "client_method": "getinputtokencounts",
+      "request_type": "GetinputtokencountsRequest",
+      "response_type": "GetinputtokencountsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.getinputtokencounts",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "beta_Getinputtokencounts",
+      "method": "POST",
+      "path": "/responses/input_tokens?beta=true",
+      "client_method": "beta_getinputtokencounts",
+      "request_type": "BetaGetinputtokencountsRequest",
+      "response_type": "BetaGetinputtokencountsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.beta_getinputtokencounts",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteResponse",
+      "method": "DELETE",
+      "path": "/responses/{response_id}",
+      "client_method": "delete_response",
+      "request_type": "DeleteResponseRequest",
+      "response_type": "DeleteResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_response",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getResponse",
+      "method": "GET",
+      "path": "/responses/{response_id}",
+      "client_method": "get_response",
+      "request_type": "GetResponseRequest",
+      "response_type": "GetResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_response",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "cancelResponse",
+      "method": "POST",
+      "path": "/responses/{response_id}/cancel",
+      "client_method": "cancel_response",
+      "request_type": "CancelResponseRequest",
+      "response_type": "CancelResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_response",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "beta_cancelResponse",
+      "method": "POST",
+      "path": "/responses/{response_id}/cancel?beta=true",
+      "client_method": "beta_cancel_response",
+      "request_type": "BetaCancelResponseRequest",
+      "response_type": "BetaCancelResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.beta_cancel_response",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listInputItems",
+      "method": "GET",
+      "path": "/responses/{response_id}/input_items",
+      "client_method": "list_input_items",
+      "request_type": "ListInputItemsRequest",
+      "response_type": "ListInputItemsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_input_items",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "beta_listInputItems",
+      "method": "GET",
+      "path": "/responses/{response_id}/input_items?beta=true",
+      "client_method": "beta_list_input_items",
+      "request_type": "BetaListInputItemsRequest",
+      "response_type": "BetaListInputItemsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.beta_list_input_items",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "beta_deleteResponse",
+      "method": "DELETE",
+      "path": "/responses/{response_id}?beta=true",
+      "client_method": "beta_delete_response",
+      "request_type": "BetaDeleteResponseRequest",
+      "response_type": "BetaDeleteResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.beta_delete_response",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "beta_getResponse",
+      "method": "GET",
+      "path": "/responses/{response_id}?beta=true",
+      "client_method": "beta_get_response",
+      "request_type": "BetaGetResponseRequest",
+      "response_type": "BetaGetResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.beta_get_response",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "beta_createResponse",
+      "method": "POST",
+      "path": "/responses?beta=true",
+      "client_method": "beta_create_response",
+      "request_type": "BetaCreateResponseRequest",
+      "response_type": "BetaCreateResponseResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.beta_create_response",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "ListSkills",
+      "method": "GET",
+      "path": "/skills",
+      "client_method": "list_skills",
+      "request_type": "ListSkillsRequest",
+      "response_type": "ListSkillsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_skills",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateSkill",
+      "method": "POST",
+      "path": "/skills",
+      "client_method": "create_skill",
+      "request_type": "CreateSkillRequest",
+      "response_type": "CreateSkillResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_skill",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "DeleteSkill",
+      "method": "DELETE",
+      "path": "/skills/{skill_id}",
+      "client_method": "delete_skill",
+      "request_type": "DeleteSkillRequest",
+      "response_type": "DeleteSkillResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_skill",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "GetSkill",
+      "method": "GET",
+      "path": "/skills/{skill_id}",
+      "client_method": "get_skill",
+      "request_type": "GetSkillRequest",
+      "response_type": "GetSkillResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_skill",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "UpdateSkillDefaultVersion",
+      "method": "POST",
+      "path": "/skills/{skill_id}",
+      "client_method": "update_skill_default_version",
+      "request_type": "UpdateSkillDefaultVersionRequest",
+      "response_type": "UpdateSkillDefaultVersionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.update_skill_default_version",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "GetSkillContent",
+      "method": "GET",
+      "path": "/skills/{skill_id}/content",
+      "client_method": "get_skill_content",
+      "request_type": "GetSkillContentRequest",
+      "response_type": "GetSkillContentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_skill_content",
+      "transports": [
+        "http_binary"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "ListSkillVersions",
+      "method": "GET",
+      "path": "/skills/{skill_id}/versions",
+      "client_method": "list_skill_versions",
+      "request_type": "ListSkillVersionsRequest",
+      "response_type": "ListSkillVersionsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_skill_versions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateSkillVersion",
+      "method": "POST",
+      "path": "/skills/{skill_id}/versions",
+      "client_method": "create_skill_version",
+      "request_type": "CreateSkillVersionRequest",
+      "response_type": "CreateSkillVersionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_skill_version",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "DeleteSkillVersion",
+      "method": "DELETE",
+      "path": "/skills/{skill_id}/versions/{version}",
+      "client_method": "delete_skill_version",
+      "request_type": "DeleteSkillVersionRequest",
+      "response_type": "DeleteSkillVersionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_skill_version",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "GetSkillVersion",
+      "method": "GET",
+      "path": "/skills/{skill_id}/versions/{version}",
+      "client_method": "get_skill_version",
+      "request_type": "GetSkillVersionRequest",
+      "response_type": "GetSkillVersionResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_skill_version",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "GetSkillVersionContent",
+      "method": "GET",
+      "path": "/skills/{skill_id}/versions/{version}/content",
+      "client_method": "get_skill_version_content",
+      "request_type": "GetSkillVersionContentRequest",
+      "response_type": "GetSkillVersionContentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_skill_version_content",
+      "transports": [
+        "http_binary"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createThread",
+      "method": "POST",
+      "path": "/threads",
+      "client_method": "create_thread",
+      "request_type": "CreateThreadRequest",
+      "response_type": "CreateThreadResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_thread",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createThreadAndRun",
+      "method": "POST",
+      "path": "/threads/runs",
+      "client_method": "create_thread_and_run",
+      "request_type": "CreateThreadAndRunRequest",
+      "response_type": "CreateThreadAndRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_thread_and_run",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteThread",
+      "method": "DELETE",
+      "path": "/threads/{thread_id}",
+      "client_method": "delete_thread",
+      "request_type": "DeleteThreadRequest",
+      "response_type": "DeleteThreadResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_thread",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getThread",
+      "method": "GET",
+      "path": "/threads/{thread_id}",
+      "client_method": "get_thread",
+      "request_type": "GetThreadRequest",
+      "response_type": "GetThreadResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_thread",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "modifyThread",
+      "method": "POST",
+      "path": "/threads/{thread_id}",
+      "client_method": "modify_thread",
+      "request_type": "ModifyThreadRequest",
+      "response_type": "ModifyThreadResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.modify_thread",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listMessages",
+      "method": "GET",
+      "path": "/threads/{thread_id}/messages",
+      "client_method": "list_messages",
+      "request_type": "ListMessagesRequest",
+      "response_type": "ListMessagesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_messages",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createMessage",
+      "method": "POST",
+      "path": "/threads/{thread_id}/messages",
+      "client_method": "create_message",
+      "request_type": "CreateMessageRequest",
+      "response_type": "CreateMessageResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_message",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteMessage",
+      "method": "DELETE",
+      "path": "/threads/{thread_id}/messages/{message_id}",
+      "client_method": "delete_message",
+      "request_type": "DeleteMessageRequest",
+      "response_type": "DeleteMessageResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_message",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getMessage",
+      "method": "GET",
+      "path": "/threads/{thread_id}/messages/{message_id}",
+      "client_method": "get_message",
+      "request_type": "GetMessageRequest",
+      "response_type": "GetMessageResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_message",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "modifyMessage",
+      "method": "POST",
+      "path": "/threads/{thread_id}/messages/{message_id}",
+      "client_method": "modify_message",
+      "request_type": "ModifyMessageRequest",
+      "response_type": "ModifyMessageResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.modify_message",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listRuns",
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs",
+      "client_method": "list_runs",
+      "request_type": "ListRunsRequest",
+      "response_type": "ListRunsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_runs",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createRun",
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs",
+      "client_method": "create_run",
+      "request_type": "CreateRunRequest",
+      "response_type": "CreateRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_run",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getRun",
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs/{run_id}",
+      "client_method": "get_run",
+      "request_type": "GetRunRequest",
+      "response_type": "GetRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_run",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "modifyRun",
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs/{run_id}",
+      "client_method": "modify_run",
+      "request_type": "ModifyRunRequest",
+      "response_type": "ModifyRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.modify_run",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "cancelRun",
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs/{run_id}/cancel",
+      "client_method": "cancel_run",
+      "request_type": "CancelRunRequest",
+      "response_type": "CancelRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_run",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listRunSteps",
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs/{run_id}/steps",
+      "client_method": "list_run_steps",
+      "request_type": "ListRunStepsRequest",
+      "response_type": "ListRunStepsResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_run_steps",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getRunStep",
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs/{run_id}/steps/{step_id}",
+      "client_method": "get_run_step",
+      "request_type": "GetRunStepRequest",
+      "response_type": "GetRunStepResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_run_step",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "submitToolOuputsToRun",
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs/{run_id}/submit_tool_outputs",
+      "client_method": "submit_tool_ouputs_to_run",
+      "request_type": "SubmitToolOuputsToRunRequest",
+      "response_type": "SubmitToolOuputsToRunResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.submit_tool_ouputs_to_run",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createUpload",
+      "method": "POST",
+      "path": "/uploads",
+      "client_method": "create_upload",
+      "request_type": "CreateUploadRequest",
+      "response_type": "CreateUploadResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_upload",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "cancelUpload",
+      "method": "POST",
+      "path": "/uploads/{upload_id}/cancel",
+      "client_method": "cancel_upload",
+      "request_type": "CancelUploadRequest",
+      "response_type": "CancelUploadResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_upload",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "completeUpload",
+      "method": "POST",
+      "path": "/uploads/{upload_id}/complete",
+      "client_method": "complete_upload",
+      "request_type": "CompleteUploadRequest",
+      "response_type": "CompleteUploadResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.complete_upload",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "addUploadPart",
+      "method": "POST",
+      "path": "/uploads/{upload_id}/parts",
+      "client_method": "add_upload_part",
+      "request_type": "AddUploadPartRequest",
+      "response_type": "AddUploadPartResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.add_upload_part",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listVectorStores",
+      "method": "GET",
+      "path": "/vector_stores",
+      "client_method": "list_vector_stores",
+      "request_type": "ListVectorStoresRequest",
+      "response_type": "ListVectorStoresResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_vector_stores",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createVectorStore",
+      "method": "POST",
+      "path": "/vector_stores",
+      "client_method": "create_vector_store",
+      "request_type": "CreateVectorStoreRequest",
+      "response_type": "CreateVectorStoreResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_vector_store",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteVectorStore",
+      "method": "DELETE",
+      "path": "/vector_stores/{vector_store_id}",
+      "client_method": "delete_vector_store",
+      "request_type": "DeleteVectorStoreRequest",
+      "response_type": "DeleteVectorStoreResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_vector_store",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getVectorStore",
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}",
+      "client_method": "get_vector_store",
+      "request_type": "GetVectorStoreRequest",
+      "response_type": "GetVectorStoreResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_vector_store",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "modifyVectorStore",
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}",
+      "client_method": "modify_vector_store",
+      "request_type": "ModifyVectorStoreRequest",
+      "response_type": "ModifyVectorStoreResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.modify_vector_store",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createVectorStoreFileBatch",
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/file_batches",
+      "client_method": "create_vector_store_file_batch",
+      "request_type": "CreateVectorStoreFileBatchRequest",
+      "response_type": "CreateVectorStoreFileBatchResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_vector_store_file_batch",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getVectorStoreFileBatch",
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/file_batches/{batch_id}",
+      "client_method": "get_vector_store_file_batch",
+      "request_type": "GetVectorStoreFileBatchRequest",
+      "response_type": "GetVectorStoreFileBatchResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_vector_store_file_batch",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "cancelVectorStoreFileBatch",
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/file_batches/{batch_id}/cancel",
+      "client_method": "cancel_vector_store_file_batch",
+      "request_type": "CancelVectorStoreFileBatchRequest",
+      "response_type": "CancelVectorStoreFileBatchResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.cancel_vector_store_file_batch",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listFilesInVectorStoreBatch",
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/file_batches/{batch_id}/files",
+      "client_method": "list_files_in_vector_store_batch",
+      "request_type": "ListFilesInVectorStoreBatchRequest",
+      "response_type": "ListFilesInVectorStoreBatchResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_files_in_vector_store_batch",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "listVectorStoreFiles",
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/files",
+      "client_method": "list_vector_store_files",
+      "request_type": "ListVectorStoreFilesRequest",
+      "response_type": "ListVectorStoreFilesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_vector_store_files",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createVectorStoreFile",
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/files",
+      "client_method": "create_vector_store_file",
+      "request_type": "CreateVectorStoreFileRequest",
+      "response_type": "CreateVectorStoreFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_vector_store_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "deleteVectorStoreFile",
+      "method": "DELETE",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}",
+      "client_method": "delete_vector_store_file",
+      "request_type": "DeleteVectorStoreFileRequest",
+      "response_type": "DeleteVectorStoreFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_vector_store_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "getVectorStoreFile",
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}",
+      "client_method": "get_vector_store_file",
+      "request_type": "GetVectorStoreFileRequest",
+      "response_type": "GetVectorStoreFileResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_vector_store_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "updateVectorStoreFileAttributes",
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}",
+      "client_method": "update_vector_store_file_attributes",
+      "request_type": "UpdateVectorStoreFileAttributesRequest",
+      "response_type": "UpdateVectorStoreFileAttributesResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.update_vector_store_file_attributes",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "retrieveVectorStoreFileContent",
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}/content",
+      "client_method": "retrieve_vector_store_file_content",
+      "request_type": "RetrieveVectorStoreFileContentRequest",
+      "response_type": "RetrieveVectorStoreFileContentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_vector_store_file_content",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "searchVectorStore",
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/search",
+      "client_method": "search_vector_store",
+      "request_type": "SearchVectorStoreRequest",
+      "response_type": "SearchVectorStoreResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.search_vector_store",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "ListVideos",
+      "method": "GET",
+      "path": "/videos",
+      "client_method": "list_videos",
+      "request_type": "ListVideosRequest",
+      "response_type": "ListVideosResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.list_videos",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "createVideo",
+      "method": "POST",
+      "path": "/videos",
+      "client_method": "create_video",
+      "request_type": "CreateVideoRequest",
+      "response_type": "CreateVideoResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_video",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateVideoCharacter",
+      "method": "POST",
+      "path": "/videos/characters",
+      "client_method": "create_video_character",
+      "request_type": "CreateVideoCharacterRequest",
+      "response_type": "CreateVideoCharacterResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_video_character",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "GetVideoCharacter",
+      "method": "GET",
+      "path": "/videos/characters/{character_id}",
+      "client_method": "get_video_character",
+      "request_type": "GetVideoCharacterRequest",
+      "response_type": "GetVideoCharacterResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_video_character",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateVideoEdit",
+      "method": "POST",
+      "path": "/videos/edits",
+      "client_method": "create_video_edit",
+      "request_type": "CreateVideoEditRequest",
+      "response_type": "CreateVideoEditResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_video_edit",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateVideoExtend",
+      "method": "POST",
+      "path": "/videos/extensions",
+      "client_method": "create_video_extend",
+      "request_type": "CreateVideoExtendRequest",
+      "response_type": "CreateVideoExtendResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_video_extend",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "DeleteVideo",
+      "method": "DELETE",
+      "path": "/videos/{video_id}",
+      "client_method": "delete_video",
+      "request_type": "DeleteVideoRequest",
+      "response_type": "DeleteVideoResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.delete_video",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "GetVideo",
+      "method": "GET",
+      "path": "/videos/{video_id}",
+      "client_method": "get_video",
+      "request_type": "GetVideoRequest",
+      "response_type": "GetVideoResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.get_video",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "RetrieveVideoContent",
+      "method": "GET",
+      "path": "/videos/{video_id}/content",
+      "client_method": "retrieve_video_content",
+      "request_type": "RetrieveVideoContentRequest",
+      "response_type": "RetrieveVideoContentResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.retrieve_video_content",
+      "transports": [
+        "http_binary"
+      ]
+    },
+    {
+      "provider": "openai",
+      "operation_id": "CreateVideoRemix",
+      "method": "POST",
+      "path": "/videos/{video_id}/remix",
+      "client_method": "create_video_remix",
+      "request_type": "CreateVideoRemixRequest",
+      "response_type": "CreateVideoRemixResponse",
+      "client_type": "OpenAiClient",
+      "cli_route": "openai.create_video_remix",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "admin-api-keys-list",
+      "method": "GET",
+      "path": "/organization/admin_api_keys",
+      "client_method": "admin_api_keys_list",
+      "request_type": "AdminApiKeysListRequest",
+      "response_type": "AdminApiKeysListResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.admin_api_keys_list",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "admin-api-keys-create",
+      "method": "POST",
+      "path": "/organization/admin_api_keys",
+      "client_method": "admin_api_keys_create",
+      "request_type": "AdminApiKeysCreateRequest",
+      "response_type": "AdminApiKeysCreateResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.admin_api_keys_create",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "admin-api-keys-delete",
+      "method": "DELETE",
+      "path": "/organization/admin_api_keys/{key_id}",
+      "client_method": "admin_api_keys_delete",
+      "request_type": "AdminApiKeysDeleteRequest",
+      "response_type": "AdminApiKeysDeleteResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.admin_api_keys_delete",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "admin-api-keys-get",
+      "method": "GET",
+      "path": "/organization/admin_api_keys/{key_id}",
+      "client_method": "admin_api_keys_get",
+      "request_type": "AdminApiKeysGetRequest",
+      "response_type": "AdminApiKeysGetResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.admin_api_keys_get",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-audit-logs",
+      "method": "GET",
+      "path": "/organization/audit_logs",
+      "client_method": "list_audit_logs",
+      "request_type": "ListAuditLogsRequest",
+      "response_type": "ListAuditLogsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_audit_logs",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "listOrganizationCertificates",
+      "method": "GET",
+      "path": "/organization/certificates",
+      "client_method": "list_organization_certificates",
+      "request_type": "ListOrganizationCertificatesRequest",
+      "response_type": "ListOrganizationCertificatesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_organization_certificates",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "uploadCertificate",
+      "method": "POST",
+      "path": "/organization/certificates",
+      "client_method": "upload_certificate",
+      "request_type": "UploadCertificateRequest",
+      "response_type": "UploadCertificateResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.upload_certificate",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "activateOrganizationCertificates",
+      "method": "POST",
+      "path": "/organization/certificates/activate",
+      "client_method": "activate_organization_certificates",
+      "request_type": "ActivateOrganizationCertificatesRequest",
+      "response_type": "ActivateOrganizationCertificatesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.activate_organization_certificates",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "deactivateOrganizationCertificates",
+      "method": "POST",
+      "path": "/organization/certificates/deactivate",
+      "client_method": "deactivate_organization_certificates",
+      "request_type": "DeactivateOrganizationCertificatesRequest",
+      "response_type": "DeactivateOrganizationCertificatesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.deactivate_organization_certificates",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "deleteCertificate",
+      "method": "DELETE",
+      "path": "/organization/certificates/{certificate_id}",
+      "client_method": "delete_certificate",
+      "request_type": "DeleteCertificateRequest",
+      "response_type": "DeleteCertificateResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_certificate",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "getCertificate",
+      "method": "GET",
+      "path": "/organization/certificates/{certificate_id}",
+      "client_method": "get_certificate",
+      "request_type": "GetCertificateRequest",
+      "response_type": "GetCertificateResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.get_certificate",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "modifyCertificate",
+      "method": "POST",
+      "path": "/organization/certificates/{certificate_id}",
+      "client_method": "modify_certificate",
+      "request_type": "ModifyCertificateRequest",
+      "response_type": "ModifyCertificateResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.modify_certificate",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-costs",
+      "method": "GET",
+      "path": "/organization/costs",
+      "client_method": "usage_costs",
+      "request_type": "UsageCostsRequest",
+      "response_type": "UsageCostsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_costs",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-organization-data-retention",
+      "method": "GET",
+      "path": "/organization/data_retention",
+      "client_method": "retrieve_organization_data_retention",
+      "request_type": "RetrieveOrganizationDataRetentionRequest",
+      "response_type": "RetrieveOrganizationDataRetentionResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_organization_data_retention",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-organization-data-retention",
+      "method": "POST",
+      "path": "/organization/data_retention",
+      "client_method": "update_organization_data_retention",
+      "request_type": "UpdateOrganizationDataRetentionRequest",
+      "response_type": "UpdateOrganizationDataRetentionResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_organization_data_retention",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-groups",
+      "method": "GET",
+      "path": "/organization/groups",
+      "client_method": "list_groups",
+      "request_type": "ListGroupsRequest",
+      "response_type": "ListGroupsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_groups",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "create-group",
+      "method": "POST",
+      "path": "/organization/groups",
+      "client_method": "create_group",
+      "request_type": "CreateGroupRequest",
+      "response_type": "CreateGroupResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.create_group",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-group",
+      "method": "DELETE",
+      "path": "/organization/groups/{group_id}",
+      "client_method": "delete_group",
+      "request_type": "DeleteGroupRequest",
+      "response_type": "DeleteGroupResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_group",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-group",
+      "method": "GET",
+      "path": "/organization/groups/{group_id}",
+      "client_method": "retrieve_group",
+      "request_type": "RetrieveGroupRequest",
+      "response_type": "RetrieveGroupResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_group",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-group",
+      "method": "POST",
+      "path": "/organization/groups/{group_id}",
+      "client_method": "update_group",
+      "request_type": "UpdateGroupRequest",
+      "response_type": "UpdateGroupResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_group",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-group-role-assignments",
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/roles",
+      "client_method": "list_group_role_assignments",
+      "request_type": "ListGroupRoleAssignmentsRequest",
+      "response_type": "ListGroupRoleAssignmentsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_group_role_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "assign-group-role",
+      "method": "POST",
+      "path": "/organization/groups/{group_id}/roles",
+      "client_method": "assign_group_role",
+      "request_type": "AssignGroupRoleRequest",
+      "response_type": "AssignGroupRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.assign_group_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "unassign-group-role",
+      "method": "DELETE",
+      "path": "/organization/groups/{group_id}/roles/{role_id}",
+      "client_method": "unassign_group_role",
+      "request_type": "UnassignGroupRoleRequest",
+      "response_type": "UnassignGroupRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.unassign_group_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-group-role",
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/roles/{role_id}",
+      "client_method": "retrieve_group_role",
+      "request_type": "RetrieveGroupRoleRequest",
+      "response_type": "RetrieveGroupRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_group_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-group-users",
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/users",
+      "client_method": "list_group_users",
+      "request_type": "ListGroupUsersRequest",
+      "response_type": "ListGroupUsersResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_group_users",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "add-group-user",
+      "method": "POST",
+      "path": "/organization/groups/{group_id}/users",
+      "client_method": "add_group_user",
+      "request_type": "AddGroupUserRequest",
+      "response_type": "AddGroupUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.add_group_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "remove-group-user",
+      "method": "DELETE",
+      "path": "/organization/groups/{group_id}/users/{user_id}",
+      "client_method": "remove_group_user",
+      "request_type": "RemoveGroupUserRequest",
+      "response_type": "RemoveGroupUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.remove_group_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-group-user",
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/users/{user_id}",
+      "client_method": "retrieve_group_user",
+      "request_type": "RetrieveGroupUserRequest",
+      "response_type": "RetrieveGroupUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_group_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-invites",
+      "method": "GET",
+      "path": "/organization/invites",
+      "client_method": "list_invites",
+      "request_type": "ListInvitesRequest",
+      "response_type": "ListInvitesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_invites",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "inviteUser",
+      "method": "POST",
+      "path": "/organization/invites",
+      "client_method": "invite_user",
+      "request_type": "InviteUserRequest",
+      "response_type": "InviteUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.invite_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-invite",
+      "method": "DELETE",
+      "path": "/organization/invites/{invite_id}",
+      "client_method": "delete_invite",
+      "request_type": "DeleteInviteRequest",
+      "response_type": "DeleteInviteResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_invite",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-invite",
+      "method": "GET",
+      "path": "/organization/invites/{invite_id}",
+      "client_method": "retrieve_invite",
+      "request_type": "RetrieveInviteRequest",
+      "response_type": "RetrieveInviteResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_invite",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-projects",
+      "method": "GET",
+      "path": "/organization/projects",
+      "client_method": "list_projects",
+      "request_type": "ListProjectsRequest",
+      "response_type": "ListProjectsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_projects",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "create-project",
+      "method": "POST",
+      "path": "/organization/projects",
+      "client_method": "create_project",
+      "request_type": "CreateProjectRequest",
+      "response_type": "CreateProjectResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.create_project",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}",
+      "client_method": "retrieve_project",
+      "request_type": "RetrieveProjectRequest",
+      "response_type": "RetrieveProjectResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "modify-project",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}",
+      "client_method": "modify_project",
+      "request_type": "ModifyProjectRequest",
+      "response_type": "ModifyProjectResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.modify_project",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-project-api-keys",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/api_keys",
+      "client_method": "list_project_api_keys",
+      "request_type": "ListProjectApiKeysRequest",
+      "response_type": "ListProjectApiKeysResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_project_api_keys",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-project-api-key",
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/api_keys/{api_key_id}",
+      "client_method": "delete_project_api_key",
+      "request_type": "DeleteProjectApiKeyRequest",
+      "response_type": "DeleteProjectApiKeyResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_project_api_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-api-key",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/api_keys/{api_key_id}",
+      "client_method": "retrieve_project_api_key",
+      "request_type": "RetrieveProjectApiKeyRequest",
+      "response_type": "RetrieveProjectApiKeyResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_api_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "archive-project",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/archive",
+      "client_method": "archive_project",
+      "request_type": "ArchiveProjectRequest",
+      "response_type": "ArchiveProjectResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.archive_project",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "listProjectCertificates",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/certificates",
+      "client_method": "list_project_certificates",
+      "request_type": "ListProjectCertificatesRequest",
+      "response_type": "ListProjectCertificatesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_project_certificates",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "activateProjectCertificates",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/certificates/activate",
+      "client_method": "activate_project_certificates",
+      "request_type": "ActivateProjectCertificatesRequest",
+      "response_type": "ActivateProjectCertificatesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.activate_project_certificates",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "deactivateProjectCertificates",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/certificates/deactivate",
+      "client_method": "deactivate_project_certificates",
+      "request_type": "DeactivateProjectCertificatesRequest",
+      "response_type": "DeactivateProjectCertificatesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.deactivate_project_certificates",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-data-retention",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/data_retention",
+      "client_method": "retrieve_project_data_retention",
+      "request_type": "RetrieveProjectDataRetentionRequest",
+      "response_type": "RetrieveProjectDataRetentionResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_data_retention",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-project-data-retention",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/data_retention",
+      "client_method": "update_project_data_retention",
+      "request_type": "UpdateProjectDataRetentionRequest",
+      "response_type": "UpdateProjectDataRetentionResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_project_data_retention",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-project-groups",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/groups",
+      "client_method": "list_project_groups",
+      "request_type": "ListProjectGroupsRequest",
+      "response_type": "ListProjectGroupsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_project_groups",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "add-project-group",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/groups",
+      "client_method": "add_project_group",
+      "request_type": "AddProjectGroupRequest",
+      "response_type": "AddProjectGroupResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.add_project_group",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "remove-project-group",
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/groups/{group_id}",
+      "client_method": "remove_project_group",
+      "request_type": "RemoveProjectGroupRequest",
+      "response_type": "RemoveProjectGroupResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.remove_project_group",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-group",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/groups/{group_id}",
+      "client_method": "retrieve_project_group",
+      "request_type": "RetrieveProjectGroupRequest",
+      "response_type": "RetrieveProjectGroupResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_group",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-hosted-tool-permissions",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/hosted_tool_permissions",
+      "client_method": "retrieve_project_hosted_tool_permissions",
+      "request_type": "RetrieveProjectHostedToolPermissionsRequest",
+      "response_type": "RetrieveProjectHostedToolPermissionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_hosted_tool_permissions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-project-hosted-tool-permissions",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/hosted_tool_permissions",
+      "client_method": "update_project_hosted_tool_permissions",
+      "request_type": "UpdateProjectHostedToolPermissionsRequest",
+      "response_type": "UpdateProjectHostedToolPermissionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_project_hosted_tool_permissions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-project-model-permissions",
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/model_permissions",
+      "client_method": "delete_project_model_permissions",
+      "request_type": "DeleteProjectModelPermissionsRequest",
+      "response_type": "DeleteProjectModelPermissionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_project_model_permissions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-model-permissions",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/model_permissions",
+      "client_method": "retrieve_project_model_permissions",
+      "request_type": "RetrieveProjectModelPermissionsRequest",
+      "response_type": "RetrieveProjectModelPermissionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_model_permissions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-project-model-permissions",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/model_permissions",
+      "client_method": "update_project_model_permissions",
+      "request_type": "UpdateProjectModelPermissionsRequest",
+      "response_type": "UpdateProjectModelPermissionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_project_model_permissions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-project-rate-limits",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/rate_limits",
+      "client_method": "list_project_rate_limits",
+      "request_type": "ListProjectRateLimitsRequest",
+      "response_type": "ListProjectRateLimitsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_project_rate_limits",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-project-rate-limits",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/rate_limits/{rate_limit_id}",
+      "client_method": "update_project_rate_limits",
+      "request_type": "UpdateProjectRateLimitsRequest",
+      "response_type": "UpdateProjectRateLimitsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_project_rate_limits",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-project-service-accounts",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/service_accounts",
+      "client_method": "list_project_service_accounts",
+      "request_type": "ListProjectServiceAccountsRequest",
+      "response_type": "ListProjectServiceAccountsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_project_service_accounts",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "create-project-service-account",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/service_accounts",
+      "client_method": "create_project_service_account",
+      "request_type": "CreateProjectServiceAccountRequest",
+      "response_type": "CreateProjectServiceAccountResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.create_project_service_account",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-project-service-account",
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}",
+      "client_method": "delete_project_service_account",
+      "request_type": "DeleteProjectServiceAccountRequest",
+      "response_type": "DeleteProjectServiceAccountResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_project_service_account",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-service-account",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}",
+      "client_method": "retrieve_project_service_account",
+      "request_type": "RetrieveProjectServiceAccountRequest",
+      "response_type": "RetrieveProjectServiceAccountResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_service_account",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-project-service-account",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}",
+      "client_method": "update_project_service_account",
+      "request_type": "UpdateProjectServiceAccountRequest",
+      "response_type": "UpdateProjectServiceAccountResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_project_service_account",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "CreateanAPIkeyforaserviceaccount",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}/api_keys",
+      "client_method": "createan_ap_ikeyforaserviceaccount",
+      "request_type": "CreateanAPIkeyforaserviceaccountRequest",
+      "response_type": "CreateanAPIkeyforaserviceaccountResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.createan_ap_ikeyforaserviceaccount",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-project-spend-alerts",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/spend_alerts",
+      "client_method": "list_project_spend_alerts",
+      "request_type": "ListProjectSpendAlertsRequest",
+      "response_type": "ListProjectSpendAlertsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_project_spend_alerts",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "create-project-spend-alert",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/spend_alerts",
+      "client_method": "create_project_spend_alert",
+      "request_type": "CreateProjectSpendAlertRequest",
+      "response_type": "CreateProjectSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.create_project_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-project-spend-alert",
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/spend_alerts/{alert_id}",
+      "client_method": "delete_project_spend_alert",
+      "request_type": "DeleteProjectSpendAlertRequest",
+      "response_type": "DeleteProjectSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_project_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-spend-alert",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/spend_alerts/{alert_id}",
+      "client_method": "retrieve_project_spend_alert",
+      "request_type": "RetrieveProjectSpendAlertRequest",
+      "response_type": "RetrieveProjectSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-project-spend-alert",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/spend_alerts/{alert_id}",
+      "client_method": "update_project_spend_alert",
+      "request_type": "UpdateProjectSpendAlertRequest",
+      "response_type": "UpdateProjectSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_project_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "Deleteprojectspendlimit",
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/spend_limit",
+      "client_method": "deleteprojectspendlimit",
+      "request_type": "DeleteprojectspendlimitRequest",
+      "response_type": "DeleteprojectspendlimitResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.deleteprojectspendlimit",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "Getprojectspendlimit",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/spend_limit",
+      "client_method": "getprojectspendlimit",
+      "request_type": "GetprojectspendlimitRequest",
+      "response_type": "GetprojectspendlimitResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.getprojectspendlimit",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "Updateprojectspendlimit",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/spend_limit",
+      "client_method": "updateprojectspendlimit",
+      "request_type": "UpdateprojectspendlimitRequest",
+      "response_type": "UpdateprojectspendlimitResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.updateprojectspendlimit",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-project-users",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/users",
+      "client_method": "list_project_users",
+      "request_type": "ListProjectUsersRequest",
+      "response_type": "ListProjectUsersResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_project_users",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "create-project-user",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/users",
+      "client_method": "create_project_user",
+      "request_type": "CreateProjectUserRequest",
+      "response_type": "CreateProjectUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.create_project_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-project-user",
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/users/{user_id}",
+      "client_method": "delete_project_user",
+      "request_type": "DeleteProjectUserRequest",
+      "response_type": "DeleteProjectUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_project_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-project-user",
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/users/{user_id}",
+      "client_method": "retrieve_project_user",
+      "request_type": "RetrieveProjectUserRequest",
+      "response_type": "RetrieveProjectUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_project_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "modify-project-user",
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/users/{user_id}",
+      "client_method": "modify_project_user",
+      "request_type": "ModifyProjectUserRequest",
+      "response_type": "ModifyProjectUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.modify_project_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-roles",
+      "method": "GET",
+      "path": "/organization/roles",
+      "client_method": "list_roles",
+      "request_type": "ListRolesRequest",
+      "response_type": "ListRolesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_roles",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "create-role",
+      "method": "POST",
+      "path": "/organization/roles",
+      "client_method": "create_role",
+      "request_type": "CreateRoleRequest",
+      "response_type": "CreateRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.create_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-role",
+      "method": "DELETE",
+      "path": "/organization/roles/{role_id}",
+      "client_method": "delete_role",
+      "request_type": "DeleteRoleRequest",
+      "response_type": "DeleteRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-role",
+      "method": "GET",
+      "path": "/organization/roles/{role_id}",
+      "client_method": "retrieve_role",
+      "request_type": "RetrieveRoleRequest",
+      "response_type": "RetrieveRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-role",
+      "method": "POST",
+      "path": "/organization/roles/{role_id}",
+      "client_method": "update_role",
+      "request_type": "UpdateRoleRequest",
+      "response_type": "UpdateRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-organization-spend-alerts",
+      "method": "GET",
+      "path": "/organization/spend_alerts",
+      "client_method": "list_organization_spend_alerts",
+      "request_type": "ListOrganizationSpendAlertsRequest",
+      "response_type": "ListOrganizationSpendAlertsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_organization_spend_alerts",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "create-organization-spend-alert",
+      "method": "POST",
+      "path": "/organization/spend_alerts",
+      "client_method": "create_organization_spend_alert",
+      "request_type": "CreateOrganizationSpendAlertRequest",
+      "response_type": "CreateOrganizationSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.create_organization_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-organization-spend-alert",
+      "method": "DELETE",
+      "path": "/organization/spend_alerts/{alert_id}",
+      "client_method": "delete_organization_spend_alert",
+      "request_type": "DeleteOrganizationSpendAlertRequest",
+      "response_type": "DeleteOrganizationSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_organization_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-organization-spend-alert",
+      "method": "GET",
+      "path": "/organization/spend_alerts/{alert_id}",
+      "client_method": "retrieve_organization_spend_alert",
+      "request_type": "RetrieveOrganizationSpendAlertRequest",
+      "response_type": "RetrieveOrganizationSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_organization_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "update-organization-spend-alert",
+      "method": "POST",
+      "path": "/organization/spend_alerts/{alert_id}",
+      "client_method": "update_organization_spend_alert",
+      "request_type": "UpdateOrganizationSpendAlertRequest",
+      "response_type": "UpdateOrganizationSpendAlertResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.update_organization_spend_alert",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "Deleteorganizationspendlimit",
+      "method": "DELETE",
+      "path": "/organization/spend_limit",
+      "client_method": "deleteorganizationspendlimit",
+      "request_type": "DeleteorganizationspendlimitRequest",
+      "response_type": "DeleteorganizationspendlimitResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.deleteorganizationspendlimit",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "Getorganizationspendlimit",
+      "method": "GET",
+      "path": "/organization/spend_limit",
+      "client_method": "getorganizationspendlimit",
+      "request_type": "GetorganizationspendlimitRequest",
+      "response_type": "GetorganizationspendlimitResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.getorganizationspendlimit",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "Updateorganizationspendlimit",
+      "method": "POST",
+      "path": "/organization/spend_limit",
+      "client_method": "updateorganizationspendlimit",
+      "request_type": "UpdateorganizationspendlimitRequest",
+      "response_type": "UpdateorganizationspendlimitResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.updateorganizationspendlimit",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-audio-speeches",
+      "method": "GET",
+      "path": "/organization/usage/audio_speeches",
+      "client_method": "usage_audio_speeches",
+      "request_type": "UsageAudioSpeechesRequest",
+      "response_type": "UsageAudioSpeechesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_audio_speeches",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-audio-transcriptions",
+      "method": "GET",
+      "path": "/organization/usage/audio_transcriptions",
+      "client_method": "usage_audio_transcriptions",
+      "request_type": "UsageAudioTranscriptionsRequest",
+      "response_type": "UsageAudioTranscriptionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_audio_transcriptions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-code-interpreter-sessions",
+      "method": "GET",
+      "path": "/organization/usage/code_interpreter_sessions",
+      "client_method": "usage_code_interpreter_sessions",
+      "request_type": "UsageCodeInterpreterSessionsRequest",
+      "response_type": "UsageCodeInterpreterSessionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_code_interpreter_sessions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-completions",
+      "method": "GET",
+      "path": "/organization/usage/completions",
+      "client_method": "usage_completions",
+      "request_type": "UsageCompletionsRequest",
+      "response_type": "UsageCompletionsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_completions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-embeddings",
+      "method": "GET",
+      "path": "/organization/usage/embeddings",
+      "client_method": "usage_embeddings",
+      "request_type": "UsageEmbeddingsRequest",
+      "response_type": "UsageEmbeddingsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_embeddings",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-file-search-calls",
+      "method": "GET",
+      "path": "/organization/usage/file_search_calls",
+      "client_method": "usage_file_search_calls",
+      "request_type": "UsageFileSearchCallsRequest",
+      "response_type": "UsageFileSearchCallsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_file_search_calls",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-images",
+      "method": "GET",
+      "path": "/organization/usage/images",
+      "client_method": "usage_images",
+      "request_type": "UsageImagesRequest",
+      "response_type": "UsageImagesResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_images",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-moderations",
+      "method": "GET",
+      "path": "/organization/usage/moderations",
+      "client_method": "usage_moderations",
+      "request_type": "UsageModerationsRequest",
+      "response_type": "UsageModerationsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_moderations",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-vector-stores",
+      "method": "GET",
+      "path": "/organization/usage/vector_stores",
+      "client_method": "usage_vector_stores",
+      "request_type": "UsageVectorStoresRequest",
+      "response_type": "UsageVectorStoresResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_vector_stores",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "usage-web-search-calls",
+      "method": "GET",
+      "path": "/organization/usage/web_search_calls",
+      "client_method": "usage_web_search_calls",
+      "request_type": "UsageWebSearchCallsRequest",
+      "response_type": "UsageWebSearchCallsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.usage_web_search_calls",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-users",
+      "method": "GET",
+      "path": "/organization/users",
+      "client_method": "list_users",
+      "request_type": "ListUsersRequest",
+      "response_type": "ListUsersResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_users",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "delete-user",
+      "method": "DELETE",
+      "path": "/organization/users/{user_id}",
+      "client_method": "delete_user",
+      "request_type": "DeleteUserRequest",
+      "response_type": "DeleteUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.delete_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-user",
+      "method": "GET",
+      "path": "/organization/users/{user_id}",
+      "client_method": "retrieve_user",
+      "request_type": "RetrieveUserRequest",
+      "response_type": "RetrieveUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "modify-user",
+      "method": "POST",
+      "path": "/organization/users/{user_id}",
+      "client_method": "modify_user",
+      "request_type": "ModifyUserRequest",
+      "response_type": "ModifyUserResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.modify_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "list-user-role-assignments",
+      "method": "GET",
+      "path": "/organization/users/{user_id}/roles",
+      "client_method": "list_user_role_assignments",
+      "request_type": "ListUserRoleAssignmentsRequest",
+      "response_type": "ListUserRoleAssignmentsResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.list_user_role_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "assign-user-role",
+      "method": "POST",
+      "path": "/organization/users/{user_id}/roles",
+      "client_method": "assign_user_role",
+      "request_type": "AssignUserRoleRequest",
+      "response_type": "AssignUserRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.assign_user_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "unassign-user-role",
+      "method": "DELETE",
+      "path": "/organization/users/{user_id}/roles/{role_id}",
+      "client_method": "unassign_user_role",
+      "request_type": "UnassignUserRoleRequest",
+      "response_type": "UnassignUserRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.unassign_user_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openai_admin",
+      "operation_id": "retrieve-user-role",
+      "method": "GET",
+      "path": "/organization/users/{user_id}/roles/{role_id}",
+      "client_method": "retrieve_user_role",
+      "request_type": "RetrieveUserRoleRequest",
+      "response_type": "RetrieveUserRoleResponse",
+      "client_type": "OpenAiAdminClient",
+      "cli_route": "openai_admin.retrieve_user_role",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getUserActivity",
+      "method": "GET",
+      "path": "/activity",
+      "client_method": "get_user_activity",
+      "request_type": "GetUserActivityRequest",
+      "response_type": "GetUserActivityResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_user_activity",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getAnalyticsMeta",
+      "method": "GET",
+      "path": "/analytics/meta",
+      "client_method": "get_analytics_meta",
+      "request_type": "GetAnalyticsMetaRequest",
+      "response_type": "GetAnalyticsMetaResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_analytics_meta",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "queryAnalytics",
+      "method": "POST",
+      "path": "/analytics/query",
+      "client_method": "query_analytics",
+      "request_type": "QueryAnalyticsRequest",
+      "response_type": "QueryAnalyticsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.query_analytics",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createAudioSpeech",
+      "method": "POST",
+      "path": "/audio/speech",
+      "client_method": "create_audio_speech",
+      "request_type": "CreateAudioSpeechRequest",
+      "response_type": "CreateAudioSpeechResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_audio_speech",
+      "transports": [
+        "http_binary",
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createAudioTranscriptions",
+      "method": "POST",
+      "path": "/audio/transcriptions",
+      "client_method": "create_audio_transcriptions",
+      "request_type": "CreateAudioTranscriptionsRequest",
+      "response_type": "CreateAudioTranscriptionsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_audio_transcriptions",
+      "transports": [
+        "http_json",
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "exchangeAuthCodeForAPIKey",
+      "method": "POST",
+      "path": "/auth/keys",
+      "client_method": "exchange_auth_code_for_api_key",
+      "request_type": "ExchangeAuthCodeForAPIKeyRequest",
+      "response_type": "ExchangeAuthCodeForAPIKeyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.exchange_auth_code_for_api_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createAuthKeysCode",
+      "method": "POST",
+      "path": "/auth/keys/code",
+      "client_method": "create_auth_keys_code",
+      "request_type": "CreateAuthKeysCodeRequest",
+      "response_type": "CreateAuthKeysCodeResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_auth_keys_code",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getBenchmarks",
+      "method": "GET",
+      "path": "/benchmarks",
+      "client_method": "get_benchmarks",
+      "request_type": "GetBenchmarksRequest",
+      "response_type": "GetBenchmarksResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_benchmarks",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listBYOKKeys",
+      "method": "GET",
+      "path": "/byok",
+      "client_method": "list_byok_keys",
+      "request_type": "ListBYOKKeysRequest",
+      "response_type": "ListBYOKKeysResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_byok_keys",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createBYOKKey",
+      "method": "POST",
+      "path": "/byok",
+      "client_method": "create_byok_key",
+      "request_type": "CreateBYOKKeyRequest",
+      "response_type": "CreateBYOKKeyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_byok_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "deleteBYOKKey",
+      "method": "DELETE",
+      "path": "/byok/{id}",
+      "client_method": "delete_byok_key",
+      "request_type": "DeleteBYOKKeyRequest",
+      "response_type": "DeleteBYOKKeyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.delete_byok_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getBYOKKey",
+      "method": "GET",
+      "path": "/byok/{id}",
+      "client_method": "get_byok_key",
+      "request_type": "GetBYOKKeyRequest",
+      "response_type": "GetBYOKKeyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_byok_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "updateBYOKKey",
+      "method": "PATCH",
+      "path": "/byok/{id}",
+      "client_method": "update_byok_key",
+      "request_type": "UpdateBYOKKeyRequest",
+      "response_type": "UpdateBYOKKeyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.update_byok_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "sendChatCompletionRequest",
+      "method": "POST",
+      "path": "/chat/completions",
+      "client_method": "send_chat_completion_request",
+      "request_type": "SendChatCompletionRequestRequest",
+      "response_type": "SendChatCompletionRequestResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.send_chat_completion_request",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getTaskClassifications",
+      "method": "GET",
+      "path": "/classifications/task",
+      "client_method": "get_task_classifications",
+      "request_type": "GetTaskClassificationsRequest",
+      "response_type": "GetTaskClassificationsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_task_classifications",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getCredits",
+      "method": "GET",
+      "path": "/credits",
+      "client_method": "get_credits",
+      "request_type": "GetCreditsRequest",
+      "response_type": "GetCreditsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_credits",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createCoinbaseCharge",
+      "method": "POST",
+      "path": "/credits/coinbase",
+      "client_method": "create_coinbase_charge",
+      "request_type": "CreateCoinbaseChargeRequest",
+      "response_type": "CreateCoinbaseChargeResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_coinbase_charge",
+      "transports": [
+        "unknown"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getAppRankings",
+      "method": "GET",
+      "path": "/datasets/app-rankings",
+      "client_method": "get_app_rankings",
+      "request_type": "GetAppRankingsRequest",
+      "response_type": "GetAppRankingsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_app_rankings",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getRankingsDaily",
+      "method": "GET",
+      "path": "/datasets/rankings-daily",
+      "client_method": "get_rankings_daily",
+      "request_type": "GetRankingsDailyRequest",
+      "response_type": "GetRankingsDailyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_rankings_daily",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createEmbeddings",
+      "method": "POST",
+      "path": "/embeddings",
+      "client_method": "create_embeddings",
+      "request_type": "CreateEmbeddingsRequest",
+      "response_type": "CreateEmbeddingsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_embeddings",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listEmbeddingsModels",
+      "method": "GET",
+      "path": "/embeddings/models",
+      "client_method": "list_embeddings_models",
+      "request_type": "ListEmbeddingsModelsRequest",
+      "response_type": "ListEmbeddingsModelsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_embeddings_models",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listEndpointsZdr",
+      "method": "GET",
+      "path": "/endpoints/zdr",
+      "client_method": "list_endpoints_zdr",
+      "request_type": "ListEndpointsZdrRequest",
+      "response_type": "ListEndpointsZdrResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_endpoints_zdr",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listFiles",
+      "method": "GET",
+      "path": "/files",
+      "client_method": "list_files",
+      "request_type": "ListFilesRequest",
+      "response_type": "ListFilesResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_files",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "uploadFile",
+      "method": "POST",
+      "path": "/files",
+      "client_method": "upload_file",
+      "request_type": "UploadFileRequest",
+      "response_type": "UploadFileResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.upload_file",
+      "transports": [
+        "http_multipart"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "deleteFile",
+      "method": "DELETE",
+      "path": "/files/{file_id}",
+      "client_method": "delete_file",
+      "request_type": "DeleteFileRequest",
+      "response_type": "DeleteFileResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.delete_file",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getFileMetadata",
+      "method": "GET",
+      "path": "/files/{file_id}",
+      "client_method": "get_file_metadata",
+      "request_type": "GetFileMetadataRequest",
+      "response_type": "GetFileMetadataResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_file_metadata",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "downloadFileContent",
+      "method": "GET",
+      "path": "/files/{file_id}/content",
+      "client_method": "download_file_content",
+      "request_type": "DownloadFileContentRequest",
+      "response_type": "DownloadFileContentResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.download_file_content",
+      "transports": [
+        "http_binary"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getGeneration",
+      "method": "GET",
+      "path": "/generation",
+      "client_method": "get_generation",
+      "request_type": "GetGenerationRequest",
+      "response_type": "GetGenerationResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_generation",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listGenerationContent",
+      "method": "GET",
+      "path": "/generation/content",
+      "client_method": "list_generation_content",
+      "request_type": "ListGenerationContentRequest",
+      "response_type": "ListGenerationContentResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_generation_content",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "submitGenerationFeedback",
+      "method": "POST",
+      "path": "/generation/feedback",
+      "client_method": "submit_generation_feedback",
+      "request_type": "SubmitGenerationFeedbackRequest",
+      "response_type": "SubmitGenerationFeedbackResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.submit_generation_feedback",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listGuardrails",
+      "method": "GET",
+      "path": "/guardrails",
+      "client_method": "list_guardrails",
+      "request_type": "ListGuardrailsRequest",
+      "response_type": "ListGuardrailsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_guardrails",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createGuardrail",
+      "method": "POST",
+      "path": "/guardrails",
+      "client_method": "create_guardrail",
+      "request_type": "CreateGuardrailRequest",
+      "response_type": "CreateGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listKeyAssignments",
+      "method": "GET",
+      "path": "/guardrails/assignments/keys",
+      "client_method": "list_key_assignments",
+      "request_type": "ListKeyAssignmentsRequest",
+      "response_type": "ListKeyAssignmentsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_key_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listMemberAssignments",
+      "method": "GET",
+      "path": "/guardrails/assignments/members",
+      "client_method": "list_member_assignments",
+      "request_type": "ListMemberAssignmentsRequest",
+      "response_type": "ListMemberAssignmentsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_member_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "deleteGuardrail",
+      "method": "DELETE",
+      "path": "/guardrails/{id}",
+      "client_method": "delete_guardrail",
+      "request_type": "DeleteGuardrailRequest",
+      "response_type": "DeleteGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.delete_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getGuardrail",
+      "method": "GET",
+      "path": "/guardrails/{id}",
+      "client_method": "get_guardrail",
+      "request_type": "GetGuardrailRequest",
+      "response_type": "GetGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "updateGuardrail",
+      "method": "PATCH",
+      "path": "/guardrails/{id}",
+      "client_method": "update_guardrail",
+      "request_type": "UpdateGuardrailRequest",
+      "response_type": "UpdateGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.update_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listGuardrailKeyAssignments",
+      "method": "GET",
+      "path": "/guardrails/{id}/assignments/keys",
+      "client_method": "list_guardrail_key_assignments",
+      "request_type": "ListGuardrailKeyAssignmentsRequest",
+      "response_type": "ListGuardrailKeyAssignmentsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_guardrail_key_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "bulkAssignKeysToGuardrail",
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/keys",
+      "client_method": "bulk_assign_keys_to_guardrail",
+      "request_type": "BulkAssignKeysToGuardrailRequest",
+      "response_type": "BulkAssignKeysToGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.bulk_assign_keys_to_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "bulkUnassignKeysFromGuardrail",
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/keys/remove",
+      "client_method": "bulk_unassign_keys_from_guardrail",
+      "request_type": "BulkUnassignKeysFromGuardrailRequest",
+      "response_type": "BulkUnassignKeysFromGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.bulk_unassign_keys_from_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listGuardrailMemberAssignments",
+      "method": "GET",
+      "path": "/guardrails/{id}/assignments/members",
+      "client_method": "list_guardrail_member_assignments",
+      "request_type": "ListGuardrailMemberAssignmentsRequest",
+      "response_type": "ListGuardrailMemberAssignmentsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_guardrail_member_assignments",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "bulkAssignMembersToGuardrail",
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/members",
+      "client_method": "bulk_assign_members_to_guardrail",
+      "request_type": "BulkAssignMembersToGuardrailRequest",
+      "response_type": "BulkAssignMembersToGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.bulk_assign_members_to_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "bulkUnassignMembersFromGuardrail",
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/members/remove",
+      "client_method": "bulk_unassign_members_from_guardrail",
+      "request_type": "BulkUnassignMembersFromGuardrailRequest",
+      "response_type": "BulkUnassignMembersFromGuardrailResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.bulk_unassign_members_from_guardrail",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createImages",
+      "method": "POST",
+      "path": "/images",
+      "client_method": "create_images",
+      "request_type": "CreateImagesRequest",
+      "response_type": "CreateImagesResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_images",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listImageModels",
+      "method": "GET",
+      "path": "/images/models",
+      "client_method": "list_image_models",
+      "request_type": "ListImageModelsRequest",
+      "response_type": "ListImageModelsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_image_models",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listImageModelEndpoints",
+      "method": "GET",
+      "path": "/images/models/{author}/{slug}/endpoints",
+      "client_method": "list_image_model_endpoints",
+      "request_type": "ListImageModelEndpointsRequest",
+      "response_type": "ListImageModelEndpointsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_image_model_endpoints",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getCurrentKey",
+      "method": "GET",
+      "path": "/key",
+      "client_method": "get_current_key",
+      "request_type": "GetCurrentKeyRequest",
+      "response_type": "GetCurrentKeyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_current_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "list",
+      "method": "GET",
+      "path": "/keys",
+      "client_method": "list",
+      "request_type": "ListRequest",
+      "response_type": "ListResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createKeys",
+      "method": "POST",
+      "path": "/keys",
+      "client_method": "create_keys",
+      "request_type": "CreateKeysRequest",
+      "response_type": "CreateKeysResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_keys",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "deleteKeys",
+      "method": "DELETE",
+      "path": "/keys/{hash}",
+      "client_method": "delete_keys",
+      "request_type": "DeleteKeysRequest",
+      "response_type": "DeleteKeysResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.delete_keys",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getKey",
+      "method": "GET",
+      "path": "/keys/{hash}",
+      "client_method": "get_key",
+      "request_type": "GetKeyRequest",
+      "response_type": "GetKeyResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_key",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "updateKeys",
+      "method": "PATCH",
+      "path": "/keys/{hash}",
+      "client_method": "update_keys",
+      "request_type": "UpdateKeysRequest",
+      "response_type": "UpdateKeysResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.update_keys",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createMessages",
+      "method": "POST",
+      "path": "/messages",
+      "client_method": "create_messages",
+      "request_type": "CreateMessagesRequest",
+      "response_type": "CreateMessagesResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_messages",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getModel",
+      "method": "GET",
+      "path": "/model/{author}/{slug}",
+      "client_method": "get_model",
+      "request_type": "GetModelRequest",
+      "response_type": "GetModelResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_model",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getModels",
+      "method": "GET",
+      "path": "/models",
+      "client_method": "get_models",
+      "request_type": "GetModelsRequest",
+      "response_type": "GetModelsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_models",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listModelsCount",
+      "method": "GET",
+      "path": "/models/count",
+      "client_method": "list_models_count",
+      "request_type": "ListModelsCountRequest",
+      "response_type": "ListModelsCountResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_models_count",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listModelsUser",
+      "method": "GET",
+      "path": "/models/user",
+      "client_method": "list_models_user",
+      "request_type": "ListModelsUserRequest",
+      "response_type": "ListModelsUserResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_models_user",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listEndpoints",
+      "method": "GET",
+      "path": "/models/{author}/{slug}/endpoints",
+      "client_method": "list_endpoints",
+      "request_type": "ListEndpointsRequest",
+      "response_type": "ListEndpointsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_endpoints",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listObservabilityDestinations",
+      "method": "GET",
+      "path": "/observability/destinations",
+      "client_method": "list_observability_destinations",
+      "request_type": "ListObservabilityDestinationsRequest",
+      "response_type": "ListObservabilityDestinationsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_observability_destinations",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createObservabilityDestination",
+      "method": "POST",
+      "path": "/observability/destinations",
+      "client_method": "create_observability_destination",
+      "request_type": "CreateObservabilityDestinationRequest",
+      "response_type": "CreateObservabilityDestinationResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_observability_destination",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "deleteObservabilityDestination",
+      "method": "DELETE",
+      "path": "/observability/destinations/{id}",
+      "client_method": "delete_observability_destination",
+      "request_type": "DeleteObservabilityDestinationRequest",
+      "response_type": "DeleteObservabilityDestinationResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.delete_observability_destination",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getObservabilityDestination",
+      "method": "GET",
+      "path": "/observability/destinations/{id}",
+      "client_method": "get_observability_destination",
+      "request_type": "GetObservabilityDestinationRequest",
+      "response_type": "GetObservabilityDestinationResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_observability_destination",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "updateObservabilityDestination",
+      "method": "PATCH",
+      "path": "/observability/destinations/{id}",
+      "client_method": "update_observability_destination",
+      "request_type": "UpdateObservabilityDestinationRequest",
+      "response_type": "UpdateObservabilityDestinationResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.update_observability_destination",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listOrganizationMembers",
+      "method": "GET",
+      "path": "/organization/members",
+      "client_method": "list_organization_members",
+      "request_type": "ListOrganizationMembersRequest",
+      "response_type": "ListOrganizationMembersResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_organization_members",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listPresets",
+      "method": "GET",
+      "path": "/presets",
+      "client_method": "list_presets",
+      "request_type": "ListPresetsRequest",
+      "response_type": "ListPresetsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_presets",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getPreset",
+      "method": "GET",
+      "path": "/presets/{slug}",
+      "client_method": "get_preset",
+      "request_type": "GetPresetRequest",
+      "response_type": "GetPresetResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_preset",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createPresetsChatCompletions",
+      "method": "POST",
+      "path": "/presets/{slug}/chat/completions",
+      "client_method": "create_presets_chat_completions",
+      "request_type": "CreatePresetsChatCompletionsRequest",
+      "response_type": "CreatePresetsChatCompletionsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_presets_chat_completions",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createPresetsMessages",
+      "method": "POST",
+      "path": "/presets/{slug}/messages",
+      "client_method": "create_presets_messages",
+      "request_type": "CreatePresetsMessagesRequest",
+      "response_type": "CreatePresetsMessagesResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_presets_messages",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createPresetsResponses",
+      "method": "POST",
+      "path": "/presets/{slug}/responses",
+      "client_method": "create_presets_responses",
+      "request_type": "CreatePresetsResponsesRequest",
+      "response_type": "CreatePresetsResponsesResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_presets_responses",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listPresetVersions",
+      "method": "GET",
+      "path": "/presets/{slug}/versions",
+      "client_method": "list_preset_versions",
+      "request_type": "ListPresetVersionsRequest",
+      "response_type": "ListPresetVersionsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_preset_versions",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getPresetVersion",
+      "method": "GET",
+      "path": "/presets/{slug}/versions/{version}",
+      "client_method": "get_preset_version",
+      "request_type": "GetPresetVersionRequest",
+      "response_type": "GetPresetVersionResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_preset_version",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listProviders",
+      "method": "GET",
+      "path": "/providers",
+      "client_method": "list_providers",
+      "request_type": "ListProvidersRequest",
+      "response_type": "ListProvidersResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_providers",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createRerank",
+      "method": "POST",
+      "path": "/rerank",
+      "client_method": "create_rerank",
+      "request_type": "CreateRerankRequest",
+      "response_type": "CreateRerankResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_rerank",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createResponses",
+      "method": "POST",
+      "path": "/responses",
+      "client_method": "create_responses",
+      "request_type": "CreateResponsesRequest",
+      "response_type": "CreateResponsesResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_responses",
+      "transports": [
+        "http_json",
+        "http_sse"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createVideos",
+      "method": "POST",
+      "path": "/videos",
+      "client_method": "create_videos",
+      "request_type": "CreateVideosRequest",
+      "response_type": "CreateVideosResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_videos",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listVideosModels",
+      "method": "GET",
+      "path": "/videos/models",
+      "client_method": "list_videos_models",
+      "request_type": "ListVideosModelsRequest",
+      "response_type": "ListVideosModelsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_videos_models",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getVideos",
+      "method": "GET",
+      "path": "/videos/{jobId}",
+      "client_method": "get_videos",
+      "request_type": "GetVideosRequest",
+      "response_type": "GetVideosResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_videos",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listVideosContent",
+      "method": "GET",
+      "path": "/videos/{jobId}/content",
+      "client_method": "list_videos_content",
+      "request_type": "ListVideosContentRequest",
+      "response_type": "ListVideosContentResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_videos_content",
+      "transports": [
+        "http_binary"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listWorkspaces",
+      "method": "GET",
+      "path": "/workspaces",
+      "client_method": "list_workspaces",
+      "request_type": "ListWorkspacesRequest",
+      "response_type": "ListWorkspacesResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_workspaces",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "createWorkspace",
+      "method": "POST",
+      "path": "/workspaces",
+      "client_method": "create_workspace",
+      "request_type": "CreateWorkspaceRequest",
+      "response_type": "CreateWorkspaceResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.create_workspace",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "deleteWorkspace",
+      "method": "DELETE",
+      "path": "/workspaces/{id}",
+      "client_method": "delete_workspace",
+      "request_type": "DeleteWorkspaceRequest",
+      "response_type": "DeleteWorkspaceResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.delete_workspace",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "getWorkspace",
+      "method": "GET",
+      "path": "/workspaces/{id}",
+      "client_method": "get_workspace",
+      "request_type": "GetWorkspaceRequest",
+      "response_type": "GetWorkspaceResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.get_workspace",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "updateWorkspace",
+      "method": "PATCH",
+      "path": "/workspaces/{id}",
+      "client_method": "update_workspace",
+      "request_type": "UpdateWorkspaceRequest",
+      "response_type": "UpdateWorkspaceResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.update_workspace",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listWorkspaceBudgets",
+      "method": "GET",
+      "path": "/workspaces/{id}/budgets",
+      "client_method": "list_workspace_budgets",
+      "request_type": "ListWorkspaceBudgetsRequest",
+      "response_type": "ListWorkspaceBudgetsResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_workspace_budgets",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "deleteWorkspaceBudget",
+      "method": "DELETE",
+      "path": "/workspaces/{id}/budgets/{interval}",
+      "client_method": "delete_workspace_budget",
+      "request_type": "DeleteWorkspaceBudgetRequest",
+      "response_type": "DeleteWorkspaceBudgetResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.delete_workspace_budget",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "upsertWorkspaceBudget",
+      "method": "PUT",
+      "path": "/workspaces/{id}/budgets/{interval}",
+      "client_method": "upsert_workspace_budget",
+      "request_type": "UpsertWorkspaceBudgetRequest",
+      "response_type": "UpsertWorkspaceBudgetResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.upsert_workspace_budget",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "listWorkspaceMembers",
+      "method": "GET",
+      "path": "/workspaces/{id}/members",
+      "client_method": "list_workspace_members",
+      "request_type": "ListWorkspaceMembersRequest",
+      "response_type": "ListWorkspaceMembersResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.list_workspace_members",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "bulkAddWorkspaceMembers",
+      "method": "POST",
+      "path": "/workspaces/{id}/members/add",
+      "client_method": "bulk_add_workspace_members",
+      "request_type": "BulkAddWorkspaceMembersRequest",
+      "response_type": "BulkAddWorkspaceMembersResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.bulk_add_workspace_members",
+      "transports": [
+        "http_json"
+      ]
+    },
+    {
+      "provider": "openrouter",
+      "operation_id": "bulkRemoveWorkspaceMembers",
+      "method": "POST",
+      "path": "/workspaces/{id}/members/remove",
+      "client_method": "bulk_remove_workspace_members",
+      "request_type": "BulkRemoveWorkspaceMembersRequest",
+      "response_type": "BulkRemoveWorkspaceMembersResponse",
+      "client_type": "OpenRouterClient",
+      "cli_route": "openrouter.bulk_remove_workspace_members",
+      "transports": [
+        "http_json"
+      ]
+    }
+  ]
+}

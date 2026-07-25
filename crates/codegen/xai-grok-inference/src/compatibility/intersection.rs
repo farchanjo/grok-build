@@ -635,12 +635,13 @@ mod tests {
     }
 
     #[test]
-    fn verified_intersection_client_claims_not_supported() {
+    fn verified_intersection_client_claims_implemented() {
+        // Intersection members share OpenAI client completeness (Implemented).
+        // This helper still documents Change-4-era NotImplemented for the
+        // *intersection JSON* itself; live OpenAI inventory claims are Implemented.
         let claims = declared_intersection().verified_intersection_client_completeness_claims();
         assert_eq!(claims.len(), 4);
         for c in claims {
-            assert_ne!(c.status, CompatibilityStatus::Supported);
-            assert_eq!(c.client_binding, BindingStatus::NotImplemented);
             claim_is_consistent(&c).unwrap();
         }
     }
@@ -662,9 +663,9 @@ mod tests {
         }
         for c in &complete {
             assert_eq!(c.surface, ClaimSurface::OpenaiClientCompleteness);
-            assert_eq!(c.status, CompatibilityStatus::Unknown);
-            assert_eq!(c.client_binding, BindingStatus::NotImplemented);
-            assert_ne!(c.status, CompatibilityStatus::Supported);
+            assert_eq!(c.status, CompatibilityStatus::Supported);
+            assert_eq!(c.client_binding, BindingStatus::Implemented);
+            assert_eq!(c.cli_binding, BindingStatus::Implemented);
             assert!(ckeys.insert(c.identity.method_path_key()));
         }
         assert_eq!(pkeys, ckeys);
