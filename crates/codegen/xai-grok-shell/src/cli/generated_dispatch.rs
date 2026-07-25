@@ -23,9 +23,7 @@ pub async fn dispatch_typed_operation(
     if op.is_binary && output.is_none() {
         use std::io::IsTerminal;
         if std::io::stdout().is_terminal() {
-            return Err(
-                "binary response requires --output <path> (refusing TTY)".into(),
-            );
+            return Err("binary response requires --output <path> (refusing TTY)".into());
         }
     }
     if !matches!(

@@ -73,9 +73,7 @@ pub struct CapabilityCacheEntry {
 }
 
 fn provider_cache_dir(grok_home: &Path, provider_id: &ProviderId) -> PathBuf {
-    grok_home
-        .join("provider_caches")
-        .join(provider_id.as_str())
+    grok_home.join("provider_caches").join(provider_id.as_str())
 }
 
 fn catalog_path(grok_home: &Path, provider_id: &ProviderId) -> PathBuf {

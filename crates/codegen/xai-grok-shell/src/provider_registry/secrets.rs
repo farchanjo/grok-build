@@ -80,9 +80,7 @@ pub fn parse_secret_scope(scope: &str) -> Result<ParsedSecretScope, ScopeParseEr
     let rest = scope
         .strip_prefix(prefix)
         .ok_or(ScopeParseError::UnknownScheme)?;
-    let (id_part, kind_part) = rest
-        .rsplit_once("::")
-        .ok_or(ScopeParseError::Malformed)?;
+    let (id_part, kind_part) = rest.rsplit_once("::").ok_or(ScopeParseError::Malformed)?;
     validate_provider_id_str(id_part).map_err(ScopeParseError::InvalidId)?;
     let kind = match kind_part {
         "api_key" => ProviderCredentialKind::Application,
@@ -138,11 +136,7 @@ pub fn read_provider_secret(grok_home: &Path, scope: &str) -> std::io::Result<Op
     read_provider_api_key(grok_home, scope)
 }
 
-pub fn store_provider_secret(
-    grok_home: &Path,
-    scope: &str,
-    secret: &str,
-) -> std::io::Result<()> {
+pub fn store_provider_secret(grok_home: &Path, scope: &str, secret: &str) -> std::io::Result<()> {
     if !is_allowed_provider_scope(scope) {
         return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }

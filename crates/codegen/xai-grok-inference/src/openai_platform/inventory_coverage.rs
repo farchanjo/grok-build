@@ -237,7 +237,10 @@ mod tests {
 
     #[test]
     fn admin_bindings_are_admin_flagged() {
-        for b in OPERATION_BINDINGS.iter().filter(|b| b.provider == "openai_admin") {
+        for b in OPERATION_BINDINGS
+            .iter()
+            .filter(|b| b.provider == "openai_admin")
+        {
             assert!(b.is_admin, "{}", b.operation_id);
         }
     }

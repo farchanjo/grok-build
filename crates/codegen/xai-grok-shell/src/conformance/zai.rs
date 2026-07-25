@@ -28,7 +28,9 @@ impl Default for ZaiConformanceConfig {
         Self {
             base_url: ZAI_DEFAULT_BASE_URL.to_owned(),
             provider_id: ZAI_PROVIDER_ID.to_owned(),
-            generation_model: std::env::var(ZAI_TEST_MODEL_ENV).ok().filter(|s| !s.is_empty()),
+            generation_model: std::env::var(ZAI_TEST_MODEL_ENV)
+                .ok()
+                .filter(|s| !s.is_empty()),
             max_tokens: 64,
         }
     }
@@ -142,9 +144,7 @@ pub mod fixtures {
 }
 
 /// Bounded live preflight: GET /models only. Never bills generation.
-pub async fn free_models_preflight(
-    cfg: &ZaiConformanceConfig,
-) -> Result<Vec<String>, String> {
+pub async fn free_models_preflight(cfg: &ZaiConformanceConfig) -> Result<Vec<String>, String> {
     if !ZaiConformanceConfig::live_enabled() {
         return Err("live conformance disabled (set GROK_ZAI_CONFORMANCE=1)".into());
     }
@@ -152,10 +152,7 @@ pub async fn free_models_preflight(
         return Err("GROK_TEST_ZAI_API_KEY unset".into());
     }
     let token = std::env::var(ZAI_TEST_ENV_KEY).map_err(|e| e.to_string())?;
-    let url = format!(
-        "{}/models",
-        cfg.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -186,8 +183,8 @@ pub async fn free_models_preflight(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::fixtures::*;
+    use super::*;
 
     #[test]
     fn fixtures_accumulate_tool_args() {
@@ -200,7 +197,9 @@ mod tests {
     fn report_redaction_shape() {
         let cfg = ZaiConformanceConfig::default();
         let mut report = ZaiConformanceReport::empty(&cfg);
-        report.skips.push("generation skipped: no model configured".into());
+        report
+            .skips
+            .push("generation skipped: no model configured".into());
         let json = report.to_redacted_json();
         let s = json.to_string();
         assert!(!s.contains("sk-"));

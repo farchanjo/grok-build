@@ -161,11 +161,7 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
     let files = parse_files(&args.files)?;
     match args.command {
         OpenAiCliCommand::Ops { .. } => {
-            let ns = if args.admin {
-                "openai_admin"
-            } else {
-                "openai"
-            };
+            let ns = if args.admin { "openai_admin" } else { "openai" };
             let ops: Vec<_> = operations_for_namespace(ns)
                 .map(|op| {
                     json!({
@@ -201,11 +197,7 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
         } => {
             call(
                 &args.provider,
-                if args.admin {
-                    "openai_admin"
-                } else {
-                    "openai"
-                },
+                if args.admin { "openai_admin" } else { "openai" },
                 &operation_id,
                 &path_params,
                 &query,
@@ -354,9 +346,7 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                 input,
             } => {
                 if is_mutating("openai_admin", &operation_id) && !args.yes && !args.dry_run {
-                    return Err(
-                        "admin mutation requires --yes confirmation (or --dry-run)".into(),
-                    );
+                    return Err("admin mutation requires --yes confirmation (or --dry-run)".into());
                 }
                 call(
                     &args.provider,
@@ -506,14 +496,9 @@ mod tests {
 
     #[test]
     fn parses_models_list() {
-        let args = OpenAiCliArgs::try_parse_from([
-            "openai",
-            "--provider",
-            "openai",
-            "models",
-            "list",
-        ])
-        .unwrap();
+        let args =
+            OpenAiCliArgs::try_parse_from(["openai", "--provider", "openai", "models", "list"])
+                .unwrap();
         assert_eq!(args.provider, "openai");
     }
 
@@ -524,7 +509,10 @@ mod tests {
             assert!(!op.request_type.is_empty());
             assert!(!op.client_method.is_empty());
             assert!(
-                matches!(op.method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"),
+                matches!(
+                    op.method,
+                    "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+                ),
                 "bad method {} on {}",
                 op.method,
                 op.operation_id

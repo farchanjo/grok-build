@@ -225,10 +225,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_slugs() {
-        assert!(matches!(
-            ProviderId::new(""),
-            Err(ProviderIdError::Empty)
-        ));
+        assert!(matches!(ProviderId::new(""), Err(ProviderIdError::Empty)));
         assert!(matches!(
             ProviderId::new("1abc"),
             Err(ProviderIdError::MustStartWithLetter)

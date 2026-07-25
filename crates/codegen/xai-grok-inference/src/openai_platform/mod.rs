@@ -21,8 +21,8 @@ mod transport_tests;
 pub use client::{OpenAiAdminClient, OpenAiClient, OpenRouterClient, PlatformClientConfig};
 pub use error::{PlatformError, PlatformResult};
 pub use generated::{
-    OPERATION_BINDINGS, OPENAI_ADMIN_BINDING_COUNT, OPENAI_APP_BINDING_COUNT,
-    OPENROUTER_BINDING_COUNT, OperationBinding, TOTAL_BINDING_COUNT,
+    OPENAI_ADMIN_BINDING_COUNT, OPENAI_APP_BINDING_COUNT, OPENROUTER_BINDING_COUNT,
+    OPERATION_BINDINGS, OperationBinding, TOTAL_BINDING_COUNT,
 };
 pub use inventory_coverage::{
     assert_zero_uncovered_operations, coverage_report_json, uncovered_operations,

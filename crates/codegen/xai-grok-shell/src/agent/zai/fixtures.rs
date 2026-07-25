@@ -73,10 +73,7 @@ mod tests {
     #[test]
     fn reasoning_content_extracted() {
         let delta = json!({"reasoning_content": "think", "content": "hi"});
-        assert_eq!(
-            extract_reasoning_content(&delta).as_deref(),
-            Some("think")
-        );
+        assert_eq!(extract_reasoning_content(&delta).as_deref(), Some("think"));
     }
 
     #[test]

@@ -17,6 +17,10 @@ Regeneration emits:
 
 - `src/openai_platform/generated/*`
 - `baselines/operation_bindings_report.json`
-- `xai-grok-shell/src/cli/generated_ops.rs` and `typed_dispatch_runtime.rs`
+- `xai-grok-shell/src/cli/generated_ops.rs`
+
+The generator invokes the pinned `rustfmt` for emitted Rust sources. The typed
+CLI dispatcher is generated separately from the binding report and is not
+rewritten by this script.
 
 No API credentials or live inference are used.

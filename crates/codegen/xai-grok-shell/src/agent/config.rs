@@ -5296,10 +5296,9 @@ pub fn inference_config_for_model(
         .as_ref()
         .is_some_and(|provider| provider.openrouter_pacing);
     // Z.ai wire extensions: only for the Z.ai provider kind.
-    let is_zai = model
-        .model_provider
-        .as_ref()
-        .is_some_and(|p| p.kind == ModelProviderKind::Zai || p.id == crate::agent::zai::ZAI_PROVIDER_ID);
+    let is_zai = model.model_provider.as_ref().is_some_and(|p| {
+        p.kind == ModelProviderKind::Zai || p.id == crate::agent::zai::ZAI_PROVIDER_ID
+    });
     let zai_tool_stream = is_zai;
     let zai_thinking = if is_zai {
         Some(serde_json::json!({"type": "enabled", "clear_thinking": false}))

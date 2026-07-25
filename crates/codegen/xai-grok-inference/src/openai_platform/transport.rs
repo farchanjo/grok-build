@@ -1,8 +1,6 @@
 //! Shared HTTP/SSE/multipart/binary transport for platform clients.
 
-use super::error::{
-    CredentialClass, ErrorCategory, PlatformError, PlatformResult, redact_preview,
-};
+use super::error::{CredentialClass, ErrorCategory, PlatformError, PlatformResult, redact_preview};
 use super::url_policy::NormalizedBaseUrl;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -295,7 +293,10 @@ impl PlatformTransport {
                 .unwrap_or("upload.bin")
                 .to_owned();
             let bytes = tokio::fs::read(path).await.map_err(|e| {
-                PlatformError::InvalidRequest(format!("read multipart file {}: {e}", path.display()))
+                PlatformError::InvalidRequest(format!(
+                    "read multipart file {}: {e}",
+                    path.display()
+                ))
             })?;
             if bytes.len() > self.policy.max_response_bytes {
                 return Err(PlatformError::OversizedResponse {
@@ -396,10 +397,7 @@ impl PlatformTransport {
 
     /// WebSocket/Realtime handshake: validates same-origin upgrade URL and
     /// credentials without following cross-origin redirects with auth.
-    pub async fn execute_websocket_handshake(
-        &self,
-        spec: HttpRequestSpec,
-    ) -> PlatformResult<()> {
+    pub async fn execute_websocket_handshake(&self, spec: HttpRequestSpec) -> PlatformResult<()> {
         if self.cancel.is_cancelled() {
             return Err(PlatformError::Cancelled);
         }
@@ -445,8 +443,7 @@ impl PlatformTransport {
                     status,
                     category: ErrorCategory::Server,
                     ..
-                }) if spec.idempotent && attempts <= self.policy.max_retries + 1 =>
-                {
+                }) if spec.idempotent && attempts <= self.policy.max_retries + 1 => {
                     let _ = status;
                     tokio::select! {
                         _ = self.cancel.cancelled() => return Err(PlatformError::Cancelled),
@@ -529,9 +526,7 @@ impl PlatformTransport {
             if status.is_redirection() {
                 redirects += 1;
                 if redirects > self.policy.max_redirects {
-                    return Err(PlatformError::RedirectPolicy(
-                        "too many redirects".into(),
-                    ));
+                    return Err(PlatformError::RedirectPolicy("too many redirects".into()));
                 }
                 let loc = response
                     .headers()
@@ -608,8 +603,8 @@ impl PlatformTransport {
             if bytes.is_empty() {
                 return Ok(ResponseBody::Json(Value::Object(Default::default())));
             }
-            let value: Value = serde_json::from_slice(&bytes)
-                .map_err(|e| PlatformError::Decode(e.to_string()))?;
+            let value: Value =
+                serde_json::from_slice(&bytes).map_err(|e| PlatformError::Decode(e.to_string()))?;
             return Ok(ResponseBody::Json(value));
         }
     }
@@ -656,10 +651,7 @@ fn extract_error_message(preview: &str) -> Option<String> {
 
 /// Split an SSE body into data payloads, dropping comments and empty frames.
 pub fn split_sse_data_frames(body: &str) -> Vec<String> {
-    parse_sse_events(body)
-        .into_iter()
-        .map(|e| e.data)
-        .collect()
+    parse_sse_events(body).into_iter().map(|e| e.data).collect()
 }
 
 /// Parse a full SSE body into structured events, preserving every non-comment frame.

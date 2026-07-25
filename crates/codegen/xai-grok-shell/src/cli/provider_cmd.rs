@@ -324,7 +324,11 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             let _ = id;
             Ok(0)
         }
-        SetKey { id, from_env, value } => {
+        SetKey {
+            id,
+            from_env,
+            value,
+        } => {
             set_secret(&id, ProviderCredentialKind::Application, from_env, value)?;
             Ok(0)
         }
@@ -334,13 +338,18 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
                 .map_err(|e| e.to_string())?;
             Ok(0)
         }
-        SetAdminKey { id, from_env, value } => {
+        SetAdminKey {
+            id,
+            from_env,
+            value,
+        } => {
             set_secret(&id, ProviderCredentialKind::Admin, from_env, value)?;
             Ok(0)
         }
         ClearAdminKey { id } => {
             let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            clear_provider_secret(&grok_home(), &admin_key_scope(&pid)).map_err(|e| e.to_string())?;
+            clear_provider_secret(&grok_home(), &admin_key_scope(&pid))
+                .map_err(|e| e.to_string())?;
             Ok(0)
         }
         Capabilities { id, json: _ } => {
@@ -386,7 +395,8 @@ fn set_secret(
 ) -> Result<(), String> {
     let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
     let secret = if let Some(env_name) = from_env {
-        std::env::var(&env_name).map_err(|_| format!("environment variable `{env_name}` is unset"))?
+        std::env::var(&env_name)
+            .map_err(|_| format!("environment variable `{env_name}` is unset"))?
     } else if let Some(v) = value {
         v
     } else {

@@ -276,8 +276,8 @@ impl EmbeddingProvider for PlatformEmbeddingProvider {
             let req: CreateEmbeddingParams = serde_json::from_value(params_val)
                 .map_err(|e| format!("typed embedding params: {e}"))?;
             let resp = client.create_embedding(req).await?;
-            let resp_val =
-                serde_json::to_value(&resp).map_err(|e| format!("embedding response encode: {e}"))?;
+            let resp_val = serde_json::to_value(&resp)
+                .map_err(|e| format!("embedding response encode: {e}"))?;
             let data = resp_val
                 .pointer("/data")
                 .or_else(|| resp_val.pointer("/body/data"))

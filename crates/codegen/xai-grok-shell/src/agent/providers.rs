@@ -1280,9 +1280,7 @@ pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Opt
     let provider = match model.model_provider.as_ref()?.kind {
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
-        ModelProviderKind::OpenAiCompatible
-        | ModelProviderKind::Zai
-        | ModelProviderKind::Xai => {
+        ModelProviderKind::OpenAiCompatible | ModelProviderKind::Zai | ModelProviderKind::Xai => {
             return None;
         }
     };

@@ -2621,7 +2621,7 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: None,
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();
@@ -2638,7 +2638,7 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: None,
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();
@@ -2695,7 +2695,7 @@ mod tests {
             provider: Some(&prefs),
             plugins: None,
             reasoning: None,
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();
@@ -2727,7 +2727,7 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: None,
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();
@@ -2759,7 +2759,7 @@ mod tests {
             provider: Some(&prefs),
             plugins: None,
             reasoning: None,
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();
@@ -2886,7 +2886,7 @@ mod tests {
             provider: client.openrouter_provider_preferences(),
             plugins: client.openrouter_plugins(),
             reasoning: None,
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();
@@ -3984,7 +3984,7 @@ mod tests {
             provider: Some(&prefs),
             plugins: None,
             reasoning: None,
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();
@@ -4023,7 +4023,7 @@ mod tests {
             provider: None,
             plugins: None,
             reasoning: Some(&reasoning),
-                    tool_stream: false,
+            tool_stream: false,
             thinking: None,
         })
         .unwrap();

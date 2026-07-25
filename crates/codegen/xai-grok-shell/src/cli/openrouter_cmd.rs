@@ -96,9 +96,9 @@ async fn run_inner(args: OpenRouterCliArgs) -> Result<ExitCode, String> {
         }
         OpenRouterCliCommand::Key => {
             // Prefer inventory operation ids containing "key".
-            if let Some(op) = operations_for_namespace("openrouter")
-                .find(|op| op.operation_id.to_ascii_lowercase().contains("key") && op.method == "GET")
-            {
+            if let Some(op) = operations_for_namespace("openrouter").find(|op| {
+                op.operation_id.to_ascii_lowercase().contains("key") && op.method == "GET"
+            }) {
                 return crate::cli::openai_cmd::call_namespace(
                     &args.provider,
                     "openrouter",

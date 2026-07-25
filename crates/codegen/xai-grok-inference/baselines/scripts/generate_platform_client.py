@@ -7,6 +7,7 @@ provenance files.
 """
 from __future__ import annotations
 import json, re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -581,6 +582,10 @@ cli.append("pub fn find_cli_operation(namespace: &str, operation_id: &str) -> Op
 cli.append("pub fn operations_for_namespace(namespace: &str) -> impl Iterator<Item = &'static CliOperation> { CLI_OPERATIONS.iter().filter(move |op| op.provider_namespace == namespace) }")
 Path('crates/codegen/xai-grok-shell/src/cli/generated_ops.rs').write_text('\n'.join(cli)+'\n')
 
+rust_sources = sorted(OUT.glob('*.rs'))
+rust_sources.append(Path('crates/codegen/xai-grok-shell/src/cli/generated_ops.rs'))
+subprocess.run(['rustfmt', '--edition', '2024', *map(str, rust_sources)], check=True)
+
 print('total', report['total'], 'generic', report['generic_value_body_count'], 'binary', report['binary_count'], 'sse', report['sse_count'], 'multipart', report['multipart_count'])
 # verify CreateEmbeddingResult no recursion
 t=Path('crates/codegen/xai-grok-inference/src/openai_platform/generated/openai_types.rs').read_text()
@@ -591,6 +596,6 @@ print(t[i:i+250] if i>=0 else 'missing params')
 # recursive check
 import re as _re
 bad=[]
-for m in _re.finditer(r'pub struct (\w+) \{[^}]*pub body: \1', t, _re.S):
+for m in _re.finditer(r'pub struct (\w+) \{[^}]*pub body: \1,', t, _re.S):
     bad.append(m.group(1))
 print('recursive bodies', bad[:10], 'count', len(bad))

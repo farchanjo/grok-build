@@ -57,7 +57,10 @@ pub struct OpenRouterClient {
 }
 
 impl OpenAiClient {
-    pub fn from_config(config: PlatformClientConfig, cancel: CancellationToken) -> PlatformResult<Self> {
+    pub fn from_config(
+        config: PlatformClientConfig,
+        cancel: CancellationToken,
+    ) -> PlatformResult<Self> {
         config.validate()?;
         let creds = Arc::new(StaticCredentials {
             application: config.application_token,
@@ -85,12 +88,17 @@ impl OpenAiClient {
 
     /// Structural guard: application client never resolves admin credentials.
     pub fn resolve_application_token(&self) -> PlatformResult<Option<String>> {
-        self.transport.credentials.resolve(CredentialKind::Application)
+        self.transport
+            .credentials
+            .resolve(CredentialKind::Application)
     }
 }
 
 impl OpenAiAdminClient {
-    pub fn from_config(config: PlatformClientConfig, cancel: CancellationToken) -> PlatformResult<Self> {
+    pub fn from_config(
+        config: PlatformClientConfig,
+        cancel: CancellationToken,
+    ) -> PlatformResult<Self> {
         config.validate()?;
         let base = config
             .admin_base_url
@@ -124,7 +132,10 @@ impl OpenAiAdminClient {
 }
 
 impl OpenRouterClient {
-    pub fn from_config(config: PlatformClientConfig, cancel: CancellationToken) -> PlatformResult<Self> {
+    pub fn from_config(
+        config: PlatformClientConfig,
+        cancel: CancellationToken,
+    ) -> PlatformResult<Self> {
         config.validate()?;
         let creds = Arc::new(StaticCredentials {
             application: config.application_token,
@@ -172,9 +183,9 @@ impl CredentialResolver for AdminOnlyCredentials {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::error::PlatformError;
     use super::super::transport::{CredentialKind, StaticCredentials};
+    use super::*;
 
     #[test]
     fn app_client_rejects_empty_provider_id() {
@@ -216,7 +227,10 @@ mod tests {
             admin: Some("admin-key".into()),
         };
         assert_eq!(
-            creds.resolve(CredentialKind::Application).unwrap().as_deref(),
+            creds
+                .resolve(CredentialKind::Application)
+                .unwrap()
+                .as_deref(),
             Some("app-key")
         );
         assert_eq!(

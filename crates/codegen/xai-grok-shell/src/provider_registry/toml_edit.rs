@@ -1,9 +1,7 @@
 //! Comment-preserving atomic TOML helpers for `[model_providers.<id>]`.
 
 use super::id::{ProviderId, is_reserved_configured_id};
-use super::lifecycle::{
-    ProviderLifecycleError, validate_extra_headers, validate_http_base_url,
-};
+use super::lifecycle::{ProviderLifecycleError, validate_extra_headers, validate_http_base_url};
 use indexmap::IndexMap;
 use std::fs;
 use std::io::{self, Write};
@@ -65,9 +63,7 @@ fn atomic_write_document(path: &Path, doc: &toml_edit::DocumentMut) -> io::Resul
     Ok(())
 }
 
-fn ensure_model_providers<'a>(
-    doc: &'a mut toml_edit::DocumentMut,
-) -> &'a mut toml_edit::Table {
+fn ensure_model_providers<'a>(doc: &'a mut toml_edit::DocumentMut) -> &'a mut toml_edit::Table {
     if !doc.contains_key("model_providers") {
         doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
@@ -209,7 +205,10 @@ pub fn apply_provider_patch(
     upsert_provider(config_path, provider_id, patch, true)
 }
 
-pub fn enable_provider(config_path: &Path, provider_id: &ProviderId) -> Result<(), ProviderLifecycleError> {
+pub fn enable_provider(
+    config_path: &Path,
+    provider_id: &ProviderId,
+) -> Result<(), ProviderLifecycleError> {
     apply_provider_patch(
         config_path,
         provider_id,
@@ -239,7 +238,10 @@ pub fn remove_provider(
     provider_id: &ProviderId,
 ) -> Result<(), ProviderLifecycleError> {
     let mut doc = read_document(config_path)?;
-    if let Some(providers) = doc.get_mut("model_providers").and_then(|i| i.as_table_mut()) {
+    if let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(|i| i.as_table_mut())
+    {
         if providers.remove(provider_id.as_str()).is_none() {
             return Err(ProviderLifecycleError::NotFound(
                 provider_id.as_str().to_owned(),

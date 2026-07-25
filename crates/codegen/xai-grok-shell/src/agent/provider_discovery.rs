@@ -4,7 +4,7 @@ use crate::agent::model_providers::{ModelProviderConfig, ModelProviderKind};
 use crate::provider_registry::id::ProviderId;
 use crate::provider_registry::lifecycle::namespaced_model_id;
 use crate::provider_registry::{
-    CacheOrigin, CatalogCacheEntry, CatalogCacheStore, CATALOG_CACHE_VERSION,
+    CATALOG_CACHE_VERSION, CacheOrigin, CatalogCacheEntry, CatalogCacheStore,
 };
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -83,10 +83,7 @@ pub async fn discover_provider_models(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        models: models
-            .iter()
-            .map(|id| json!({"id": id}))
-            .collect(),
+        models: models.iter().map(|id| json!({"id": id})).collect(),
         baseline_version: None,
     };
     let _ = CatalogCacheStore::store(grok_home, &entry);
@@ -154,7 +151,9 @@ fn extract_model_ids(body: &Value) -> Vec<String> {
 
 fn origin_host(base_url: &str) -> Result<String, String> {
     let url = reqwest::Url::parse(base_url).map_err(|e| e.to_string())?;
-    let host = url.host_str().ok_or_else(|| "base URL missing host".to_string())?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "base URL missing host".to_string())?;
     match url.port() {
         Some(p) => Ok(format!("{}://{}:{p}", url.scheme(), host)),
         None => Ok(format!("{}://{}", url.scheme(), host)),

@@ -15,8 +15,6 @@ pub mod models;
 pub mod mvp_agent;
 pub mod provider_discovery;
 pub mod providers;
-/// First-class Z.ai Model API profile and wire extensions.
-pub mod zai;
 pub(crate) mod proxy;
 pub mod relay;
 pub(crate) mod restore_code;
@@ -28,6 +26,8 @@ pub mod session_registry_client;
 pub(crate) mod subagent;
 pub(crate) mod subscription_check;
 pub(crate) mod update_chunk_merge;
+/// First-class Z.ai Model API profile and wire extensions.
+pub mod zai;
 
 pub use mvp_agent::MvpAgent;
 pub use relay::{RelayConfig, RelayHandle, spawn_relay_connection};

@@ -7024,5 +7024,13 @@ pub static CLI_OPERATIONS: &[CliOperation] = &[
     },
 ];
 pub const CLI_OPERATION_COUNT: usize = 389;
-pub fn find_cli_operation(namespace: &str, operation_id: &str) -> Option<&'static CliOperation> { CLI_OPERATIONS.iter().find(|op| op.provider_namespace == namespace && op.operation_id == operation_id) }
-pub fn operations_for_namespace(namespace: &str) -> impl Iterator<Item = &'static CliOperation> { CLI_OPERATIONS.iter().filter(move |op| op.provider_namespace == namespace) }
+pub fn find_cli_operation(namespace: &str, operation_id: &str) -> Option<&'static CliOperation> {
+    CLI_OPERATIONS
+        .iter()
+        .find(|op| op.provider_namespace == namespace && op.operation_id == operation_id)
+}
+pub fn operations_for_namespace(namespace: &str) -> impl Iterator<Item = &'static CliOperation> {
+    CLI_OPERATIONS
+        .iter()
+        .filter(move |op| op.provider_namespace == namespace)
+}

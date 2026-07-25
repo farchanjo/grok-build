@@ -185,7 +185,10 @@ pub fn resolve_legacy_model_alias(
 ) -> Option<String> {
     let mut matches: Vec<String> = Vec::new();
     for (provider_id, models) in catalog_by_provider {
-        if models.iter().any(|m| m == slug || m.ends_with(&format!(":{slug}"))) {
+        if models
+            .iter()
+            .any(|m| m == slug || m.ends_with(&format!(":{slug}")))
+        {
             let pid = ProviderId::new(provider_id).ok()?;
             matches.push(namespaced_model_id(&pid, slug));
         }
