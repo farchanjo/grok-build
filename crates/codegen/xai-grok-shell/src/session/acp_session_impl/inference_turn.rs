@@ -607,6 +607,14 @@ impl SessionActor {
             }
             (effort, _) => effort,
         };
+        let is_zai = resolved_entry.is_some_and(|entry| {
+            entry.model_provider.as_ref().is_some_and(|provider| {
+                provider.kind == crate::agent::model_providers::ModelProviderKind::Zai
+                    || provider.id == crate::agent::zai::ZAI_PROVIDER_ID
+            })
+        });
+        let zai_thinking =
+            is_zai.then(|| serde_json::json!({"type": "enabled", "clear_thinking": false}));
         InferenceConfig {
             api_key: creds.api_key,
             base_url: cfg.base_url,
@@ -618,6 +626,8 @@ impl SessionActor {
             openrouter_provider_preferences: self.openrouter_provider_preferences.borrow().clone(),
             openrouter_plugins: self.openrouter_plugins.borrow().clone(),
             openrouter_pacing: self.openrouter_pacing.get(),
+            zai_tool_stream: is_zai,
+            zai_thinking,
             api_backend: cfg.api_backend,
             include_message_model_id: model_facts.include_message_model_id,
             auth_scheme,

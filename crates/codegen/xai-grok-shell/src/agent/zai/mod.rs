@@ -109,7 +109,11 @@ pub enum ZaiErrorClass {
     Unknown,
 }
 
-pub fn classify_zai_error(status: Option<u16>, finish_reason: Option<&str>, body_preview: &str) -> ZaiErrorClass {
+pub fn classify_zai_error(
+    status: Option<u16>,
+    finish_reason: Option<&str>,
+    body_preview: &str,
+) -> ZaiErrorClass {
     if status == Some(401) || body_preview.contains("invalid_api_key") {
         return ZaiErrorClass::InvalidKey;
     }
@@ -144,7 +148,10 @@ pub fn zai_credential_repair_message() -> &'static str {
 
 /// Whether native Z.ai web search should be advertised (off by default).
 pub fn native_web_search_enabled(capabilities: &IndexMap<String, bool>) -> bool {
-    capabilities.get("native_web_search").copied().unwrap_or(false)
+    capabilities
+        .get("native_web_search")
+        .copied()
+        .unwrap_or(false)
 }
 
 /// Merge Z.ai extensions into a chat completion request body when identity is Z.ai.
@@ -178,6 +185,7 @@ pub fn extract_reasoning_content(delta: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn builtin_profile_points_at_paas_v4() {

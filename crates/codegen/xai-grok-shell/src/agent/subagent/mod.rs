@@ -1057,6 +1057,8 @@ async fn read_parent_inference_config(
                         .clone(),
                     openrouter_plugins: ctx.inference_config.openrouter_plugins.clone(),
                     openrouter_pacing: ctx.inference_config.openrouter_pacing,
+                    zai_tool_stream: ctx.inference_config.zai_tool_stream,
+                    zai_thinking: ctx.inference_config.zai_thinking.clone(),
                     api_backend: cfg.api_backend,
                     include_message_model_id: ctx.inference_config.include_message_model_id,
                     auth_scheme,

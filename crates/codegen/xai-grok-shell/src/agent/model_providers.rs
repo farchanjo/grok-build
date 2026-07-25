@@ -182,8 +182,6 @@ impl Default for ModelProviderConfig {
             provider_preferences: None,
             plugins: Vec::new(),
             openrouter_pacing: false,
-            zai_tool_stream: false,
-            zai_thinking: None,
             extra_headers: IndexMap::new(),
             auth_provider: None,
             auth: None,
@@ -331,8 +329,12 @@ pub(crate) fn parse_model_providers(
                     ));
                     continue;
                 }
-                if let Some(url) = provider.base_url.as_deref().or(provider.api_base_url.as_deref())
-                    && let Err(err) = crate::provider_registry::lifecycle::validate_http_base_url(url)
+                if let Some(url) = provider
+                    .base_url
+                    .as_deref()
+                    .or(provider.api_base_url.as_deref())
+                    && let Err(err) =
+                        crate::provider_registry::lifecycle::validate_http_base_url(url)
                 {
                     warnings.push(ConfigWarning::model_provider(
                         id,
@@ -343,7 +345,8 @@ pub(crate) fn parse_model_providers(
                     continue;
                 }
                 if let Some(url) = provider.admin_base_url.as_deref()
-                    && let Err(err) = crate::provider_registry::lifecycle::validate_http_base_url(url)
+                    && let Err(err) =
+                        crate::provider_registry::lifecycle::validate_http_base_url(url)
                 {
                     warnings.push(ConfigWarning::model_provider(
                         id,
@@ -353,9 +356,9 @@ pub(crate) fn parse_model_providers(
                     ));
                     continue;
                 }
-                if let Err(err) =
-                    crate::provider_registry::lifecycle::validate_extra_headers(&provider.extra_headers)
-                {
+                if let Err(err) = crate::provider_registry::lifecycle::validate_extra_headers(
+                    &provider.extra_headers,
+                ) {
                     warnings.push(ConfigWarning::model_provider(
                         id,
                         Some("extra_headers"),
