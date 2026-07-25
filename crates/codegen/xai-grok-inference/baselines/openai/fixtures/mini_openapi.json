@@ -1,0 +1,261 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenAI API Mini Fixture",
+    "version": "2.3.0-test"
+  },
+  "paths": {
+    "/chat/completions": {
+      "post": {
+        "operationId": "createChatCompletion",
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Create chat completion",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/responses": {
+      "post": {
+        "operationId": "createResponse",
+        "tags": [
+          "Responses"
+        ],
+        "summary": "Create a response",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/embeddings": {
+      "post": {
+        "operationId": "createEmbedding",
+        "tags": [
+          "Embeddings"
+        ],
+        "summary": "Create embeddings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "listModels",
+        "tags": [
+          "Models"
+        ],
+        "summary": "List models"
+      }
+    },
+    "/audio/speech": {
+      "post": {
+        "operationId": "createSpeech",
+        "tags": [
+          "Audio"
+        ],
+        "summary": "Create speech",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/audio/transcriptions": {
+      "post": {
+        "operationId": "createTranscription",
+        "tags": [
+          "Audio"
+        ],
+        "summary": "Create transcription",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/files": {
+      "get": {
+        "operationId": "listFiles",
+        "tags": [
+          "Files"
+        ],
+        "summary": "List files"
+      },
+      "post": {
+        "operationId": "createFile",
+        "tags": [
+          "Files"
+        ],
+        "summary": "Upload file",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateChatCompletionRequest": {
+        "type": "object",
+        "required": [
+          "messages",
+          "model"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "tools": {
+            "type": "array"
+          }
+        }
+      },
+      "CreateResponse": {
+        "type": "object",
+        "properties": {
+          "input": {},
+          "model": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CreateEmbeddingRequest": {
+        "type": "object",
+        "required": [
+          "input",
+          "model"
+        ],
+        "properties": {
+          "input": {},
+          "model": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateSpeechRequest": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "voice": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateTranscriptionRequest": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateFileRequest": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        }
+      },
+      "ListModelsResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array"
+          },
+          "object": {
+            "type": "string"
+          }
+        }
+      },
+      "Model": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatCompletionRequestMessage": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "content": {}
+        }
+      },
+      "ChatCompletionTool": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "function": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

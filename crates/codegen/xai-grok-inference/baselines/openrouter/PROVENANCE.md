@@ -89,6 +89,9 @@ OPENROUTER_OPENAPI_PATH=/tmp/openrouter-openapi.json \
 
 - `xai-grok-inference::openrouter_baseline` loads the inventory and asserts
   integrity (`field_count`, unique paths/schemas, priority endpoints exist).
+- `xai-grok-inference::compatibility` reuses this inventory alongside the
+  OpenAI baseline and the declared intersection under
+  `baselines/intersection/` (Change 4).
 - Later milestones compare Grok serializers and capability claims against these
   endpoints and schema fields. OpenRouter is **not** treated as a full OpenAI
   clone; OpenRouter-native coverage is measured separately.

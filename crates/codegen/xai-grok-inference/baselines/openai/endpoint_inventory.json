@@ -1,0 +1,3837 @@
+{
+  "format_version": 1,
+  "provider": "openai",
+  "baseline": {
+    "title": "OpenAI API",
+    "version": "2.3.0",
+    "openapi": "3.1.0",
+    "source_url": "https://raw.githubusercontent.com/openai/openai-openapi/master/openapi.yaml",
+    "docs_url": "https://platform.openai.com/docs/api-reference",
+    "repo_url": "https://github.com/openai/openai-openapi",
+    "license_note": "OpenAPI description from openai/openai-openapi (MIT). Compact inventory is derived metadata only; full OpenAPI is not vendored.",
+    "source_format": "yaml",
+    "fetched_at_utc": "2026-07-25T17:00:00Z",
+    "content_sha256": "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da",
+    "content_bytes": 2827615,
+    "path_count": 181,
+    "endpoint_count": 287,
+    "schema_count": 1385
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/assistants",
+      "operation_id": "listAssistants",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Returns a list of assistants.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/assistants",
+      "operation_id": "createAssistant",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Create an assistant with a model and instructions.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/assistants/{assistant_id}",
+      "operation_id": "deleteAssistant",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Delete an assistant.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/assistants/{assistant_id}",
+      "operation_id": "getAssistant",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Retrieves an assistant.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/assistants/{assistant_id}",
+      "operation_id": "modifyAssistant",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Modifies an assistant.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/speech",
+      "operation_id": "createSpeech",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Generates audio from the input text.\n\nReturns the audio file content, or a stream of audio events.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/transcriptions",
+      "operation_id": "createTranscription",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Transcribes audio into the input language.\n\nReturns a transcription object in `json`, `diarized_json`, or `verbose_json`\nformat, or a stream of transcript events.\n",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/translations",
+      "operation_id": "createTranslation",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Translates audio into English.",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "GET",
+      "path": "/audio/voice_consents",
+      "operation_id": "listVoiceConsents",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Returns a list of voice consent recordings.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/voice_consents",
+      "operation_id": "createVoiceConsent",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Upload a voice consent recording.",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "DELETE",
+      "path": "/audio/voice_consents/{consent_id}",
+      "operation_id": "deleteVoiceConsent",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Deletes a voice consent recording.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/audio/voice_consents/{consent_id}",
+      "operation_id": "getVoiceConsent",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Retrieves a voice consent recording.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/voice_consents/{consent_id}",
+      "operation_id": "updateVoiceConsent",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Updates a voice consent recording (metadata only).",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/voices",
+      "operation_id": "createVoice",
+      "tags": [
+        "Audio"
+      ],
+      "summary": "Creates a custom voice.",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "GET",
+      "path": "/batches",
+      "operation_id": "listBatches",
+      "tags": [
+        "Batch"
+      ],
+      "summary": "List your organization's batches.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/batches",
+      "operation_id": "createBatch",
+      "tags": [
+        "Batch"
+      ],
+      "summary": "Creates and executes a batch from an uploaded file of requests",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/batches/{batch_id}",
+      "operation_id": "retrieveBatch",
+      "tags": [
+        "Batch"
+      ],
+      "summary": "Retrieves a batch.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/batches/{batch_id}/cancel",
+      "operation_id": "cancelBatch",
+      "tags": [
+        "Batch"
+      ],
+      "summary": "Cancels an in-progress batch. The batch will be in status `cancelling` for up to 10 minutes, before changing to `cancelled`, where it will have partial results (if any) available in the output file.",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/chat/completions",
+      "operation_id": "listChatCompletions",
+      "tags": [
+        "Chat"
+      ],
+      "summary": "List stored Chat Completions. Only Chat Completions that have been stored\nwith the `store` parameter set to `true` will be returned.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/chat/completions",
+      "operation_id": "createChatCompletion",
+      "tags": [
+        "Chat"
+      ],
+      "summary": "**Starting a new project?** We recommend trying [Responses](/docs/api-reference/responses)\nto take advantage of the latest OpenAI platform features. Compare\n[Chat Completions with Responses](/docs/guides/responses-vs-chat-completions?api-mode=responses).\n\n---\n\nCreates a model response for the given chat conversation. Learn more in the\n[text generation](/docs/guides/text-generation), [vision](/docs/guides/vision),\nand [audio](/docs/guides/audio) guides.\n\nParameter support can differ depending on the model used to generate the\nresponse, particularly for newer reasoning models. Parameters that are only\nsupported for reasoning models are noted below. For the current state of\nunsupported parameters in reasoning models,\n[refer to the reasoning guide](/docs/guides/reasoning).\n\nReturns a chat completion object, or a streamed sequence of chat completion\nchunk objects if the request is streamed.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/chat/completions/{completion_id}",
+      "operation_id": "deleteChatCompletion",
+      "tags": [
+        "Chat"
+      ],
+      "summary": "Delete a stored chat completion. Only Chat Completions that have been\ncreated with the `store` parameter set to `true` can be deleted.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/chat/completions/{completion_id}",
+      "operation_id": "getChatCompletion",
+      "tags": [
+        "Chat"
+      ],
+      "summary": "Get a stored chat completion. Only Chat Completions that have been created\nwith the `store` parameter set to `true` will be returned.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/chat/completions/{completion_id}",
+      "operation_id": "updateChatCompletion",
+      "tags": [
+        "Chat"
+      ],
+      "summary": "Modify a stored chat completion. Only Chat Completions that have been\ncreated with the `store` parameter set to `true` can be modified. Currently,\nthe only supported modification is to update the `metadata` field.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/chat/completions/{completion_id}/messages",
+      "operation_id": "getChatCompletionMessages",
+      "tags": [
+        "Chat"
+      ],
+      "summary": "Get the messages in a stored chat completion. Only Chat Completions that\nhave been created with the `store` parameter set to `true` will be\nreturned.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/chatkit/sessions",
+      "operation_id": "CreateChatSessionMethod",
+      "tags": [],
+      "summary": "Create a ChatKit session.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/chatkit/sessions/{session_id}/cancel",
+      "operation_id": "CancelChatSessionMethod",
+      "tags": [],
+      "summary": "Cancel an active ChatKit session and return its most recent metadata.\n\nCancelling prevents new requests from using the issued client secret.",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/chatkit/threads",
+      "operation_id": "ListThreadsMethod",
+      "tags": [],
+      "summary": "List ChatKit threads with optional pagination and user filters.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/chatkit/threads/{thread_id}",
+      "operation_id": "DeleteThreadMethod",
+      "tags": [],
+      "summary": "Delete a ChatKit thread along with its items and stored attachments.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/chatkit/threads/{thread_id}",
+      "operation_id": "GetThreadMethod",
+      "tags": [],
+      "summary": "Retrieve a ChatKit thread by its identifier.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/chatkit/threads/{thread_id}/items",
+      "operation_id": "ListThreadItemsMethod",
+      "tags": [],
+      "summary": "List items that belong to a ChatKit thread.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/completions",
+      "operation_id": "createCompletion",
+      "tags": [
+        "Completions"
+      ],
+      "summary": "Creates a completion for the provided prompt and parameters.\n\nReturns a completion object, or a sequence of completion objects if the request is streamed.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/containers",
+      "operation_id": "ListContainers",
+      "tags": [],
+      "summary": "List Containers",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/containers",
+      "operation_id": "CreateContainer",
+      "tags": [],
+      "summary": "Create Container",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/containers/{container_id}",
+      "operation_id": "DeleteContainer",
+      "tags": [],
+      "summary": "Delete Container",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{container_id}",
+      "operation_id": "RetrieveContainer",
+      "tags": [],
+      "summary": "Retrieve Container",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{container_id}/files",
+      "operation_id": "ListContainerFiles",
+      "tags": [],
+      "summary": "List Container files",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{container_id}/files",
+      "operation_id": "CreateContainerFile",
+      "tags": [],
+      "summary": "Create a Container File\n\nYou can send either a multipart/form-data request with the raw file content, or a JSON request with a file ID.\n",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "DELETE",
+      "path": "/containers/{container_id}/files/{file_id}",
+      "operation_id": "DeleteContainerFile",
+      "tags": [],
+      "summary": "Delete Container File",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{container_id}/files/{file_id}",
+      "operation_id": "RetrieveContainerFile",
+      "tags": [],
+      "summary": "Retrieve Container File",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{container_id}/files/{file_id}/content",
+      "operation_id": "RetrieveContainerFileContent",
+      "tags": [],
+      "summary": "Retrieve Container File Content",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/conversations",
+      "operation_id": "createConversation",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "Create a conversation.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/conversations/{conversation_id}",
+      "operation_id": "deleteConversation",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "Delete a conversation. Items in the conversation will not be deleted.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/conversations/{conversation_id}",
+      "operation_id": "getConversation",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "Get a conversation",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/conversations/{conversation_id}",
+      "operation_id": "updateConversation",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "Update a conversation",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/conversations/{conversation_id}/items",
+      "operation_id": "listConversationItems",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "List all items for a conversation with the given ID.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/conversations/{conversation_id}/items",
+      "operation_id": "createConversationItems",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "Create items in a conversation with the given ID.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/conversations/{conversation_id}/items/{item_id}",
+      "operation_id": "deleteConversationItem",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "Delete an item from a conversation with the given IDs.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/conversations/{conversation_id}/items/{item_id}",
+      "operation_id": "getConversationItem",
+      "tags": [
+        "Conversations"
+      ],
+      "summary": "Get a single item from a conversation with the given IDs.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/embeddings",
+      "operation_id": "createEmbedding",
+      "tags": [
+        "Embeddings"
+      ],
+      "summary": "Creates an embedding vector representing the input text.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/evals",
+      "operation_id": "listEvals",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "List evaluations for a project.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/evals",
+      "operation_id": "createEval",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Create the structure of an evaluation that can be used to test a model's performance.\nAn evaluation is a set of testing criteria and the config for a data source, which dictates the schema of the data used in the evaluation. After creating an evaluation, you can run it on different models and model parameters. We support several types of graders and datasources.\nFor more information, see the [Evals guide](/docs/guides/evals).\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/evals/{eval_id}",
+      "operation_id": "deleteEval",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Delete an evaluation.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/evals/{eval_id}",
+      "operation_id": "getEval",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Get an evaluation by ID.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/evals/{eval_id}",
+      "operation_id": "updateEval",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Update certain properties of an evaluation.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs",
+      "operation_id": "getEvalRuns",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Get a list of runs for an evaluation.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/evals/{eval_id}/runs",
+      "operation_id": "createEvalRun",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Kicks off a new run for a given evaluation, specifying the data source, and what model configuration to use to test. The datasource will be validated against the schema specified in the config of the evaluation.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/evals/{eval_id}/runs/{run_id}",
+      "operation_id": "deleteEvalRun",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Delete an eval run.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs/{run_id}",
+      "operation_id": "getEvalRun",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Get an evaluation run by ID.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/evals/{eval_id}/runs/{run_id}",
+      "operation_id": "cancelEvalRun",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Cancel an ongoing evaluation run.\n",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs/{run_id}/output_items",
+      "operation_id": "getEvalRunOutputItems",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Get a list of output items for an evaluation run.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/evals/{eval_id}/runs/{run_id}/output_items/{output_item_id}",
+      "operation_id": "getEvalRunOutputItem",
+      "tags": [
+        "Evals"
+      ],
+      "summary": "Get an evaluation run output item by ID.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/files",
+      "operation_id": "listFiles",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Returns a list of files.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/files",
+      "operation_id": "createFile",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Upload a file that can be used across various endpoints. Individual files\ncan be up to 512 MB, and each project can store up to 2.5 TB of files in\ntotal. There is no organization-wide storage limit. Uploads to this\nendpoint are rate-limited to 1,000 requests per minute per authenticated\nuser.\n\n- The Assistants API supports files up to 2 million tokens and of specific\n  file types. See the [Assistants Tools guide](/docs/assistants/tools) for\n  details.\n- The Fine-tuning API only supports `.jsonl` files. The input also has\n  certain required formats for fine-tuning\n  [chat](/docs/api-reference/fine-tuning/chat-input) or\n  [completions](/docs/api-reference/fine-tuning/completions-input) models.\n- The Batch API only supports `.jsonl` files up to 200 MB in size. The input\n  also has a specific required\n  [format](/docs/api-reference/batch/request-input).\n- For Retrieval or `file_search` ingestion, upload files here first. If\n  you need to attach multiple uploaded files to the same vector store, use\n  [`/vector_stores/{vector_store_id}/file_batches`](/docs/api-reference/vector-stores-file-batches/createBatch)\n  instead of attaching them one by one. Vector store attachment has separate\n  limits from file upload, including 2,000 attached files per minute per\n  organization.\n\nPlease [contact us](https://help.openai.com/) if you need to increase these\nstorage limits.\n",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "DELETE",
+      "path": "/files/{file_id}",
+      "operation_id": "deleteFile",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Delete a file and remove it from all vector stores.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/files/{file_id}",
+      "operation_id": "retrieveFile",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Returns information about a specific file.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/files/{file_id}/content",
+      "operation_id": "downloadFile",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Returns the contents of the specified file.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/fine_tuning/alpha/graders/run",
+      "operation_id": "runGrader",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Run a grader.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/fine_tuning/alpha/graders/validate",
+      "operation_id": "validateGrader",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Validate a grader.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions",
+      "operation_id": "listFineTuningCheckpointPermissions",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "**NOTE:** This endpoint requires an [admin API key](../admin-api-keys).\n\nOrganization owners can use this endpoint to view all permissions for a fine-tuned model checkpoint.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions",
+      "operation_id": "createFineTuningCheckpointPermission",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "**NOTE:** Calling this endpoint requires an [admin API key](../admin-api-keys).\n\nThis enables organization owners to share fine-tuned models with other projects in their organization.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions/{permission_id}",
+      "operation_id": "deleteFineTuningCheckpointPermission",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "**NOTE:** This endpoint requires an [admin API key](../admin-api-keys).\n\nOrganization owners can use this endpoint to delete a permission for a fine-tuned model checkpoint.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/fine_tuning/jobs",
+      "operation_id": "listPaginatedFineTuningJobs",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "List your organization's fine-tuning jobs\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/fine_tuning/jobs",
+      "operation_id": "createFineTuningJob",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Creates a fine-tuning job which begins the process of creating a new model from a given dataset.\n\nResponse includes details of the enqueued job including job status and the name of the fine-tuned models once complete.\n\n[Learn more about fine-tuning](/docs/guides/model-optimization)\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}",
+      "operation_id": "retrieveFineTuningJob",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Get info about a fine-tuning job.\n\n[Learn more about fine-tuning](/docs/guides/model-optimization)\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/cancel",
+      "operation_id": "cancelFineTuningJob",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Immediately cancel a fine-tune job.\n",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/checkpoints",
+      "operation_id": "listFineTuningJobCheckpoints",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "List checkpoints for a fine-tuning job.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/events",
+      "operation_id": "listFineTuningEvents",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Get status updates for a fine-tuning job.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/pause",
+      "operation_id": "pauseFineTuningJob",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Pause a fine-tune job.\n",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "POST",
+      "path": "/fine_tuning/jobs/{fine_tuning_job_id}/resume",
+      "operation_id": "resumeFineTuningJob",
+      "tags": [
+        "Fine-tuning"
+      ],
+      "summary": "Resume a fine-tune job.\n",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "POST",
+      "path": "/images/edits",
+      "operation_id": "createImageEdit",
+      "tags": [
+        "Images"
+      ],
+      "summary": "Creates an edited or extended image given one or more source images and a prompt. This endpoint supports GPT Image models (`gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini`, and `chatgpt-image-latest`) and `dall-e-2`.",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "POST",
+      "path": "/images/generations",
+      "operation_id": "createImage",
+      "tags": [
+        "Images"
+      ],
+      "summary": "Creates an image given a prompt. [Learn more](/docs/guides/images).\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/images/variations",
+      "operation_id": "createImageVariation",
+      "tags": [
+        "Images"
+      ],
+      "summary": "Creates a variation of a given image. This endpoint only supports `dall-e-2`.",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "GET",
+      "path": "/models",
+      "operation_id": "listModels",
+      "tags": [
+        "Models"
+      ],
+      "summary": "Lists the currently available models, and provides basic information about each one such as the owner and availability.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/models/{model}",
+      "operation_id": "deleteModel",
+      "tags": [
+        "Models"
+      ],
+      "summary": "Delete a fine-tuned model. You must have the Owner role in your organization to delete a model.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/models/{model}",
+      "operation_id": "retrieveModel",
+      "tags": [
+        "Models"
+      ],
+      "summary": "Retrieves a model instance, providing basic information about the model such as the owner and permissioning.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/moderations",
+      "operation_id": "createModeration",
+      "tags": [
+        "Moderations"
+      ],
+      "summary": "Classifies if text and/or image inputs are potentially harmful. Learn\nmore in the [moderation guide](/docs/guides/moderation).\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/admin_api_keys",
+      "operation_id": "admin-api-keys-list",
+      "tags": [],
+      "summary": "List organization API keys",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/admin_api_keys",
+      "operation_id": "admin-api-keys-create",
+      "tags": [],
+      "summary": "Create an organization admin API key",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/admin_api_keys/{key_id}",
+      "operation_id": "admin-api-keys-delete",
+      "tags": [],
+      "summary": "Delete an organization admin API key",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/admin_api_keys/{key_id}",
+      "operation_id": "admin-api-keys-get",
+      "tags": [],
+      "summary": "Retrieve a single organization API key",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/audit_logs",
+      "operation_id": "list-audit-logs",
+      "tags": [
+        "Audit Logs"
+      ],
+      "summary": "List user actions and configuration changes within this organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/certificates",
+      "operation_id": "listOrganizationCertificates",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "List uploaded certificates for this organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/certificates",
+      "operation_id": "uploadCertificate",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Upload a certificate to the organization. This does **not** automatically activate the certificate.\n\nOrganizations can upload up to 50 certificates.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/certificates/activate",
+      "operation_id": "activateOrganizationCertificates",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Activate certificates at the organization level.\n\nYou can atomically and idempotently activate up to 10 certificates at a time.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/certificates/deactivate",
+      "operation_id": "deactivateOrganizationCertificates",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Deactivate certificates at the organization level.\n\nYou can atomically and idempotently deactivate up to 10 certificates at a time.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/certificates/{certificate_id}",
+      "operation_id": "deleteCertificate",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Delete a certificate from the organization.\n\nThe certificate must be inactive for the organization and all projects.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/certificates/{certificate_id}",
+      "operation_id": "getCertificate",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Get a certificate that has been uploaded to the organization.\n\nYou can get a certificate regardless of whether it is active or not.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/certificates/{certificate_id}",
+      "operation_id": "modifyCertificate",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Modify a certificate. Note that only the name can be modified.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/costs",
+      "operation_id": "usage-costs",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get costs details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/data_retention",
+      "operation_id": "retrieve-organization-data-retention",
+      "tags": [
+        "Data retention"
+      ],
+      "summary": "Retrieves organization data retention controls.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/data_retention",
+      "operation_id": "update-organization-data-retention",
+      "tags": [
+        "Data retention"
+      ],
+      "summary": "Updates organization data retention controls.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/groups",
+      "operation_id": "list-groups",
+      "tags": [
+        "Groups"
+      ],
+      "summary": "Lists all groups in the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/groups",
+      "operation_id": "create-group",
+      "tags": [
+        "Groups"
+      ],
+      "summary": "Creates a new group in the organization.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/groups/{group_id}",
+      "operation_id": "delete-group",
+      "tags": [
+        "Groups"
+      ],
+      "summary": "Deletes a group from the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/groups/{group_id}",
+      "operation_id": "retrieve-group",
+      "tags": [
+        "Groups"
+      ],
+      "summary": "Retrieves a group.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/groups/{group_id}",
+      "operation_id": "update-group",
+      "tags": [
+        "Groups"
+      ],
+      "summary": "Updates a group's information.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/roles",
+      "operation_id": "list-group-role-assignments",
+      "tags": [
+        "Group organization role assignments"
+      ],
+      "summary": "Lists the organization roles assigned to a group within the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/groups/{group_id}/roles",
+      "operation_id": "assign-group-role",
+      "tags": [
+        "Group organization role assignments"
+      ],
+      "summary": "Assigns an organization role to a group within the organization.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/groups/{group_id}/roles/{role_id}",
+      "operation_id": "unassign-group-role",
+      "tags": [
+        "Group organization role assignments"
+      ],
+      "summary": "Unassigns an organization role from a group within the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/roles/{role_id}",
+      "operation_id": "retrieve-group-role",
+      "tags": [
+        "Group organization role assignments"
+      ],
+      "summary": "Retrieves an organization role assigned to a group.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/users",
+      "operation_id": "list-group-users",
+      "tags": [
+        "Group users"
+      ],
+      "summary": "Lists the users assigned to a group.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/groups/{group_id}/users",
+      "operation_id": "add-group-user",
+      "tags": [
+        "Group users"
+      ],
+      "summary": "Adds a user to a group.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/groups/{group_id}/users/{user_id}",
+      "operation_id": "remove-group-user",
+      "tags": [
+        "Group users"
+      ],
+      "summary": "Removes a user from a group.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/groups/{group_id}/users/{user_id}",
+      "operation_id": "retrieve-group-user",
+      "tags": [
+        "Group users"
+      ],
+      "summary": "Retrieves a user in a group.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/invites",
+      "operation_id": "list-invites",
+      "tags": [
+        "Invites"
+      ],
+      "summary": "Returns a list of invites in the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/invites",
+      "operation_id": "inviteUser",
+      "tags": [
+        "Invites"
+      ],
+      "summary": "Create an invite for a user to the organization. The invite must be accepted by the user before they have access to the organization.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/invites/{invite_id}",
+      "operation_id": "delete-invite",
+      "tags": [
+        "Invites"
+      ],
+      "summary": "Delete an invite. If the invite has already been accepted, it cannot be deleted.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/invites/{invite_id}",
+      "operation_id": "retrieve-invite",
+      "tags": [
+        "Invites"
+      ],
+      "summary": "Retrieves an invite.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects",
+      "operation_id": "list-projects",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Returns a list of projects.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects",
+      "operation_id": "create-project",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Create a new project in the organization. Projects can be created and archived, but cannot be deleted.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}",
+      "operation_id": "retrieve-project",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Retrieves a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}",
+      "operation_id": "modify-project",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Modifies a project in the organization.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/api_keys",
+      "operation_id": "list-project-api-keys",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Returns a list of API keys in the project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/api_keys/{api_key_id}",
+      "operation_id": "delete-project-api-key",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Deletes an API key from the project.\n\nReturns confirmation of the key deletion, or an error if the key belonged to\na service account.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/api_keys/{api_key_id}",
+      "operation_id": "retrieve-project-api-key",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Retrieves an API key in the project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/archive",
+      "operation_id": "archive-project",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Archives a project in the organization. Archived projects cannot be used or updated.",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/certificates",
+      "operation_id": "listProjectCertificates",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "List certificates for this project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/certificates/activate",
+      "operation_id": "activateProjectCertificates",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Activate certificates at the project level.\n\nYou can atomically and idempotently activate up to 10 certificates at a time.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/certificates/deactivate",
+      "operation_id": "deactivateProjectCertificates",
+      "tags": [
+        "Certificates"
+      ],
+      "summary": "Deactivate certificates at the project level. You can atomically and \nidempotently deactivate up to 10 certificates at a time.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/data_retention",
+      "operation_id": "retrieve-project-data-retention",
+      "tags": [
+        "Data retention"
+      ],
+      "summary": "Retrieves project data retention controls.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/data_retention",
+      "operation_id": "update-project-data-retention",
+      "tags": [
+        "Data retention"
+      ],
+      "summary": "Updates project data retention controls.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/groups",
+      "operation_id": "list-project-groups",
+      "tags": [
+        "Project groups"
+      ],
+      "summary": "Lists the groups that have access to a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/groups",
+      "operation_id": "add-project-group",
+      "tags": [
+        "Project groups"
+      ],
+      "summary": "Grants a group access to a project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/groups/{group_id}",
+      "operation_id": "remove-project-group",
+      "tags": [
+        "Project groups"
+      ],
+      "summary": "Revokes a group's access to a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/groups/{group_id}",
+      "operation_id": "retrieve-project-group",
+      "tags": [
+        "Project groups"
+      ],
+      "summary": "Retrieves a project's group.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/hosted_tool_permissions",
+      "operation_id": "retrieve-project-hosted-tool-permissions",
+      "tags": [
+        "Hosted tools"
+      ],
+      "summary": "Returns hosted tool permissions for a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/hosted_tool_permissions",
+      "operation_id": "update-project-hosted-tool-permissions",
+      "tags": [
+        "Hosted tools"
+      ],
+      "summary": "Updates hosted tool permissions for a project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/model_permissions",
+      "operation_id": "delete-project-model-permissions",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Deletes model permissions for a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/model_permissions",
+      "operation_id": "retrieve-project-model-permissions",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Returns model permissions for a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/model_permissions",
+      "operation_id": "update-project-model-permissions",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Updates model permissions for a project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/rate_limits",
+      "operation_id": "list-project-rate-limits",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Returns the rate limits per model for a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/rate_limits/{rate_limit_id}",
+      "operation_id": "update-project-rate-limits",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Updates a project rate limit.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/service_accounts",
+      "operation_id": "list-project-service-accounts",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Returns a list of service accounts in the project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/service_accounts",
+      "operation_id": "create-project-service-account",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Creates a new service account in the project. By default, this also returns an unredacted API key for the service account.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}",
+      "operation_id": "delete-project-service-account",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Deletes a service account from the project.\n\nReturns confirmation of service account deletion, or an error if the project\nis archived (archived projects have no service accounts).\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}",
+      "operation_id": "retrieve-project-service-account",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Retrieves a service account in the project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}",
+      "operation_id": "update-project-service-account",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Updates a service account in the project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/service_accounts/{service_account_id}/api_keys",
+      "operation_id": "CreateanAPIkeyforaserviceaccount",
+      "tags": [],
+      "summary": "Creates an API key for a service account in the project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/spend_alerts",
+      "operation_id": "list-project-spend-alerts",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Lists project spend alerts.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/spend_alerts",
+      "operation_id": "create-project-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Creates a project spend alert.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/spend_alerts/{alert_id}",
+      "operation_id": "delete-project-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Deletes a project spend alert.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/spend_alerts/{alert_id}",
+      "operation_id": "retrieve-project-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Retrieves a project spend alert.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/spend_alerts/{alert_id}",
+      "operation_id": "update-project-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Updates a project spend alert.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/spend_limit",
+      "operation_id": "Deleteprojectspendlimit",
+      "tags": [],
+      "summary": "Delete a project's hard spend limit.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/spend_limit",
+      "operation_id": "Getprojectspendlimit",
+      "tags": [],
+      "summary": "Get a project's hard spend limit.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/spend_limit",
+      "operation_id": "Updateprojectspendlimit",
+      "tags": [],
+      "summary": "Create or replace a project's hard spend limit.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/users",
+      "operation_id": "list-project-users",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Returns a list of users in the project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/users",
+      "operation_id": "create-project-user",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Adds a user to the project. Users must already be members of the organization to be added to a project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/projects/{project_id}/users/{user_id}",
+      "operation_id": "delete-project-user",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Deletes a user from the project.\n\nReturns confirmation of project user deletion, or an error if the project is\narchived (archived projects have no users).\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/projects/{project_id}/users/{user_id}",
+      "operation_id": "retrieve-project-user",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Retrieves a user in the project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/projects/{project_id}/users/{user_id}",
+      "operation_id": "modify-project-user",
+      "tags": [
+        "Projects"
+      ],
+      "summary": "Modifies a user's role in the project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/roles",
+      "operation_id": "list-roles",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Lists the roles configured for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/roles",
+      "operation_id": "create-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Creates a custom role for the organization.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/roles/{role_id}",
+      "operation_id": "delete-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Deletes a custom role from the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/roles/{role_id}",
+      "operation_id": "retrieve-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Retrieves an organization role.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/roles/{role_id}",
+      "operation_id": "update-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Updates an existing organization role.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/spend_alerts",
+      "operation_id": "list-organization-spend-alerts",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Lists organization spend alerts.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/spend_alerts",
+      "operation_id": "create-organization-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Creates an organization spend alert.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/spend_alerts/{alert_id}",
+      "operation_id": "delete-organization-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Deletes an organization spend alert.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/spend_alerts/{alert_id}",
+      "operation_id": "retrieve-organization-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Retrieves an organization spend alert.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/spend_alerts/{alert_id}",
+      "operation_id": "update-organization-spend-alert",
+      "tags": [
+        "Spend alerts"
+      ],
+      "summary": "Updates an organization spend alert.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/spend_limit",
+      "operation_id": "Deleteorganizationspendlimit",
+      "tags": [],
+      "summary": "Delete the organization's hard spend limit.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/spend_limit",
+      "operation_id": "Getorganizationspendlimit",
+      "tags": [],
+      "summary": "Get the organization's hard spend limit.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/spend_limit",
+      "operation_id": "Updateorganizationspendlimit",
+      "tags": [],
+      "summary": "Create or replace the organization's hard spend limit.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/audio_speeches",
+      "operation_id": "usage-audio-speeches",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get audio speeches usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/audio_transcriptions",
+      "operation_id": "usage-audio-transcriptions",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get audio transcriptions usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/code_interpreter_sessions",
+      "operation_id": "usage-code-interpreter-sessions",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get code interpreter sessions usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/completions",
+      "operation_id": "usage-completions",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get completions usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/embeddings",
+      "operation_id": "usage-embeddings",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get embeddings usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/file_search_calls",
+      "operation_id": "usage-file-search-calls",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get file search calls usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/images",
+      "operation_id": "usage-images",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get images usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/moderations",
+      "operation_id": "usage-moderations",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get moderations usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/vector_stores",
+      "operation_id": "usage-vector-stores",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get vector stores usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/usage/web_search_calls",
+      "operation_id": "usage-web-search-calls",
+      "tags": [
+        "Usage"
+      ],
+      "summary": "Get web search calls usage details for the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/users",
+      "operation_id": "list-users",
+      "tags": [
+        "Users"
+      ],
+      "summary": "Lists all of the users in the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/users/{user_id}",
+      "operation_id": "delete-user",
+      "tags": [
+        "Users"
+      ],
+      "summary": "Deletes a user from the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/users/{user_id}",
+      "operation_id": "retrieve-user",
+      "tags": [
+        "Users"
+      ],
+      "summary": "Retrieves a user by their identifier.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/users/{user_id}",
+      "operation_id": "modify-user",
+      "tags": [
+        "Users"
+      ],
+      "summary": "Modifies a user's role in the organization.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/users/{user_id}/roles",
+      "operation_id": "list-user-role-assignments",
+      "tags": [
+        "User organization role assignments"
+      ],
+      "summary": "Lists the organization roles assigned to a user within the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/organization/users/{user_id}/roles",
+      "operation_id": "assign-user-role",
+      "tags": [
+        "User organization role assignments"
+      ],
+      "summary": "Assigns an organization role to a user within the organization.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/organization/users/{user_id}/roles/{role_id}",
+      "operation_id": "unassign-user-role",
+      "tags": [
+        "User organization role assignments"
+      ],
+      "summary": "Unassigns an organization role from a user within the organization.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/users/{user_id}/roles/{role_id}",
+      "operation_id": "retrieve-user-role",
+      "tags": [
+        "User organization role assignments"
+      ],
+      "summary": "Retrieves an organization role assigned to a user.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/projects/{project_id}/groups/{group_id}/roles",
+      "operation_id": "list-project-group-role-assignments",
+      "tags": [
+        "Project group role assignments"
+      ],
+      "summary": "Lists the project roles assigned to a group within a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/projects/{project_id}/groups/{group_id}/roles",
+      "operation_id": "assign-project-group-role",
+      "tags": [
+        "Project group role assignments"
+      ],
+      "summary": "Assigns a project role to a group within a project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/projects/{project_id}/groups/{group_id}/roles/{role_id}",
+      "operation_id": "unassign-project-group-role",
+      "tags": [
+        "Project group role assignments"
+      ],
+      "summary": "Unassigns a project role from a group within a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/projects/{project_id}/groups/{group_id}/roles/{role_id}",
+      "operation_id": "retrieve-project-group-role",
+      "tags": [
+        "Project group role assignments"
+      ],
+      "summary": "Retrieves a project role assigned to a group.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/projects/{project_id}/roles",
+      "operation_id": "list-project-roles",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Lists the roles configured for a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/projects/{project_id}/roles",
+      "operation_id": "create-project-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Creates a custom role for a project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/projects/{project_id}/roles/{role_id}",
+      "operation_id": "delete-project-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Deletes a custom role from a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/projects/{project_id}/roles/{role_id}",
+      "operation_id": "retrieve-project-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Retrieves a project role.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/projects/{project_id}/roles/{role_id}",
+      "operation_id": "update-project-role",
+      "tags": [
+        "Roles"
+      ],
+      "summary": "Updates an existing project role.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/projects/{project_id}/users/{user_id}/roles",
+      "operation_id": "list-project-user-role-assignments",
+      "tags": [
+        "Project user role assignments"
+      ],
+      "summary": "Lists the project roles assigned to a user within a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/projects/{project_id}/users/{user_id}/roles",
+      "operation_id": "assign-project-user-role",
+      "tags": [
+        "Project user role assignments"
+      ],
+      "summary": "Assigns a project role to a user within a project.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/projects/{project_id}/users/{user_id}/roles/{role_id}",
+      "operation_id": "unassign-project-user-role",
+      "tags": [
+        "Project user role assignments"
+      ],
+      "summary": "Unassigns a project role from a user within a project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/projects/{project_id}/users/{user_id}/roles/{role_id}",
+      "operation_id": "retrieve-project-user-role",
+      "tags": [
+        "Project user role assignments"
+      ],
+      "summary": "Retrieves a project role assigned to a user.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/calls",
+      "operation_id": "create-realtime-call",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Create a new Realtime API call over WebRTC and receive the SDP answer needed\nto complete the peer connection.",
+      "content_types": [
+        "application/sdp",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/accept",
+      "operation_id": "accept-realtime-call",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Accept an incoming SIP call and configure the realtime session that will\nhandle it.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/hangup",
+      "operation_id": "hangup-realtime-call",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "End an active Realtime API call, whether it was initiated over SIP or\nWebRTC.",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/refer",
+      "operation_id": "refer-realtime-call",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Transfer an active SIP call to a new destination using the SIP REFER verb.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/calls/{call_id}/reject",
+      "operation_id": "reject-realtime-call",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Decline an incoming SIP call by returning a SIP status code to the caller.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/client_secrets",
+      "operation_id": "create-realtime-client-secret",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Create a Realtime client secret with an associated session configuration.\n\nClient secrets are short-lived tokens that can be passed to a client app,\nsuch as a web frontend or mobile client, which grants access to the Realtime API without\nleaking your main API key. You can configure a custom TTL for each client secret.\n\nYou can also attach session configuration options to the client secret, which will be\napplied to any sessions created using that client secret, but these can also be overridden\nby the client connection.\n\n[Learn more about authentication with client secrets over WebRTC](/docs/guides/realtime-webrtc).\n\nReturns the created client secret and the effective session object. The client secret is a string that looks like `ek_1234`.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_sse"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/sessions",
+      "operation_id": "create-realtime-session",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Create an ephemeral API token for use in client-side applications with the\nRealtime API. Can be configured with the same session parameters as the\n`session.update` client event.\n\nIt responds with a session object, plus a `client_secret` key which contains\na usable ephemeral API token that can be used to authenticate browser clients\nfor the Realtime API.\n\nReturns the created Realtime session object, plus an ephemeral key.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/transcription_sessions",
+      "operation_id": "create-realtime-transcription-session",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Create an ephemeral API token for use in client-side applications with the\nRealtime API specifically for realtime transcriptions. \nCan be configured with the same session parameters as the `transcription_session.update` client event.\n\nIt responds with a session object, plus a `client_secret` key which contains\na usable ephemeral API token that can be used to authenticate browser clients\nfor the Realtime API.\n\nReturns the created Realtime transcription session object, plus an ephemeral key.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/realtime/translations/client_secrets",
+      "operation_id": "create-realtime-translation-client-secret",
+      "tags": [
+        "Realtime"
+      ],
+      "summary": "Create a Realtime translation client secret with an associated translation session configuration.\n\nClient secrets are short-lived tokens that can be passed to a client app,\nsuch as a web frontend or mobile client, which grants access to the Realtime\nTranslation API without leaking your main API key. You can configure a custom\nTTL for each client secret.\n\nReturns the created client secret and the effective translation session object.\nThe client secret is a string that looks like `ek_1234`.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_sse"
+    },
+    {
+      "method": "POST",
+      "path": "/responses",
+      "operation_id": "createResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Creates a model response. Provide [text](/docs/guides/text) or\n[image](/docs/guides/images) inputs to generate [text](/docs/guides/text)\nor [JSON](/docs/guides/structured-outputs) outputs. Have the model call\nyour own [custom code](/docs/guides/function-calling) or use built-in\n[tools](/docs/guides/tools) like [web search](/docs/guides/tools-web-search)\nor [file search](/docs/guides/tools-file-search) to use your own data\nas input for the model's response.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/responses/compact",
+      "operation_id": "Compactconversation",
+      "tags": [],
+      "summary": "Compact a conversation. Returns a compacted response object.\n\nLearn when and how to compact long-running conversations in the [conversation state guide](/docs/guides/conversation-state#managing-the-context-window). For ZDR-compatible compaction details, see [Compaction (advanced)](/docs/guides/conversation-state#compaction-advanced).",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/responses/compact?beta=true",
+      "operation_id": "beta_Compactconversation",
+      "tags": [],
+      "summary": "Compact a conversation. Returns a compacted response object.\n\nLearn when and how to compact long-running conversations in the [conversation state guide](/docs/guides/conversation-state#managing-the-context-window). For ZDR-compatible compaction details, see [Compaction (advanced)](/docs/guides/conversation-state#compaction-advanced).",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/responses/input_tokens",
+      "operation_id": "Getinputtokencounts",
+      "tags": [],
+      "summary": "Returns input token counts of the request.\n\nReturns an object with `object` set to `response.input_tokens` and an `input_tokens` count.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/responses/input_tokens?beta=true",
+      "operation_id": "beta_Getinputtokencounts",
+      "tags": [],
+      "summary": "Returns input token counts of the request.\n\nReturns an object with `object` set to `response.input_tokens` and an `input_tokens` count.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/responses/{response_id}",
+      "operation_id": "deleteResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Deletes a model response with the given ID.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/responses/{response_id}",
+      "operation_id": "getResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Retrieves a model response with the given ID.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/responses/{response_id}/cancel",
+      "operation_id": "cancelResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Cancels a model response with the given ID. Only responses created with\nthe `background` parameter set to `true` can be cancelled. \n[Learn more](/docs/guides/background).\n",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "POST",
+      "path": "/responses/{response_id}/cancel?beta=true",
+      "operation_id": "beta_cancelResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Cancels a model response with the given ID. Only responses created with\nthe `background` parameter set to `true` can be cancelled. \n[Learn more](/docs/guides/background).\n",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/responses/{response_id}/input_items",
+      "operation_id": "listInputItems",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Returns a list of input items for a given response.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/responses/{response_id}/input_items?beta=true",
+      "operation_id": "beta_listInputItems",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Returns a list of input items for a given response.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/responses/{response_id}?beta=true",
+      "operation_id": "beta_deleteResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Deletes a model response with the given ID.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/responses/{response_id}?beta=true",
+      "operation_id": "beta_getResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Retrieves a model response with the given ID.\n",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/responses?beta=true",
+      "operation_id": "beta_createResponse",
+      "tags": [
+        "Responses"
+      ],
+      "summary": "Creates a model response. Provide [text](/docs/guides/text) or\n[image](/docs/guides/images) inputs to generate [text](/docs/guides/text)\nor [JSON](/docs/guides/structured-outputs) outputs. Have the model call\nyour own [custom code](/docs/guides/function-calling) or use built-in\n[tools](/docs/guides/tools) like [web search](/docs/guides/tools-web-search)\nor [file search](/docs/guides/tools-file-search) to use your own data\nas input for the model's response.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/skills",
+      "operation_id": "ListSkills",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "List all skills for the current project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/skills",
+      "operation_id": "CreateSkill",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Create a new skill.",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "DELETE",
+      "path": "/skills/{skill_id}",
+      "operation_id": "DeleteSkill",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Delete a skill by its ID.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/skills/{skill_id}",
+      "operation_id": "GetSkill",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Get a skill by its ID.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/skills/{skill_id}",
+      "operation_id": "UpdateSkillDefaultVersion",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Update the default version pointer for a skill.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/skills/{skill_id}/content",
+      "operation_id": "GetSkillContent",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Download a skill zip bundle by its ID.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/skills/{skill_id}/versions",
+      "operation_id": "ListSkillVersions",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "List skill versions for a skill.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/skills/{skill_id}/versions",
+      "operation_id": "CreateSkillVersion",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Create a new immutable skill version.",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "DELETE",
+      "path": "/skills/{skill_id}/versions/{version}",
+      "operation_id": "DeleteSkillVersion",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Delete a skill version.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/skills/{skill_id}/versions/{version}",
+      "operation_id": "GetSkillVersion",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Get a specific skill version.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/skills/{skill_id}/versions/{version}/content",
+      "operation_id": "GetSkillVersionContent",
+      "tags": [
+        "Skills"
+      ],
+      "summary": "Download a skill version zip bundle.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads",
+      "operation_id": "createThread",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Create a thread.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/runs",
+      "operation_id": "createThreadAndRun",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Create a thread and run it in one request.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/threads/{thread_id}",
+      "operation_id": "deleteThread",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Delete a thread.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/{thread_id}",
+      "operation_id": "getThread",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Retrieves a thread.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/{thread_id}",
+      "operation_id": "modifyThread",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Modifies a thread.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/{thread_id}/messages",
+      "operation_id": "listMessages",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Returns a list of messages for a given thread.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/{thread_id}/messages",
+      "operation_id": "createMessage",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Create a message.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/threads/{thread_id}/messages/{message_id}",
+      "operation_id": "deleteMessage",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Deletes a message.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/{thread_id}/messages/{message_id}",
+      "operation_id": "getMessage",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Retrieve a message.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/{thread_id}/messages/{message_id}",
+      "operation_id": "modifyMessage",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Modifies a message.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs",
+      "operation_id": "listRuns",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Returns a list of runs belonging to a thread.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs",
+      "operation_id": "createRun",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Create a run.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs/{run_id}",
+      "operation_id": "getRun",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Retrieves a run.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs/{run_id}",
+      "operation_id": "modifyRun",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Modifies a run.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs/{run_id}/cancel",
+      "operation_id": "cancelRun",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Cancels a run that is `in_progress`.",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs/{run_id}/steps",
+      "operation_id": "listRunSteps",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Returns a list of run steps belonging to a run.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/{thread_id}/runs/{run_id}/steps/{step_id}",
+      "operation_id": "getRunStep",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "Retrieves a run step.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/threads/{thread_id}/runs/{run_id}/submit_tool_outputs",
+      "operation_id": "submitToolOuputsToRun",
+      "tags": [
+        "Assistants"
+      ],
+      "summary": "When a run has the `status: \"requires_action\"` and `required_action.type` is `submit_tool_outputs`, this endpoint can be used to submit the outputs from the tool calls once they're all completed. All outputs must be submitted in a single request.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/uploads",
+      "operation_id": "createUpload",
+      "tags": [
+        "Uploads"
+      ],
+      "summary": "Creates an intermediate [Upload](/docs/api-reference/uploads/object) object\nthat you can add [Parts](/docs/api-reference/uploads/part-object) to.\nCurrently, an Upload can accept at most 8 GB in total and expires after an\nhour after you create it.\n\nOnce you complete the Upload, we will create a\n[File](/docs/api-reference/files/object) object that contains all the parts\nyou uploaded. This File is usable in the rest of our platform as a regular\nFile object.\n\nFor certain `purpose` values, the correct `mime_type` must be specified. \nPlease refer to documentation for the \n[supported MIME types for your use case](/docs/assistants/tools/file-search#supported-files).\n\nFor guidance on the proper filename extensions for each purpose, please\nfollow the documentation on [creating a\nFile](/docs/api-reference/files/create).\n\nReturns the Upload object with status `pending`.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/uploads/{upload_id}/cancel",
+      "operation_id": "cancelUpload",
+      "tags": [
+        "Uploads"
+      ],
+      "summary": "Cancels the Upload. No Parts may be added after an Upload is cancelled.\n\nReturns the Upload object with status `cancelled`.\n",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "POST",
+      "path": "/uploads/{upload_id}/complete",
+      "operation_id": "completeUpload",
+      "tags": [
+        "Uploads"
+      ],
+      "summary": "Completes the [Upload](/docs/api-reference/uploads/object). \n\nWithin the returned Upload object, there is a nested [File](/docs/api-reference/files/object) object that is ready to use in the rest of the platform.\n\nYou can specify the order of the Parts by passing in an ordered list of the Part IDs.\n\nThe number of bytes uploaded upon completion must match the number of bytes initially specified when creating the Upload object. No Parts may be added after an Upload is completed.\nReturns the Upload object with status `completed`, including an additional `file` property containing the created usable File object.\n",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/uploads/{upload_id}/parts",
+      "operation_id": "addUploadPart",
+      "tags": [
+        "Uploads"
+      ],
+      "summary": "Adds a [Part](/docs/api-reference/uploads/part-object) to an [Upload](/docs/api-reference/uploads/object) object. A Part represents a chunk of bytes from the file you are trying to upload. \n\nEach Part can be at most 64 MB, and you can add Parts until you hit the Upload maximum of 8 GB.\n\nIt is possible to add multiple Parts in parallel. You can decide the intended order of the Parts when you [complete the Upload](/docs/api-reference/uploads/complete).\n",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "GET",
+      "path": "/vector_stores",
+      "operation_id": "listVectorStores",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Returns a list of vector stores.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/vector_stores",
+      "operation_id": "createVectorStore",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Create a vector store.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/vector_stores/{vector_store_id}",
+      "operation_id": "deleteVectorStore",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Delete a vector store.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}",
+      "operation_id": "getVectorStore",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Retrieves a vector store.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}",
+      "operation_id": "modifyVectorStore",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Modifies a vector store.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/file_batches",
+      "operation_id": "createVectorStoreFileBatch",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Create a vector store file batch.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/file_batches/{batch_id}",
+      "operation_id": "getVectorStoreFileBatch",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Retrieves a vector store file batch.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/file_batches/{batch_id}/cancel",
+      "operation_id": "cancelVectorStoreFileBatch",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Cancel a vector store file batch. This attempts to cancel the processing of files in this batch as soon as possible.",
+      "content_types": [],
+      "transport": "unknown"
+    },
+    {
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/file_batches/{batch_id}/files",
+      "operation_id": "listFilesInVectorStoreBatch",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Returns a list of vector store files in a batch.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/files",
+      "operation_id": "listVectorStoreFiles",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Returns a list of vector store files.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/files",
+      "operation_id": "createVectorStoreFile",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Create a vector store file by attaching a [File](/docs/api-reference/files) to a [vector store](/docs/api-reference/vector-stores/object).",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "DELETE",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}",
+      "operation_id": "deleteVectorStoreFile",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Delete a vector store file. This will remove the file from the vector store but the file itself will not be deleted. To delete the file, use the [delete file](/docs/api-reference/files/delete) endpoint.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}",
+      "operation_id": "getVectorStoreFile",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Retrieves a vector store file.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}",
+      "operation_id": "updateVectorStoreFileAttributes",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Update attributes on a vector store file.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/vector_stores/{vector_store_id}/files/{file_id}/content",
+      "operation_id": "retrieveVectorStoreFileContent",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Retrieve the parsed contents of a vector store file.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/vector_stores/{vector_store_id}/search",
+      "operation_id": "searchVectorStore",
+      "tags": [
+        "Vector stores"
+      ],
+      "summary": "Search a vector store for relevant chunks based on a query and file attributes filter.",
+      "content_types": [
+        "application/json"
+      ],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/videos",
+      "operation_id": "ListVideos",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "List recently generated videos for the current project.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/videos",
+      "operation_id": "createVideo",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Create a new video generation job from a prompt and optional reference assets.",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "POST",
+      "path": "/videos/characters",
+      "operation_id": "CreateVideoCharacter",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Create a character from an uploaded video.",
+      "content_types": [
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/characters/{character_id}",
+      "operation_id": "GetVideoCharacter",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Fetch a character.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "POST",
+      "path": "/videos/edits",
+      "operation_id": "CreateVideoEdit",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Create a new video generation job by editing a source video or existing generated video.",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "POST",
+      "path": "/videos/extensions",
+      "operation_id": "CreateVideoExtend",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Create an extension of a completed video.",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    },
+    {
+      "method": "DELETE",
+      "path": "/videos/{video_id}",
+      "operation_id": "DeleteVideo",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Permanently delete a completed or failed video and its stored assets.",
+      "content_types": [],
+      "transport": "http_sse"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/{video_id}",
+      "operation_id": "GetVideo",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Fetch the latest metadata for a generated video.",
+      "content_types": [],
+      "transport": "http_json"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/{video_id}/content",
+      "operation_id": "RetrieveVideoContent",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Download the generated video bytes or a derived preview asset.\n\nStreams the rendered video content for the specified video job.",
+      "content_types": [],
+      "transport": "http_sse"
+    },
+    {
+      "method": "POST",
+      "path": "/videos/{video_id}/remix",
+      "operation_id": "CreateVideoRemix",
+      "tags": [
+        "Videos"
+      ],
+      "summary": "Create a remix of a completed video using a refreshed prompt.",
+      "content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "transport": "http_multipart"
+    }
+  ],
+  "coding_agent_schema_fields": [
+    {
+      "schema": "CreateChatCompletionRequest",
+      "field_count": 28,
+      "fields": [
+        {
+          "name": "audio",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "name": "frequency_penalty",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "name": "function_call",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "functions",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "logit_bias",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "name": "logprobs",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "name": "max_completion_tokens",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "max_tokens",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "messages",
+          "required": true,
+          "type": "array"
+        },
+        {
+          "name": "modalities",
+          "required": false,
+          "ref": "ResponseModalities"
+        },
+        {
+          "name": "model",
+          "required": true,
+          "ref": "ModelIdsShared"
+        },
+        {
+          "name": "moderation",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "n",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "parallel_tool_calls",
+          "required": false,
+          "ref": "ParallelToolCalls"
+        },
+        {
+          "name": "prediction",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "presence_penalty",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "name": "reasoning_effort",
+          "required": false,
+          "ref": "ReasoningEffort"
+        },
+        {
+          "name": "response_format",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "seed",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "stop",
+          "required": false,
+          "ref": "StopConfiguration"
+        },
+        {
+          "name": "store",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "name": "stream",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "name": "stream_options",
+          "required": false,
+          "ref": "ChatCompletionStreamOptions"
+        },
+        {
+          "name": "tool_choice",
+          "required": false,
+          "ref": "ChatCompletionToolChoiceOption"
+        },
+        {
+          "name": "tools",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "top_logprobs",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "verbosity",
+          "required": false,
+          "ref": "Verbosity"
+        },
+        {
+          "name": "web_search_options",
+          "required": false,
+          "type": "object"
+        }
+      ]
+    },
+    {
+      "schema": "CreateResponse",
+      "field_count": 13,
+      "fields": [
+        {
+          "name": "context_management",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "conversation",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "include",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "input",
+          "required": false,
+          "ref": "InputParam"
+        },
+        {
+          "name": "instructions",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "max_output_tokens",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "moderation",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "parallel_tool_calls",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "reasoning",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "store",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "stream",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "stream_options",
+          "required": false,
+          "ref": "ResponseStreamOptions"
+        },
+        {
+          "name": "truncation",
+          "required": false,
+          "union": true
+        }
+      ]
+    },
+    {
+      "schema": "CreateEmbeddingRequest",
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "dimensions",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "encoding_format",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "float",
+            "base64"
+          ]
+        },
+        {
+          "name": "input",
+          "required": true,
+          "union": true
+        },
+        {
+          "name": "model",
+          "required": true,
+          "union": true
+        },
+        {
+          "name": "user",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "schema": "CreateSpeechRequest",
+      "field_count": 7,
+      "fields": [
+        {
+          "name": "input",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "instructions",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "model",
+          "required": true,
+          "union": true
+        },
+        {
+          "name": "response_format",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "mp3",
+            "opus",
+            "aac",
+            "flac",
+            "wav",
+            "pcm"
+          ]
+        },
+        {
+          "name": "speed",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "name": "stream_format",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "sse",
+            "audio"
+          ]
+        },
+        {
+          "name": "voice",
+          "required": true,
+          "ref": "VoiceIdsOrCustomVoice"
+        }
+      ]
+    },
+    {
+      "schema": "CreateTranscriptionRequest",
+      "field_count": 12,
+      "fields": [
+        {
+          "name": "chunking_strategy",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "file",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "include",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "known_speaker_names",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "known_speaker_references",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "language",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "model",
+          "required": true,
+          "union": true
+        },
+        {
+          "name": "prompt",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "response_format",
+          "required": false,
+          "ref": "AudioResponseFormat"
+        },
+        {
+          "name": "stream",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "temperature",
+          "required": false,
+          "type": "number"
+        },
+        {
+          "name": "timestamp_granularities",
+          "required": false,
+          "type": "array"
+        }
+      ]
+    },
+    {
+      "schema": "CreateFileRequest",
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "expires_after",
+          "required": false,
+          "ref": "FileExpirationAfter"
+        },
+        {
+          "name": "file",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "purpose",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "assistants",
+            "batch",
+            "fine-tune",
+            "vision",
+            "user_data",
+            "evals"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "ListModelsResponse",
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "data",
+          "required": true,
+          "type": "array"
+        },
+        {
+          "name": "object",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "list"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "Model",
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "created",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "name": "id",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "object",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "model"
+          ]
+        },
+        {
+          "name": "owned_by",
+          "required": true,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "schema": "ChatCompletionRequestMessage",
+      "field_count": 0,
+      "fields": []
+    },
+    {
+      "schema": "ChatCompletionTool",
+      "field_count": 2,
+      "fields": [
+        {
+          "name": "function",
+          "required": true,
+          "ref": "FunctionObject"
+        },
+        {
+          "name": "type",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "function"
+          ]
+        }
+      ]
+    }
+  ],
+  "coding_agent_priority_endpoints": [
+    "POST /chat/completions",
+    "POST /responses",
+    "POST /embeddings",
+    "GET /models",
+    "POST /audio/speech",
+    "POST /audio/transcriptions",
+    "POST /files",
+    "GET /files"
+  ],
+  "notes": [
+    "Compact inventory only; full OpenAPI is not vendored (~2.8 MiB YAML).",
+    "OpenAI OpenAPI path templates omit the /v1 prefix (API base URL includes it).",
+    "OpenRouter is NOT treated as a full OpenAI platform clone.",
+    "Regenerate with generate_inventory.py from a local OpenAPI file.",
+    "No network I/O in the generator or in unit tests."
+  ]
+}
