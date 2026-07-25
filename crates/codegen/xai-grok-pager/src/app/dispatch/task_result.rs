@@ -1322,7 +1322,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 else {
                     return false;
                 };
-                state.set_status(provider, status);
+                state.set_status(&provider, status);
                 true
             });
             if !applied && let Some(error) = fallback_error {

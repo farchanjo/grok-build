@@ -151,7 +151,7 @@ pub(in crate::app::dispatch) fn dispatch_open_howto_guides(app: &mut AppView) ->
 /// the modal can mount. This is the only TUI authentication surface.
 pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
-    use crate::views::providers_modal::{ProviderKind, ProviderModalState};
+    use crate::views::providers_modal::ProviderModalState;
 
     let mut effects = Vec::new();
     let id = match app.active_view {
@@ -220,7 +220,7 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
     use crate::app::actions::{ProviderApiKey, ProviderOperation};
     use crate::app::dispatch::auth::begin_credential_repair;
     use crate::views::modal::ActiveModal;
-    use crate::views::providers_modal::{ProviderCommand, ProviderKind, ProviderStatus};
+    use crate::views::providers_modal::{ProviderCommand, ProviderStatus};
 
     if command == ProviderCommand::LoginXai {
         return crate::app::dispatch::auth::dispatch_login(app);
@@ -256,7 +256,7 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::Connect(provider) | ProviderCommand::ReplaceKey(provider) => {
                 let Some(api_key) = state.take_submitted_secret(&provider) else {
                     state.set_status(
-                        provider,
+                        &provider,
                         ProviderStatus::Error("No API key was submitted".to_owned()),
                     );
                     return vec![];

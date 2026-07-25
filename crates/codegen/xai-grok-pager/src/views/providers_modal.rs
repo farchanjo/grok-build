@@ -277,8 +277,8 @@ impl ProviderModalState {
     }
 
     /// Called by the provider backend after a status probe or connection task.
-    pub fn set_status(&mut self, provider: ProviderKind, status: ProviderStatus) {
-        if let Some(idx) = self.provider_index(&provider) {
+    pub fn set_status(&mut self, provider: &ProviderKind, status: ProviderStatus) {
+        if let Some(idx) = self.provider_index(provider) {
             if idx >= self.statuses.len() {
                 self.statuses.resize(idx + 1, ProviderStatus::Missing);
             }
@@ -398,7 +398,7 @@ fn handle_openai_choice(
             }
             // ChatGPT OAuth (browser / device)
             state.mode = ProviderModalMode::Browse;
-            state.set_status(ProviderKind::OpenAi, ProviderStatus::Connecting);
+            state.set_status(&ProviderKind::OpenAi, ProviderStatus::Connecting);
             Some(ProviderModalOutcome::Command(ProviderCommand::LoginCodex))
         }
         _ => Some(ProviderModalOutcome::Unchanged),
@@ -433,10 +433,12 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
                 };
                 state.submitted_secret = Some((provider.clone(), secret));
                 let command = match state.status(&provider) {
-                    ProviderStatus::Connected { .. } => ProviderCommand::ReplaceKey(provider.clone()),
+                    ProviderStatus::Connected { .. } => {
+                        ProviderCommand::ReplaceKey(provider.clone())
+                    }
                     _ => ProviderCommand::Connect(provider.clone()),
                 };
-                state.set_status(provider, ProviderStatus::Connecting);
+                state.set_status(&provider, ProviderStatus::Connecting);
                 state.mode = ProviderModalMode::Browse;
                 return ProviderModalOutcome::Command(command);
             }
@@ -462,7 +464,7 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
         KeyCode::Enter | KeyCode::Char('c') if key.modifiers.is_empty() => start_connect(state),
         KeyCode::Char('t') if key.modifiers.is_empty() => {
             let provider = state.selected_provider();
-            state.set_status(provider.clone(), ProviderStatus::Connecting);
+            state.set_status(&provider, ProviderStatus::Connecting);
             ProviderModalOutcome::Command(ProviderCommand::Test(provider))
         }
         KeyCode::Char('d') if key.modifiers.is_empty() => {
@@ -474,7 +476,7 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
                 };
                 return ProviderModalOutcome::Changed;
             }
-            state.set_status(provider.clone(), ProviderStatus::Missing);
+            state.set_status(&provider, ProviderStatus::Missing);
             // OpenAI: clear ChatGPT OAuth and/or API key (mutual exclusion store).
             ProviderModalOutcome::Command(if provider == ProviderKind::OpenAi {
                 ProviderCommand::LogoutCodex
@@ -513,7 +515,7 @@ fn start_connect(state: &mut ProviderModalState) -> ProviderModalOutcome {
     } else if matches!(state.status(&provider), ProviderStatus::Connected { .. }) {
         ProviderModalOutcome::Command(ProviderCommand::RefreshStatus(provider))
     } else {
-        state.set_status(provider, ProviderStatus::Connecting);
+        state.set_status(&provider, ProviderStatus::Connecting);
         ProviderModalOutcome::Command(ProviderCommand::LoginCodex)
     }
 }
@@ -789,7 +791,9 @@ mod tests {
             &ProviderStatus::Connecting
         );
         assert_eq!(
-            state.take_submitted_secret(&ProviderKind::OpenAi).as_deref(),
+            state
+                .take_submitted_secret(&ProviderKind::OpenAi)
+                .as_deref(),
             Some("sk-secret")
         );
         assert!(state.take_submitted_secret(&ProviderKind::OpenAi).is_none());
@@ -837,7 +841,7 @@ mod tests {
     fn disconnect_and_status_transitions_are_explicit() {
         let mut state = ProviderModalState::new();
         state.set_status(
-            ProviderKind::OpenRouter,
+            &ProviderKind::OpenRouter,
             ProviderStatus::Connected {
                 detail: Some("ok".into()),
             },
@@ -852,7 +856,7 @@ mod tests {
             &ProviderStatus::Missing
         );
         state.set_status(
-            ProviderKind::OpenRouter,
+            &ProviderKind::OpenRouter,
             ProviderStatus::Error("invalid key".into()),
         );
         assert_eq!(
