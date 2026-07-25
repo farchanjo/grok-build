@@ -288,9 +288,12 @@ mod tests {
                     .unwrap_or_default();
                 assert!(content_type.starts_with("multipart/form-data; boundary="));
                 let body = String::from_utf8(body.to_vec()).unwrap();
+                let body_lower = body.to_ascii_lowercase();
                 assert!(body.contains("name=\"sdp\""));
+                assert!(body_lower.contains("content-type: application/sdp"));
                 assert!(body.contains("v=0"));
                 assert!(body.contains("name=\"session\""));
+                assert!(body_lower.contains("content-type: application/json"));
                 assert!(body.contains("gpt-realtime"));
                 Response::builder()
                     .status(StatusCode::CREATED)
@@ -318,7 +321,9 @@ mod tests {
                     operation_id: "create-realtime-call",
                     idempotent: false,
                 },
-                MultipartFiles::new(),
+                MultipartFiles::new()
+                    .content_type("sdp", "application/sdp")
+                    .content_type("session", "application/json"),
             )
             .await
             .unwrap();

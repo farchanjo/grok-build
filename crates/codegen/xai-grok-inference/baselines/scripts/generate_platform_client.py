@@ -285,6 +285,15 @@ def content_schema(content: dict) -> tuple[Any|None, list[str]]:
         return first.get('schema'), media
     return None, media
 
+def multipart_content_types(content: dict) -> dict[str, str]:
+    multipart = content.get('multipart/form-data') or {}
+    encoding = multipart.get('encoding') or {}
+    return {
+        field: details['contentType']
+        for field, details in encoding.items()
+        if isinstance(details, dict) and isinstance(details.get('contentType'), str)
+    }
+
 def classify_transports(req_media, resp_media) -> list[str]:
     t=set()
     for mt in list(req_media)+list(resp_media):
@@ -322,6 +331,7 @@ def gen_provider(namespace: str, openapi: dict, ops_path: Path, types_path: Path
             rb=op.get('requestBody') or {}
             req_content=rb.get('content') or {}
             req_schema, req_media = content_schema(req_content)
+            multipart_types = multipart_content_types(req_content)
             resp_media=[]; resp_schema=None
             for code, resp in (op.get('responses') or {}).items():
                 content=(resp or {}).get('content') or {}
@@ -464,6 +474,8 @@ pub struct {resp_sse_ty} {{
                 meth.append(f'            operation_id: {json.dumps(op_id)}, idempotent: {str(m in ("GET","HEAD")).lower()},')
                 meth.append('        };')
                 if mode=='multipart':
+                    for field, content_type in sorted(multipart_types.items()):
+                        meth.append(f'        let files = files.content_type({json.dumps(field)}, {json.dumps(content_type)});')
                     meth.append('        let raw = self.transport.execute_multipart(spec, files).await?;')
                     meth.append(f'        serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))')
                 elif mode=='binary':

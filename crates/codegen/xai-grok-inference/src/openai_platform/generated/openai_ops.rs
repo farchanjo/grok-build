@@ -3356,6 +3356,8 @@ impl crate::openai_platform::client::OpenAiClient {
             operation_id: "create-realtime-call",
             idempotent: false,
         };
+        let files = files.content_type("sdp", "application/sdp");
+        let files = files.content_type("session", "application/json");
         let raw = self.transport.execute_multipart(spec, files).await?;
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
     }

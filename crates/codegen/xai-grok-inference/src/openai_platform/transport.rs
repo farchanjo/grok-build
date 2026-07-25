@@ -203,6 +203,8 @@ pub struct MultipartFiles {
     pub files: Vec<(String, std::path::PathBuf)>,
     /// Additional text fields (field name → value).
     pub text_fields: Vec<(String, String)>,
+    /// Optional per-field MIME types derived from the operation schema.
+    pub content_types: BTreeMap<String, String>,
 }
 
 impl MultipartFiles {
@@ -217,6 +219,11 @@ impl MultipartFiles {
 
     pub fn text(mut self, field: impl Into<String>, value: impl Into<String>) -> Self {
         self.text_fields.push((field.into(), value.into()));
+        self
+    }
+
+    pub fn content_type(mut self, field: impl Into<String>, mime: impl Into<String>) -> Self {
+        self.content_types.insert(field.into(), mime.into());
         self
     }
 }
@@ -385,16 +392,18 @@ impl PlatformTransport {
         let mut form = reqwest::multipart::Form::new();
         // JSON body fields flattened into form text parts when present.
         if let Some(Value::Object(map)) = &spec.body {
-            for (k, v) in map {
-                let s = match v {
-                    Value::String(s) => s.clone(),
+            for (field, value) in map {
+                let text = match value {
+                    Value::String(text) => text.clone(),
                     other => other.to_string(),
                 };
-                form = form.text(k.clone(), s);
+                let part = multipart_text_part(field, text, &files.content_types)?;
+                form = form.part(field.clone(), part);
             }
         }
         for (field, value) in &files.text_fields {
-            form = form.text(field.clone(), value.clone());
+            let part = multipart_text_part(field, value.clone(), &files.content_types)?;
+            form = form.part(field.clone(), part);
         }
         for (field, path) in &files.files {
             let file_name = path
@@ -414,6 +423,7 @@ impl PlatformTransport {
                 });
             }
             let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
+            let part = multipart_part_content_type(field, part, &files.content_types)?;
             form = form.part(field.clone(), part);
         }
 
@@ -781,6 +791,29 @@ impl PlatformTransport {
                 serde_json::from_slice(&bytes).map_err(|e| PlatformError::Decode(e.to_string()))?;
             return Ok(ResponseBody::Json(value));
         }
+    }
+}
+
+fn multipart_text_part(
+    field: &str,
+    value: String,
+    content_types: &BTreeMap<String, String>,
+) -> PlatformResult<reqwest::multipart::Part> {
+    multipart_part_content_type(field, reqwest::multipart::Part::text(value), content_types)
+}
+
+fn multipart_part_content_type(
+    field: &str,
+    part: reqwest::multipart::Part,
+    content_types: &BTreeMap<String, String>,
+) -> PlatformResult<reqwest::multipart::Part> {
+    match content_types.get(field) {
+        Some(content_type) => part.mime_str(content_type).map_err(|error| {
+            PlatformError::InvalidRequest(format!(
+                "multipart field `{field}` content type: {error}"
+            ))
+        }),
+        None => Ok(part),
     }
 }
 
