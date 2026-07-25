@@ -1,4 +1,8 @@
 /target
+/target-*
 /target-dev
+/.codex-protoc-wrapper
+**/__pycache__/
+**/*.pyc
 **/*.rs.bk
 .DS_Store
