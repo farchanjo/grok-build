@@ -1303,10 +1303,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             provider,
             status,
         } => {
+            use super::auth::strip_trailing_auth_error_blocks;
+            use super::queue::{maybe_drain_queue, note_peek_page_flip};
+            use crate::scrollback::block::RenderBlock;
+            use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+
             let fallback_error = match &status {
-                crate::views::providers_modal::ProviderStatus::Error(error) => Some(error.clone()),
+                ProviderStatus::Error(error) => Some(error.clone()),
                 _ => None,
             };
+            let connected = matches!(status, ProviderStatus::Connected { .. });
             let applied = app.agents.get_mut(&agent_id).is_some_and(|agent| {
                 let Some(crate::views::modal::ActiveModal::Providers { state }) =
                     agent.active_modal.as_mut()
@@ -1319,7 +1325,46 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if !applied && let Some(error) = fallback_error {
                 app.show_toast(&format!("Provider action failed: {error}"));
             }
-            vec![]
+
+            // Same-provider successful connect/test: resubmit a prompt stashed
+            // for that provider only. Sibling providers never match.
+            if !connected {
+                return vec![];
+            }
+            let provider_id = match provider {
+                ProviderKind::Xai => "xai",
+                ProviderKind::OpenAi => "openai",
+                ProviderKind::OpenRouter => "openrouter",
+            };
+            let mut retry_effects = Vec::new();
+            let mut page_flips = Vec::new();
+            for agent in app.agents.values_mut() {
+                let Some(stashed) = agent.reauth_stashed_prompt.take() else {
+                    continue;
+                };
+                // Accept any generation for this provider: the repair is the
+                // successful credential write/test; generation only prevents
+                // sibling-provider races.
+                if stashed.provider_id != provider_id {
+                    agent.reauth_stashed_prompt = Some(stashed);
+                    continue;
+                }
+                strip_trailing_auth_error_blocks(agent);
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Reconnected {}. Retrying\u{2026}",
+                    provider.label()
+                )));
+                agent
+                    .session
+                    .enqueue_in_flight_prompt_front(stashed.prompt);
+                let drain = maybe_drain_queue(agent);
+                retry_effects.extend(drain.effects);
+                page_flips.push((agent.session.id, drain.page_flip_entry));
+            }
+            for (id, page_flip_entry) in page_flips {
+                note_peek_page_flip(app, id, page_flip_entry);
+            }
+            retry_effects
         }
     }
 }

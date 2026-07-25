@@ -1,6 +1,9 @@
 //! Prompt and bash-command submission dispatchers and reload-window helpers.
 
-use super::auth::{scrollback_has_recent_context_too_large, scrollback_has_recent_reauth_prompt};
+use super::auth::{
+    scrollback_has_recent_context_too_large, scrollback_has_recent_reauth_prompt,
+    scrollback_recent_credential_scope,
+};
 use super::billing::is_credit_limit_error;
 use super::ctx::with_active_agent;
 use super::interject;
@@ -1239,10 +1242,9 @@ pub(super) fn handle_prompt_response(
         // PromptResponse, detect the free-usage code from the prompt error
         // itself — the flattened 429 body embeds it.
         let free_usage_blocked = agent.session.free_usage_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| xai_grok_shell::inference::error::is_free_usage_exhausted_error(e));
+            || result.as_ref().err().is_some_and(|e| {
+                xai_grok_shell::inference::error::is_free_usage_exhausted_error(e)
+            });
         let model_incompatible = agent.session.model_incompatible;
         // Context overflow: the RetryState handler already pushed the actionable
         // block, so the generic TurnFailed + error toast are redundant. Derived
@@ -1294,8 +1296,10 @@ pub(super) fn handle_prompt_response(
         if credit_limit_blocked {
             agent.credit_limit_stashed_prompt = agent.session.in_flight_prompt.clone();
         }
-        // Stash for AuthComplete after 401. Prefer in_flight; fall back to
-        // compact_held (cleared for cancel-rewind during auto-compact). Skip if both None.
+        // Stash for credential repair resubmit. Prefer in_flight; fall back to
+        // compact_held (cleared for cancel-rewind during auto-compact). Key by
+        // provider id + generation when the failure is provider-scoped so a
+        // sibling provider reconnect cannot resubmit.
         if reauth_prompted {
             let held = agent
                 .session
@@ -1303,7 +1307,15 @@ pub(super) fn handle_prompt_response(
                 .clone()
                 .or_else(|| agent.session.compact_held_prompt.clone());
             if let Some(prompt) = held {
-                agent.reauth_stashed_prompt = Some(prompt);
+                let (provider_id, generation) =
+                    scrollback_recent_credential_scope(&agent.scrollback)
+                        .unwrap_or(("xai".to_string(), 0));
+                agent.reauth_stashed_prompt =
+                    Some(crate::app::agent::ProviderScopedStashedPrompt {
+                        provider_id,
+                        credential_generation: generation,
+                        prompt,
+                    });
             }
         }
 

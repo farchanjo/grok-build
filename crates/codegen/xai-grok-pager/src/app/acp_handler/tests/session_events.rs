@@ -496,6 +496,9 @@
                     provider_id: "openrouter".into(),
                     provider_name: "OpenRouter".into(),
                     failed_model_id: Some("moonshotai/kimi-k2".into()),
+                    credential_kind: Default::default(),
+                    recommended_action: Default::default(),
+                    credential_generation: 1,
                     http_status: Some(401),
                     request_id: None,
                     generation_id: Some("gen-test-moonshot-401".into()),
@@ -515,9 +518,13 @@
                 provider_id,
                 provider_name,
                 failed_model_id,
+                credential_kind,
+                credential_generation,
             } => {
                 assert_eq!(provider_id, "openrouter");
                 assert_eq!(provider_name, "OpenRouter");
+                assert_eq!(credential_kind.as_deref(), Some("api_key"));
+                assert_eq!(*credential_generation, Some(1));
                 assert_eq!(failed_model_id.as_deref(), Some("moonshotai/kimi-k2"));
             }
             other => panic!("expected ProviderCredentialRequired, got {other:?}"),

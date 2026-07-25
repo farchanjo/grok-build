@@ -85,18 +85,16 @@ pub enum SessionEvent {
         /// Used to match known error patterns without fragile string matching.
         error_type: Option<String>,
     },
-    /// The server rejected the credentials (401 / auth error) and automatic
-    /// recovery was exhausted. Rendered as a prominent call-to-action that
-    /// points the user at `/login` to re-authenticate, replacing the raw
-    /// "Retry failed: Unauthorized (401) …" dump.
+    /// The server rejected first-party xAI session credentials (401 / auth
+    /// error) and automatic recovery was exhausted. Points the user at
+    /// `/providers` to reconnect xAI — never at global `/login`.
     ///
-    /// Reserved for first-party / session-token auth. Provider API-key
-    /// rejections use [`Self::ProviderCredentialRequired`] so the repair
-    /// path names the configured provider and never suggests `/login`.
+    /// Third-party and ChatGPT OAuth rejections use
+    /// [`Self::ProviderCredentialRequired`] so the repair path names the
+    /// configured provider.
     ReAuthRequired,
-    /// A configured third-party provider (OpenRouter, OpenAI, …) rejected its
-    /// API key. Points the user at `/providers` for that provider only — never
-    /// at global `/login` or xAI OAuth.
+    /// A configured provider rejected its credentials. Points the user at
+    /// `/providers` for that provider only — never at global `/login`.
     ProviderCredentialRequired {
         /// Stable provider slug (`openrouter`, `openai`, …).
         provider_id: String,
@@ -104,6 +102,10 @@ pub enum SessionEvent {
         provider_name: String,
         /// Catalog / routed model that failed, when known.
         failed_model_id: Option<String>,
+        /// `"api_key"` or `"oauth"` (structured; optional for legacy replay).
+        credential_kind: Option<String>,
+        /// Race-safe generation for blocked-prompt resumption.
+        credential_generation: Option<u64>,
     },
     /// Terminal context overflow — ideally unreachable, since auto-compaction should
     /// shrink the conversation first; a safeguard for when it didn't (estimate drift
@@ -243,19 +245,24 @@ impl SessionEvent {
                 }
             }
             SessionEvent::ReAuthRequired => {
-                "Authentication required \u{2014} your session has expired or your \
-                 credentials were rejected. Run /login to re-authenticate, then resend \
-                 your message."
-                    .to_string()
+                xai_grok_shell::extensions::notification::xai_session_repair_message()
             }
             SessionEvent::ProviderCredentialRequired {
                 provider_name,
                 failed_model_id,
+                credential_kind,
                 ..
             } => {
+                let kind = match credential_kind.as_deref() {
+                    Some("oauth") => {
+                        xai_grok_shell::extensions::notification::ProviderCredentialKind::Oauth
+                    }
+                    _ => xai_grok_shell::extensions::notification::ProviderCredentialKind::ApiKey,
+                };
                 let mut msg =
-                    xai_grok_shell::extensions::notification::provider_credential_repair_message(
+                    xai_grok_shell::extensions::notification::provider_credential_repair_message_detailed(
                         provider_name,
+                        kind,
                     );
                 if let Some(model) = failed_model_id.as_deref().filter(|m| !m.is_empty()) {
                     msg.push_str(&format!(" Failed model: {model}."));
@@ -992,9 +999,18 @@ mod tests {
     }
 
     #[test]
-    fn reauth_required_message_points_at_login() {
+    fn reauth_required_message_points_at_providers_not_login() {
         let msg = SessionEvent::ReAuthRequired.message();
-        assert!(msg.contains("/login"), "must tell the user to run /login");
+        assert!(
+            msg.contains("/providers"),
+            "must tell the user to repair via /providers: {msg}"
+        );
+        assert!(
+            msg.contains("xAI") || msg.to_lowercase().contains("xai"),
+            "must name xAI: {msg}"
+        );
+        assert!(!msg.contains("/login"), "must never mention /login: {msg}");
+        assert!(!msg.contains("/logout"), "must never mention /logout: {msg}");
         assert!(
             msg.to_lowercase().contains("authentication")
                 || msg.to_lowercase().contains("credentials"),
@@ -1008,6 +1024,8 @@ mod tests {
             provider_id: "openrouter".into(),
             provider_name: "OpenRouter".into(),
             failed_model_id: Some("moonshotai/kimi-k2".into()),
+            credential_kind: Some("api_key".into()),
+            credential_generation: Some(1),
         };
         let msg = event.message();
         assert!(msg.contains("OpenRouter"), "{msg}");

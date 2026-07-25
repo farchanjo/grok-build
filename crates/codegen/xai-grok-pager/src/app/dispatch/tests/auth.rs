@@ -355,7 +355,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
 
         apply_session_event_for_test(
             &XaiSessionUpdate::AutoCompactFailed {
-                error: "authentication problem — re-authenticate using /login and retry.".into(),
+                error: "authentication problem — reconnect xAI in /providers and retry.".into(),
             },
             &mut agent.session,
             &mut agent.scrollback,
@@ -394,7 +394,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
         app.agents[&id]
             .reauth_stashed_prompt
             .as_ref()
-            .map(|p| p.text.as_str()),
+            .map(|p| p.prompt.text.as_str()),
         Some("please continue after login"),
         "PromptResponse must stash the compact-held prompt for AuthComplete"
     );
@@ -466,12 +466,16 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.reauth_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 0,
+            prompt: crate::app::agent::InFlightPrompt {
             text: "first prompt".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(0),
             combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
+            },
         });
         agent
             .scrollback
@@ -495,7 +499,7 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
         app.agents[&id]
             .reauth_stashed_prompt
             .as_ref()
-            .map(|prompt| prompt.text.as_str()),
+            .map(|stashed| stashed.prompt.text.as_str()),
         Some("first prompt"),
         "a None in_flight_prompt must not wipe an earlier stash"
     );
@@ -508,12 +512,16 @@ fn cancel_login_drops_reauth_stashed_prompt() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
-        Some(crate::app::agent::InFlightPrompt {
-            text: "stale".into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
+        Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 0,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "stale".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
         });
 
     dispatch(Action::Login, &mut app);
@@ -535,12 +543,16 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent.reauth_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 0,
+            prompt: crate::app::agent::InFlightPrompt {
             text: "stale".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(0),
             combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
+            },
         });
         agent
             .scrollback
@@ -767,6 +779,123 @@ fn cancel_login_noop_without_stashed_view() {
     assert!(effects.is_empty());
     assert_eq!(app.active_view, ActiveView::Welcome);
     assert_eq!(app.auth_return_view, None);
+}
+
+/// Same-provider `/providers` repair resumes a matching stash once;
+/// sibling-provider connect does not.
+#[test]
+fn provider_operation_complete_resumes_only_matching_provider_stash() {
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-provider-resume"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 7,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "moonshot via openrouter".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+    }
+
+    // Sibling OpenAI connect must not consume the OpenRouter stash.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("ok".into()),
+            },
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "sibling provider must leave the OpenRouter stash"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "sibling connect must not resubmit: {effects:?}"
+    );
+
+    // Matching OpenRouter connect consumes and resubmits once.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("ok".into()),
+            },
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_none(),
+        "same-provider repair must consume the stash"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "same-provider connect must resubmit once: {effects:?}"
+    );
+}
+
+/// xAI AuthComplete must not resubmit a third-party provider stash.
+#[test]
+fn auth_complete_does_not_resubmit_openrouter_stash() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 2,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "keep me".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+    }
+    dispatch(Action::Login, &mut app);
+    let seq = authenticating_seq(&app);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: seq,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|s| s.provider_id.as_str()),
+        Some("openrouter"),
+        "xAI AuthComplete must preserve third-party stash"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "xAI reconnect must not resubmit OpenRouter stash: {effects:?}"
+    );
 }
 
 #[test]

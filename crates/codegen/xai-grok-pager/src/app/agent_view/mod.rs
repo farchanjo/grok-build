@@ -829,11 +829,12 @@ pub struct AgentView {
     /// `CreditLimitRecheckComplete` to retry the prompt after a tier
     /// upgrade instead of showing a stale upsell.
     pub credit_limit_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
-    /// Complete prompt stashed from a turn that failed because the login
-    /// expired (401 / re-auth). Used by the `AuthComplete` handler to
-    /// auto-resubmit the prompt after a successful mid-session re-auth so
-    /// the user doesn't have to retype it.
-    pub reauth_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
+    /// Complete prompt stashed from a turn that failed on credentials.
+    /// Keyed by provider id + credential generation so reconnecting a
+    /// sibling provider cannot resubmit it. Used after successful
+    /// same-provider recovery (xAI session reconnect or `/providers` key
+    /// repair for the same generation).
+    pub reauth_stashed_prompt: Option<crate::app::agent::ProviderScopedStashedPrompt>,
     /// Currently active modal dialog (blocks all other input).
     pub active_modal: Option<ActiveModal>,
     /// Hit areas for modal buttons (from last render).

@@ -1316,11 +1316,21 @@ pub(super) fn apply_retry_state(
                 session.credit_limit_blocked = true;
             } else if let Some(provider) = provider {
                 is_reauth = true;
+                let kind = match provider.credential_kind {
+                    xai_grok_shell::extensions::notification::ProviderCredentialKind::Oauth => {
+                        Some("oauth".to_string())
+                    }
+                    xai_grok_shell::extensions::notification::ProviderCredentialKind::ApiKey => {
+                        Some("api_key".to_string())
+                    }
+                };
                 scrollback.push_block(RenderBlock::session_event(
                     SessionEvent::ProviderCredentialRequired {
                         provider_id: provider.provider_id.clone(),
                         provider_name: provider.provider_name.clone(),
                         failed_model_id: provider.failed_model_id.clone(),
+                        credential_kind: kind,
+                        credential_generation: Some(provider.credential_generation),
                     },
                 ));
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {

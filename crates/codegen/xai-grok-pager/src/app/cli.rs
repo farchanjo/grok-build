@@ -4,6 +4,35 @@ use clap::{ArgAction, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+/// Built-in provider-scoped credential commands (`grok provider …`).
+///
+/// Narrow facade for Change 3: only the well-known built-in provider ids are
+/// accepted. Full dynamic registry work is deferred to a later milestone.
+#[derive(Debug, Clone, Parser)]
+pub struct ProviderCliArgs {
+    #[command(subcommand)]
+    pub command: ProviderCliCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ProviderCliCommand {
+    /// Connect or re-authenticate a provider (opens interactive auth when needed).
+    Connect {
+        /// Provider id: `xai`, `openai`, or `openrouter`.
+        id: String,
+    },
+    /// Alias for `connect` (re-auth after a credential rejection).
+    Reconnect {
+        /// Provider id: `xai`, `openai`, or `openrouter`.
+        id: String,
+    },
+    /// Disconnect and clear stored credentials for a provider.
+    Disconnect {
+        /// Provider id: `xai`, `openai`, or `openrouter`.
+        id: String,
+    },
+}
+
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
@@ -19,31 +48,38 @@ pub enum Command {
     Doctor(crate::doctor_cmd::DoctorArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
-    /// Sign out and clear cached credentials
+    /// Deprecated: use `grok provider disconnect <id>`.
+    ///
+    /// Still parsed so old invocations print an actionable error instead of
+    /// "unknown command". Does not clear credentials.
+    #[command(hide = true)]
     Logout,
-    /// Sign in to Grok
+    /// Deprecated: use `grok provider connect <id>`.
+    ///
+    /// Still parsed so old invocations print an actionable error instead of
+    /// "unknown command". Does not initiate auth.
+    #[command(hide = true)]
     Login {
-        /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
+        /// Ignored (kept for backwards compatibility).
         #[arg(long, hide = true)]
         legacy: bool,
-        /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
+        /// Ignored (kept for backwards compatibility).
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"], hide = true)]
         oauth: bool,
-        /// Use device-code authentication for headless/remote environments.
+        /// Ignored (kept for backwards compatibility).
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth"]
+            conflicts_with_all = ["oauth"],
+            hide = true
         )]
         device_auth: bool,
-        /// Authenticate for remote development environments (hidden).
-        ///
-        /// Field is always present so match arms stay feature-unification-safe
-        /// across Bazel/cargo graphs; clap only registers `--devbox` when
-        /// `devbox-login` is enabled (`arg(skip)` otherwise → always false).
+        /// Ignored (kept for backwards compatibility).
         #[arg(skip)]
         devbox: bool,
     },
+    /// Connect, reconnect, or disconnect a built-in provider (xAI, OpenAI, OpenRouter).
+    Provider(ProviderCliArgs),
     /// Manage MCP server configurations
     Mcp(crate::mcp_cmd::McpArgs),
     /// Manage plugins and marketplace sources
@@ -1265,6 +1301,38 @@ mod tests {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
         assert!(matches!(args.command, Some(Command::Logout)));
         assert!(args.prompt.is_none());
+    }
+
+    #[test]
+    fn provider_connect_parses_built_in_id() {
+        let args = PagerArgs::try_parse_from(["grok", "provider", "connect", "openrouter"])
+            .expect("provider connect parses");
+        match args.command {
+            Some(Command::Provider(ProviderCliArgs {
+                command: ProviderCliCommand::Connect { id },
+            })) => assert_eq!(id, "openrouter"),
+            other => panic!("expected Provider::Connect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_disconnect_and_reconnect_parse() {
+        let d = PagerArgs::try_parse_from(["grok", "provider", "disconnect", "xai"])
+            .expect("disconnect parses");
+        assert!(matches!(
+            d.command,
+            Some(Command::Provider(ProviderCliArgs {
+                command: ProviderCliCommand::Disconnect { .. }
+            }))
+        ));
+        let r = PagerArgs::try_parse_from(["grok", "provider", "reconnect", "openai"])
+            .expect("reconnect parses");
+        assert!(matches!(
+            r.command,
+            Some(Command::Provider(ProviderCliArgs {
+                command: ProviderCliCommand::Reconnect { .. }
+            }))
+        ));
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {

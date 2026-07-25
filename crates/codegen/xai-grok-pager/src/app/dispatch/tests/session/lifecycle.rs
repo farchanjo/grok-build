@@ -1520,12 +1520,16 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
-        agent.reauth_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 0,
+            prompt: crate::app::agent::InFlightPrompt {
             text: "retry me".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(0),
             combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
+            },
         });
     }
     dispatch(Action::Login, &mut app);

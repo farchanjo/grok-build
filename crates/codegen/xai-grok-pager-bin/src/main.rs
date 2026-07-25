@@ -31,7 +31,7 @@ use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::{
     AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderTargetArgs,
-    PagerArgs, join_early_prefetch, resolve_use_leader,
+    PagerArgs, ProviderCliArgs, ProviderCliCommand, join_early_prefetch, resolve_use_leader,
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
@@ -147,6 +147,91 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
         ),
     );
 }
+/// Narrow built-in provider CLI facade (`grok provider connect|reconnect|disconnect <id>`).
+async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
+    use xai_grok_shell::agent::providers::{ProviderId, ProviderManager};
+
+    let (action, id_raw) = match &args.command {
+        ProviderCliCommand::Connect { id } | ProviderCliCommand::Reconnect { id } => {
+            ("connect", id.as_str())
+        }
+        ProviderCliCommand::Disconnect { id } => ("disconnect", id.as_str()),
+    };
+    let id = id_raw.trim().to_ascii_lowercase();
+    let provider = match id.as_str() {
+        "xai" | "grok" => ProviderId::Xai,
+        "openai" | "chatgpt" | "codex" => ProviderId::OpenAi,
+        "openrouter" => ProviderId::OpenRouter,
+        other => {
+            eprintln!(
+                "error: unknown provider id `{other}`.\n\
+                 Built-in ids: xai, openai, openrouter.\n\
+                 Custom providers are managed in the TUI via /providers."
+            );
+            std::process::exit(2);
+        }
+    };
+
+    let home = xai_grok_config::grok_home();
+    let manager = ProviderManager::new(&home);
+
+    match (action, provider) {
+        ("connect", ProviderId::Xai) | ("reconnect", ProviderId::Xai) => {
+            let config = xai_grok_shell::config::load_effective_config_disk_only()
+                .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+            let config = AgentConfig::new_from_toml_cfg(&config)
+                .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+            // Interactive xAI OAuth (same as historical `grok login`).
+            xai_grok_shell::auth::run_cli_login(&config, true, false, false).await?;
+            println!("Connected xAI.");
+        }
+        ("disconnect", ProviderId::Xai) => {
+            let config = xai_grok_shell::config::load_effective_config_disk_only()
+                .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+            let config = AgentConfig::new_from_toml_cfg(&config)
+                .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+            xai_grok_shell::auth::run_cli_logout(&config)?;
+            let _ = manager.remove_api_key(ProviderId::Xai);
+            println!("Disconnected xAI.");
+        }
+        ("connect", ProviderId::OpenAi) | ("reconnect", ProviderId::OpenAi) => {
+            // Prefer ChatGPT OAuth browser flow for CLI connect.
+            match manager.chatgpt_oauth_login().await {
+                Ok(()) => println!("Connected OpenAI (ChatGPT OAuth)."),
+                Err(e) => {
+                    eprintln!(
+                        "error: OpenAI connect failed: {e}\n\
+                         For an API key, open /providers in the TUI or set OPENAI_API_KEY."
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        ("disconnect", ProviderId::OpenAi) => {
+            let _ = manager.chatgpt_oauth_logout().await;
+            manager
+                .remove_api_key(ProviderId::OpenAi)
+                .map_err(|e| anyhow::anyhow!("Failed to clear OpenAI credentials: {e}"))?;
+            println!("Disconnected OpenAI.");
+        }
+        ("connect", ProviderId::OpenRouter) | ("reconnect", ProviderId::OpenRouter) => {
+            eprintln!(
+                "OpenRouter uses an API key. Set OPENROUTER_API_KEY, or open /providers in the TUI \
+                 to paste and test a key. This CLI does not accept keys on the command line."
+            );
+            std::process::exit(2);
+        }
+        ("disconnect", ProviderId::OpenRouter) => {
+            manager
+                .remove_api_key(ProviderId::OpenRouter)
+                .map_err(|e| anyhow::anyhow!("Failed to clear OpenRouter credentials: {e}"))?;
+            println!("Disconnected OpenRouter.");
+        }
+        _ => unreachable!(),
+    }
+    xai_grok_shell::instrumentation::finalize_and_exit(0);
+}
+
 /// `grok setup`: rendering + exit codes only; fetch logic lives in `xai_grok_shell::managed_config`.
 /// `json` prints the served configuration instead of installing it.
 async fn run_setup_command(json: bool) {
@@ -154,7 +239,10 @@ async fn run_setup_command(json: bool) {
     if !managed_config::has_principal() {
         eprintln!("No deployment key or team sign-in found.");
         eprintln!();
-        eprintln!("To install managed configuration, sign in with a team using `grok login`,");
+        eprintln!(
+            "To install managed configuration, connect a team account with \
+             `grok provider connect xai`,"
+        );
         eprintln!("or set a deployment key:");
         eprintln!();
         if cfg!(unix) {
@@ -433,7 +521,7 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
         WorkspaceGate::Unknown => {
             anyhow::bail!(
                 "Could not load your settings for `grok workspace`. Check your \
-             network connection (run `grok login` if you are signed out), then \
+             network connection (run `grok provider connect xai` if you are signed out), then \
              try again."
             )
         }
@@ -536,7 +624,7 @@ async fn workspace_start(
     ensure_authenticated(
         &agent_config.grok_com_config,
         false,
-        Some("No cached credentials found. Run `grok login` first."),
+        Some("No cached credentials found. Run `grok provider connect xai` first."),
     )
     .await?;
     let env_urls = LeaderEnvUrls::from(&agent_config.grok_com_config);
@@ -1950,30 +2038,28 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 )
                 .await;
             }
-            Command::Login {
-                legacy: _,
-                oauth,
-                device_auth,
-                devbox,
-            } => {
-                init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox).await?;
-                println!();
-                xai_grok_shell::instrumentation::finalize_and_exit(0);
+            Command::Login { .. } => {
+                // One-release deprecation: parse but never initiate auth.
+                eprintln!(
+                    "error: `grok login` is no longer supported.\n\
+                     Use `grok provider connect <id>` for built-in providers \
+                     (xai, openai, openrouter), or open `/providers` in the TUI."
+                );
+                std::process::exit(2);
             }
             Command::Logout => {
+                // One-release deprecation: parse but never clear credentials.
+                eprintln!(
+                    "error: `grok logout` is no longer supported.\n\
+                     Use `grok provider disconnect <id>` for built-in providers \
+                     (xai, openai, openrouter), or open `/providers` in the TUI."
+                );
+                std::process::exit(2);
+            }
+            Command::Provider(ref provider_args) => {
                 init_tracing_simple("cli");
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                xai_grok_shell::auth::run_cli_logout(&config)?;
-                xai_grok_shell::instrumentation::finalize_and_exit(0);
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return run_provider_cli(provider_args).await;
             }
             Command::Wrap(ref wrap_args) => {
                 return xai_grok_pager::wrap_cmd::run(wrap_args);

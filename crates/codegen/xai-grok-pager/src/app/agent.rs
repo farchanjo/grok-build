@@ -714,8 +714,9 @@ pub struct AgentSession {
     /// the input box if the user cancels before any response arrives.
     /// `None` for skill-injected prompts (cannot be reversed) and bash/cron.
     pub in_flight_prompt: Option<InFlightPrompt>,
-    /// Prompt held across auto-compact for reauth resubmit after `/login`.
-    /// `in_flight_prompt` is cleared on compact start so cancel cannot rewind.
+    /// Prompt held across auto-compact for credential-repair resubmit after
+    /// `/providers` reconnect. `in_flight_prompt` is cleared on compact start
+    /// so cancel cannot rewind.
     pub compact_held_prompt: Option<InFlightPrompt>,
     /// Stable id for the prompt currently in flight. Generated client-side
     /// at `Effect::SendPrompt` time and threaded through `PromptRequest._meta`
@@ -747,6 +748,74 @@ pub struct InFlightPrompt {
     /// active in the textarea at send time. Restored on rewind so collapsed
     /// chips render correctly instead of raw text.
     pub chip_elements: Vec<ChipElement>,
+}
+
+/// Prompt blocked on a provider credential failure, keyed so only the same
+/// provider and generation may resubmit it after repair.
+#[derive(Debug, Clone)]
+pub struct ProviderScopedStashedPrompt {
+    /// Stable provider slug that rejected the request (`openrouter`, `xai`, …).
+    pub provider_id: String,
+    /// Generation from [`ProviderCredentialFailure::credential_generation`]
+    /// (or `0` for first-party xAI session reauth without a generation).
+    pub credential_generation: u64,
+    pub prompt: InFlightPrompt,
+}
+
+impl ProviderScopedStashedPrompt {
+    /// Whether a successful repair for `provider_id` with optional generation
+    /// may resubmit this stash. Sibling providers never match.
+    pub fn matches_repair(&self, provider_id: &str, generation: Option<u64>) -> bool {
+        if self.provider_id != provider_id {
+            return false;
+        }
+        match generation {
+            Some(g) => self.credential_generation == g,
+            // First-party session reconnect has no generation counter; only
+            // allow when the stash itself used generation 0 (xAI path).
+            None => self.credential_generation == 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_scoped_stash_tests {
+    use super::*;
+
+    fn sample(provider_id: &str, generation: u64) -> ProviderScopedStashedPrompt {
+        ProviderScopedStashedPrompt {
+            provider_id: provider_id.into(),
+            credential_generation: generation,
+            prompt: InFlightPrompt {
+                text: "hi".into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn sibling_provider_cannot_resubmit() {
+        let stash = sample("openrouter", 3);
+        assert!(!stash.matches_repair("openai", Some(3)));
+        assert!(!stash.matches_repair("xai", None));
+    }
+
+    #[test]
+    fn same_provider_requires_matching_generation() {
+        let stash = sample("openrouter", 3);
+        assert!(stash.matches_repair("openrouter", Some(3)));
+        assert!(!stash.matches_repair("openrouter", Some(4)));
+    }
+
+    #[test]
+    fn xai_session_path_uses_generation_zero() {
+        let stash = sample("xai", 0);
+        assert!(stash.matches_repair("xai", None));
+        assert!(!stash.matches_repair("xai", Some(1)));
+    }
 }
 /// Snapshot of a textarea chip element for rewind restore.
 /// Covers paste blocks, @-file refs, and image chips.

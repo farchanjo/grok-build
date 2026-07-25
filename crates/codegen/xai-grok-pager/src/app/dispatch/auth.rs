@@ -124,22 +124,52 @@ pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
 pub(super) fn scrollback_has_recent_reauth_prompt(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {
+    scrollback_recent_credential_scope(scrollback).is_some()
+        || scrollback_has_trailing_session_event(scrollback, |ev| {
+            matches!(ev, SessionEvent::ReAuthRequired)
+        })
+}
+
+/// Provider id + generation from the trailing credential-repair block, if any.
+/// Used to key blocked-prompt stashes so sibling-provider reconnects cannot
+/// resubmit. First-party `ReAuthRequired` maps to `("xai", 0)`.
+pub(super) fn scrollback_recent_credential_scope(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+) -> Option<(String, u64)> {
+    use crate::scrollback::block::RenderBlock;
+    for idx in (0..scrollback.len()).rev() {
+        match scrollback.entry(idx).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(ev)) => match &ev.event {
+                SessionEvent::ProviderCredentialRequired {
+                    provider_id,
+                    credential_generation,
+                    ..
+                } => {
+                    return Some((provider_id.clone(), credential_generation.unwrap_or(0)));
+                }
+                SessionEvent::ReAuthRequired => return Some(("xai".to_string(), 0)),
+                _ => {}
+            },
+            Some(RenderBlock::System(_)) => {}
+            _ => break,
+        }
+    }
+    None
+}
+
+fn scrollback_has_trailing_session_event(
+    scrollback: &crate::scrollback::state::ScrollbackState,
+    pred: impl Fn(&SessionEvent) -> bool,
+) -> bool {
     use crate::scrollback::block::RenderBlock;
     for idx in (0..scrollback.len()).rev() {
         match scrollback.entry(idx).map(|e| &e.block) {
             Some(RenderBlock::SessionEvent(ev)) => {
-                if matches!(
-                    ev.event,
-                    SessionEvent::ReAuthRequired | SessionEvent::ProviderCredentialRequired { .. }
-                ) {
+                if pred(&ev.event) {
                     return true;
                 }
             }
-            // Tolerate interleaved system messages in the trailing run.
             Some(RenderBlock::System(_)) => {}
-            // Stop at the first substantive block: any re-auth prompt for
-            // this turn lives in the trailing events pushed just before the
-            // PromptResponse arrived.
             _ => break,
         }
     }
@@ -358,14 +388,22 @@ pub(super) fn handle_auth_complete(
                 // login so the user doesn't have to retype it. The
                 // user couldn't have queued another prompt during the
                 // auth detour, so a plain front-enqueue + drain is safe.
-                if let Some(prompt) = agent.reauth_stashed_prompt.take() {
-                    agent.scrollback.push_block(RenderBlock::system(
-                        "Re-authenticated. Retrying\u{2026}".to_string(),
-                    ));
-                    agent.session.enqueue_in_flight_prompt_front(prompt);
-                    let drain = maybe_drain_queue(agent);
-                    retry_effects.extend(drain.effects);
-                    page_flips.push((agent.session.id, drain.page_flip_entry));
+                // Only resubmit stashes keyed to xAI session reauth (generation 0).
+                // Provider API-key stashes require a matching `/providers` repair
+                // and must not fire on global xAI reconnect.
+                if let Some(stashed) = agent.reauth_stashed_prompt.take() {
+                    if stashed.matches_repair("xai", None) {
+                        agent.scrollback.push_block(RenderBlock::system(
+                            "Reconnected xAI. Retrying\u{2026}".to_string(),
+                        ));
+                        agent.session.enqueue_in_flight_prompt_front(stashed.prompt);
+                        let drain = maybe_drain_queue(agent);
+                        retry_effects.extend(drain.effects);
+                        page_flips.push((agent.session.id, drain.page_flip_entry));
+                    } else {
+                        // Keep the stash for a later same-provider repair.
+                        agent.reauth_stashed_prompt = Some(stashed);
+                    }
                 }
             }
             for (id, page_flip_entry) in page_flips {

@@ -368,16 +368,20 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
     });
     image.display_number = 1;
     app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
-        Some(crate::app::agent::InFlightPrompt {
-            text: "retry me [Image #1]".into(),
-            images: vec![image],
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: vec![crate::app::agent::ChipElement {
-                range: 9..19,
-                kind: crate::views::prompt_widget::KIND_IMAGE,
-                display: None,
-            }],
+        Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 0,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "retry me [Image #1]".into(),
+                images: vec![image],
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: vec![crate::app::agent::ChipElement {
+                    range: 9..19,
+                    kind: crate::views::prompt_widget::KIND_IMAGE,
+                    display: None,
+                }],
+            },
         });
     app.active_view = ActiveView::AgentDashboard;
     dispatch(Action::Login, &mut app);
@@ -405,12 +409,16 @@ fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
-        Some(crate::app::agent::InFlightPrompt {
-            text: "stale".into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
+        Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 0,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "stale".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
         });
     app.active_view = ActiveView::AgentDashboard;
     dispatch(Action::Login, &mut app);

@@ -432,7 +432,9 @@ impl ConversationsPartial {
     /// Actionable picker notice for a degraded conversations lane.
     pub(crate) fn picker_notice(self) -> &'static str {
         match self {
-            Self::NoOauth => "Couldn't load your chats \u{2014} log in with /login",
+            Self::NoOauth => {
+                "Couldn't load your chats \u{2014} connect xAI in /providers"
+            }
             Self::Timeout | Self::Error => "Couldn't load conversations \u{2014} retry",
         }
     }
