@@ -304,15 +304,17 @@ pub fn media_type_is_valid(mt: &str) -> bool {
     ok(t) && ok(st)
 }
 
-/// RFC3339-ish UTC timestamp check (`YYYY-MM-DDTHH:MM:SSZ`).
+/// RFC3339 UTC timestamp check (`YYYY-MM-DDTHH:MM:SSZ`) with real calendar ranges.
+///
+/// Validates month/day/hour/minute/second bounds and leap-year February 29.
+/// Does not accept offsets or fractional seconds (inventory pins use `Z` form).
 pub fn timestamp_is_rfc3339_utc(ts: &str) -> bool {
     let b = ts.as_bytes();
     if b.len() != 20 || b[19] != b'Z' {
         return false;
     }
-    // 2026-07-25T16:25:32Z
     let digits = |i: usize| b[i].is_ascii_digit();
-    digits(0)
+    if !(digits(0)
         && digits(1)
         && digits(2)
         && digits(3)
@@ -330,7 +332,89 @@ pub fn timestamp_is_rfc3339_utc(ts: &str) -> bool {
         && digits(15)
         && b[16] == b':'
         && digits(17)
-        && digits(18)
+        && digits(18))
+    {
+        return false;
+    }
+    let year: u32 = match std::str::from_utf8(&b[0..4])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(y) => y,
+        None => return false,
+    };
+    let month: u32 = match std::str::from_utf8(&b[5..7])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(m) => m,
+        None => return false,
+    };
+    let day: u32 = match std::str::from_utf8(&b[8..10])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(d) => d,
+        None => return false,
+    };
+    let hour: u32 = match std::str::from_utf8(&b[11..13])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(h) => h,
+        None => return false,
+    };
+    let minute: u32 = match std::str::from_utf8(&b[14..16])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(m) => m,
+        None => return false,
+    };
+    let second: u32 = match std::str::from_utf8(&b[17..19])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(s) => s,
+        None => return false,
+    };
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    let max_day = days_in_month(year, month);
+    day >= 1 && day <= max_day
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Full git SHA-1 (40 lowercase/uppercase hex chars).
+pub fn source_revision_is_valid(rev: &str) -> bool {
+    rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// SHA-256 hex digest (64 hex chars).
+pub fn sha256_hex_is_valid(sha: &str) -> bool {
+    sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Reject Supported status paired with unimplemented bindings on client/CLI surfaces.
@@ -380,8 +464,32 @@ mod tests {
     #[test]
     fn timestamp_validation() {
         assert!(timestamp_is_rfc3339_utc("2026-07-25T16:25:32Z"));
+        assert!(timestamp_is_rfc3339_utc("2024-02-29T00:00:00Z")); // leap day
         assert!(!timestamp_is_rfc3339_utc("2026-07-25T17:00:00+00:00"));
         assert!(!timestamp_is_rfc3339_utc("not-a-time"));
+        assert!(!timestamp_is_rfc3339_utc("2026-13-01T00:00:00Z")); // month
+        assert!(!timestamp_is_rfc3339_utc("2026-00-01T00:00:00Z"));
+        assert!(!timestamp_is_rfc3339_utc("2026-04-31T00:00:00Z")); // day
+        assert!(!timestamp_is_rfc3339_utc("2025-02-29T00:00:00Z")); // non-leap
+        assert!(!timestamp_is_rfc3339_utc("2026-07-25T24:00:00Z")); // hour
+        assert!(!timestamp_is_rfc3339_utc("2026-07-25T16:60:00Z")); // minute
+        assert!(!timestamp_is_rfc3339_utc("2026-07-25T16:00:60Z")); // second
+    }
+
+    #[test]
+    fn source_revision_and_sha_validation() {
+        assert!(source_revision_is_valid(
+            "5c044be3bf3a42854e99e34616564eeb2124a317"
+        ));
+        assert!(!source_revision_is_valid("5c044be")); // too short
+        assert!(!source_revision_is_valid(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        ));
+        assert!(sha256_hex_is_valid(
+            "b58d6cd94c881bdfd6a940bdc4db009e2c9b455accf8fd6a8b712458bc30c0da"
+        ));
+        assert!(!sha256_hex_is_valid("abc"));
+        assert!(!sha256_hex_is_valid(&"g".repeat(64)));
     }
 
     #[test]

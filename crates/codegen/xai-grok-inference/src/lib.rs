@@ -46,6 +46,7 @@ pub use compatibility::{
     Evidence, EvidenceKind, OperationClaim, OperationIdentity, ProviderInventory, Transport,
     claim_is_consistent, compatibility_counts, declared_intersection, intersection_report_json,
     inventory_report_json, openai_inventory, openrouter_inventory as openrouter_provider_inventory,
+    sha256_hex_is_valid, source_revision_is_valid, timestamp_is_rfc3339_utc,
 };
 pub use config::{
     AuthScheme, BearerResolver, HeaderInjector, InferenceConfig, OpenRouterMaxPrice,

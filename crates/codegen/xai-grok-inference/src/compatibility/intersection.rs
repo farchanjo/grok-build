@@ -2,11 +2,13 @@
 
 use super::domain::{
     ApiFamily, BindingStatus, ClaimSurface, CompatibilityStatus, Evidence, EvidenceKind,
-    HttpMethod, OperationClaim, OperationIdentity, Transport, claim_is_consistent, path_is_safe,
+    HttpMethod, OperationClaim, OperationIdentity, Transport, claim_is_consistent,
+    media_type_is_valid, path_is_safe, sha256_hex_is_valid, source_revision_is_valid,
+    timestamp_is_rfc3339_utc,
 };
-use super::inventory::ProviderInventory;
+use super::inventory::{InventoryEndpoint, ProviderInventory};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
 const INTERSECTION_JSON: &str =
@@ -89,13 +91,30 @@ impl IntersectionMember {
         let method = HttpMethod::parse(&self.method)
             .ok_or_else(|| format!("invalid method {}", self.method))?;
         let mut transports = Vec::new();
+        let mut seen = HashSet::new();
         for raw in &self.transports {
             let t = Transport::parse_strict(raw)
                 .ok_or_else(|| format!("invalid transport `{raw}` on {}", self.shared_id))?;
+            if !seen.insert(t) {
+                return Err(format!(
+                    "duplicate transport `{}` on {}",
+                    t.as_str(),
+                    self.shared_id
+                ));
+            }
             transports.push(t);
         }
         if transports.is_empty() {
             return Err(format!("empty transports for {}", self.shared_id));
+        }
+        for mt in self
+            .request_content_types
+            .iter()
+            .chain(self.response_content_types.iter())
+        {
+            if !media_type_is_valid(mt) {
+                return Err(format!("malformed media type `{mt}` on {}", self.shared_id));
+            }
         }
         Ok(OperationIdentity {
             family: ApiFamily::from_path(&self.path),
@@ -145,6 +164,11 @@ impl CategorizedOpenrouterOp {
 }
 
 /// Full declared intersection document (format v2).
+///
+/// OpenRouter baseline partition (single source of truth per category):
+/// 1. `members` — verified semantic intersection (common transport/content subset)
+/// 2. `same_path_unverified_overlap` — METHOD+path on both sides, semantics not verified
+/// 3. `openrouter_contract_outside_intersection` — path exclusive to OpenRouter
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DeclaredIntersection {
     pub format_version: u32,
@@ -153,20 +177,99 @@ pub struct DeclaredIntersection {
     pub openai_baseline: IntersectionBaselineRef,
     pub openrouter_baseline: IntersectionBaselineRef,
     pub members: Vec<IntersectionMember>,
-    /// METHOD+path overlap without verified OpenAI-compatible semantics.
     #[serde(default)]
     pub same_path_unverified_overlap: Vec<CategorizedOpenrouterOp>,
-    /// OpenRouter-only path operations (not in OpenAI baseline).
     #[serde(default)]
     pub openrouter_contract_outside_intersection: Vec<CategorizedOpenrouterOp>,
-    /// Alias for path-exclusive OpenRouter ops (same as outside_intersection).
-    #[serde(default)]
-    pub openrouter_native_operations: Vec<CategorizedOpenrouterOp>,
     #[serde(default)]
     pub notes: Vec<String>,
 }
 
+fn sorted_set(items: &[String]) -> BTreeSet<String> {
+    items.iter().cloned().collect()
+}
+
+fn endpoint_transport_set(ep: &InventoryEndpoint) -> Result<BTreeSet<String>, String> {
+    let mut labels = ep.transports.clone();
+    if labels.is_empty()
+        && let Some(t) = &ep.transport
+    {
+        labels.push(t.clone());
+    }
+    let mut out = BTreeSet::new();
+    for raw in labels {
+        Transport::parse_strict(&raw)
+            .ok_or_else(|| format!("invalid transport `{raw}` on {}", ep.method_path_key()))?;
+        out.insert(raw);
+    }
+    Ok(out)
+}
+
+/// Declared member contract must equal the set-intersection of both vendor ops.
+fn validate_common_contract(
+    member: &IntersectionMember,
+    oa: &InventoryEndpoint,
+    ore: &InventoryEndpoint,
+) -> Result<(), String> {
+    let key = member.method_path_key();
+    let oa_t = endpoint_transport_set(oa)?;
+    let or_t = endpoint_transport_set(ore)?;
+    let common_t: BTreeSet<_> = oa_t.intersection(&or_t).cloned().collect();
+    let declared_t = sorted_set(&member.transports);
+    if declared_t != common_t {
+        return Err(format!(
+            "member {key} transports must equal vendor intersection: declared={declared_t:?} common={common_t:?}"
+        ));
+    }
+    if declared_t.is_empty() {
+        return Err(format!("member {key} has empty common transport set"));
+    }
+
+    let oa_req = sorted_set(&oa.request_content_types);
+    let or_req = sorted_set(&ore.request_content_types);
+    let common_req: BTreeSet<_> = oa_req.intersection(&or_req).cloned().collect();
+    let declared_req = sorted_set(&member.request_content_types);
+    if declared_req != common_req {
+        return Err(format!(
+            "member {key} request_content_types must equal vendor intersection: declared={declared_req:?} common={common_req:?}"
+        ));
+    }
+
+    let oa_resp = sorted_set(&oa.response_content_types);
+    let or_resp = sorted_set(&ore.response_content_types);
+    let common_resp: BTreeSet<_> = oa_resp.intersection(&or_resp).cloned().collect();
+    let declared_resp = sorted_set(&member.response_content_types);
+    if declared_resp != common_resp {
+        return Err(format!(
+            "member {key} response_content_types must equal vendor intersection: declared={declared_resp:?} common={common_resp:?}"
+        ));
+    }
+
+    // Declared values must also be subsets of each vendor individually.
+    if !declared_t.is_subset(&oa_t) || !declared_t.is_subset(&or_t) {
+        return Err(format!(
+            "member {key} transports not subset of both vendors"
+        ));
+    }
+    if !declared_req.is_subset(&oa_req) || !declared_req.is_subset(&or_req) {
+        return Err(format!(
+            "member {key} request types not subset of both vendors"
+        ));
+    }
+    if !declared_resp.is_subset(&oa_resp) || !declared_resp.is_subset(&or_resp) {
+        return Err(format!(
+            "member {key} response types not subset of both vendors"
+        ));
+    }
+    Ok(())
+}
+
 impl DeclaredIntersection {
+    /// Path-exclusive OpenRouter operations (single serialized source of truth).
+    pub fn openrouter_path_exclusive_ops(&self) -> &[CategorizedOpenrouterOp] {
+        &self.openrouter_contract_outside_intersection
+    }
+
     pub fn validate_against_baselines(
         &self,
         openai: &ProviderInventory,
@@ -174,6 +277,27 @@ impl DeclaredIntersection {
     ) -> Result<(), String> {
         if self.format_version < 2 {
             return Err("intersection format_version must be >= 2".into());
+        }
+        if !timestamp_is_rfc3339_utc(&self.generated_at_utc) {
+            return Err(format!(
+                "invalid generated_at_utc `{}`",
+                self.generated_at_utc
+            ));
+        }
+        if !sha256_hex_is_valid(&self.openai_baseline.content_sha256)
+            || !sha256_hex_is_valid(&self.openrouter_baseline.content_sha256)
+        {
+            return Err("intersection baseline content_sha256 invalid".into());
+        }
+        if !timestamp_is_rfc3339_utc(&self.openai_baseline.fetched_at_utc)
+            || !timestamp_is_rfc3339_utc(&self.openrouter_baseline.fetched_at_utc)
+        {
+            return Err("intersection baseline fetched_at_utc invalid".into());
+        }
+        if let Some(rev) = &self.openai_baseline.source_revision
+            && !source_revision_is_valid(rev)
+        {
+            return Err("intersection openai source_revision invalid".into());
         }
         if self.openai_baseline.content_sha256 != openai.baseline.content_sha256 {
             return Err("openai baseline sha mismatch vs inventory".into());
@@ -204,6 +328,22 @@ impl DeclaredIntersection {
             if m.semantic_evidence.rationale.trim().is_empty() {
                 return Err(format!("member {} missing semantic rationale", m.shared_id));
             }
+            if !timestamp_is_rfc3339_utc(&m.evidence.timestamp_utc) {
+                return Err(format!("member {} evidence timestamp invalid", m.shared_id));
+            }
+            if !sha256_hex_is_valid(&m.evidence.openai_content_sha256)
+                || !sha256_hex_is_valid(&m.evidence.openrouter_content_sha256)
+            {
+                return Err(format!("member {} evidence sha invalid", m.shared_id));
+            }
+            if let Some(rev) = &m.evidence.openai_source_revision
+                && !source_revision_is_valid(rev)
+            {
+                return Err(format!(
+                    "member {} evidence source_revision invalid",
+                    m.shared_id
+                ));
+            }
             if !shared_ids.insert(m.shared_id.clone()) {
                 return Err(format!("duplicate shared_id {}", m.shared_id));
             }
@@ -233,6 +373,7 @@ impl DeclaredIntersection {
                     m.openrouter_operation_id
                 ));
             }
+            validate_common_contract(m, oa, ore)?;
             if m.client_binding() == BindingStatus::Implemented
                 || m.cli_binding() == BindingStatus::Implemented
             {
@@ -263,40 +404,34 @@ impl DeclaredIntersection {
             }
         }
 
-        let mut nat_keys = HashSet::new();
-        let outside = if self.openrouter_contract_outside_intersection.is_empty() {
-            &self.openrouter_native_operations
-        } else {
-            &self.openrouter_contract_outside_intersection
-        };
-        for n in outside {
+        let mut exclusive_keys = HashSet::new();
+        for n in self.openrouter_path_exclusive_ops() {
             let key = n.method_path_key();
-            if !nat_keys.insert(key.clone()) {
-                return Err(format!("duplicate outside-intersection op {key}"));
+            if !exclusive_keys.insert(key.clone()) {
+                return Err(format!("duplicate path-exclusive op {key}"));
             }
             if oa_map.contains_key(&key) {
                 return Err(format!(
-                    "outside-intersection {key} also exists in OpenAI (use unverified overlap)"
+                    "path-exclusive {key} also exists in OpenAI (use same-path-unverified)"
                 ));
             }
             if !or_map.contains_key(&key) {
                 return Err(format!(
-                    "outside-intersection {key} missing from OpenRouter baseline"
+                    "path-exclusive {key} missing from OpenRouter baseline"
                 ));
             }
         }
 
-        // Disjoint + cover OpenRouter exactly.
         if !ix_keys.is_disjoint(&unv_keys)
-            || !ix_keys.is_disjoint(&nat_keys)
-            || !unv_keys.is_disjoint(&nat_keys)
+            || !ix_keys.is_disjoint(&exclusive_keys)
+            || !unv_keys.is_disjoint(&exclusive_keys)
         {
             return Err("OpenRouter category sets are not disjoint".into());
         }
         let covered: HashSet<String> = ix_keys
             .iter()
             .chain(unv_keys.iter())
-            .chain(nat_keys.iter())
+            .chain(exclusive_keys.iter())
             .cloned()
             .collect();
         let or_keys: HashSet<String> = or_map.keys().cloned().collect();
@@ -310,8 +445,8 @@ impl DeclaredIntersection {
         Ok(())
     }
 
-    /// Baseline-presence claims only (not client completeness).
-    pub fn openai_baseline_presence_claims(&self) -> Vec<OperationClaim> {
+    /// Claims for verified intersection members only (not the full OpenAI ledger).
+    pub fn verified_intersection_baseline_presence_claims(&self) -> Vec<OperationClaim> {
         self.members
             .iter()
             .filter_map(|m| {
@@ -336,8 +471,9 @@ impl DeclaredIntersection {
             .collect()
     }
 
-    /// Client-completeness claims are Unknown/NotImplemented in Change 4.
-    pub fn openai_client_completeness_claims(&self) -> Vec<OperationClaim> {
+    /// Client-completeness claims for verified intersection members only.
+    /// Always Unknown/NotImplemented in Change 4.
+    pub fn verified_intersection_client_completeness_claims(&self) -> Vec<OperationClaim> {
         self.members
             .iter()
             .filter_map(|m| {
@@ -378,14 +514,16 @@ pub fn intersection_report_json() -> serde_json::Value {
         "generated_at_utc": ix.generated_at_utc,
         "member_count": ix.members.len(),
         "same_path_unverified_count": ix.same_path_unverified_overlap.len(),
-        "openrouter_outside_count": ix.openrouter_contract_outside_intersection.len()
-            .max(ix.openrouter_native_operations.len()),
+        "openrouter_path_exclusive_count": ix.openrouter_path_exclusive_ops().len(),
         "members": ix.members.iter().map(|m| serde_json::json!({
             "shared_id": m.shared_id,
             "method_path": m.method_path_key(),
             "openai_operation_id": m.openai_operation_id,
             "openrouter_operation_id": m.openrouter_operation_id,
             "api_family": m.api_family,
+            "transports": m.transports,
+            "request_content_types": m.request_content_types,
+            "response_content_types": m.response_content_types,
             "semantic_rationale": m.semantic_evidence.rationale,
             "client_binding": m.client_binding,
             "cli_binding": m.cli_binding,
@@ -420,22 +558,50 @@ mod tests {
         assert!(keys.contains("POST /responses"));
         assert!(keys.contains("POST /embeddings"));
         assert!(keys.contains("GET /models"));
-        // Files/media must not be claimed as verified intersection.
         assert!(!keys.iter().any(|k| k.contains("/files")));
         assert!(!keys.iter().any(|k| k.contains("/audio")));
         assert!(!keys.iter().any(|k| k.contains("/videos")));
     }
 
     #[test]
-    fn every_member_has_semantic_evidence() {
-        for m in &declared_intersection().members {
-            assert!(!m.semantic_evidence.rationale.is_empty());
-            assert!(
-                m.semantic_evidence.openai_schema.is_some()
-                    || m.semantic_evidence.openrouter_schema.is_some()
-                    || !m.semantic_evidence.rationale.is_empty()
-            );
+    fn member_transports_are_common_subset_not_union() {
+        let ix = declared_intersection();
+        let oa = openai_inventory().endpoint_map();
+        let or = openrouter_inventory().endpoint_map();
+        for m in &ix.members {
+            let key = m.method_path_key();
+            let oa_e = oa.get(&key).unwrap();
+            let or_e = or.get(&key).unwrap();
+            validate_common_contract(m, oa_e, or_e).unwrap();
         }
+        // Embeddings specifically: OpenRouter has SSE, OpenAI does not → common JSON only.
+        let emb = ix
+            .members
+            .iter()
+            .find(|m| m.method_path_key() == "POST /embeddings")
+            .unwrap();
+        assert_eq!(emb.transports, vec!["http_json".to_string()]);
+        assert!(!emb.transports.iter().any(|t| t == "http_sse"));
+    }
+
+    #[test]
+    fn union_overclaim_is_rejected() {
+        let oa = openai_inventory().endpoint_map();
+        let or = openrouter_inventory().endpoint_map();
+        let key = "POST /embeddings";
+        let mut m = declared_intersection()
+            .members
+            .iter()
+            .find(|x| x.method_path_key() == key)
+            .unwrap()
+            .clone();
+        // Fabricate a union overclaim (SSE only on OpenRouter side).
+        m.transports = vec!["http_json".into(), "http_sse".into()];
+        let err = validate_common_contract(&m, oa[key], or[key]).unwrap_err();
+        assert!(
+            err.contains("must equal vendor intersection"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -449,12 +615,7 @@ mod tests {
         for n in &ix.same_path_unverified_overlap {
             assert!(covered.insert(n.method_path_key()));
         }
-        let outside = if ix.openrouter_contract_outside_intersection.is_empty() {
-            &ix.openrouter_native_operations
-        } else {
-            &ix.openrouter_contract_outside_intersection
-        };
-        for n in outside {
+        for n in ix.openrouter_path_exclusive_ops() {
             assert!(covered.insert(n.method_path_key()));
         }
         assert_eq!(covered.len(), or.len());
@@ -464,35 +625,51 @@ mod tests {
     }
 
     #[test]
-    fn bindings_are_not_implemented() {
-        let ix = declared_intersection();
-        for m in &ix.members {
-            assert_eq!(m.client_binding(), BindingStatus::NotImplemented);
-            assert_eq!(m.cli_binding(), BindingStatus::NotImplemented);
-        }
+    fn no_duplicated_native_operations_field() {
+        // Serialized JSON must not reintroduce the duplicate alias.
+        let raw = include_str!("../../baselines/intersection/declared_intersection.json");
+        assert!(
+            !raw.contains("\"openrouter_native_operations\""),
+            "duplicate openrouter_native_operations must not be serialized"
+        );
     }
 
     #[test]
-    fn client_completeness_claims_are_not_supported() {
-        let claims = declared_intersection().openai_client_completeness_claims();
-        assert!(!claims.is_empty());
+    fn verified_intersection_client_claims_not_supported() {
+        let claims = declared_intersection().verified_intersection_client_completeness_claims();
+        assert_eq!(claims.len(), 4);
         for c in claims {
             assert_ne!(c.status, CompatibilityStatus::Supported);
             assert_eq!(c.client_binding, BindingStatus::NotImplemented);
-            assert_eq!(c.surface, ClaimSurface::OpenaiClientCompleteness);
             claim_is_consistent(&c).unwrap();
         }
     }
 
     #[test]
-    fn baseline_presence_claims_are_supported_without_client_coverage() {
-        let claims = declared_intersection().openai_baseline_presence_claims();
-        assert!(!claims.is_empty());
-        for c in claims {
-            assert_eq!(c.status, CompatibilityStatus::Supported);
+    fn full_openai_claim_ledgers_cover_every_endpoint() {
+        let inv = openai_inventory();
+        let presence = inv.baseline_presence_claims().unwrap();
+        let complete = inv.client_completeness_claims().unwrap();
+        assert_eq!(presence.len() as u64, inv.baseline.endpoint_count);
+        assert_eq!(complete.len() as u64, inv.baseline.endpoint_count);
+        assert_eq!(presence.len(), 287);
+        let mut pkeys = HashSet::new();
+        let mut ckeys = HashSet::new();
+        for c in &presence {
             assert_eq!(c.surface, ClaimSurface::OpenaiBaselinePresence);
+            assert_eq!(c.status, CompatibilityStatus::Supported);
+            assert!(pkeys.insert(c.identity.method_path_key()));
+        }
+        for c in &complete {
+            assert_eq!(c.surface, ClaimSurface::OpenaiClientCompleteness);
+            assert_eq!(c.status, CompatibilityStatus::Unknown);
             assert_eq!(c.client_binding, BindingStatus::NotImplemented);
-            claim_is_consistent(&c).unwrap();
+            assert_ne!(c.status, CompatibilityStatus::Supported);
+            assert!(ckeys.insert(c.identity.method_path_key()));
+        }
+        assert_eq!(pkeys, ckeys);
+        for ep in &inv.endpoints {
+            assert!(pkeys.contains(&ep.method_path_key()));
         }
     }
 
@@ -501,5 +678,6 @@ mod tests {
         let report = intersection_report_json();
         assert_eq!(report["member_count"], 4);
         assert!(report["same_path_unverified_count"].as_u64().unwrap() >= 1);
+        assert_eq!(report["openrouter_path_exclusive_count"], 77);
     }
 }

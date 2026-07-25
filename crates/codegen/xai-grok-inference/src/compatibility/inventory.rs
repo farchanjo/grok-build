@@ -1,8 +1,10 @@
 //! Shared baseline inventory types and loaders.
 
 use super::domain::{
-    ApiFamily, BindingStatus, HttpMethod, OperationIdentity, Transport, media_type_is_valid,
-    path_is_safe, timestamp_is_rfc3339_utc,
+    ApiFamily, BindingStatus, ClaimSurface, CompatibilityStatus, Evidence, EvidenceKind,
+    HttpMethod, OperationClaim, OperationIdentity, Transport, claim_is_consistent,
+    media_type_is_valid, path_is_safe, sha256_hex_is_valid, source_revision_is_valid,
+    timestamp_is_rfc3339_utc,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -183,14 +185,13 @@ impl ProviderInventory {
                 self.format_version
             ));
         }
-        if self.baseline.content_sha256.len() != 64
-            || !self
-                .baseline
-                .content_sha256
-                .chars()
-                .all(|c| c.is_ascii_hexdigit())
-        {
+        if !sha256_hex_is_valid(&self.baseline.content_sha256) {
             return Err("content_sha256 must be 64 hex chars".into());
+        }
+        if let Some(conv) = &self.baseline.converted_json_sha256
+            && !sha256_hex_is_valid(conv)
+        {
+            return Err("converted_json_sha256 must be 64 hex chars when present".into());
         }
         if self.baseline.content_bytes == 0 {
             return Err("content_bytes must be non-zero".into());
@@ -200,18 +201,22 @@ impl ProviderInventory {
         }
         // Mutable branch pins are rejected for OpenAI (must be commit-addressed).
         if self.provider == "openai" {
-            if self.baseline.source_revision.as_deref().unwrap_or("").len() != 40 {
-                return Err("openai source_revision must be full 40-char git SHA".into());
+            let rev = self.baseline.source_revision.as_deref().unwrap_or("");
+            if !source_revision_is_valid(rev) {
+                return Err("openai source_revision must be full 40-char hex git SHA".into());
             }
             if self.baseline.source_url.contains("/master/")
                 || self.baseline.source_url.contains("/main/")
             {
                 return Err("openai source_url must not use mutable branch path".into());
             }
-            let rev = self.baseline.source_revision.as_deref().unwrap();
             if !self.baseline.source_url.contains(rev) {
                 return Err("openai source_url must embed source_revision".into());
             }
+        } else if let Some(rev) = &self.baseline.source_revision
+            && !source_revision_is_valid(rev)
+        {
+            return Err("source_revision must be 40 hex chars when present".into());
         }
         if !timestamp_is_rfc3339_utc(&self.baseline.fetched_at_utc) {
             return Err(format!(
@@ -267,6 +272,89 @@ impl ProviderInventory {
             }
         }
         Ok(())
+    }
+
+    /// Baseline-presence claims for **every** endpoint in this inventory.
+    ///
+    /// Status is `Supported` (operation exists in the official baseline).
+    /// Client/CLI bindings remain `NotImplemented` in Change 4.
+    pub fn baseline_presence_claims(&self) -> Result<Vec<OperationClaim>, String> {
+        let mut out = Vec::with_capacity(self.endpoints.len());
+        let mut seen = HashSet::new();
+        for ep in &self.endpoints {
+            let key = ep.method_path_key();
+            if !seen.insert(key.clone()) {
+                return Err(format!("duplicate endpoint key in claim ledger: {key}"));
+            }
+            let identity = ep.to_identity()?;
+            let claim = OperationClaim {
+                identity,
+                surface: ClaimSurface::OpenaiBaselinePresence,
+                status: CompatibilityStatus::Supported,
+                evidence: vec![Evidence {
+                    kind: EvidenceKind::OfficialBaseline,
+                    source: format!("{}:{}", self.provider, self.baseline.content_sha256),
+                    timestamp_utc: self.baseline.fetched_at_utc.clone(),
+                    baseline_version: self.baseline.version.clone(),
+                    content_sha256: Some(self.baseline.content_sha256.clone()),
+                }],
+                client_binding: BindingStatus::NotImplemented,
+                cli_binding: BindingStatus::NotImplemented,
+            };
+            claim_is_consistent(&claim)?;
+            out.push(claim);
+        }
+        if out.len() as u64 != self.baseline.endpoint_count {
+            return Err(format!(
+                "baseline presence claim count {} != endpoint_count {}",
+                out.len(),
+                self.baseline.endpoint_count
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Client-completeness claims for **every** endpoint in this inventory.
+    ///
+    /// Change 4: all claims are `Unknown` with `NotImplemented` bindings.
+    /// Never reports `Supported` for client completeness.
+    pub fn client_completeness_claims(&self) -> Result<Vec<OperationClaim>, String> {
+        let mut out = Vec::with_capacity(self.endpoints.len());
+        let mut seen = HashSet::new();
+        for ep in &self.endpoints {
+            let key = ep.method_path_key();
+            if !seen.insert(key.clone()) {
+                return Err(format!("duplicate endpoint key in claim ledger: {key}"));
+            }
+            let identity = ep.to_identity()?;
+            let claim = OperationClaim {
+                identity,
+                surface: ClaimSurface::OpenaiClientCompleteness,
+                status: CompatibilityStatus::Unknown,
+                evidence: vec![Evidence {
+                    kind: EvidenceKind::ClientBinding,
+                    source: "change4_not_implemented".into(),
+                    timestamp_utc: self.baseline.fetched_at_utc.clone(),
+                    baseline_version: self.baseline.version.clone(),
+                    content_sha256: Some(self.baseline.content_sha256.clone()),
+                }],
+                client_binding: BindingStatus::NotImplemented,
+                cli_binding: BindingStatus::NotImplemented,
+            };
+            claim_is_consistent(&claim)?;
+            if claim.status == CompatibilityStatus::Supported {
+                return Err("client completeness must not be Supported in Change 4".into());
+            }
+            out.push(claim);
+        }
+        if out.len() as u64 != self.baseline.endpoint_count {
+            return Err(format!(
+                "client completeness claim count {} != endpoint_count {}",
+                out.len(),
+                self.baseline.endpoint_count
+            ));
+        }
+        Ok(out)
     }
 }
 

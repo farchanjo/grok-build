@@ -12,9 +12,9 @@ platform clone.
 | **Supported / Unsupported / Unknown** | Tri-state claim status (`Unknown` fails closed) |
 | **Baseline presence** | Operation exists in the official baseline inventory |
 | **Client completeness** | Typed client binding coverage (Change 9+; **Unknown/NotImplemented** in Change 4) |
-| **Intersection** | Declared OpenAI-compatible ops with **semantic** schema/doc evidence |
-| **Same-path unverified** | METHOD+path on both sides without verified compatible semantics |
-| **OpenRouter outside intersection** | Path exclusive to OpenRouter |
+| **Intersection** | Declared OpenAI-compatible ops with **semantic** schema/doc evidence; transports/content types are the **common subset** of both vendors |
+| **Same-path unverified** | METHOD+path on both sides without verified compatible semantics (not “native”) |
+| **OpenRouter path-exclusive** | Path exclusive to OpenRouter (`openrouter_contract_outside_intersection`) |
 
 ## Inventories
 
@@ -30,10 +30,13 @@ Module: `xai_grok_inference::compatibility`
 
 - Claim surfaces include `OpenaiBaselinePresence` vs `OpenaiClientCompleteness`
   (must not report Supported client completeness with NotImplemented bindings)
+- Full OpenAI ledger: **287** baseline-presence + **287** client-completeness
+  claims (`ProviderInventory::baseline_presence_claims` /
+  `client_completeness_claims`); Change 4 completeness is always `Unknown`
 - Each operation: method, path, multi-label **transports**, request/response
   content types
 - OpenRouter endpoints partition into three disjoint categories covering the
-  full baseline
+  full baseline (one serialized source each; no duplicate native alias)
 
 ## Baseline update procedure
 

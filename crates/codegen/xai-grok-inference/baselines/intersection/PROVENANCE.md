@@ -19,11 +19,15 @@ Files, audio, video, and other same-path resources remain in
 
 ## OpenRouter baseline partition (disjoint, exact cover)
 
-Every OpenRouter endpoint is in exactly one category:
+Every OpenRouter endpoint is in exactly one category (single serialized source;
+no duplicated `openrouter_native_operations` alias):
 
-1. **compatible intersection** (`members`)
-2. **same_path_unverified_overlap** (METHOD+path also on OpenAI, semantics not verified)
+1. **verified intersection** (`members`) — common transport/content subset
+2. **same_path_unverified_overlap** (METHOD+path also on OpenAI; not “native”)
 3. **openrouter_contract_outside_intersection** (path exclusive to OpenRouter)
+
+Member `transports` / content types are the **set-intersection** of both vendor
+operations (never a union).
 
 ## Baseline pins
 
