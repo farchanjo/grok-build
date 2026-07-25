@@ -1183,9 +1183,7 @@ impl SessionActor {
             ProviderIdentity::OpenAi => ("openai", "OpenAI"),
             ProviderIdentity::Xai => return None,
             ProviderIdentity::Custom => {
-                if provider_id.is_none() {
-                    return None;
-                }
+                provider_id.as_ref()?;
                 ("custom", "Custom")
             }
         };
