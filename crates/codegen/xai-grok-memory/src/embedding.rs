@@ -242,11 +242,9 @@ impl EmbeddingProvider for PlatformEmbeddingProvider {
         &self,
         texts: &[&str],
     ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-        use xai_grok_inference::{
-            OpenAiClient, PlatformClientConfig, TransportPolicy,
-            openai_platform::generated::openai_ops::{CreateEmbeddingBody, CreateEmbeddingRequest},
-        };
         use tokio_util::sync::CancellationToken;
+        use xai_grok_inference::openai_platform::generated::openai_types::CreateEmbeddingParams;
+        use xai_grok_inference::{OpenAiClient, PlatformClientConfig, TransportPolicy};
 
         if texts.is_empty() {
             return Ok(vec![]);
@@ -267,27 +265,23 @@ impl EmbeddingProvider for PlatformEmbeddingProvider {
 
         let mut all = Vec::with_capacity(texts.len());
         for batch in texts.chunks(self.max_batch_size) {
-            let mut fields = std::collections::BTreeMap::new();
-            fields.insert("model".into(), serde_json::json!(self.model));
-            fields.insert(
-                "input".into(),
-                serde_json::json!(batch.iter().copied().collect::<Vec<_>>()),
-            );
-            fields.insert("dimensions".into(), serde_json::json!(self.dimensions));
-            let req = CreateEmbeddingRequest {
-                body: CreateEmbeddingBody { fields },
-            };
+            // Deserialize into schema-derived CreateEmbeddingParams (not Value passthrough).
+            let params_val = serde_json::json!({
+                "body": {
+                    "model": self.model,
+                    "input": batch.iter().copied().collect::<Vec<_>>(),
+                    "dimensions": self.dimensions,
+                }
+            });
+            let req: CreateEmbeddingParams = serde_json::from_value(params_val)
+                .map_err(|e| format!("typed embedding params: {e}"))?;
             let resp = client.create_embedding(req).await?;
-            // Response fields flatten; prefer `data` array when present.
-            let data = resp
-                .data
-                .clone()
-                .or_else(|| {
-                    resp.fields
-                        .get("data")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                })
+            let resp_val =
+                serde_json::to_value(&resp).map_err(|e| format!("embedding response encode: {e}"))?;
+            let data = resp_val
+                .pointer("/data")
+                .or_else(|| resp_val.pointer("/body/data"))
+                .and_then(|v| v.as_array())
                 .ok_or("embedding response missing data")?;
             for item in data {
                 let embedding: Vec<f32> = item

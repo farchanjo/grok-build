@@ -1,10 +1,12 @@
 //! Typed CLI facades for provider lifecycle and platform operations.
 
+pub mod generated_dispatch;
 pub mod generated_ops;
 pub mod openai_cmd;
 pub mod openrouter_cmd;
 pub mod output;
 pub mod provider_cmd;
+pub mod typed_dispatch_runtime;
 
 pub use generated_ops::{CLI_OPERATION_COUNT, CLI_OPERATIONS, CliOperation, find_cli_operation};
 pub use openai_cmd::{OpenAiCliArgs, OpenAiCliCommand, run_openai_cli};

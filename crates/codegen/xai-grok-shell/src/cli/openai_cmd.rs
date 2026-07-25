@@ -1,7 +1,12 @@
 //! `grok openai --provider <id> ...` typed platform CLI.
+//!
+//! All live calls go through the typed client via
+//! [`super::generated_dispatch::dispatch_typed_operation`]. There is no
+//! generic `Value` / `HttpRequestSpec` bypass path for supported operations.
 
+use super::generated_dispatch::dispatch_typed_operation;
 use super::generated_ops::{CLI_OPERATIONS, find_cli_operation, operations_for_namespace};
-use super::output::{ExitCode, read_typed_input, write_binary, write_json, write_ndjson_line};
+use super::output::{ExitCode, read_typed_input, write_json};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -20,7 +25,7 @@ pub struct OpenAiCliArgs {
     #[arg(long)]
     pub admin: bool,
 
-    /// Dry-run shared-state mutations (print request only).
+    /// Dry-run shared-state mutations (print typed request only).
     #[arg(long)]
     pub dry_run: bool,
 
@@ -28,13 +33,17 @@ pub struct OpenAiCliArgs {
     #[arg(long)]
     pub yes: bool,
 
-    /// Write binary responses to this path.
+    /// Write binary responses to this path (required for binary ops on TTY).
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// Emit NDJSON for streaming operations.
+    /// Emit NDJSON for streaming / SSE operations.
     #[arg(long)]
     pub stream: bool,
+
+    /// Multipart file field bindings as `field=/path/to/file` (repeatable).
+    #[arg(long = "file", value_name = "FIELD=PATH")]
+    pub files: Vec<String>,
 
     #[command(subcommand)]
     pub command: OpenAiCliCommand,
@@ -50,7 +59,7 @@ pub enum OpenAiCliCommand {
     /// Invoke a baseline operation by OpenAPI operation_id.
     ///
     /// Complex bodies use `--input <file|->` and deserialize into the
-    /// operation's typed request (not raw JSON forwarding).
+    /// operation's typed Params request (not raw JSON forwarding).
     Call {
         /// OpenAPI `operationId` (e.g. `listModels`, `createChatCompletion`).
         operation_id: String,
@@ -64,27 +73,22 @@ pub enum OpenAiCliCommand {
         #[arg(long)]
         input: Option<String>,
     },
-    /// Convenience: models list.
     Models {
         #[command(subcommand)]
         command: ModelsCommand,
     },
-    /// Convenience: chat completions create.
     Chat {
         #[command(subcommand)]
         command: ChatCommand,
     },
-    /// Convenience: responses create.
     Responses {
         #[command(subcommand)]
         command: ResponsesCommand,
     },
-    /// Convenience: embeddings create.
     Embeddings {
         #[command(subcommand)]
         command: EmbeddingsCommand,
     },
-    /// Administration namespace (requires --admin or admin key).
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
@@ -131,7 +135,6 @@ pub enum EmbeddingsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
-    /// List admin operations (never uses application keys).
     Ops,
     Call {
         operation_id: String,
@@ -155,9 +158,14 @@ pub async fn run_openai_cli(args: OpenAiCliArgs) -> i32 {
 }
 
 async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
+    let files = parse_files(&args.files)?;
     match args.command {
         OpenAiCliCommand::Ops { .. } => {
-            let ns = if args.admin { "openai_admin" } else { "openai" };
+            let ns = if args.admin {
+                "openai_admin"
+            } else {
+                "openai"
+            };
             let ops: Vec<_> = operations_for_namespace(ns)
                 .map(|op| {
                     json!({
@@ -165,8 +173,14 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                         "method": op.method,
                         "path": op.path,
                         "cli_route": op.cli_route,
-                        "deprecated": op.is_deprecated,
                         "request_type": op.request_type,
+                        "response_type": op.response_type,
+                        "transports": op.transports,
+                        "deprecated": op.is_deprecated,
+                        "typed_request": op.typed_request,
+                        "multipart": op.is_multipart,
+                        "sse": op.is_sse,
+                        "binary": op.is_binary,
                     })
                 })
                 .collect();
@@ -185,7 +199,7 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
             query,
             input,
         } => {
-            dispatch_call(
+            call(
                 &args.provider,
                 if args.admin {
                     "openai_admin"
@@ -200,12 +214,13 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                 args.yes,
                 args.stream,
                 args.output.as_deref(),
+                &files,
             )
             .await
         }
         OpenAiCliCommand::Models { command } => match command {
             ModelsCommand::List { input } => {
-                dispatch_call(
+                call(
                     &args.provider,
                     "openai",
                     "listModels",
@@ -216,11 +231,12 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                     args.yes,
                     false,
                     None,
+                    &files,
                 )
                 .await
             }
             ModelsCommand::Retrieve { model_id } => {
-                dispatch_call(
+                call(
                     &args.provider,
                     "openai",
                     "retrieveModel",
@@ -231,6 +247,7 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                     args.yes,
                     false,
                     None,
+                    &files,
                 )
                 .await
             }
@@ -238,7 +255,7 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                 if !args.yes && !args.dry_run {
                     return Err("delete requires --yes (or --dry-run)".into());
                 }
-                dispatch_call(
+                call(
                     &args.provider,
                     "openai",
                     "deleteModel",
@@ -249,16 +266,30 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                     args.yes,
                     false,
                     None,
+                    &files,
                 )
                 .await
             }
         },
         OpenAiCliCommand::Chat { command } => match command {
             ChatCommand::Create { input } => {
-                dispatch_call(
+                let op = if args.stream {
+                    "createChatCompletion_stream"
+                } else {
+                    "createChatCompletion"
+                };
+                // Prefer primary createChatCompletion; stream companion if present.
+                let op = if args.stream && find_cli_operation("openai", op).is_none() {
+                    "createChatCompletion"
+                } else if args.stream {
+                    op
+                } else {
+                    "createChatCompletion"
+                };
+                call(
                     &args.provider,
                     "openai",
-                    "createChatCompletion",
+                    op,
                     &[],
                     &[],
                     Some(&input),
@@ -266,13 +297,14 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                     args.yes,
                     args.stream,
                     args.output.as_deref(),
+                    &files,
                 )
                 .await
             }
         },
         OpenAiCliCommand::Responses { command } => match command {
             ResponsesCommand::Create { input } => {
-                dispatch_call(
+                call(
                     &args.provider,
                     "openai",
                     "createResponse",
@@ -283,13 +315,14 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                     args.yes,
                     args.stream,
                     args.output.as_deref(),
+                    &files,
                 )
                 .await
             }
         },
         OpenAiCliCommand::Embeddings { command } => match command {
             EmbeddingsCommand::Create { input } => {
-                dispatch_call(
+                call(
                     &args.provider,
                     "openai",
                     "createEmbedding",
@@ -300,6 +333,7 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                     args.yes,
                     false,
                     None,
+                    &files,
                 )
                 .await
             }
@@ -319,12 +353,12 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                 query,
                 input,
             } => {
-                if is_mutating_op("openai_admin", &operation_id) && !args.yes && !args.dry_run {
+                if is_mutating("openai_admin", &operation_id) && !args.yes && !args.dry_run {
                     return Err(
                         "admin mutation requires --yes confirmation (or --dry-run)".into(),
                     );
                 }
-                dispatch_call(
+                call(
                     &args.provider,
                     "openai_admin",
                     &operation_id,
@@ -334,7 +368,8 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
                     args.dry_run,
                     args.yes,
                     false,
-                    None,
+                    args.output.as_deref(),
+                    &files,
                 )
                 .await
             }
@@ -342,13 +377,35 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
     }
 }
 
-fn is_mutating_op(namespace: &str, operation_id: &str) -> bool {
+fn is_mutating(namespace: &str, operation_id: &str) -> bool {
     find_cli_operation(namespace, operation_id)
         .map(|op| matches!(op.method, "POST" | "PUT" | "PATCH" | "DELETE"))
         .unwrap_or(true)
 }
 
-async fn dispatch_call(
+fn parse_files(files: &[String]) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut out = Vec::new();
+    for f in files {
+        let (field, path) = f
+            .split_once('=')
+            .ok_or_else(|| format!("--file must be FIELD=PATH, got `{f}`"))?;
+        out.push((field.to_owned(), PathBuf::from(path)));
+    }
+    Ok(out)
+}
+
+fn parse_pairs(pairs: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for p in pairs {
+        let (k, v) = p
+            .split_once('=')
+            .ok_or_else(|| format!("expected NAME=VALUE, got `{p}`"))?;
+        out.push((k.to_owned(), v.to_owned()));
+    }
+    Ok(out)
+}
+
+async fn call(
     provider: &str,
     namespace: &str,
     operation_id: &str,
@@ -359,277 +416,63 @@ async fn dispatch_call(
     _yes: bool,
     stream: bool,
     output: Option<&std::path::Path>,
+    files: &[(String, PathBuf)],
 ) -> Result<ExitCode, String> {
     let op = find_cli_operation(namespace, operation_id).ok_or_else(|| {
         format!("unknown operation_id `{operation_id}` in namespace `{namespace}`")
     })?;
-
-    // Typed body: deserialize as JSON object (operation-specific type envelope).
-    let body: Option<Value> = match input {
+    if !op.typed_request {
+        return Err(format!(
+            "operation `{operation_id}` lacks a typed request binding"
+        ));
+    }
+    if op.is_binary && output.is_none() {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() {
+            return Err(
+                "binary response requires --output <path> (refusing interactive TTY)".into(),
+            );
+        }
+    }
+    let path_params = parse_pairs(path_params)?;
+    let query = parse_pairs(query)?;
+    let input_json = match input {
         Some(path) => {
-            let typed: Value = read_typed_input(path)?;
-            if !typed.is_object() && !typed.is_array() {
-                return Err(
-                    "typed request must deserialize to a JSON object or array for this operation"
-                        .into(),
-                );
+            // Validate typed JSON exists; dispatch will deserialize to Params.
+            let raw = if path == "-" {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                    .map_err(|e| format!("read stdin: {e}"))?;
+                buf
+            } else {
+                std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?
+            };
+            if raw.trim().is_empty() {
+                return Err("input is empty".into());
             }
-            Some(typed)
+            // Structural check: must be JSON value.
+            let _: Value =
+                serde_json::from_str(&raw).map_err(|e| format!("input JSON invalid: {e}"))?;
+            Some(raw)
         }
         None => None,
     };
-
-    let mut path_map = serde_json::Map::new();
-    for pair in path_params {
-        let (k, v) = pair
-            .split_once('=')
-            .ok_or_else(|| format!("path-param must be NAME=VALUE, got `{pair}`"))?;
-        path_map.insert(k.to_owned(), Value::String(v.to_owned()));
-    }
-    let mut query_map = serde_json::Map::new();
-    for pair in query {
-        let (k, v) = pair
-            .split_once('=')
-            .ok_or_else(|| format!("query must be NAME=VALUE, got `{pair}`"))?;
-        query_map.insert(k.to_owned(), Value::String(v.to_owned()));
-    }
-
-    let request_preview = json!({
-        "provider": provider,
-        "namespace": namespace,
-        "operation_id": op.operation_id,
-        "method": op.method,
-        "path": op.path,
-        "path_params": path_map,
-        "query": query_map,
-        "body": body,
-        "client_method": op.client_method,
-        "request_type": op.request_type,
-        "dry_run": dry_run,
-    });
-
-    if dry_run {
-        write_json(&request_preview).map_err(|e| e.to_string())?;
-        return Ok(ExitCode::Success);
-    }
-
-    // Live execution goes through the platform client when credentials resolve.
-    let result = execute_platform_call(provider, namespace, op, &path_map, &query_map, body).await?;
-
-    if stream {
-        write_ndjson_line(&result).map_err(|e| e.to_string())?;
-    } else if let Some(bytes) = result.get("__binary__").and_then(|v| v.as_str()) {
-        let raw = bytes.as_bytes();
-        return write_binary(raw, output).map_err(|e| e.to_string());
-    } else {
-        write_json(&result).map_err(|e| e.to_string())?;
-    }
-    Ok(ExitCode::Success)
+    dispatch_typed_operation(
+        provider,
+        namespace,
+        operation_id,
+        &path_params,
+        &query,
+        input_json.as_deref(),
+        dry_run,
+        stream,
+        output,
+        files,
+    )
+    .await
 }
 
-async fn execute_platform_call(
-    provider: &str,
-    namespace: &str,
-    op: &super::generated_ops::CliOperation,
-    path_params: &serde_json::Map<String, Value>,
-    query: &serde_json::Map<String, Value>,
-    body: Option<Value>,
-) -> Result<Value, String> {
-    use crate::provider_registry::id::ProviderId;
-    use crate::provider_registry::secrets::{
-        admin_key_scope, application_key_scope, read_provider_secret,
-    };
-    use tokio_util::sync::CancellationToken;
-    use xai_grok_inference::{
-        OpenAiAdminClient, OpenAiClient, PlatformClientConfig, TransportPolicy,
-    };
-
-    let home = std::env::var("GROK_HOME").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .map(|h| h.join(".grokdev").display().to_string())
-            .unwrap_or_else(|| ".".into())
-    });
-    let home = std::path::PathBuf::from(home);
-    let (base_url, display_name) = resolve_provider_endpoint(provider, &home)?;
-    let pid = ProviderId::new(provider).map_err(|e| e.to_string())?;
-
-    let app_token = resolve_app_token(provider, &home, &pid);
-    let admin_token = resolve_admin_token(provider, &home, &pid);
-
-    let mut path = op.path.to_string();
-    for (k, v) in path_params {
-        let s = v.as_str().unwrap_or("");
-        path = path.replace(
-            &format!("{{{k}}}"),
-            &xai_grok_inference::openai_platform::url_policy::encode_path_segment(s),
-        );
-    }
-    let mut q = std::collections::BTreeMap::new();
-    for (k, v) in query {
-        q.insert(
-            k.clone(),
-            v.as_str()
-                .map(|s| s.to_owned())
-                .unwrap_or_else(|| v.to_string()),
-        );
-    }
-    let method = static_method(op.method);
-    let spec = xai_grok_inference::openai_platform::HttpRequestSpec {
-        method,
-        path,
-        query: q,
-        body,
-        credential: if namespace == "openai_admin" {
-            xai_grok_inference::openai_platform::CredentialKind::Admin
-        } else {
-            xai_grok_inference::openai_platform::CredentialKind::Application
-        },
-        expect_sse: false,
-        expect_binary: false,
-        multipart: false,
-        operation_id: op.operation_id,
-        idempotent: method == "GET" || method == "HEAD",
-    };
-
-    let cfg = PlatformClientConfig {
-        provider_id: provider.to_owned(),
-        display_name,
-        base_url,
-        admin_base_url: None,
-        application_token: app_token,
-        admin_token,
-        extra_headers: Default::default(),
-        policy: TransportPolicy::default(),
-    };
-    if namespace == "openai_admin" {
-        let client = OpenAiAdminClient::from_config(cfg, CancellationToken::new())
-            .map_err(|e| e.to_string())?;
-        client
-            .transport()
-            .execute_json(spec)
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        let client =
-            OpenAiClient::from_config(cfg, CancellationToken::new()).map_err(|e| e.to_string())?;
-        client
-            .transport()
-            .execute_json(spec)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
-fn static_method(m: &str) -> &'static str {
-    match m {
-        "GET" => "GET",
-        "POST" => "POST",
-        "PUT" => "PUT",
-        "PATCH" => "PATCH",
-        "DELETE" => "DELETE",
-        "HEAD" => "HEAD",
-        _ => "GET",
-    }
-}
-
-fn resolve_app_token(
-    provider: &str,
-    home: &std::path::Path,
-    pid: &crate::provider_registry::id::ProviderId,
-) -> Option<String> {
-    use crate::provider_registry::secrets::{application_key_scope, read_provider_secret};
-    match provider {
-        "openai" => crate::auth::read_provider_api_key(home, crate::auth::OPENAI_API_KEY_SCOPE)
-            .ok()
-            .flatten()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok()),
-        "openrouter" => {
-            crate::auth::read_provider_api_key(home, crate::auth::OPENROUTER_API_KEY_SCOPE)
-                .ok()
-                .flatten()
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-        }
-        "zai" | "zai-model-api" => read_provider_secret(home, &application_key_scope(pid))
-            .ok()
-            .flatten()
-            .or_else(|| std::env::var(crate::agent::zai::ZAI_ENV_KEY).ok())
-            .or_else(|| std::env::var(crate::agent::zai::ZAI_TEST_ENV_KEY).ok()),
-        _ => read_provider_secret(home, &application_key_scope(pid))
-            .ok()
-            .flatten()
-            .or_else(|| {
-                std::env::var(format!(
-                    "GROK_PROVIDER_{}_API_KEY",
-                    provider.to_ascii_uppercase()
-                ))
-                .ok()
-            }),
-    }
-}
-
-fn resolve_admin_token(
-    provider: &str,
-    home: &std::path::Path,
-    pid: &crate::provider_registry::id::ProviderId,
-) -> Option<String> {
-    use crate::provider_registry::secrets::{admin_key_scope, read_provider_secret};
-    read_provider_secret(home, &admin_key_scope(pid))
-        .ok()
-        .flatten()
-        .or_else(|| {
-            if provider == "openai" {
-                crate::auth::read_provider_api_key(home, crate::auth::OPENAI_ADMIN_KEY_SCOPE)
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            }
-        })
-}
-
-fn resolve_provider_endpoint(
-    provider: &str,
-    home: &std::path::Path,
-) -> Result<(String, String), String> {
-    match provider {
-        "openai" => Ok((
-            "https://api.openai.com/v1".into(),
-            "OpenAI".into(),
-        )),
-        "openrouter" => Ok((
-            "https://openrouter.ai/api/v1".into(),
-            "OpenRouter".into(),
-        )),
-        "zai" | "zai-model-api" => Ok((
-            crate::agent::zai::ZAI_DEFAULT_BASE_URL.into(),
-            "Z.ai".into(),
-        )),
-        _ => {
-            let cfg_path = home.join("config.toml");
-            let raw = std::fs::read_to_string(&cfg_path)
-                .map_err(|e| format!("read config.toml: {e}"))?;
-            let val: toml::Value = raw.parse().map_err(|e| format!("parse config: {e}"))?;
-            let entry = val
-                .get("model_providers")
-                .and_then(|t| t.get(provider))
-                .ok_or_else(|| format!("provider `{provider}` not found in config.toml"))?;
-            let base = entry
-                .get("base_url")
-                .or_else(|| entry.get("api_base_url"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("provider `{provider}` missing base_url"))?
-                .to_owned();
-            let name = entry
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(provider)
-                .to_owned();
-            Ok((base, name))
-        }
-    }
-}
-
-/// Shared entry point used by the OpenRouter-native namespace.
+/// Shared entry for OpenRouter namespace.
 pub async fn call_namespace(
     provider: &str,
     namespace: &str,
@@ -640,7 +483,7 @@ pub async fn call_namespace(
     dry_run: bool,
     yes: bool,
 ) -> Result<ExitCode, String> {
-    dispatch_call(
+    call(
         provider,
         namespace,
         operation_id,
@@ -651,6 +494,7 @@ pub async fn call_namespace(
         yes,
         false,
         None,
+        &[],
     )
     .await
 }
@@ -671,20 +515,20 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.provider, "openai");
-        assert!(matches!(
-            args.command,
-            OpenAiCliCommand::Models {
-                command: ModelsCommand::List { .. }
-            }
-        ));
     }
 
     #[test]
-    fn every_binding_has_cli_catalog_entry() {
-        assert_eq!(CLI_OPERATIONS.len(), xai_grok_inference::TOTAL_BINDING_COUNT);
+    fn every_cli_op_is_typed() {
         for op in CLI_OPERATIONS {
-            assert!(!op.operation_id.is_empty());
-            assert!(!op.cli_route.is_empty());
+            assert!(op.typed_request, "{}", op.operation_id);
+            assert!(!op.request_type.is_empty());
+            assert!(!op.client_method.is_empty());
+            assert!(
+                matches!(op.method, "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"),
+                "bad method {} on {}",
+                op.method,
+                op.operation_id
+            );
         }
     }
 

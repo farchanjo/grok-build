@@ -137,22 +137,11 @@ pub enum ProviderLifecycleCommand {
 }
 
 fn config_path(explicit: Option<PathBuf>) -> PathBuf {
-    explicit.unwrap_or_else(|| {
-        let home = std::env::var("GROK_HOME").unwrap_or_else(|_| {
-            dirs::home_dir()
-                .map(|h| h.join(".grokdev").display().to_string())
-                .unwrap_or_else(|| ".".into())
-        });
-        PathBuf::from(home).join("config.toml")
-    })
+    explicit.unwrap_or_else(|| xai_grok_config::grok_home().join("config.toml"))
 }
 
 fn grok_home() -> PathBuf {
-    PathBuf::from(std::env::var("GROK_HOME").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .map(|h| h.join(".grokdev").display().to_string())
-            .unwrap_or_else(|| ".".into())
-    }))
+    xai_grok_config::grok_home()
 }
 
 /// Run the provider lifecycle CLI. Returns process exit code.
