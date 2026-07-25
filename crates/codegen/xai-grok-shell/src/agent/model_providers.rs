@@ -103,15 +103,21 @@ impl ModelProviderConfig {
         ResolvedModelProvider {
             id: id.to_string(),
             kind: self.kind,
-            openrouter_fallback_models: (self.kind == ModelProviderKind::OpenRouter)
-                .then_some(openrouter_fallback_models)
-                .unwrap_or_default(),
-            openrouter_provider_preferences: (self.kind == ModelProviderKind::OpenRouter)
-                .then_some(provider_preferences)
-                .unwrap_or(None),
-            openrouter_plugins: (self.kind == ModelProviderKind::OpenRouter)
-                .then_some(plugins)
-                .unwrap_or_default(),
+            openrouter_fallback_models: if self.kind == ModelProviderKind::OpenRouter {
+                openrouter_fallback_models
+            } else {
+                Vec::new()
+            },
+            openrouter_provider_preferences: if self.kind == ModelProviderKind::OpenRouter {
+                provider_preferences
+            } else {
+                None
+            },
+            openrouter_plugins: if self.kind == ModelProviderKind::OpenRouter {
+                plugins
+            } else {
+                Vec::new()
+            },
             command: self.command.clone(),
         }
     }
@@ -349,7 +355,7 @@ impl ConfigModelOverride {
 #[cfg(test)]
 mod tests {
     use crate::agent::config::{
-        Config, resolve_credentials, resolve_model_list, inference_config_for_model,
+        Config, inference_config_for_model, resolve_credentials, resolve_model_list,
     };
     #[test]
     fn model_inherits_provider_connection_defaults() {

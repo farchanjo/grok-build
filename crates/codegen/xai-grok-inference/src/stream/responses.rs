@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, Stream};
 
 use xai_grok_inference_types::{
-    ConversationItem, ConversationResponse, ResponseModelMetadata, InferenceError, StopReason,
+    ConversationItem, ConversationResponse, InferenceError, ResponseModelMetadata, StopReason,
     TokenUsage, ToolCall, rs,
 };
 
@@ -450,11 +450,13 @@ pub(crate) fn stream_responses_tracked<'a>(
                                 },
                             );
                             // Ensure tool_index mapping exists if Added was missed.
-                            if !output_to_tool_index.contains_key(&done_event.output_index) {
-                                let tool_index = next_tool_index;
-                                next_tool_index += 1;
-                                output_to_tool_index.insert(done_event.output_index, tool_index);
-                            }
+                            output_to_tool_index
+                                .entry(done_event.output_index)
+                                .or_insert_with(|| {
+                                    let tool_index = next_tool_index;
+                                    next_tool_index += 1;
+                                    tool_index
+                                });
                         }
                         rs::OutputItem::WebSearchCall(ws) => {
                             let result = serde_json::to_value(ws).ok();
@@ -908,7 +910,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, InferenceEvent::ToolCallDelta { .. }))
             .count();
-        assert!(tool_deltas >= 1, "expected ToolCallDelta events from stream");
+        assert!(
+            tool_deltas >= 1,
+            "expected ToolCallDelta events from stream"
+        );
 
         match events.last().unwrap() {
             InferenceEvent::Completed { response, .. } => {
@@ -929,16 +934,15 @@ mod tests {
 
     #[tokio::test]
     async fn text_done_without_deltas_fills_assistant_content() {
-        let done = rs::ResponseStreamEvent::ResponseOutputTextDone(
-            rs_types::ResponseTextDoneEvent {
+        let done =
+            rs::ResponseStreamEvent::ResponseOutputTextDone(rs_types::ResponseTextDoneEvent {
                 sequence_number: 0,
                 item_id: "item-1".into(),
                 output_index: 0,
                 content_index: 0,
                 text: "full message".into(),
                 logprobs: None,
-            },
-        );
+            });
         let raw = stream::iter(vec![Ok(done), Ok(completed_event())]).boxed();
         let events = collect(stream_responses(
             raw,

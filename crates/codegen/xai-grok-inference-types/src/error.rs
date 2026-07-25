@@ -1413,7 +1413,7 @@ mod tests {
             .as_secs();
         let future = now + 120;
         let parsed = parse_rate_limit_reset(Some(&future.to_string())).unwrap();
-        assert!(parsed >= 118 && parsed <= 120, "got {parsed}");
+        assert!((118..=120).contains(&parsed), "got {parsed}");
     }
 
     #[test]

@@ -1846,7 +1846,7 @@ impl LocalTerminalActor {
     }
 
     async fn shutdown_all(&mut self) {
-        for (_, process) in self.processes.iter_mut() {
+        for process in self.processes.values_mut() {
             send_sigkill_to_group(process);
             // Abort the state dump reader so its spawn_blocking thread
             // doesn't outlive the actor.

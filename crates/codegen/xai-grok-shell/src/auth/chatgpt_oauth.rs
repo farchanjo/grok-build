@@ -174,8 +174,7 @@ fn extract_email(id_token: Option<&str>, access_token: &str) -> Option<String> {
 }
 
 fn tokens_from_response(resp: TokenResponse) -> ChatGptOAuthTokens {
-    let account_id =
-        extract_account_id_from_tokens(resp.id_token.as_deref(), &resp.access_token);
+    let account_id = extract_account_id_from_tokens(resp.id_token.as_deref(), &resp.access_token);
     let email = extract_email(resp.id_token.as_deref(), &resp.access_token);
     let expires_in = resp.expires_in.unwrap_or(3600) as i64;
     ChatGptOAuthTokens {
@@ -300,10 +299,7 @@ fn tokens_to_auth(tokens: &ChatGptOAuthTokens) -> GrokAuth {
         key: tokens.access_token.clone(),
         auth_mode: AuthMode::Oidc,
         create_time: Utc::now(),
-        user_id: tokens
-            .email
-            .clone()
-            .unwrap_or_else(|| "chatgpt".to_owned()),
+        user_id: tokens.email.clone().unwrap_or_else(|| "chatgpt".to_owned()),
         email: tokens.email.clone(),
         refresh_token: Some(tokens.refresh_token.clone()),
         expires_at: Some(tokens.expires_at),
@@ -316,7 +312,10 @@ fn tokens_to_auth(tokens: &ChatGptOAuthTokens) -> GrokAuth {
 }
 
 /// Persist OAuth tokens and clear any OpenAI API key (mutual exclusion).
-pub fn store_tokens(grok_home: &Path, tokens: &ChatGptOAuthTokens) -> Result<(), ChatGptOAuthError> {
+pub fn store_tokens(
+    grok_home: &Path,
+    tokens: &ChatGptOAuthTokens,
+) -> Result<(), ChatGptOAuthError> {
     let path = grok_home.join("auth.json");
     let lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path)
         .ok_or(ChatGptOAuthError::Store)?;
@@ -363,10 +362,7 @@ pub fn read_tokens(grok_home: &Path) -> Result<Option<ChatGptOAuthTokens>, ChatG
 pub fn status(grok_home: &Path) -> ChatGptOAuthStatus {
     match read_tokens(grok_home) {
         Ok(Some(tokens)) => {
-            if tokens.expires_at <= Utc::now() && tokens.refresh_token.is_empty() {
-                ChatGptOAuthStatus::Expired
-            } else if tokens.expires_at
-                <= Utc::now() + ChronoDuration::seconds(TOKEN_SKEW_SECS)
+            if tokens.expires_at <= Utc::now() + ChronoDuration::seconds(TOKEN_SKEW_SECS)
                 && tokens.refresh_token.is_empty()
             {
                 ChatGptOAuthStatus::Expired
@@ -385,8 +381,7 @@ pub async fn valid_access_token(
     let Some(tokens) = read_tokens(grok_home)? else {
         return Ok(None);
     };
-    let near_expiry =
-        tokens.expires_at <= Utc::now() + ChronoDuration::seconds(TOKEN_SKEW_SECS);
+    let near_expiry = tokens.expires_at <= Utc::now() + ChronoDuration::seconds(TOKEN_SKEW_SECS);
     if !near_expiry {
         return Ok(Some((tokens.access_token, tokens.account_id)));
     }
@@ -422,10 +417,10 @@ pub fn clear_api_key_only(grok_home: &Path) -> Result<(), ChatGptOAuthError> {
 
 async fn open_browser(url: &str) -> bool {
     let url = url.to_owned();
-    match tokio::task::spawn_blocking(move || webbrowser::open(&url)).await {
-        Ok(Ok(())) => true,
-        _ => false,
-    }
+    matches!(
+        tokio::task::spawn_blocking(move || webbrowser::open(&url)).await,
+        Ok(Ok(()))
+    )
 }
 
 fn success_html() -> &'static str {
@@ -733,24 +728,17 @@ mod tests {
     #[test]
     fn extracts_account_id_from_nested_claim() {
         // header.payload.sig — payload is {"https://api.openai.com/auth":{"chatgpt_account_id":"acc-1"}}
-        let payload = base64_url_encode(
-            br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acc-1"}}"#,
-        );
+        let payload =
+            base64_url_encode(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acc-1"}}"#);
         let jwt = format!("hdr.{payload}.sig");
-        assert_eq!(
-            extract_account_id_from_jwt(&jwt).as_deref(),
-            Some("acc-1")
-        );
+        assert_eq!(extract_account_id_from_jwt(&jwt).as_deref(), Some("acc-1"));
     }
 
     #[test]
     fn extracts_top_level_account_id() {
         let payload = base64_url_encode(br#"{"chatgpt_account_id":"acc-2","email":"a@b.c"}"#);
         let jwt = format!("hdr.{payload}.sig");
-        assert_eq!(
-            extract_account_id_from_jwt(&jwt).as_deref(),
-            Some("acc-2")
-        );
+        assert_eq!(extract_account_id_from_jwt(&jwt).as_deref(), Some("acc-2"));
     }
 
     #[test]

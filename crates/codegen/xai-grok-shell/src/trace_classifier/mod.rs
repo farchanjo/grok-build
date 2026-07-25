@@ -410,17 +410,17 @@ pub fn count_outstanding_dispatches(items: &[ConversationItem]) -> BackingCounts
                     }
                 }
             }
-            ConversationItem::ToolResult(tr) => {
-                if unresolved.remove(tr.tool_call_id.as_str()).is_none() {
-                    // Either this result is for a non-background tool
-                    // call (the common case) or it precedes its
-                    // dispatch (trace integrity issue). The latter is
-                    // worth surfacing.
-                    tracing::trace!(
-                        tool_call_id = %tr.tool_call_id,
-                        "trace_classifier: tool_result without matching prior dispatch (expected for non-background calls)",
-                    );
-                }
+            ConversationItem::ToolResult(tr)
+                if unresolved.remove(tr.tool_call_id.as_str()).is_none() =>
+            {
+                // Either this result is for a non-background tool
+                // call (the common case) or it precedes its
+                // dispatch (trace integrity issue). The latter is
+                // worth surfacing.
+                tracing::trace!(
+                    tool_call_id = %tr.tool_call_id,
+                    "trace_classifier: tool_result without matching prior dispatch (expected for non-background calls)",
+                );
             }
             _ => {}
         }
@@ -1128,7 +1128,8 @@ async fn build_sampler_client(
         max_completion_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
         ..xai_grok_inference::InferenceConfig::default()
     };
-    xai_grok_inference::InferenceClient::new(config).map_err(|e| anyhow!("build InferenceClient: {e}"))
+    xai_grok_inference::InferenceClient::new(config)
+        .map_err(|e| anyhow!("build InferenceClient: {e}"))
 }
 
 /// End-to-end entry point used by the binary. Writes one JSONL line

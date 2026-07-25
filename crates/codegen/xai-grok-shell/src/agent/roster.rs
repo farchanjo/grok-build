@@ -142,7 +142,7 @@ pub(crate) fn merge_roster(
     }));
 
     // Most-recently-changed first.
-    entries.sort_by(|a, b| b.last_change_unix_ms.cmp(&a.last_change_unix_ms));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_change_unix_ms));
     entries
 }
 
