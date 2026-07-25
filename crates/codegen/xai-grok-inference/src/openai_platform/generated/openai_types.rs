@@ -32,9 +32,9 @@ pub enum ActiveStatusTypeEnum {
     #[serde(rename = "active")]
     Active,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ActiveStatusTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ActiveStatusTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /uploads/{upload_id}/parts` (`addUploadPart`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -89,9 +89,9 @@ pub enum AdditionalToolsItemParamRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AdditionalToolsItemParamRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AdditionalToolsItemParamRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `AdditionalToolsItemParamTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,9 +99,9 @@ pub enum AdditionalToolsItemParamTypeEnum {
     #[serde(rename = "additional_tools")]
     AdditionalTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AdditionalToolsItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AdditionalToolsItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `AdditionalToolsTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,9 +109,9 @@ pub enum AdditionalToolsTypeEnum {
     #[serde(rename = "additional_tools")]
     AdditionalTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AdditionalToolsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AdditionalToolsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `Annotation`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,9 +133,9 @@ pub enum ApplyPatchCallOutputStatus {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchCallOutputStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchCallOutputStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchCallOutputStatusParam`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,9 +145,9 @@ pub enum ApplyPatchCallOutputStatusParam {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchCallOutputStatusParam { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchCallOutputStatusParam { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchCallStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,9 +157,9 @@ pub enum ApplyPatchCallStatus {
     #[serde(rename = "completed")]
     Completed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchCallStatusParam`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,9 +169,9 @@ pub enum ApplyPatchCallStatusParam {
     #[serde(rename = "completed")]
     Completed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchCallStatusParam { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchCallStatusParam { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ApplyPatchCreateFileOperation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -201,9 +201,9 @@ pub enum ApplyPatchCreateFileOperationParamTypeEnum {
     #[serde(rename = "create_file")]
     CreateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchCreateFileOperationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchCreateFileOperationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchCreateFileOperationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,9 +211,9 @@ pub enum ApplyPatchCreateFileOperationTypeEnum {
     #[serde(rename = "create_file")]
     CreateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchCreateFileOperationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchCreateFileOperationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ApplyPatchDeleteFileOperation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -241,9 +241,9 @@ pub enum ApplyPatchDeleteFileOperationParamTypeEnum {
     #[serde(rename = "delete_file")]
     DeleteFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchDeleteFileOperationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchDeleteFileOperationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchDeleteFileOperationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,9 +251,9 @@ pub enum ApplyPatchDeleteFileOperationTypeEnum {
     #[serde(rename = "delete_file")]
     DeleteFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchDeleteFileOperationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchDeleteFileOperationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ApplyPatchOperationParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -305,9 +305,9 @@ pub enum ApplyPatchToolCallItemParamTypeEnum {
     #[serde(rename = "apply_patch_call")]
     ApplyPatchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchToolCallItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchToolCallItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ApplyPatchToolCallOperationUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,9 +361,9 @@ pub enum ApplyPatchToolCallOutputItemParamTypeEnum {
     #[serde(rename = "apply_patch_call_output")]
     ApplyPatchCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchToolCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchToolCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,9 +371,9 @@ pub enum ApplyPatchToolCallOutputTypeEnum {
     #[serde(rename = "apply_patch_call_output")]
     ApplyPatchCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,9 +381,9 @@ pub enum ApplyPatchToolCallTypeEnum {
     #[serde(rename = "apply_patch_call")]
     ApplyPatchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ApplyPatchToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -402,9 +402,9 @@ pub enum ApplyPatchToolParamTypeEnum {
     #[serde(rename = "apply_patch")]
     ApplyPatch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ApplyPatchUpdateFileOperation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -434,9 +434,9 @@ pub enum ApplyPatchUpdateFileOperationParamTypeEnum {
     #[serde(rename = "update_file")]
     UpdateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchUpdateFileOperationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchUpdateFileOperationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ApplyPatchUpdateFileOperationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,9 +444,9 @@ pub enum ApplyPatchUpdateFileOperationTypeEnum {
     #[serde(rename = "update_file")]
     UpdateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApplyPatchUpdateFileOperationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApplyPatchUpdateFileOperationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ApproximateLocation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -471,9 +471,9 @@ pub enum ApproximateLocationTypeEnum {
     #[serde(rename = "approximate")]
     Approximate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApproximateLocationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApproximateLocationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /projects/{project_id}/groups/{group_id}/roles` (`assign-project-group-role`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -560,9 +560,9 @@ pub enum AssistantMessageItemObjectEnum {
     #[serde(rename = "chatkit.thread_item")]
     ChatkitThreadItem,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantMessageItemObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantMessageItemObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `AssistantMessageItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,9 +570,9 @@ pub enum AssistantMessageItemTypeEnum {
     #[serde(rename = "chatkit.assistant_message")]
     ChatkitAssistantMessage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantMessageItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantMessageItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AssistantObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -607,9 +607,9 @@ pub enum AssistantObjectObjectEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AssistantObjectToolResources`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -739,9 +739,9 @@ pub enum AssistantSupportedModels {
     #[serde(rename = "gpt-3.5-turbo-16k-0613")]
     Gpt35Turbo16k0613,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantSupportedModels { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantSupportedModels { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AssistantToolsCode`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -758,9 +758,9 @@ pub enum AssistantToolsCodeTypeEnum {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantToolsCodeTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantToolsCodeTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AssistantToolsFileSearch`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -790,9 +790,9 @@ pub enum AssistantToolsFileSearchTypeEnum {
     #[serde(rename = "file_search")]
     FileSearch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantToolsFileSearchTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantToolsFileSearchTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AssistantToolsFileSearchTypeOnly`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -809,9 +809,9 @@ pub enum AssistantToolsFileSearchTypeOnlyTypeEnum {
     #[serde(rename = "file_search")]
     FileSearch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantToolsFileSearchTypeOnlyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantToolsFileSearchTypeOnlyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AssistantToolsFunction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -829,9 +829,9 @@ pub enum AssistantToolsFunctionTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantToolsFunctionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantToolsFunctionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `AssistantsApiResponseFormatOption`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -851,9 +851,9 @@ pub enum AssistantsApiResponseFormatOptionV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AssistantsApiResponseFormatOptionV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AssistantsApiResponseFormatOptionV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Attachment`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -877,9 +877,9 @@ pub enum AttachmentType {
     #[serde(rename = "file")]
     File,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AttachmentType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AttachmentType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `AudioResponseFormat`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -897,9 +897,9 @@ pub enum AudioResponseFormat {
     #[serde(rename = "diarized_json")]
     DiarizedJson,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AudioResponseFormat { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AudioResponseFormat { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AudioTranscription`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -930,9 +930,9 @@ pub enum AudioTranscriptionDelayEnum {
     #[serde(rename = "xhigh")]
     Xhigh,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AudioTranscriptionDelayEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AudioTranscriptionDelayEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `AudioTranscriptionModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -960,9 +960,9 @@ pub enum AudioTranscriptionModelV1Enum {
     #[serde(rename = "gpt-realtime-whisper")]
     GptRealtimeWhisper,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AudioTranscriptionModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AudioTranscriptionModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AudioTranscriptionResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1003,9 +1003,9 @@ pub enum AudioTranscriptionResponseModelV1Enum {
     #[serde(rename = "gpt-realtime-whisper")]
     GptRealtimeWhisper,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AudioTranscriptionResponseModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AudioTranscriptionResponseModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AutoChunkingStrategyRequestParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1022,9 +1022,9 @@ pub enum AutoChunkingStrategyRequestParamTypeEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AutoChunkingStrategyRequestParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AutoChunkingStrategyRequestParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AutoCodeInterpreterToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1057,9 +1057,9 @@ pub enum AutoCodeInterpreterToolParamTypeEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AutoCodeInterpreterToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AutoCodeInterpreterToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AutomaticThreadTitlingParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1155,9 +1155,9 @@ pub enum BatchFileExpirationAfterAnchorEnum {
     #[serde(rename = "created_at")]
     CreatedAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BatchFileExpirationAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BatchFileExpirationAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BatchObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1165,9 +1165,9 @@ pub enum BatchObjectEnum {
     #[serde(rename = "batch")]
     Batch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BatchObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BatchObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BatchRequestCounts`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1199,9 +1199,9 @@ pub enum BatchStatusEnum {
     #[serde(rename = "cancelled")]
     Cancelled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BatchStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BatchStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BatchUsage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1266,9 +1266,9 @@ pub enum BetaAdditionalToolsItemParamRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaAdditionalToolsItemParamRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaAdditionalToolsItemParamRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaAdditionalToolsItemParamTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1276,9 +1276,9 @@ pub enum BetaAdditionalToolsItemParamTypeEnum {
     #[serde(rename = "additional_tools")]
     AdditionalTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaAdditionalToolsItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaAdditionalToolsItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaAdditionalToolsTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1286,9 +1286,9 @@ pub enum BetaAdditionalToolsTypeEnum {
     #[serde(rename = "additional_tools")]
     AdditionalTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaAdditionalToolsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaAdditionalToolsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaAgentMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1356,9 +1356,9 @@ pub enum BetaAgentMessageItemParamTypeEnum {
     #[serde(rename = "agent_message")]
     AgentMessage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaAgentMessageItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaAgentMessageItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaAgentMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1366,9 +1366,9 @@ pub enum BetaAgentMessageTypeEnum {
     #[serde(rename = "agent_message")]
     AgentMessage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaAgentMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaAgentMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaAgentTag`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1406,9 +1406,9 @@ pub enum BetaApplyPatchCallOutputStatus {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchCallOutputStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchCallOutputStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchCallOutputStatusParam`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1418,9 +1418,9 @@ pub enum BetaApplyPatchCallOutputStatusParam {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchCallOutputStatusParam { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchCallOutputStatusParam { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchCallStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1430,9 +1430,9 @@ pub enum BetaApplyPatchCallStatus {
     #[serde(rename = "completed")]
     Completed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchCallStatusParam`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1442,9 +1442,9 @@ pub enum BetaApplyPatchCallStatusParam {
     #[serde(rename = "completed")]
     Completed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchCallStatusParam { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchCallStatusParam { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaApplyPatchCreateFileOperation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1474,9 +1474,9 @@ pub enum BetaApplyPatchCreateFileOperationParamTypeEnum {
     #[serde(rename = "create_file")]
     CreateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchCreateFileOperationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchCreateFileOperationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchCreateFileOperationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1484,9 +1484,9 @@ pub enum BetaApplyPatchCreateFileOperationTypeEnum {
     #[serde(rename = "create_file")]
     CreateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchCreateFileOperationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchCreateFileOperationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaApplyPatchDeleteFileOperation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1514,9 +1514,9 @@ pub enum BetaApplyPatchDeleteFileOperationParamTypeEnum {
     #[serde(rename = "delete_file")]
     DeleteFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchDeleteFileOperationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchDeleteFileOperationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchDeleteFileOperationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1524,9 +1524,9 @@ pub enum BetaApplyPatchDeleteFileOperationTypeEnum {
     #[serde(rename = "delete_file")]
     DeleteFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchDeleteFileOperationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchDeleteFileOperationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaApplyPatchOperationParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1582,9 +1582,9 @@ pub enum BetaApplyPatchToolCallItemParamTypeEnum {
     #[serde(rename = "apply_patch_call")]
     ApplyPatchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchToolCallItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchToolCallItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaApplyPatchToolCallOperationUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1642,9 +1642,9 @@ pub enum BetaApplyPatchToolCallOutputItemParamTypeEnum {
     #[serde(rename = "apply_patch_call_output")]
     ApplyPatchCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchToolCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchToolCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1652,9 +1652,9 @@ pub enum BetaApplyPatchToolCallOutputTypeEnum {
     #[serde(rename = "apply_patch_call_output")]
     ApplyPatchCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1662,9 +1662,9 @@ pub enum BetaApplyPatchToolCallTypeEnum {
     #[serde(rename = "apply_patch_call")]
     ApplyPatchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaApplyPatchToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1683,9 +1683,9 @@ pub enum BetaApplyPatchToolParamTypeEnum {
     #[serde(rename = "apply_patch")]
     ApplyPatch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaApplyPatchUpdateFileOperation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1715,9 +1715,9 @@ pub enum BetaApplyPatchUpdateFileOperationParamTypeEnum {
     #[serde(rename = "update_file")]
     UpdateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchUpdateFileOperationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchUpdateFileOperationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaApplyPatchUpdateFileOperationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1725,9 +1725,9 @@ pub enum BetaApplyPatchUpdateFileOperationTypeEnum {
     #[serde(rename = "update_file")]
     UpdateFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApplyPatchUpdateFileOperationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApplyPatchUpdateFileOperationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaApproximateLocation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1752,9 +1752,9 @@ pub enum BetaApproximateLocationTypeEnum {
     #[serde(rename = "approximate")]
     Approximate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaApproximateLocationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaApproximateLocationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaAutoCodeInterpreterToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1787,9 +1787,9 @@ pub enum BetaAutoCodeInterpreterToolParamTypeEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaAutoCodeInterpreterToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaAutoCodeInterpreterToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaCallableToolAllowedCaller`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1799,9 +1799,9 @@ pub enum BetaCallableToolAllowedCaller {
     #[serde(rename = "programmatic")]
     Programmatic,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCallableToolAllowedCaller { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCallableToolAllowedCaller { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /responses/{response_id}/cancel?beta=true` (`beta_cancelResponse`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1830,9 +1830,9 @@ pub enum BetaClickButtonType {
     #[serde(rename = "forward")]
     Forward,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaClickButtonType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaClickButtonType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaClickParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1854,9 +1854,9 @@ pub enum BetaClickParamTypeEnum {
     #[serde(rename = "click")]
     Click,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaClickParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaClickParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCodeInterpreterOutputImage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1874,9 +1874,9 @@ pub enum BetaCodeInterpreterOutputImageTypeEnum {
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCodeInterpreterOutputImageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCodeInterpreterOutputImageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCodeInterpreterOutputLogs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1894,9 +1894,9 @@ pub enum BetaCodeInterpreterOutputLogsTypeEnum {
     #[serde(rename = "logs")]
     Logs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCodeInterpreterOutputLogsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCodeInterpreterOutputLogsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCodeInterpreterTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1952,9 +1952,9 @@ pub enum BetaCodeInterpreterToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCodeInterpreterToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCodeInterpreterToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaCodeInterpreterToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1962,9 +1962,9 @@ pub enum BetaCodeInterpreterToolCallTypeEnum {
     #[serde(rename = "code_interpreter_call")]
     CodeInterpreterCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCodeInterpreterToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCodeInterpreterToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaCodeInterpreterToolContainerUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1982,9 +1982,9 @@ pub enum BetaCodeInterpreterToolTypeEnum {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCodeInterpreterToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCodeInterpreterToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCompactResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2004,9 +2004,9 @@ pub enum BetaCompactResourceObjectEnum {
     #[serde(rename = "response.compaction")]
     ResponseCompaction,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCompactResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCompactResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCompactResponseMethodPublicBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2074,9 +2074,9 @@ pub enum BetaCompactionBodyTypeEnum {
     #[serde(rename = "compaction")]
     Compaction,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCompactionBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCompactionBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCompactionSummaryItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2098,9 +2098,9 @@ pub enum BetaCompactionSummaryItemParamTypeEnum {
     #[serde(rename = "compaction")]
     Compaction,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCompactionSummaryItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCompactionSummaryItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCompactionTriggerItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2119,9 +2119,9 @@ pub enum BetaCompactionTriggerItemParamTypeEnum {
     #[serde(rename = "compaction_trigger")]
     CompactionTrigger,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCompactionTriggerItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCompactionTriggerItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaComparisonFilter`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2154,9 +2154,9 @@ pub enum BetaComparisonFilterTypeEnum {
     #[serde(rename = "nin")]
     Nin,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComparisonFilterTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComparisonFilterTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaComparisonFilterValueUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2208,9 +2208,9 @@ pub enum BetaCompoundFilterTypeEnum {
     #[serde(rename = "or")]
     Or,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCompoundFilterTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCompoundFilterTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaComputerAction`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2261,9 +2261,9 @@ pub enum BetaComputerCallOutputItemParamTypeEnum {
     #[serde(rename = "computer_call_output")]
     ComputerCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaComputerCallOutputStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2275,9 +2275,9 @@ pub enum BetaComputerCallOutputStatus {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerCallOutputStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerCallOutputStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaComputerCallSafetyCheckParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2305,9 +2305,9 @@ pub enum BetaComputerEnvironment {
     #[serde(rename = "browser")]
     Browser,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerEnvironment { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerEnvironment { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaComputerScreenshotContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2331,9 +2331,9 @@ pub enum BetaComputerScreenshotContentTypeEnum {
     #[serde(rename = "computer_screenshot")]
     ComputerScreenshot,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerScreenshotContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerScreenshotContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaComputerScreenshotImage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2354,9 +2354,9 @@ pub enum BetaComputerScreenshotImageTypeEnum {
     #[serde(rename = "computer_screenshot")]
     ComputerScreenshot,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerScreenshotImageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerScreenshotImageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaComputerTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2411,9 +2411,9 @@ pub enum BetaComputerToolCallOutputResourceTypeEnum {
     #[serde(rename = "computer_call_output")]
     ComputerCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerToolCallOutputResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerToolCallOutputResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaComputerToolCallStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2425,9 +2425,9 @@ pub enum BetaComputerToolCallStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaComputerToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2435,9 +2435,9 @@ pub enum BetaComputerToolCallTypeEnum {
     #[serde(rename = "computer_call")]
     ComputerCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaComputerToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2445,9 +2445,9 @@ pub enum BetaComputerToolTypeEnum {
     #[serde(rename = "computer")]
     Computer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaComputerUsePreviewTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2467,9 +2467,9 @@ pub enum BetaComputerUsePreviewToolTypeEnum {
     #[serde(rename = "computer_use_preview")]
     ComputerUsePreview,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaComputerUsePreviewToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaComputerUsePreviewToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContainerAutoParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2514,9 +2514,9 @@ pub enum BetaContainerAutoParamTypeEnum {
     #[serde(rename = "container_auto")]
     ContainerAuto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerAutoParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerAutoParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContainerFileCitationBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2538,9 +2538,9 @@ pub enum BetaContainerFileCitationBodyTypeEnum {
     #[serde(rename = "container_file_citation")]
     ContainerFileCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerFileCitationBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerFileCitationBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContainerFileCitationParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2562,9 +2562,9 @@ pub enum BetaContainerFileCitationParamTypeEnum {
     #[serde(rename = "container_file_citation")]
     ContainerFileCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerFileCitationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerFileCitationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaContainerMemoryLimit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2578,9 +2578,9 @@ pub enum BetaContainerMemoryLimit {
     #[serde(rename = "64g")]
     T64g,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerMemoryLimit { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerMemoryLimit { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContainerNetworkPolicyAllowlistParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2600,9 +2600,9 @@ pub enum BetaContainerNetworkPolicyAllowlistParamTypeEnum {
     #[serde(rename = "allowlist")]
     Allowlist,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerNetworkPolicyAllowlistParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerNetworkPolicyAllowlistParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContainerNetworkPolicyDisabledParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2619,9 +2619,9 @@ pub enum BetaContainerNetworkPolicyDisabledParamTypeEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerNetworkPolicyDisabledParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerNetworkPolicyDisabledParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContainerNetworkPolicyDomainSecretParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2649,9 +2649,9 @@ pub enum BetaContainerReferenceParamTypeEnum {
     #[serde(rename = "container_reference")]
     ContainerReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerReferenceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerReferenceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContainerReferenceResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2669,9 +2669,9 @@ pub enum BetaContainerReferenceResourceTypeEnum {
     #[serde(rename = "container_reference")]
     ContainerReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaContainerReferenceResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaContainerReferenceResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaContextManagementParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2797,9 +2797,9 @@ pub enum BetaCreateResponseTruncationEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCreateResponseTruncationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCreateResponseTruncationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCustomGrammarFormatParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2818,9 +2818,9 @@ pub enum BetaCustomGrammarFormatParamTypeEnum {
     #[serde(rename = "grammar")]
     Grammar,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCustomGrammarFormatParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCustomGrammarFormatParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCustomTextFormatParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2837,9 +2837,9 @@ pub enum BetaCustomTextFormatParamTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCustomTextFormatParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCustomTextFormatParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCustomToolCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2923,9 +2923,9 @@ pub enum BetaCustomToolCallOutputResourceTypeEnum {
     #[serde(rename = "custom_tool_call_output")]
     CustomToolCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCustomToolCallOutputResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCustomToolCallOutputResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaCustomToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2933,9 +2933,9 @@ pub enum BetaCustomToolCallOutputTypeEnum {
     #[serde(rename = "custom_tool_call_output")]
     CustomToolCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCustomToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCustomToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCustomToolCallResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2965,9 +2965,9 @@ pub enum BetaCustomToolCallResourceTypeEnum {
     #[serde(rename = "custom_tool_call")]
     CustomToolCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCustomToolCallResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCustomToolCallResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaCustomToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2975,9 +2975,9 @@ pub enum BetaCustomToolCallTypeEnum {
     #[serde(rename = "custom_tool_call")]
     CustomToolCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCustomToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCustomToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaCustomToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3013,9 +3013,9 @@ pub enum BetaCustomToolParamTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaCustomToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaCustomToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `DELETE /responses/{response_id}?beta=true` (`beta_deleteResponse`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3042,9 +3042,9 @@ pub enum BetaDetailEnum {
     #[serde(rename = "original")]
     Original,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaDetailEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaDetailEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaDirectToolCallCaller`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3070,9 +3070,9 @@ pub enum BetaDirectToolCallCallerParamTypeEnum {
     #[serde(rename = "direct")]
     Direct,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaDirectToolCallCallerParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaDirectToolCallCallerParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaDirectToolCallCallerTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3080,9 +3080,9 @@ pub enum BetaDirectToolCallCallerTypeEnum {
     #[serde(rename = "direct")]
     Direct,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaDirectToolCallCallerTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaDirectToolCallCallerTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaDoubleClickAction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3103,9 +3103,9 @@ pub enum BetaDoubleClickActionTypeEnum {
     #[serde(rename = "double_click")]
     DoubleClick,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaDoubleClickActionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaDoubleClickActionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaDragParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3125,9 +3125,9 @@ pub enum BetaDragParamTypeEnum {
     #[serde(rename = "drag")]
     Drag,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaDragParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaDragParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaEasyInputMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3165,9 +3165,9 @@ pub enum BetaEasyInputMessageRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaEasyInputMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaEasyInputMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaEasyInputMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3175,9 +3175,9 @@ pub enum BetaEasyInputMessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaEasyInputMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaEasyInputMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaEmptyModelParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3212,9 +3212,9 @@ pub enum BetaEncryptedContentParamTypeEnum {
     #[serde(rename = "encrypted_content")]
     EncryptedContent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaEncryptedContentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaEncryptedContentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaEncryptedContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3222,9 +3222,9 @@ pub enum BetaEncryptedContentTypeEnum {
     #[serde(rename = "encrypted_content")]
     EncryptedContent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaEncryptedContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaEncryptedContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFileCitationBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3244,9 +3244,9 @@ pub enum BetaFileCitationBodyTypeEnum {
     #[serde(rename = "file_citation")]
     FileCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFileCitationBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFileCitationBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFileCitationParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3266,9 +3266,9 @@ pub enum BetaFileCitationParamTypeEnum {
     #[serde(rename = "file_citation")]
     FileCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFileCitationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFileCitationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFileDetailEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3280,9 +3280,9 @@ pub enum BetaFileDetailEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFileDetailEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFileDetailEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFileInputDetail`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3294,9 +3294,9 @@ pub enum BetaFileInputDetail {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFileInputDetail { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFileInputDetail { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFilePath`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3315,9 +3315,9 @@ pub enum BetaFilePathTypeEnum {
     #[serde(rename = "file_path")]
     FilePath,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFilePathTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFilePathTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFileSearchTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3382,9 +3382,9 @@ pub enum BetaFileSearchToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFileSearchToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFileSearchToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFileSearchToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3392,9 +3392,9 @@ pub enum BetaFileSearchToolCallTypeEnum {
     #[serde(rename = "file_search_call")]
     FileSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFileSearchToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFileSearchToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFileSearchToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3402,9 +3402,9 @@ pub enum BetaFileSearchToolTypeEnum {
     #[serde(rename = "file_search")]
     FileSearch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFileSearchToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFileSearchToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaFilters`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3437,9 +3437,9 @@ pub enum BetaFunctionCallItemStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionCallItemStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionCallItemStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionCallOutputItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3487,9 +3487,9 @@ pub enum BetaFunctionCallOutputItemParamTypeEnum {
     #[serde(rename = "function_call_output")]
     FunctionCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionCallOutputStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3501,9 +3501,9 @@ pub enum BetaFunctionCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionCallStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3515,9 +3515,9 @@ pub enum BetaFunctionCallStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionShellAction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3611,9 +3611,9 @@ pub enum BetaFunctionShellCallItemParamTypeEnum {
     #[serde(rename = "shell_call")]
     ShellCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionShellCallItemStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3625,9 +3625,9 @@ pub enum BetaFunctionShellCallItemStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallItemStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallItemStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionShellCallOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3708,9 +3708,9 @@ pub enum BetaFunctionShellCallOutputExitOutcomeParamTypeEnum {
     #[serde(rename = "exit")]
     Exit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallOutputExitOutcomeParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallOutputExitOutcomeParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionShellCallOutputExitOutcomeTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3718,9 +3718,9 @@ pub enum BetaFunctionShellCallOutputExitOutcomeTypeEnum {
     #[serde(rename = "exit")]
     Exit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallOutputExitOutcomeTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallOutputExitOutcomeTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionShellCallOutputItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3749,9 +3749,9 @@ pub enum BetaFunctionShellCallOutputItemParamTypeEnum {
     #[serde(rename = "shell_call_output")]
     ShellCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaFunctionShellCallOutputOutcomeParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3773,9 +3773,9 @@ pub enum BetaFunctionShellCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionShellCallOutputTimeoutOutcome`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3801,9 +3801,9 @@ pub enum BetaFunctionShellCallOutputTimeoutOutcomeParamTypeEnum {
     #[serde(rename = "timeout")]
     Timeout,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallOutputTimeoutOutcomeParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallOutputTimeoutOutcomeParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionShellCallOutputTimeoutOutcomeTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3811,9 +3811,9 @@ pub enum BetaFunctionShellCallOutputTimeoutOutcomeTypeEnum {
     #[serde(rename = "timeout")]
     Timeout,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallOutputTimeoutOutcomeTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallOutputTimeoutOutcomeTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionShellCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3821,9 +3821,9 @@ pub enum BetaFunctionShellCallOutputTypeEnum {
     #[serde(rename = "shell_call_output")]
     ShellCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionShellCallStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3835,9 +3835,9 @@ pub enum BetaFunctionShellCallStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionShellCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3845,9 +3845,9 @@ pub enum BetaFunctionShellCallTypeEnum {
     #[serde(rename = "shell_call")]
     ShellCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionShellToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3879,9 +3879,9 @@ pub enum BetaFunctionShellToolParamTypeEnum {
     #[serde(rename = "shell")]
     Shell,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionShellToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionShellToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3991,9 +3991,9 @@ pub enum BetaFunctionToolCallOutputResourceTypeEnum {
     #[serde(rename = "function_call_output")]
     FunctionCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolCallOutputResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolCallOutputResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionToolCallOutputStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4005,9 +4005,9 @@ pub enum BetaFunctionToolCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4015,9 +4015,9 @@ pub enum BetaFunctionToolCallOutputTypeEnum {
     #[serde(rename = "function_call_output")]
     FunctionCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionToolCallResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4047,9 +4047,9 @@ pub enum BetaFunctionToolCallResourceTypeEnum {
     #[serde(rename = "function_call")]
     FunctionCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolCallResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolCallResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionToolCallStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4061,9 +4061,9 @@ pub enum BetaFunctionToolCallStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4071,9 +4071,9 @@ pub enum BetaFunctionToolCallTypeEnum {
     #[serde(rename = "function_call")]
     FunctionCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaFunctionToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4103,9 +4103,9 @@ pub enum BetaFunctionToolParamTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaFunctionToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4113,9 +4113,9 @@ pub enum BetaFunctionToolTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaFunctionToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaFunctionToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /responses/{response_id}?beta=true` (`beta_getResponse`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4159,9 +4159,9 @@ pub enum BetaGrammarSyntax1 {
     #[serde(rename = "regex")]
     Regex,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaGrammarSyntax1 { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaGrammarSyntax1 { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaHybridSearchOptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4184,9 +4184,9 @@ pub enum BetaImageDetail {
     #[serde(rename = "original")]
     Original,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageDetail { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageDetail { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaImageGenActionEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4198,9 +4198,9 @@ pub enum BetaImageGenActionEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenActionEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenActionEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaImageGenTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4243,9 +4243,9 @@ pub enum BetaImageGenToolBackgroundEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolBackgroundEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolBackgroundEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaImageGenToolCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4274,9 +4274,9 @@ pub enum BetaImageGenToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaImageGenToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4284,9 +4284,9 @@ pub enum BetaImageGenToolCallTypeEnum {
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaImageGenToolInputImageMask`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4319,9 +4319,9 @@ pub enum BetaImageGenToolModelV1Enum {
     #[serde(rename = "gpt-image-1.5")]
     GptImage15,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaImageGenToolModerationEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4331,9 +4331,9 @@ pub enum BetaImageGenToolModerationEnum {
     #[serde(rename = "low")]
     Low,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolModerationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolModerationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaImageGenToolOutputFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4345,9 +4345,9 @@ pub enum BetaImageGenToolOutputFormatEnum {
     #[serde(rename = "jpeg")]
     Jpeg,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolOutputFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolOutputFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaImageGenToolQualityEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4361,9 +4361,9 @@ pub enum BetaImageGenToolQualityEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolQualityEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolQualityEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaImageGenToolSizeUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4387,9 +4387,9 @@ pub enum BetaImageGenToolSizeV1Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolSizeV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolSizeV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaImageGenToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4397,9 +4397,9 @@ pub enum BetaImageGenToolTypeEnum {
     #[serde(rename = "image_generation")]
     ImageGeneration,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaImageGenToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaImageGenToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaIncludeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4421,9 +4421,9 @@ pub enum BetaIncludeEnum {
     #[serde(rename = "message.output_text.logprobs")]
     MessageOutputTextLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaIncludeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaIncludeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaInlineSkillParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4443,9 +4443,9 @@ pub enum BetaInlineSkillParamTypeEnum {
     #[serde(rename = "inline")]
     Inline,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInlineSkillParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInlineSkillParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaInlineSkillSourceParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4464,9 +4464,9 @@ pub enum BetaInlineSkillSourceParamMediaTypeEnum {
     #[serde(rename = "application/zip")]
     ApplicationZip,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInlineSkillSourceParamMediaTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInlineSkillSourceParamMediaTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInlineSkillSourceParamTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4474,9 +4474,9 @@ pub enum BetaInlineSkillSourceParamTypeEnum {
     #[serde(rename = "base64")]
     Base64,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInlineSkillSourceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInlineSkillSourceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputFidelity`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4486,9 +4486,9 @@ pub enum BetaInputFidelity {
     #[serde(rename = "low")]
     Low,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputFidelity { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputFidelity { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaInputFileContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4538,9 +4538,9 @@ pub enum BetaInputFileContentParamTypeEnum {
     #[serde(rename = "input_file")]
     InputFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputFileContentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputFileContentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputFileContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4548,9 +4548,9 @@ pub enum BetaInputFileContentTypeEnum {
     #[serde(rename = "input_file")]
     InputFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputFileContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputFileContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaInputImageContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4591,9 +4591,9 @@ pub enum BetaInputImageContentParamAutoParamTypeEnum {
     #[serde(rename = "input_image")]
     InputImage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputImageContentParamAutoParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputImageContentParamAutoParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputImageContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4601,9 +4601,9 @@ pub enum BetaInputImageContentTypeEnum {
     #[serde(rename = "input_image")]
     InputImage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputImageContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputImageContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaInputItem`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4668,9 +4668,9 @@ pub enum BetaInputMessageResourceRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputMessageResourceRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputMessageResourceRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputMessageResourceStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4682,9 +4682,9 @@ pub enum BetaInputMessageResourceStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputMessageResourceStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputMessageResourceStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputMessageResourceTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4692,9 +4692,9 @@ pub enum BetaInputMessageResourceTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputMessageResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputMessageResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputMessageRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4706,9 +4706,9 @@ pub enum BetaInputMessageRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputMessageStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4720,9 +4720,9 @@ pub enum BetaInputMessageStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputMessageStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputMessageStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4730,9 +4730,9 @@ pub enum BetaInputMessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaInputParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4774,9 +4774,9 @@ pub enum BetaInputTextContentParamTypeEnum {
     #[serde(rename = "input_text")]
     InputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputTextContentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputTextContentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaInputTextContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4784,9 +4784,9 @@ pub enum BetaInputTextContentTypeEnum {
     #[serde(rename = "input_text")]
     InputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaInputTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaInputTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaItem`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4884,9 +4884,9 @@ pub enum BetaItemReferenceParamTypeEnum {
     #[serde(rename = "item_reference")]
     ItemReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaItemReferenceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaItemReferenceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaItemResource`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4944,9 +4944,9 @@ pub enum BetaKeyPressActionTypeEnum {
     #[serde(rename = "keypress")]
     Keypress,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaKeyPressActionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaKeyPressActionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /responses/{response_id}/input_items?beta=true` (`beta_listInputItems`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4970,9 +4970,9 @@ pub enum BetaListInputItemsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaListInputItemsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaListInputItemsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `beta_listInputItems`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4998,9 +4998,9 @@ pub enum BetaLocalEnvironmentParamTypeEnum {
     #[serde(rename = "local")]
     Local,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalEnvironmentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalEnvironmentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaLocalEnvironmentResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5017,9 +5017,9 @@ pub enum BetaLocalEnvironmentResourceTypeEnum {
     #[serde(rename = "local")]
     Local,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalEnvironmentResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalEnvironmentResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaLocalShellExecAction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5044,9 +5044,9 @@ pub enum BetaLocalShellExecActionTypeEnum {
     #[serde(rename = "exec")]
     Exec,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalShellExecActionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalShellExecActionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaLocalShellToolCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5088,9 +5088,9 @@ pub enum BetaLocalShellToolCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalShellToolCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalShellToolCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaLocalShellToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5098,9 +5098,9 @@ pub enum BetaLocalShellToolCallOutputTypeEnum {
     #[serde(rename = "local_shell_call_output")]
     LocalShellCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalShellToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalShellToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaLocalShellToolCallStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5112,9 +5112,9 @@ pub enum BetaLocalShellToolCallStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalShellToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalShellToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaLocalShellToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5122,9 +5122,9 @@ pub enum BetaLocalShellToolCallTypeEnum {
     #[serde(rename = "local_shell_call")]
     LocalShellCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalShellToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalShellToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaLocalShellToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5141,9 +5141,9 @@ pub enum BetaLocalShellToolParamTypeEnum {
     #[serde(rename = "local_shell")]
     LocalShell,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaLocalShellToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaLocalShellToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaLocalSkillParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5187,9 +5187,9 @@ pub enum BetaMCPApprovalRequestTypeEnum {
     #[serde(rename = "mcp_approval_request")]
     McpApprovalRequest,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPApprovalRequestTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPApprovalRequestTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMCPApprovalResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5230,9 +5230,9 @@ pub enum BetaMCPApprovalResponseResourceTypeEnum {
     #[serde(rename = "mcp_approval_response")]
     McpApprovalResponse,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPApprovalResponseResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPApprovalResponseResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMCPApprovalResponseTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5240,9 +5240,9 @@ pub enum BetaMCPApprovalResponseTypeEnum {
     #[serde(rename = "mcp_approval_response")]
     McpApprovalResponse,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPApprovalResponseTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPApprovalResponseTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMCPListTools`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5279,9 +5279,9 @@ pub enum BetaMCPListToolsTypeEnum {
     #[serde(rename = "mcp_list_tools")]
     McpListTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPListToolsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPListToolsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMCPTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5360,9 +5360,9 @@ pub enum BetaMCPToolCallStatus {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPToolCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPToolCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMCPToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5370,9 +5370,9 @@ pub enum BetaMCPToolCallTypeEnum {
     #[serde(rename = "mcp_call")]
     McpCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMCPToolConnectorIdEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5394,9 +5394,9 @@ pub enum BetaMCPToolConnectorIdEnum {
     #[serde(rename = "connector_sharepoint")]
     ConnectorSharepoint,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPToolConnectorIdEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPToolConnectorIdEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMCPToolFilter`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5438,9 +5438,9 @@ pub enum BetaMCPToolRequireApprovalV1Enum {
     #[serde(rename = "never")]
     Never,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPToolRequireApprovalV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPToolRequireApprovalV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMCPToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5448,9 +5448,9 @@ pub enum BetaMCPToolTypeEnum {
     #[serde(rename = "mcp")]
     Mcp,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMCPToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMCPToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5495,9 +5495,9 @@ pub enum BetaMessagePhase {
     #[serde(rename = "final_answer")]
     FinalAnswer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMessagePhase { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMessagePhase { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMessagePhase2`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5507,9 +5507,9 @@ pub enum BetaMessagePhase2 {
     #[serde(rename = "final_answer")]
     FinalAnswer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMessagePhase2 { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMessagePhase2 { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMessageRole`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5531,9 +5531,9 @@ pub enum BetaMessageRole {
     #[serde(rename = "tool")]
     Tool,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMessageRole { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMessageRole { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMessageStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5545,9 +5545,9 @@ pub enum BetaMessageStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMessageStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMessageStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5555,9 +5555,9 @@ pub enum BetaMessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaMetadata`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5620,9 +5620,9 @@ pub enum BetaModelIdsResponsesV1Enum {
     #[serde(rename = "gpt-5.1-codex-max")]
     Gpt51CodexMax,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaModelIdsResponsesV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaModelIdsResponsesV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaModelIdsShared`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5800,9 +5800,9 @@ pub enum BetaModelIdsSharedV1Enum {
     #[serde(rename = "gpt-3.5-turbo-16k-0613")]
     Gpt35Turbo16k0613,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaModelIdsSharedV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaModelIdsSharedV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaModeration`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5838,9 +5838,9 @@ pub enum BetaModerationErrorBodyTypeEnum {
     #[serde(rename = "error")]
     Error,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaModerationErrorBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaModerationErrorBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaModerationInputType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5850,9 +5850,9 @@ pub enum BetaModerationInputType {
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaModerationInputType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaModerationInputType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaModerationInputUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5872,9 +5872,9 @@ pub enum BetaModerationMode {
     #[serde(rename = "block")]
     Block,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaModerationMode { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaModerationMode { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaModerationOutputUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5927,9 +5927,9 @@ pub enum BetaModerationResultBodyTypeEnum {
     #[serde(rename = "moderation_result")]
     ModerationResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaModerationResultBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaModerationResultBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMoveParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5950,9 +5950,9 @@ pub enum BetaMoveParamTypeEnum {
     #[serde(rename = "move")]
     Move,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMoveParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMoveParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMultiAgentAction`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5970,9 +5970,9 @@ pub enum BetaMultiAgentAction {
     #[serde(rename = "wait_agent")]
     WaitAgent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMultiAgentAction { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMultiAgentAction { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMultiAgentAction1`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5990,9 +5990,9 @@ pub enum BetaMultiAgentAction1 {
     #[serde(rename = "wait_agent")]
     WaitAgent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMultiAgentAction1 { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMultiAgentAction1 { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMultiAgentCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6031,9 +6031,9 @@ pub enum BetaMultiAgentCallItemParamTypeEnum {
     #[serde(rename = "multi_agent_call")]
     MultiAgentCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMultiAgentCallItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMultiAgentCallItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMultiAgentCallOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6072,9 +6072,9 @@ pub enum BetaMultiAgentCallOutputItemParamTypeEnum {
     #[serde(rename = "multi_agent_call_output")]
     MultiAgentCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMultiAgentCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMultiAgentCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMultiAgentCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6082,9 +6082,9 @@ pub enum BetaMultiAgentCallOutputTypeEnum {
     #[serde(rename = "multi_agent_call_output")]
     MultiAgentCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMultiAgentCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMultiAgentCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaMultiAgentCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6092,9 +6092,9 @@ pub enum BetaMultiAgentCallTypeEnum {
     #[serde(rename = "multi_agent_call")]
     MultiAgentCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaMultiAgentCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaMultiAgentCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaMultiAgentParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6134,9 +6134,9 @@ pub enum BetaNamespaceToolParamTypeEnum {
     #[serde(rename = "namespace")]
     Namespace,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaNamespaceToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaNamespaceToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaOutputItem`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6210,9 +6210,9 @@ pub enum BetaOutputMessageRoleEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaOutputMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaOutputMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaOutputMessageStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6224,9 +6224,9 @@ pub enum BetaOutputMessageStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaOutputMessageStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaOutputMessageStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaOutputMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6234,9 +6234,9 @@ pub enum BetaOutputMessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaOutputMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaOutputMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaOutputTextContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6279,9 +6279,9 @@ pub enum BetaOutputTextContentParamTypeEnum {
     #[serde(rename = "output_text")]
     OutputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaOutputTextContentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaOutputTextContentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaOutputTextContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6289,9 +6289,9 @@ pub enum BetaOutputTextContentTypeEnum {
     #[serde(rename = "output_text")]
     OutputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaOutputTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaOutputTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaPersonalityEnum`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6311,9 +6311,9 @@ pub enum BetaPersonalityEnumV1Enum {
     #[serde(rename = "pragmatic")]
     Pragmatic,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaPersonalityEnumV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaPersonalityEnumV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaProgram`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6351,9 +6351,9 @@ pub enum BetaProgramItemParamTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaProgramOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6391,9 +6391,9 @@ pub enum BetaProgramOutputItemParamTypeEnum {
     #[serde(rename = "program_output")]
     ProgramOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaProgramOutputItemStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6403,9 +6403,9 @@ pub enum BetaProgramOutputItemStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramOutputItemStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramOutputItemStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaProgramOutputStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6415,9 +6415,9 @@ pub enum BetaProgramOutputStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramOutputStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramOutputStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaProgramOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6425,9 +6425,9 @@ pub enum BetaProgramOutputTypeEnum {
     #[serde(rename = "program_output")]
     ProgramOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaProgramToolCallCaller`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6455,9 +6455,9 @@ pub enum BetaProgramToolCallCallerParamTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramToolCallCallerParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramToolCallCallerParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaProgramToolCallCallerTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6465,9 +6465,9 @@ pub enum BetaProgramToolCallCallerTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramToolCallCallerTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramToolCallCallerTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaProgramTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6475,9 +6475,9 @@ pub enum BetaProgramTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgramTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgramTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaProgrammaticToolCallingParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6494,9 +6494,9 @@ pub enum BetaProgrammaticToolCallingParamTypeEnum {
     #[serde(rename = "programmatic_tool_calling")]
     ProgrammaticToolCalling,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaPrompt`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6521,9 +6521,9 @@ pub enum BetaPromptCacheBreakpointConfigModeEnum {
     #[serde(rename = "explicit")]
     Explicit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaPromptCacheBreakpointConfigModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaPromptCacheBreakpointConfigModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaPromptCacheBreakpointParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6539,9 +6539,9 @@ pub enum BetaPromptCacheBreakpointParamModeEnum {
     #[serde(rename = "explicit")]
     Explicit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaPromptCacheBreakpointParamModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaPromptCacheBreakpointParamModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaPromptCacheModeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6551,9 +6551,9 @@ pub enum BetaPromptCacheModeEnum {
     #[serde(rename = "explicit")]
     Explicit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaPromptCacheModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaPromptCacheModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaPromptCacheOptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6583,9 +6583,9 @@ pub enum BetaPromptCacheRetentionEnum {
     #[serde(rename = "24h")]
     T24h,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaPromptCacheRetentionEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaPromptCacheRetentionEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaPromptCacheTTLEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6593,9 +6593,9 @@ pub enum BetaPromptCacheTTLEnum {
     #[serde(rename = "30m")]
     T30m,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaPromptCacheTTLEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaPromptCacheTTLEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaPromptV0`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6617,9 +6617,9 @@ pub enum BetaRankerVersionType {
     #[serde(rename = "default-2024-11-15")]
     Default20241115,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaRankerVersionType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaRankerVersionType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaRankingOptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6661,9 +6661,9 @@ pub enum BetaReasoningContextEnum {
     #[serde(rename = "all_turns")]
     AllTurns,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningContextEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningContextEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaReasoningEffort`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6692,9 +6692,9 @@ pub enum BetaReasoningEffortV0Enum {
     #[serde(rename = "max")]
     Max,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningEffortV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningEffortV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaReasoningGenerateSummaryEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6706,9 +6706,9 @@ pub enum BetaReasoningGenerateSummaryEnum {
     #[serde(rename = "detailed")]
     Detailed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningGenerateSummaryEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningGenerateSummaryEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaReasoningItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6739,9 +6739,9 @@ pub enum BetaReasoningItemStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningItemStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningItemStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaReasoningItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6749,9 +6749,9 @@ pub enum BetaReasoningItemTypeEnum {
     #[serde(rename = "reasoning")]
     Reasoning,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaReasoningModeEnum`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6771,9 +6771,9 @@ pub enum BetaReasoningModeEnumV1Enum {
     #[serde(rename = "pro")]
     Pro,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningModeEnumV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningModeEnumV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaReasoningSummaryEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6785,9 +6785,9 @@ pub enum BetaReasoningSummaryEnum {
     #[serde(rename = "detailed")]
     Detailed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningSummaryEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningSummaryEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaReasoningTextContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6805,9 +6805,9 @@ pub enum BetaReasoningTextContentTypeEnum {
     #[serde(rename = "reasoning_text")]
     ReasoningText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaReasoningTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaReasoningTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaRefusalContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6825,9 +6825,9 @@ pub enum BetaRefusalContentTypeEnum {
     #[serde(rename = "refusal")]
     Refusal,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaRefusalContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaRefusalContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6949,9 +6949,9 @@ pub enum BetaResponseErrorCode {
     #[serde(rename = "image_file_not_found")]
     ImageFileNotFound,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseErrorCode { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseErrorCode { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaResponseErrorV0`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6977,9 +6977,9 @@ pub enum BetaResponseFormatJsonObjectTypeEnum {
     #[serde(rename = "json_object")]
     JsonObject,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseFormatJsonObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseFormatJsonObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaResponseFormatJsonSchemaSchema`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7003,9 +7003,9 @@ pub enum BetaResponseFormatTextTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseFormatTextTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseFormatTextTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaResponseIncompleteDetails`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7024,9 +7024,9 @@ pub enum BetaResponseIncompleteDetailsReasonEnum {
     #[serde(rename = "content_filter")]
     ContentFilter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseIncompleteDetailsReasonEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseIncompleteDetailsReasonEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaResponseInstructionsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7056,9 +7056,9 @@ pub enum BetaResponseItemListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseItemListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseItemListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaResponseObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7066,9 +7066,9 @@ pub enum BetaResponseObjectEnum {
     #[serde(rename = "response")]
     Response,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaResponsePromptCacheRetentionEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7078,9 +7078,9 @@ pub enum BetaResponsePromptCacheRetentionEnum {
     #[serde(rename = "24h")]
     T24h,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponsePromptCacheRetentionEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponsePromptCacheRetentionEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaResponsePromptVariables`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7119,9 +7119,9 @@ pub enum BetaResponseStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaResponseStreamOptions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7160,9 +7160,9 @@ pub enum BetaResponseTruncationEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaResponseTruncationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaResponseTruncationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaResponseUsage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7208,9 +7208,9 @@ pub enum BetaScreenshotParamTypeEnum {
     #[serde(rename = "screenshot")]
     Screenshot,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaScreenshotParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaScreenshotParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaScrollParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7233,9 +7233,9 @@ pub enum BetaScrollParamTypeEnum {
     #[serde(rename = "scroll")]
     Scroll,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaScrollParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaScrollParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaSearchContentType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7245,9 +7245,9 @@ pub enum BetaSearchContentType {
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaSearchContentType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaSearchContentType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaSearchContextSize`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7259,9 +7259,9 @@ pub enum BetaSearchContextSize {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaSearchContextSize { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaSearchContextSize { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaServiceTier`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7284,9 +7284,9 @@ pub enum BetaServiceTierEnum {
     #[serde(rename = "priority")]
     Priority,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaServiceTierEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaServiceTierEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaServiceTierV0Enum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7302,9 +7302,9 @@ pub enum BetaServiceTierV0Enum {
     #[serde(rename = "priority")]
     Priority,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaServiceTierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaServiceTierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaSkillReferenceParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7324,9 +7324,9 @@ pub enum BetaSkillReferenceParamTypeEnum {
     #[serde(rename = "skill_reference")]
     SkillReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaSkillReferenceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaSkillReferenceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaSpecificApplyPatchParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7343,9 +7343,9 @@ pub enum BetaSpecificApplyPatchParamTypeEnum {
     #[serde(rename = "apply_patch")]
     ApplyPatch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaSpecificApplyPatchParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaSpecificApplyPatchParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaSpecificFunctionShellParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7362,9 +7362,9 @@ pub enum BetaSpecificFunctionShellParamTypeEnum {
     #[serde(rename = "shell")]
     Shell,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaSpecificFunctionShellParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaSpecificFunctionShellParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaSpecificProgrammaticToolCallingParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7381,9 +7381,9 @@ pub enum BetaSpecificProgrammaticToolCallingParamTypeEnum {
     #[serde(rename = "programmatic_tool_calling")]
     ProgrammaticToolCalling,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaSpecificProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaSpecificProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaSummaryTextContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7401,9 +7401,9 @@ pub enum BetaSummaryTextContentTypeEnum {
     #[serde(rename = "summary_text")]
     SummaryText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaSummaryTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaSummaryTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaTextContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7421,9 +7421,9 @@ pub enum BetaTextContentTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaTextResponseFormatConfiguration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7457,9 +7457,9 @@ pub enum BetaTextResponseFormatJsonSchemaTypeEnum {
     #[serde(rename = "json_schema")]
     JsonSchema,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaTextResponseFormatJsonSchemaTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaTextResponseFormatJsonSchemaTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaTokenCountsBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7517,9 +7517,9 @@ pub enum BetaTokenCountsResourceObjectEnum {
     #[serde(rename = "response.input_tokens")]
     ResponseInputTokens,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaTokenCountsResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaTokenCountsResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaTool`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7584,9 +7584,9 @@ pub enum BetaToolChoiceAllowedModeEnum {
     #[serde(rename = "required")]
     Required,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolChoiceAllowedModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolChoiceAllowedModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaToolChoiceAllowedTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7594,9 +7594,9 @@ pub enum BetaToolChoiceAllowedTypeEnum {
     #[serde(rename = "allowed_tools")]
     AllowedTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolChoiceAllowedTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolChoiceAllowedTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaToolChoiceCustom`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7614,9 +7614,9 @@ pub enum BetaToolChoiceCustomTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolChoiceCustomTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolChoiceCustomTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaToolChoiceFunction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7634,9 +7634,9 @@ pub enum BetaToolChoiceFunctionTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolChoiceFunctionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolChoiceFunctionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaToolChoiceMCP`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7656,9 +7656,9 @@ pub enum BetaToolChoiceMCPTypeEnum {
     #[serde(rename = "mcp")]
     Mcp,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolChoiceMCPTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolChoiceMCPTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaToolChoiceOptions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7670,9 +7670,9 @@ pub enum BetaToolChoiceOptions {
     #[serde(rename = "required")]
     Required,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolChoiceOptions { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolChoiceOptions { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaToolChoiceParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7720,9 +7720,9 @@ pub enum BetaToolChoiceTypesTypeEnum {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolChoiceTypesTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolChoiceTypesTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaToolSearchCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7769,9 +7769,9 @@ pub enum BetaToolSearchCallItemParamTypeEnum {
     #[serde(rename = "tool_search_call")]
     ToolSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolSearchCallItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolSearchCallItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaToolSearchCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7779,9 +7779,9 @@ pub enum BetaToolSearchCallTypeEnum {
     #[serde(rename = "tool_search_call")]
     ToolSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolSearchCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolSearchCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaToolSearchExecutionType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7791,9 +7791,9 @@ pub enum BetaToolSearchExecutionType {
     #[serde(rename = "client")]
     Client,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolSearchExecutionType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolSearchExecutionType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaToolSearchOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7840,9 +7840,9 @@ pub enum BetaToolSearchOutputItemParamTypeEnum {
     #[serde(rename = "tool_search_output")]
     ToolSearchOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolSearchOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolSearchOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaToolSearchOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7850,9 +7850,9 @@ pub enum BetaToolSearchOutputTypeEnum {
     #[serde(rename = "tool_search_output")]
     ToolSearchOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolSearchOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolSearchOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaToolSearchToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7875,9 +7875,9 @@ pub enum BetaToolSearchToolParamTypeEnum {
     #[serde(rename = "tool_search")]
     ToolSearch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaToolSearchToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaToolSearchToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaToolsArray`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7904,9 +7904,9 @@ pub enum BetaTruncationEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaTruncationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaTruncationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaTypeParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7924,9 +7924,9 @@ pub enum BetaTypeParamTypeEnum {
     #[serde(rename = "type")]
     Type,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaTypeParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaTypeParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaUrlCitationBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7947,9 +7947,9 @@ pub enum BetaUrlCitationBodyTypeEnum {
     #[serde(rename = "url_citation")]
     UrlCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaUrlCitationBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaUrlCitationBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaUrlCitationParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -7970,9 +7970,9 @@ pub enum BetaUrlCitationParamTypeEnum {
     #[serde(rename = "url_citation")]
     UrlCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaUrlCitationParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaUrlCitationParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaVectorStoreFileAttributes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8013,9 +8013,9 @@ pub enum BetaVerbosityV0Enum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaVerbosityV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaVerbosityV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaWaitParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8032,9 +8032,9 @@ pub enum BetaWaitParamTypeEnum {
     #[serde(rename = "wait")]
     Wait,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWaitParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWaitParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaWebSearchActionFind`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8053,9 +8053,9 @@ pub enum BetaWebSearchActionFindTypeEnum {
     #[serde(rename = "find_in_page")]
     FindInPage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchActionFindTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchActionFindTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaWebSearchActionOpenPage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8074,9 +8074,9 @@ pub enum BetaWebSearchActionOpenPageTypeEnum {
     #[serde(rename = "open_page")]
     OpenPage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchActionOpenPageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchActionOpenPageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaWebSearchActionSearch`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8109,9 +8109,9 @@ pub enum BetaWebSearchActionSearchSourcesItemTypeEnum {
     #[serde(rename = "url")]
     Url,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchActionSearchSourcesItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchActionSearchSourcesItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaWebSearchActionSearchTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8119,9 +8119,9 @@ pub enum BetaWebSearchActionSearchTypeEnum {
     #[serde(rename = "search")]
     Search,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchActionSearchTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchActionSearchTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `BetaWebSearchApproximateLocation`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8156,9 +8156,9 @@ pub enum BetaWebSearchApproximateLocationV0TypeEnum {
     #[serde(rename = "approximate")]
     Approximate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchApproximateLocationV0TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchApproximateLocationV0TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaWebSearchPreviewTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8183,9 +8183,9 @@ pub enum BetaWebSearchPreviewToolTypeEnum {
     #[serde(rename = "web_search_preview_2025_03_11")]
     WebSearchPreview20250311,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchPreviewToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchPreviewToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaWebSearchTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8239,9 +8239,9 @@ pub enum BetaWebSearchToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaWebSearchToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8249,9 +8249,9 @@ pub enum BetaWebSearchToolCallTypeEnum {
     #[serde(rename = "web_search_call")]
     WebSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `BetaWebSearchToolFilters`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8272,9 +8272,9 @@ pub enum BetaWebSearchToolSearchContextSizeEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchToolSearchContextSizeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchToolSearchContextSizeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `BetaWebSearchToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8284,9 +8284,9 @@ pub enum BetaWebSearchToolTypeEnum {
     #[serde(rename = "web_search_2025_08_26")]
     WebSearch20250826,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for BetaWebSearchToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for BetaWebSearchToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CallableToolAllowedCaller`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8296,9 +8296,9 @@ pub enum CallableToolAllowedCaller {
     #[serde(rename = "programmatic")]
     Programmatic,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CallableToolAllowedCaller { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CallableToolAllowedCaller { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /batches/{batch_id}/cancel` (`cancelBatch`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8432,9 +8432,9 @@ pub enum ChatCompletionAllowedToolsChoiceTypeEnum {
     #[serde(rename = "allowed_tools")]
     AllowedTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionAllowedToolsChoiceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionAllowedToolsChoiceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ChatCompletionAllowedToolsModeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8444,9 +8444,9 @@ pub enum ChatCompletionAllowedToolsModeEnum {
     #[serde(rename = "required")]
     Required,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionAllowedToolsModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionAllowedToolsModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionDeleted`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8464,9 +8464,9 @@ pub enum ChatCompletionDeletedObjectEnum {
     #[serde(rename = "chat.completion.deleted")]
     ChatCompletionDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionDeletedObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionDeletedObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionFunctionCallOption`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8506,9 +8506,9 @@ pub enum ChatCompletionListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionMessageList`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8561,9 +8561,9 @@ pub enum ChatCompletionMessageListDataItemAnnotationsItemTypeEnum {
     #[serde(rename = "url_citation")]
     UrlCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionMessageListDataItemAnnotationsItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionMessageListDataItemAnnotationsItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionMessageListDataItemAnnotationsItemUrlCitation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8612,9 +8612,9 @@ pub enum ChatCompletionMessageListDataItemRoleEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionMessageListDataItemRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionMessageListDataItemRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ChatCompletionMessageListObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8622,9 +8622,9 @@ pub enum ChatCompletionMessageListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionMessageListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionMessageListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionMessageToolCalls`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8659,9 +8659,9 @@ pub enum ChatCompletionModerationErrorTypeEnum {
     #[serde(rename = "error")]
     Error,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionModerationErrorTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionModerationErrorTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ChatCompletionModerationInputUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8700,9 +8700,9 @@ pub enum ChatCompletionModerationResultsTypeEnum {
     #[serde(rename = "moderation_results")]
     ModerationResults,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionModerationResultsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionModerationResultsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionNamedToolChoice`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8738,9 +8738,9 @@ pub enum ChatCompletionNamedToolChoiceCustomTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionNamedToolChoiceCustomTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionNamedToolChoiceCustomTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionNamedToolChoiceFunction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8756,9 +8756,9 @@ pub enum ChatCompletionNamedToolChoiceTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionNamedToolChoiceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionNamedToolChoiceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestAssistantMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8823,9 +8823,9 @@ pub enum ChatCompletionRequestAssistantMessageRoleEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestAssistantMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestAssistantMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestDeveloperMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8854,9 +8854,9 @@ pub enum ChatCompletionRequestDeveloperMessageRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestDeveloperMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestDeveloperMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestFunctionMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8875,9 +8875,9 @@ pub enum ChatCompletionRequestFunctionMessageRoleEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestFunctionMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestFunctionMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ChatCompletionRequestMessage`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8922,9 +8922,9 @@ pub enum ChatCompletionRequestMessageContentPartAudioInputAudioFormatEnum {
     #[serde(rename = "mp3")]
     Mp3,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestMessageContentPartAudioInputAudioFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestMessageContentPartAudioInputAudioFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ChatCompletionRequestMessageContentPartAudioTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8932,9 +8932,9 @@ pub enum ChatCompletionRequestMessageContentPartAudioTypeEnum {
     #[serde(rename = "input_audio")]
     InputAudio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestMessageContentPartAudioTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestMessageContentPartAudioTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestMessageContentPartFile`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8967,9 +8967,9 @@ pub enum ChatCompletionRequestMessageContentPartFileTypeEnum {
     #[serde(rename = "file")]
     File,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestMessageContentPartFileTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestMessageContentPartFileTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestMessageContentPartImage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9003,9 +9003,9 @@ pub enum ChatCompletionRequestMessageContentPartImageImageUrlDetailEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestMessageContentPartImageImageUrlDetailEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestMessageContentPartImageImageUrlDetailEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ChatCompletionRequestMessageContentPartImageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9013,9 +9013,9 @@ pub enum ChatCompletionRequestMessageContentPartImageTypeEnum {
     #[serde(rename = "image_url")]
     ImageUrl,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestMessageContentPartImageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestMessageContentPartImageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestMessageContentPartRefusal`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9033,9 +9033,9 @@ pub enum ChatCompletionRequestMessageContentPartRefusalTypeEnum {
     #[serde(rename = "refusal")]
     Refusal,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestMessageContentPartRefusalTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestMessageContentPartRefusalTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestMessageContentPartText`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9055,9 +9055,9 @@ pub enum ChatCompletionRequestMessageContentPartTextTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestMessageContentPartTextTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestMessageContentPartTextTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestSystemMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9095,9 +9095,9 @@ pub enum ChatCompletionRequestSystemMessageRoleEnum {
     #[serde(rename = "system")]
     System,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestSystemMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestSystemMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestToolMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9134,9 +9134,9 @@ pub enum ChatCompletionRequestToolMessageRoleEnum {
     #[serde(rename = "tool")]
     Tool,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestToolMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestToolMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionRequestUserMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9177,9 +9177,9 @@ pub enum ChatCompletionRequestUserMessageRoleEnum {
     #[serde(rename = "user")]
     User,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionRequestUserMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionRequestUserMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionResponseMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9217,9 +9217,9 @@ pub enum ChatCompletionResponseMessageAnnotationsItemTypeEnum {
     #[serde(rename = "url_citation")]
     UrlCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionResponseMessageAnnotationsItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionResponseMessageAnnotationsItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatCompletionResponseMessageAnnotationsItemUrlCitation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9258,9 +9258,9 @@ pub enum ChatCompletionResponseMessageRoleEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionResponseMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionResponseMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ChatCompletionStreamOptions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -9337,9 +9337,9 @@ pub enum ChatCompletionToolChoiceOptionV0Enum {
     #[serde(rename = "required")]
     Required,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionToolChoiceOptionV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionToolChoiceOptionV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ChatCompletionToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9347,9 +9347,9 @@ pub enum ChatCompletionToolTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatCompletionToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatCompletionToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatSessionAutomaticThreadTitling`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9422,9 +9422,9 @@ pub enum ChatSessionResourceObjectEnum {
     #[serde(rename = "chatkit.session")]
     ChatkitSession,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatSessionResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatSessionResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ChatSessionStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9436,9 +9436,9 @@ pub enum ChatSessionStatus {
     #[serde(rename = "cancelled")]
     Cancelled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ChatSessionStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ChatSessionStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ChatkitConfigurationParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9510,9 +9510,9 @@ pub enum ClickButtonType {
     #[serde(rename = "forward")]
     Forward,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ClickButtonType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ClickButtonType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ClickParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9534,9 +9534,9 @@ pub enum ClickParamTypeEnum {
     #[serde(rename = "click")]
     Click,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ClickParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ClickParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ClientToolCallItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9563,9 +9563,9 @@ pub enum ClientToolCallItemObjectEnum {
     #[serde(rename = "chatkit.thread_item")]
     ChatkitThreadItem,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ClientToolCallItemObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ClientToolCallItemObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ClientToolCallItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9573,9 +9573,9 @@ pub enum ClientToolCallItemTypeEnum {
     #[serde(rename = "chatkit.client_tool_call")]
     ChatkitClientToolCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ClientToolCallItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ClientToolCallItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ClientToolCallStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9585,9 +9585,9 @@ pub enum ClientToolCallStatus {
     #[serde(rename = "completed")]
     Completed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ClientToolCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ClientToolCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ClosedStatus`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9606,9 +9606,9 @@ pub enum ClosedStatusTypeEnum {
     #[serde(rename = "closed")]
     Closed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ClosedStatusTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ClosedStatusTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CodeInterpreterOutputImage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9626,9 +9626,9 @@ pub enum CodeInterpreterOutputImageTypeEnum {
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CodeInterpreterOutputImageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CodeInterpreterOutputImageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CodeInterpreterOutputLogs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9646,9 +9646,9 @@ pub enum CodeInterpreterOutputLogsTypeEnum {
     #[serde(rename = "logs")]
     Logs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CodeInterpreterOutputLogsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CodeInterpreterOutputLogsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CodeInterpreterTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9702,9 +9702,9 @@ pub enum CodeInterpreterToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CodeInterpreterToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CodeInterpreterToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CodeInterpreterToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9712,9 +9712,9 @@ pub enum CodeInterpreterToolCallTypeEnum {
     #[serde(rename = "code_interpreter_call")]
     CodeInterpreterCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CodeInterpreterToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CodeInterpreterToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CodeInterpreterToolContainerUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -9732,9 +9732,9 @@ pub enum CodeInterpreterToolTypeEnum {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CodeInterpreterToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CodeInterpreterToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CompactResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9754,9 +9754,9 @@ pub enum CompactResourceObjectEnum {
     #[serde(rename = "response.compaction")]
     ResponseCompaction,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CompactResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CompactResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CompactResponseMethodPublicBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9822,9 +9822,9 @@ pub enum CompactionBodyTypeEnum {
     #[serde(rename = "compaction")]
     Compaction,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CompactionBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CompactionBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CompactionSummaryItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9844,9 +9844,9 @@ pub enum CompactionSummaryItemParamTypeEnum {
     #[serde(rename = "compaction")]
     Compaction,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CompactionSummaryItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CompactionSummaryItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CompactionTriggerItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9863,9 +9863,9 @@ pub enum CompactionTriggerItemParamTypeEnum {
     #[serde(rename = "compaction_trigger")]
     CompactionTrigger,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CompactionTriggerItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CompactionTriggerItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ComparisonFilter`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9898,9 +9898,9 @@ pub enum ComparisonFilterTypeEnum {
     #[serde(rename = "nin")]
     Nin,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComparisonFilterTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComparisonFilterTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ComparisonFilterValueUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10018,9 +10018,9 @@ pub enum CompoundFilterTypeEnum {
     #[serde(rename = "or")]
     Or,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CompoundFilterTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CompoundFilterTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ComputerAction`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10069,9 +10069,9 @@ pub enum ComputerCallOutputItemParamTypeEnum {
     #[serde(rename = "computer_call_output")]
     ComputerCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ComputerCallOutputStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10083,9 +10083,9 @@ pub enum ComputerCallOutputStatus {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerCallOutputStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerCallOutputStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ComputerCallSafetyCheckParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10113,9 +10113,9 @@ pub enum ComputerEnvironment {
     #[serde(rename = "browser")]
     Browser,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerEnvironment { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerEnvironment { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ComputerScreenshotContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10139,9 +10139,9 @@ pub enum ComputerScreenshotContentTypeEnum {
     #[serde(rename = "computer_screenshot")]
     ComputerScreenshot,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerScreenshotContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerScreenshotContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ComputerScreenshotImage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10162,9 +10162,9 @@ pub enum ComputerScreenshotImageTypeEnum {
     #[serde(rename = "computer_screenshot")]
     ComputerScreenshot,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerScreenshotImageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerScreenshotImageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ComputerTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10215,9 +10215,9 @@ pub enum ComputerToolCallOutputResourceTypeEnum {
     #[serde(rename = "computer_call_output")]
     ComputerCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerToolCallOutputResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerToolCallOutputResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ComputerToolCallStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10229,9 +10229,9 @@ pub enum ComputerToolCallStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ComputerToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10239,9 +10239,9 @@ pub enum ComputerToolCallTypeEnum {
     #[serde(rename = "computer_call")]
     ComputerCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ComputerToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10249,9 +10249,9 @@ pub enum ComputerToolTypeEnum {
     #[serde(rename = "computer")]
     Computer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ComputerUsePreviewTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10271,9 +10271,9 @@ pub enum ComputerUsePreviewToolTypeEnum {
     #[serde(rename = "computer_use_preview")]
     ComputerUsePreview,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ComputerUsePreviewToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ComputerUsePreviewToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerAutoParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10318,9 +10318,9 @@ pub enum ContainerAutoParamTypeEnum {
     #[serde(rename = "container_auto")]
     ContainerAuto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerAutoParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerAutoParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerFileCitationBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10342,9 +10342,9 @@ pub enum ContainerFileCitationBodyTypeEnum {
     #[serde(rename = "container_file_citation")]
     ContainerFileCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerFileCitationBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerFileCitationBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerFileListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10364,9 +10364,9 @@ pub enum ContainerFileListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerFileListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerFileListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerFileResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10400,9 +10400,9 @@ pub enum ContainerListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ContainerMemoryLimit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10416,9 +10416,9 @@ pub enum ContainerMemoryLimit {
     #[serde(rename = "64g")]
     T64g,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerMemoryLimit { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerMemoryLimit { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerNetworkPolicyAllowlistParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10438,9 +10438,9 @@ pub enum ContainerNetworkPolicyAllowlistParamTypeEnum {
     #[serde(rename = "allowlist")]
     Allowlist,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerNetworkPolicyAllowlistParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerNetworkPolicyAllowlistParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerNetworkPolicyDisabledParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10457,9 +10457,9 @@ pub enum ContainerNetworkPolicyDisabledParamTypeEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerNetworkPolicyDisabledParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerNetworkPolicyDisabledParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerNetworkPolicyDomainSecretParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10487,9 +10487,9 @@ pub enum ContainerReferenceParamTypeEnum {
     #[serde(rename = "container_reference")]
     ContainerReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerReferenceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerReferenceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerReferenceResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10507,9 +10507,9 @@ pub enum ContainerReferenceResourceTypeEnum {
     #[serde(rename = "container_reference")]
     ContainerReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerReferenceResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerReferenceResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10548,9 +10548,9 @@ pub enum ContainerResourceExpiresAfterAnchorEnum {
     #[serde(rename = "last_active_at")]
     LastActiveAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerResourceExpiresAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerResourceExpiresAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ContainerResourceMemoryLimitEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10564,9 +10564,9 @@ pub enum ContainerResourceMemoryLimitEnum {
     #[serde(rename = "64g")]
     T64g,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerResourceMemoryLimitEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerResourceMemoryLimitEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContainerResourceNetworkPolicy`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10587,9 +10587,9 @@ pub enum ContainerResourceNetworkPolicyTypeEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ContainerResourceNetworkPolicyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ContainerResourceNetworkPolicyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ContextManagementParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10664,9 +10664,9 @@ pub enum ConversationItemListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ConversationItemListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ConversationItemListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ConversationParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10703,9 +10703,9 @@ pub enum ConversationResourceObjectEnum {
     #[serde(rename = "conversation")]
     Conversation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ConversationResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ConversationResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CoordParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10834,9 +10834,9 @@ pub enum CreateBatchRequestCompletionWindowEnum {
     #[serde(rename = "24h")]
     T24h,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateBatchRequestCompletionWindowEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateBatchRequestCompletionWindowEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateBatchRequestEndpointEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10858,9 +10858,9 @@ pub enum CreateBatchRequestEndpointEnum {
     #[serde(rename = "/v1/videos")]
     V1Videos,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateBatchRequestEndpointEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateBatchRequestEndpointEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createBatch`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10961,9 +10961,9 @@ pub enum CreateChatCompletionRequestAudioFormatEnum {
     #[serde(rename = "pcm16")]
     Pcm16,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateChatCompletionRequestAudioFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateChatCompletionRequestAudioFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateChatCompletionRequestFunctionCallUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10983,9 +10983,9 @@ pub enum CreateChatCompletionRequestFunctionCallV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateChatCompletionRequestFunctionCallV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateChatCompletionRequestFunctionCallV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateChatCompletionRequestPredictionUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11044,9 +11044,9 @@ pub enum CreateChatCompletionRequestWebSearchOptionsUserLocationTypeEnum {
     #[serde(rename = "approximate")]
     Approximate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateChatCompletionRequestWebSearchOptionsUserLocationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateChatCompletionRequestWebSearchOptionsUserLocationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateChatCompletionResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11094,9 +11094,9 @@ pub enum CreateChatCompletionResponseChoicesItemFinishReasonEnum {
     #[serde(rename = "function_call")]
     FunctionCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateChatCompletionResponseChoicesItemFinishReasonEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateChatCompletionResponseChoicesItemFinishReasonEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateChatCompletionResponseChoicesItemLogprobs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11115,9 +11115,9 @@ pub enum CreateChatCompletionResponseObjectEnum {
     #[serde(rename = "chat.completion")]
     ChatCompletion,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateChatCompletionResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateChatCompletionResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createChatCompletion`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11228,9 +11228,9 @@ pub enum CreateCompletionRequestModelV1Enum {
     #[serde(rename = "babbage-002")]
     Babbage002,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateCompletionRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateCompletionRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateCompletionRequestPromptUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11282,9 +11282,9 @@ pub enum CreateCompletionResponseChoicesItemFinishReasonEnum {
     #[serde(rename = "content_filter")]
     ContentFilter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateCompletionResponseChoicesItemFinishReasonEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateCompletionResponseChoicesItemFinishReasonEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateCompletionResponseChoicesItemLogprobs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11307,9 +11307,9 @@ pub enum CreateCompletionResponseObjectEnum {
     #[serde(rename = "text_completion")]
     TextCompletion,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateCompletionResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateCompletionResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createCompletion`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11351,9 +11351,9 @@ pub enum CreateContainerBodyExpiresAfterAnchorEnum {
     #[serde(rename = "last_active_at")]
     LastActiveAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateContainerBodyExpiresAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateContainerBodyExpiresAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateContainerBodyMemoryLimitEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11367,9 +11367,9 @@ pub enum CreateContainerBodyMemoryLimitEnum {
     #[serde(rename = "64g")]
     T64g,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateContainerBodyMemoryLimitEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateContainerBodyMemoryLimitEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateContainerBodyNetworkPolicyUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11506,9 +11506,9 @@ pub enum CreateEmbeddingRequestEncodingFormatEnum {
     #[serde(rename = "base64")]
     Base64,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEmbeddingRequestEncodingFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEmbeddingRequestEncodingFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateEmbeddingRequestInputUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11542,9 +11542,9 @@ pub enum CreateEmbeddingRequestModelV1Enum {
     #[serde(rename = "text-embedding-3-large")]
     TextEmbedding3Large,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEmbeddingRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEmbeddingRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEmbeddingResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11563,9 +11563,9 @@ pub enum CreateEmbeddingResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEmbeddingResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEmbeddingResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEmbeddingResponseUsage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11635,9 +11635,9 @@ pub enum CreateEvalCompletionsRunDataSourceInputMessagesV0TypeEnum {
     #[serde(rename = "template")]
     Template,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalCompletionsRunDataSourceInputMessagesV0TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalCompletionsRunDataSourceInputMessagesV0TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEvalCompletionsRunDataSourceInputMessagesV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11655,9 +11655,9 @@ pub enum CreateEvalCompletionsRunDataSourceInputMessagesV1TypeEnum {
     #[serde(rename = "item_reference")]
     ItemReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalCompletionsRunDataSourceInputMessagesV1TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalCompletionsRunDataSourceInputMessagesV1TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEvalCompletionsRunDataSourceSamplingParams`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11708,9 +11708,9 @@ pub enum CreateEvalCompletionsRunDataSourceTypeEnum {
     #[serde(rename = "completions")]
     Completions,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalCompletionsRunDataSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalCompletionsRunDataSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEvalCustomDataSourceConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11730,9 +11730,9 @@ pub enum CreateEvalCustomDataSourceConfigTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalCustomDataSourceConfigTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalCustomDataSourceConfigTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateEvalItem`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11779,9 +11779,9 @@ pub enum CreateEvalJsonlRunDataSourceTypeEnum {
     #[serde(rename = "jsonl")]
     Jsonl,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalJsonlRunDataSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalJsonlRunDataSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEvalLabelModelGrader`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11803,9 +11803,9 @@ pub enum CreateEvalLabelModelGraderTypeEnum {
     #[serde(rename = "label_model")]
     LabelModel,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalLabelModelGraderTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalLabelModelGraderTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEvalLogsDataSourceConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11824,9 +11824,9 @@ pub enum CreateEvalLogsDataSourceConfigTypeEnum {
     #[serde(rename = "logs")]
     Logs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalLogsDataSourceConfigTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalLogsDataSourceConfigTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /evals` (`createEval`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11932,9 +11932,9 @@ pub enum CreateEvalResponsesRunDataSourceInputMessagesV0TypeEnum {
     #[serde(rename = "template")]
     Template,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalResponsesRunDataSourceInputMessagesV0TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalResponsesRunDataSourceInputMessagesV0TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEvalResponsesRunDataSourceInputMessagesV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -11952,9 +11952,9 @@ pub enum CreateEvalResponsesRunDataSourceInputMessagesV1TypeEnum {
     #[serde(rename = "item_reference")]
     ItemReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalResponsesRunDataSourceInputMessagesV1TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalResponsesRunDataSourceInputMessagesV1TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateEvalResponsesRunDataSourceSamplingParams`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12003,9 +12003,9 @@ pub enum CreateEvalResponsesRunDataSourceTypeEnum {
     #[serde(rename = "responses")]
     Responses,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalResponsesRunDataSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalResponsesRunDataSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createEval`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12068,9 +12068,9 @@ pub enum CreateEvalStoredCompletionsDataSourceConfigTypeEnum {
     #[serde(rename = "stored_completions")]
     StoredCompletions,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateEvalStoredCompletionsDataSourceConfigTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateEvalStoredCompletionsDataSourceConfigTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /files` (`createFile`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12105,9 +12105,9 @@ pub enum CreateFileRequestPurposeEnum {
     #[serde(rename = "evals")]
     Evals,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateFileRequestPurposeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateFileRequestPurposeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createFile`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12196,9 +12196,9 @@ pub enum CreateFineTuningJobRequestHyperparametersBatchSizeV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateFineTuningJobRequestHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateFineTuningJobRequestHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateFineTuningJobRequestHyperparametersLearningRateMultiplierUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12216,9 +12216,9 @@ pub enum CreateFineTuningJobRequestHyperparametersLearningRateMultiplierV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateFineTuningJobRequestHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateFineTuningJobRequestHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateFineTuningJobRequestHyperparametersNEpochsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12236,9 +12236,9 @@ pub enum CreateFineTuningJobRequestHyperparametersNEpochsV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateFineTuningJobRequestHyperparametersNEpochsV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateFineTuningJobRequestHyperparametersNEpochsV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateFineTuningJobRequestIntegrationsItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12265,9 +12265,9 @@ pub enum CreateFineTuningJobRequestIntegrationsItemTypeV0Enum {
     #[serde(rename = "wandb")]
     Wandb,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateFineTuningJobRequestIntegrationsItemTypeV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateFineTuningJobRequestIntegrationsItemTypeV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateFineTuningJobRequestIntegrationsItemWandb`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12305,9 +12305,9 @@ pub enum CreateFineTuningJobRequestModelV1Enum {
     #[serde(rename = "gpt-4o-mini")]
     Gpt4oMini,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateFineTuningJobRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateFineTuningJobRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createFineTuningJob`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12385,9 +12385,9 @@ pub enum CreateImageRequestBackgroundEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestBackgroundEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestBackgroundEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateImageRequestModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12413,9 +12413,9 @@ pub enum CreateImageRequestModelV1Enum {
     #[serde(rename = "gpt-image-1-mini")]
     GptImage1Mini,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateImageRequestModerationEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12425,9 +12425,9 @@ pub enum CreateImageRequestModerationEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestModerationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestModerationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateImageRequestOutputFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12439,9 +12439,9 @@ pub enum CreateImageRequestOutputFormatEnum {
     #[serde(rename = "webp")]
     Webp,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestOutputFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestOutputFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateImageRequestQualityEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12459,9 +12459,9 @@ pub enum CreateImageRequestQualityEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestQualityEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestQualityEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateImageRequestResponseFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12471,9 +12471,9 @@ pub enum CreateImageRequestResponseFormatEnum {
     #[serde(rename = "b64_json")]
     B64Json,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestResponseFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestResponseFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateImageRequestSizeUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12505,9 +12505,9 @@ pub enum CreateImageRequestSizeV1Enum {
     #[serde(rename = "1024x1792")]
     T1024x1792,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestSizeV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestSizeV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateImageRequestStyleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12517,9 +12517,9 @@ pub enum CreateImageRequestStyleEnum {
     #[serde(rename = "natural")]
     Natural,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageRequestStyleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageRequestStyleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createImage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12574,9 +12574,9 @@ pub enum CreateImageVariationRequestModelV1Enum {
     #[serde(rename = "dall-e-2")]
     DallE2,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageVariationRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageVariationRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateImageVariationRequestResponseFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12586,9 +12586,9 @@ pub enum CreateImageVariationRequestResponseFormatEnum {
     #[serde(rename = "b64_json")]
     B64Json,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageVariationRequestResponseFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageVariationRequestResponseFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateImageVariationRequestSizeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12600,9 +12600,9 @@ pub enum CreateImageVariationRequestSizeEnum {
     #[serde(rename = "1024x1024")]
     T1024x1024,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateImageVariationRequestSizeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateImageVariationRequestSizeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createImageVariation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12681,9 +12681,9 @@ pub enum CreateMessageRequestRoleEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateMessageRequestRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateMessageRequestRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12753,9 +12753,9 @@ pub enum CreateModerationRequestInputV2ItemV0TypeEnum {
     #[serde(rename = "image_url")]
     ImageUrl,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationRequestInputV2ItemV0TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationRequestInputV2ItemV0TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateModerationRequestInputV2ItemV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12773,9 +12773,9 @@ pub enum CreateModerationRequestInputV2ItemV1TypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationRequestInputV2ItemV1TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationRequestInputV2ItemV1TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateModerationRequestModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12799,9 +12799,9 @@ pub enum CreateModerationRequestModelV1Enum {
     #[serde(rename = "text-moderation-stable")]
     TextModerationStable,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateModerationResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -12888,9 +12888,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesHarassmentI
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHarassmentItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHarassmentItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesHarassmentThreateningItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12898,9 +12898,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesHarassmentT
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHarassmentThreateningItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHarassmentThreateningItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesHateItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12908,9 +12908,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesHateItemEnu
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHateItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHateItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesHateThreateningItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12918,9 +12918,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesHateThreate
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHateThreateningItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesHateThreateningItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12928,9 +12928,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitItem
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitViolentItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12938,9 +12938,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitViol
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitViolentItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesIllicitViolentItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmInstructionsItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12950,9 +12950,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmIns
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmInstructionsItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmInstructionsItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmIntentItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12962,9 +12962,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmInt
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmIntentItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmIntentItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12974,9 +12974,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmIte
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSelfHarmItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12986,9 +12986,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualItemE
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualMinorsItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12996,9 +12996,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualMinor
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualMinorsItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesSexualMinorsItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceGraphicItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13008,9 +13008,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceGra
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceGraphicItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceGraphicItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13020,9 +13020,9 @@ pub enum CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceIte
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateModerationResponseResultsItemCategoryAppliedInputTypesViolenceItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateModerationResponseResultsItemCategoryScores`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -13215,9 +13215,9 @@ pub enum CreateResponseTruncationEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateResponseTruncationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateResponseTruncationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /threads/{thread_id}/runs` (`createRun`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -13235,9 +13235,9 @@ pub enum CreateRunParamsIncludeItemEnum {
     #[serde(rename = "step_details.tool_calls[*].file_search.results[*].content")]
     StepDetailsToolCallsFileSearchResultsContent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateRunParamsIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateRunParamsIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateRunRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -13319,9 +13319,9 @@ pub enum CreateRunRequestTruncationStrategyTypeEnum {
     #[serde(rename = "last_messages")]
     LastMessages,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateRunRequestTruncationStrategyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateRunRequestTruncationStrategyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createRun`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -13441,9 +13441,9 @@ pub enum CreateSpeechRequestModelV1Enum {
     #[serde(rename = "gpt-4o-mini-tts-2025-12-15")]
     Gpt4oMiniTts20251215,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateSpeechRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateSpeechRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateSpeechRequestResponseFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13461,9 +13461,9 @@ pub enum CreateSpeechRequestResponseFormatEnum {
     #[serde(rename = "pcm")]
     Pcm,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateSpeechRequestResponseFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateSpeechRequestResponseFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateSpeechRequestStreamFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13473,9 +13473,9 @@ pub enum CreateSpeechRequestStreamFormatEnum {
     #[serde(rename = "audio")]
     Audio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateSpeechRequestStreamFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateSpeechRequestStreamFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Binary result for `createSpeech`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13624,9 +13624,9 @@ pub enum CreateThreadAndRunRequestModelV1Enum {
     #[serde(rename = "gpt-3.5-turbo-16k-0613")]
     Gpt35Turbo16k0613,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateThreadAndRunRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateThreadAndRunRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateThreadAndRunRequestToolResources`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -13687,9 +13687,9 @@ pub enum CreateThreadAndRunRequestTruncationStrategyTypeEnum {
     #[serde(rename = "last_messages")]
     LastMessages,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateThreadAndRunRequestTruncationStrategyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateThreadAndRunRequestTruncationStrategyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createThreadAndRun`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -13805,9 +13805,9 @@ pub enum CreateTranscriptionRequestChunkingStrategyV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateTranscriptionRequestChunkingStrategyV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateTranscriptionRequestChunkingStrategyV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateTranscriptionRequestModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -13833,9 +13833,9 @@ pub enum CreateTranscriptionRequestModelV1Enum {
     #[serde(rename = "gpt-4o-transcribe-diarize")]
     Gpt4oTranscribeDiarize,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateTranscriptionRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateTranscriptionRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateTranscriptionRequestTimestampGranularitiesItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13845,9 +13845,9 @@ pub enum CreateTranscriptionRequestTimestampGranularitiesItemEnum {
     #[serde(rename = "segment")]
     Segment,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateTranscriptionRequestTimestampGranularitiesItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateTranscriptionRequestTimestampGranularitiesItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateTranscriptionResponseDiarizedJson`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -13868,9 +13868,9 @@ pub enum CreateTranscriptionResponseDiarizedJsonTaskEnum {
     #[serde(rename = "transcribe")]
     Transcribe,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateTranscriptionResponseDiarizedJsonTaskEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateTranscriptionResponseDiarizedJsonTaskEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `CreateTranscriptionResponseDiarizedJsonUsageUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -13994,9 +13994,9 @@ pub enum CreateTranslationRequestModelV1Enum {
     #[serde(rename = "whisper-1")]
     Whisper1,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateTranslationRequestModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateTranslationRequestModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateTranslationRequestResponseFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14012,9 +14012,9 @@ pub enum CreateTranslationRequestResponseFormatEnum {
     #[serde(rename = "vtt")]
     Vtt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateTranslationRequestResponseFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateTranslationRequestResponseFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateTranslationResponseJson`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14084,9 +14084,9 @@ pub enum CreateUploadRequestPurposeEnum {
     #[serde(rename = "vision")]
     Vision,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateUploadRequestPurposeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateUploadRequestPurposeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `createUpload`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14368,9 +14368,9 @@ pub enum CustomGrammarFormatParamTypeEnum {
     #[serde(rename = "grammar")]
     Grammar,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomGrammarFormatParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomGrammarFormatParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CustomTextFormatParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14387,9 +14387,9 @@ pub enum CustomTextFormatParamTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomTextFormatParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomTextFormatParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CustomToolCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14467,9 +14467,9 @@ pub enum CustomToolCallOutputResourceTypeEnum {
     #[serde(rename = "custom_tool_call_output")]
     CustomToolCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolCallOutputResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolCallOutputResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CustomToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14477,9 +14477,9 @@ pub enum CustomToolCallOutputTypeEnum {
     #[serde(rename = "custom_tool_call_output")]
     CustomToolCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CustomToolCallResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14507,9 +14507,9 @@ pub enum CustomToolCallResourceTypeEnum {
     #[serde(rename = "custom_tool_call")]
     CustomToolCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolCallResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolCallResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CustomToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14517,9 +14517,9 @@ pub enum CustomToolCallTypeEnum {
     #[serde(rename = "custom_tool_call")]
     CustomToolCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CustomToolChatCompletions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14568,9 +14568,9 @@ pub enum CustomToolChatCompletionsCustomFormatV0TypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolChatCompletionsCustomFormatV0TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolChatCompletionsCustomFormatV0TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CustomToolChatCompletionsCustomFormatV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14599,9 +14599,9 @@ pub enum CustomToolChatCompletionsCustomFormatV1GrammarSyntaxEnum {
     #[serde(rename = "regex")]
     Regex,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolChatCompletionsCustomFormatV1GrammarSyntaxEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolChatCompletionsCustomFormatV1GrammarSyntaxEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CustomToolChatCompletionsCustomFormatV1TypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14609,9 +14609,9 @@ pub enum CustomToolChatCompletionsCustomFormatV1TypeEnum {
     #[serde(rename = "grammar")]
     Grammar,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolChatCompletionsCustomFormatV1TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolChatCompletionsCustomFormatV1TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CustomToolChatCompletionsTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14619,9 +14619,9 @@ pub enum CustomToolChatCompletionsTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolChatCompletionsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolChatCompletionsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CustomToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14657,9 +14657,9 @@ pub enum CustomToolParamTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CustomToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CustomToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `DELETE /assistants/{assistant_id}` (`deleteAssistant`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14683,9 +14683,9 @@ pub enum DeleteAssistantResponseObjectEnum {
     #[serde(rename = "assistant.deleted")]
     AssistantDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteAssistantResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteAssistantResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteAssistant`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14833,9 +14833,9 @@ pub enum DeleteFileResponseObjectEnum {
     #[serde(rename = "file")]
     File,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteFileResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteFileResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteFile`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14867,9 +14867,9 @@ pub enum DeleteFineTuningCheckpointPermissionResponseObjectEnum {
     #[serde(rename = "checkpoint.permission")]
     CheckpointPermission,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteFineTuningCheckpointPermissionResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteFineTuningCheckpointPermissionResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteFineTuningCheckpointPermission`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -14901,9 +14901,9 @@ pub enum DeleteMessageResponseObjectEnum {
     #[serde(rename = "thread.message.deleted")]
     ThreadMessageDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteMessageResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteMessageResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15024,9 +15024,9 @@ pub enum DeleteThreadResponseObjectEnum {
     #[serde(rename = "thread.deleted")]
     ThreadDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteThreadResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteThreadResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteThread`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15058,9 +15058,9 @@ pub enum DeleteVectorStoreFileResponseObjectEnum {
     #[serde(rename = "vector_store.file.deleted")]
     VectorStoreFileDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteVectorStoreFileResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteVectorStoreFileResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteVectorStoreFile`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15091,9 +15091,9 @@ pub enum DeleteVectorStoreResponseObjectEnum {
     #[serde(rename = "vector_store.deleted")]
     VectorStoreDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteVectorStoreResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteVectorStoreResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteVectorStore`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15144,9 +15144,9 @@ pub enum DeletedConversationResourceObjectEnum {
     #[serde(rename = "conversation.deleted")]
     ConversationDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeletedConversationResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeletedConversationResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `DeletedRoleAssignmentResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15173,9 +15173,9 @@ pub enum DeletedSkillResourceObjectEnum {
     #[serde(rename = "skill.deleted")]
     SkillDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeletedSkillResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeletedSkillResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `DeletedSkillVersionResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15194,9 +15194,9 @@ pub enum DeletedSkillVersionResourceObjectEnum {
     #[serde(rename = "skill.version.deleted")]
     SkillVersionDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeletedSkillVersionResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeletedSkillVersionResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `DeletedThreadResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15214,9 +15214,9 @@ pub enum DeletedThreadResourceObjectEnum {
     #[serde(rename = "chatkit.thread.deleted")]
     ChatkitThreadDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeletedThreadResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeletedThreadResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `DeletedVideoResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15234,9 +15234,9 @@ pub enum DeletedVideoResourceObjectEnum {
     #[serde(rename = "video.deleted")]
     VideoDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeletedVideoResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeletedVideoResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `DetailEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15250,9 +15250,9 @@ pub enum DetailEnum {
     #[serde(rename = "original")]
     Original,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DetailEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DetailEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `DirectToolCallCaller`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15278,9 +15278,9 @@ pub enum DirectToolCallCallerParamTypeEnum {
     #[serde(rename = "direct")]
     Direct,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DirectToolCallCallerParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DirectToolCallCallerParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `DirectToolCallCallerTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15288,9 +15288,9 @@ pub enum DirectToolCallCallerTypeEnum {
     #[serde(rename = "direct")]
     Direct,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DirectToolCallCallerTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DirectToolCallCallerTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `DoubleClickAction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15311,9 +15311,9 @@ pub enum DoubleClickActionTypeEnum {
     #[serde(rename = "double_click")]
     DoubleClick,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DoubleClickActionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DoubleClickActionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /files/{file_id}/content` (`downloadFile`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15346,9 +15346,9 @@ pub enum DragParamTypeEnum {
     #[serde(rename = "drag")]
     Drag,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DragParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DragParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EasyInputMessage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15386,9 +15386,9 @@ pub enum EasyInputMessageRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EasyInputMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EasyInputMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EasyInputMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15396,9 +15396,9 @@ pub enum EasyInputMessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EasyInputMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EasyInputMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EditImageBodyJsonParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15445,9 +15445,9 @@ pub enum EditImageBodyJsonParamBackgroundEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EditImageBodyJsonParamBackgroundEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EditImageBodyJsonParamBackgroundEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EditImageBodyJsonParamInputFidelityEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15457,9 +15457,9 @@ pub enum EditImageBodyJsonParamInputFidelityEnum {
     #[serde(rename = "low")]
     Low,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EditImageBodyJsonParamInputFidelityEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EditImageBodyJsonParamInputFidelityEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `EditImageBodyJsonParamModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15483,9 +15483,9 @@ pub enum EditImageBodyJsonParamModelV1Enum {
     #[serde(rename = "chatgpt-image-latest")]
     ChatgptImageLatest,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EditImageBodyJsonParamModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EditImageBodyJsonParamModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EditImageBodyJsonParamModerationEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15495,9 +15495,9 @@ pub enum EditImageBodyJsonParamModerationEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EditImageBodyJsonParamModerationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EditImageBodyJsonParamModerationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EditImageBodyJsonParamOutputFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15509,9 +15509,9 @@ pub enum EditImageBodyJsonParamOutputFormatEnum {
     #[serde(rename = "webp")]
     Webp,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EditImageBodyJsonParamOutputFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EditImageBodyJsonParamOutputFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EditImageBodyJsonParamQualityEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15525,9 +15525,9 @@ pub enum EditImageBodyJsonParamQualityEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EditImageBodyJsonParamQualityEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EditImageBodyJsonParamQualityEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EditImageBodyJsonParamSizeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15541,9 +15541,9 @@ pub enum EditImageBodyJsonParamSizeEnum {
     #[serde(rename = "1024x1536")]
     T1024x1536,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EditImageBodyJsonParamSizeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EditImageBodyJsonParamSizeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Embedding`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15561,9 +15561,9 @@ pub enum EmbeddingObjectEnum {
     #[serde(rename = "embedding")]
     Embedding,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EmbeddingObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EmbeddingObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EmptyModelParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15620,9 +15620,9 @@ pub enum EvalCustomDataSourceConfigTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalCustomDataSourceConfigTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalCustomDataSourceConfigTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `EvalDataSourceConfigUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15655,9 +15655,9 @@ pub enum EvalGraderLabelModelTypeEnum {
     #[serde(rename = "label_model")]
     LabelModel,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalGraderLabelModelTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalGraderLabelModelTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalGraderPython`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15680,9 +15680,9 @@ pub enum EvalGraderPythonTypeEnum {
     #[serde(rename = "python")]
     Python,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalGraderPythonTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalGraderPythonTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalGraderScoreModel`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15725,9 +15725,9 @@ pub enum EvalGraderScoreModelTypeEnum {
     #[serde(rename = "score_model")]
     ScoreModel,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalGraderScoreModelTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalGraderScoreModelTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalGraderStringCheck`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15754,9 +15754,9 @@ pub enum EvalGraderStringCheckOperationEnum {
     #[serde(rename = "ilike")]
     Ilike,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalGraderStringCheckOperationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalGraderStringCheckOperationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EvalGraderStringCheckTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15764,9 +15764,9 @@ pub enum EvalGraderStringCheckTypeEnum {
     #[serde(rename = "string_check")]
     StringCheck,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalGraderStringCheckTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalGraderStringCheckTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalGraderTextSimilarity`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15808,9 +15808,9 @@ pub enum EvalGraderTextSimilarityEvaluationMetricEnum {
     #[serde(rename = "rouge_l")]
     RougeL,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalGraderTextSimilarityEvaluationMetricEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalGraderTextSimilarityEvaluationMetricEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EvalGraderTextSimilarityTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15818,9 +15818,9 @@ pub enum EvalGraderTextSimilarityTypeEnum {
     #[serde(rename = "text_similarity")]
     TextSimilarity,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalGraderTextSimilarityTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalGraderTextSimilarityTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15880,9 +15880,9 @@ pub enum EvalItemContentOutputTextTypeEnum {
     #[serde(rename = "output_text")]
     OutputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalItemContentOutputTextTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalItemContentOutputTextTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalItemContentText`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15909,9 +15909,9 @@ pub enum EvalItemInputImageTypeEnum {
     #[serde(rename = "input_image")]
     InputImage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalItemInputImageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalItemInputImageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EvalItemRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15925,9 +15925,9 @@ pub enum EvalItemRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalItemRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalItemRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EvalItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15935,9 +15935,9 @@ pub enum EvalItemTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalJsonlFileContentSource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15965,9 +15965,9 @@ pub enum EvalJsonlFileContentSourceTypeEnum {
     #[serde(rename = "file_content")]
     FileContent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalJsonlFileContentSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalJsonlFileContentSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalJsonlFileIdSource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15985,9 +15985,9 @@ pub enum EvalJsonlFileIdSourceTypeEnum {
     #[serde(rename = "file_id")]
     FileId,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalJsonlFileIdSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalJsonlFileIdSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalList`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16007,9 +16007,9 @@ pub enum EvalListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalLogsDataSourceConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16029,9 +16029,9 @@ pub enum EvalLogsDataSourceConfigTypeEnum {
     #[serde(rename = "logs")]
     Logs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalLogsDataSourceConfigTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalLogsDataSourceConfigTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EvalObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16039,9 +16039,9 @@ pub enum EvalObjectEnum {
     #[serde(rename = "eval")]
     Eval,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalResponsesSource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16078,9 +16078,9 @@ pub enum EvalResponsesSourceTypeEnum {
     #[serde(rename = "responses")]
     Responses,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalResponsesSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalResponsesSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalRun`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16132,9 +16132,9 @@ pub enum EvalRunListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalRunListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalRunListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EvalRunObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16142,9 +16142,9 @@ pub enum EvalRunObjectEnum {
     #[serde(rename = "eval.run")]
     EvalRun,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalRunObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalRunObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalRunOutputItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16181,9 +16181,9 @@ pub enum EvalRunOutputItemListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalRunOutputItemListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalRunOutputItemListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `EvalRunOutputItemObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16191,9 +16191,9 @@ pub enum EvalRunOutputItemObjectEnum {
     #[serde(rename = "eval.run.output_item")]
     EvalRunOutputItem,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalRunOutputItemObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalRunOutputItemObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalRunOutputItemResult`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16310,9 +16310,9 @@ pub enum EvalStoredCompletionsDataSourceConfigTypeEnum {
     #[serde(rename = "stored_completions")]
     StoredCompletions,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalStoredCompletionsDataSourceConfigTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalStoredCompletionsDataSourceConfigTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `EvalStoredCompletionsSource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16339,9 +16339,9 @@ pub enum EvalStoredCompletionsSourceTypeEnum {
     #[serde(rename = "stored_completions")]
     StoredCompletions,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for EvalStoredCompletionsSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for EvalStoredCompletionsSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `EvalTestingCriteriaItemUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16371,9 +16371,9 @@ pub enum ExpiresAfterParamAnchorEnum {
     #[serde(rename = "created_at")]
     CreatedAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ExpiresAfterParamAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ExpiresAfterParamAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FileAnnotation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16401,9 +16401,9 @@ pub enum FileAnnotationSourceTypeEnum {
     #[serde(rename = "file")]
     File,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileAnnotationSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileAnnotationSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FileAnnotationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16411,9 +16411,9 @@ pub enum FileAnnotationTypeEnum {
     #[serde(rename = "file")]
     File,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileAnnotationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileAnnotationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FileCitationBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16433,9 +16433,9 @@ pub enum FileCitationBodyTypeEnum {
     #[serde(rename = "file_citation")]
     FileCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileCitationBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileCitationBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FileDetailEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16447,9 +16447,9 @@ pub enum FileDetailEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileDetailEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileDetailEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FileExpirationAfter`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16466,9 +16466,9 @@ pub enum FileExpirationAfterAnchorEnum {
     #[serde(rename = "created_at")]
     CreatedAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileExpirationAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileExpirationAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FileInputDetail`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16480,9 +16480,9 @@ pub enum FileInputDetail {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileInputDetail { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileInputDetail { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FilePath`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16501,9 +16501,9 @@ pub enum FilePathTypeEnum {
     #[serde(rename = "file_path")]
     FilePath,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FilePathTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FilePathTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FileSearchRanker`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16513,9 +16513,9 @@ pub enum FileSearchRanker {
     #[serde(rename = "default_2024_08_21")]
     Default20240821,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileSearchRanker { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileSearchRanker { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FileSearchRankingOptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16588,9 +16588,9 @@ pub enum FileSearchToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileSearchToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileSearchToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FileSearchToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16598,9 +16598,9 @@ pub enum FileSearchToolCallTypeEnum {
     #[serde(rename = "file_search_call")]
     FileSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileSearchToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileSearchToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FileSearchToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16608,9 +16608,9 @@ pub enum FileSearchToolTypeEnum {
     #[serde(rename = "file_search")]
     FileSearch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FileSearchToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FileSearchToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FileUploadParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16666,9 +16666,9 @@ pub enum FineTuneDPOHyperparametersBatchSizeV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneDPOHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneDPOHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneDPOHyperparametersBetaUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16686,9 +16686,9 @@ pub enum FineTuneDPOHyperparametersBetaV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneDPOHyperparametersBetaV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneDPOHyperparametersBetaV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneDPOHyperparametersLearningRateMultiplierUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16706,9 +16706,9 @@ pub enum FineTuneDPOHyperparametersLearningRateMultiplierV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneDPOHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneDPOHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneDPOHyperparametersNEpochsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16726,9 +16726,9 @@ pub enum FineTuneDPOHyperparametersNEpochsV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneDPOHyperparametersNEpochsV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneDPOHyperparametersNEpochsV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuneDPOMethod`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16764,9 +16764,9 @@ pub enum FineTuneMethodTypeEnum {
     #[serde(rename = "reinforcement")]
     Reinforcement,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneMethodTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneMethodTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuneReinforcementHyperparameters`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16805,9 +16805,9 @@ pub enum FineTuneReinforcementHyperparametersBatchSizeV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneReinforcementHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneReinforcementHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneReinforcementHyperparametersComputeMultiplierUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16825,9 +16825,9 @@ pub enum FineTuneReinforcementHyperparametersComputeMultiplierV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneReinforcementHyperparametersComputeMultiplierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneReinforcementHyperparametersComputeMultiplierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneReinforcementHyperparametersEvalIntervalUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16845,9 +16845,9 @@ pub enum FineTuneReinforcementHyperparametersEvalIntervalV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneReinforcementHyperparametersEvalIntervalV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneReinforcementHyperparametersEvalIntervalV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneReinforcementHyperparametersEvalSamplesUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16865,9 +16865,9 @@ pub enum FineTuneReinforcementHyperparametersEvalSamplesV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneReinforcementHyperparametersEvalSamplesV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneReinforcementHyperparametersEvalSamplesV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneReinforcementHyperparametersLearningRateMultiplierUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16885,9 +16885,9 @@ pub enum FineTuneReinforcementHyperparametersLearningRateMultiplierV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneReinforcementHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneReinforcementHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneReinforcementHyperparametersNEpochsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16905,9 +16905,9 @@ pub enum FineTuneReinforcementHyperparametersNEpochsV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneReinforcementHyperparametersNEpochsV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneReinforcementHyperparametersNEpochsV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FineTuneReinforcementHyperparametersReasoningEffortEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16921,9 +16921,9 @@ pub enum FineTuneReinforcementHyperparametersReasoningEffortEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneReinforcementHyperparametersReasoningEffortEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneReinforcementHyperparametersReasoningEffortEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuneReinforcementMethod`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -16977,9 +16977,9 @@ pub enum FineTuneSupervisedHyperparametersBatchSizeV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneSupervisedHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneSupervisedHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneSupervisedHyperparametersLearningRateMultiplierUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16997,9 +16997,9 @@ pub enum FineTuneSupervisedHyperparametersLearningRateMultiplierV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneSupervisedHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneSupervisedHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuneSupervisedHyperparametersNEpochsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17017,9 +17017,9 @@ pub enum FineTuneSupervisedHyperparametersNEpochsV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuneSupervisedHyperparametersNEpochsV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuneSupervisedHyperparametersNEpochsV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuneSupervisedMethod`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17047,9 +17047,9 @@ pub enum FineTuningCheckpointPermissionObjectEnum {
     #[serde(rename = "checkpoint.permission")]
     CheckpointPermission,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningCheckpointPermissionObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningCheckpointPermissionObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuningIntegration`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17067,9 +17067,9 @@ pub enum FineTuningIntegrationTypeEnum {
     #[serde(rename = "wandb")]
     Wandb,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningIntegrationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningIntegrationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuningIntegrationWandb`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17161,9 +17161,9 @@ pub enum FineTuningJobCheckpointObjectEnum {
     #[serde(rename = "fine_tuning.job.checkpoint")]
     FineTuningJobCheckpoint,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobCheckpointObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobCheckpointObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuningJobError`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17203,9 +17203,9 @@ pub enum FineTuningJobEventLevelEnum {
     #[serde(rename = "error")]
     Error,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobEventLevelEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobEventLevelEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FineTuningJobEventObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17213,9 +17213,9 @@ pub enum FineTuningJobEventObjectEnum {
     #[serde(rename = "fine_tuning.job.event")]
     FineTuningJobEvent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobEventObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobEventObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FineTuningJobEventTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17225,9 +17225,9 @@ pub enum FineTuningJobEventTypeEnum {
     #[serde(rename = "metrics")]
     Metrics,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobEventTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobEventTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FineTuningJobHyperparameters`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17258,9 +17258,9 @@ pub enum FineTuningJobHyperparametersBatchSizeV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobHyperparametersBatchSizeV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuningJobHyperparametersLearningRateMultiplierUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17278,9 +17278,9 @@ pub enum FineTuningJobHyperparametersLearningRateMultiplierV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobHyperparametersLearningRateMultiplierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuningJobHyperparametersNEpochsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17298,9 +17298,9 @@ pub enum FineTuningJobHyperparametersNEpochsV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobHyperparametersNEpochsV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobHyperparametersNEpochsV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FineTuningJobIntegrationsItemUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17317,9 +17317,9 @@ pub enum FineTuningJobObjectEnum {
     #[serde(rename = "fine_tuning.job")]
     FineTuningJob,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FineTuningJobStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17337,9 +17337,9 @@ pub enum FineTuningJobStatusEnum {
     #[serde(rename = "cancelled")]
     Cancelled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FineTuningJobStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FineTuningJobStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FunctionAndCustomToolCallOutput`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17362,9 +17362,9 @@ pub enum FunctionCallItemStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionCallItemStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionCallItemStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionCallOutputItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17410,9 +17410,9 @@ pub enum FunctionCallOutputItemParamTypeEnum {
     #[serde(rename = "function_call_output")]
     FunctionCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionCallOutputStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17424,9 +17424,9 @@ pub enum FunctionCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionCallStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17438,9 +17438,9 @@ pub enum FunctionCallStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17551,9 +17551,9 @@ pub enum FunctionShellCallItemParamTypeEnum {
     #[serde(rename = "shell_call")]
     ShellCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionShellCallItemStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17565,9 +17565,9 @@ pub enum FunctionShellCallItemStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallItemStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallItemStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionShellCallOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17646,9 +17646,9 @@ pub enum FunctionShellCallOutputExitOutcomeParamTypeEnum {
     #[serde(rename = "exit")]
     Exit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallOutputExitOutcomeParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallOutputExitOutcomeParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionShellCallOutputExitOutcomeTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17656,9 +17656,9 @@ pub enum FunctionShellCallOutputExitOutcomeTypeEnum {
     #[serde(rename = "exit")]
     Exit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallOutputExitOutcomeTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallOutputExitOutcomeTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionShellCallOutputItemParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17685,9 +17685,9 @@ pub enum FunctionShellCallOutputItemParamTypeEnum {
     #[serde(rename = "shell_call_output")]
     ShellCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `FunctionShellCallOutputOutcomeParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17709,9 +17709,9 @@ pub enum FunctionShellCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionShellCallOutputTimeoutOutcome`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17737,9 +17737,9 @@ pub enum FunctionShellCallOutputTimeoutOutcomeParamTypeEnum {
     #[serde(rename = "timeout")]
     Timeout,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallOutputTimeoutOutcomeParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallOutputTimeoutOutcomeParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionShellCallOutputTimeoutOutcomeTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17747,9 +17747,9 @@ pub enum FunctionShellCallOutputTimeoutOutcomeTypeEnum {
     #[serde(rename = "timeout")]
     Timeout,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallOutputTimeoutOutcomeTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallOutputTimeoutOutcomeTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionShellCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17757,9 +17757,9 @@ pub enum FunctionShellCallOutputTypeEnum {
     #[serde(rename = "shell_call_output")]
     ShellCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionShellCallStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17771,9 +17771,9 @@ pub enum FunctionShellCallStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionShellCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17781,9 +17781,9 @@ pub enum FunctionShellCallTypeEnum {
     #[serde(rename = "shell_call")]
     ShellCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionShellToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17815,9 +17815,9 @@ pub enum FunctionShellToolParamTypeEnum {
     #[serde(rename = "shell")]
     Shell,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionShellToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionShellToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17921,9 +17921,9 @@ pub enum FunctionToolCallOutputResourceTypeEnum {
     #[serde(rename = "function_call_output")]
     FunctionCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolCallOutputResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolCallOutputResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionToolCallOutputStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17935,9 +17935,9 @@ pub enum FunctionToolCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17945,9 +17945,9 @@ pub enum FunctionToolCallOutputTypeEnum {
     #[serde(rename = "function_call_output")]
     FunctionCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionToolCallResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17975,9 +17975,9 @@ pub enum FunctionToolCallResourceTypeEnum {
     #[serde(rename = "function_call")]
     FunctionCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolCallResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolCallResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionToolCallStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17989,9 +17989,9 @@ pub enum FunctionToolCallStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17999,9 +17999,9 @@ pub enum FunctionToolCallTypeEnum {
     #[serde(rename = "function_call")]
     FunctionCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `FunctionToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18031,9 +18031,9 @@ pub enum FunctionToolParamTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `FunctionToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18041,9 +18041,9 @@ pub enum FunctionToolTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for FunctionToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for FunctionToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /assistants/{assistant_id}` (`getAssistant`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18078,9 +18078,9 @@ pub enum GetChatCompletionMessagesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GetChatCompletionMessagesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GetChatCompletionMessagesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `getChatCompletionMessages`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18182,9 +18182,9 @@ pub enum GetEvalRunOutputItemsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GetEvalRunOutputItemsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GetEvalRunOutputItemsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `GetEvalRunOutputItemsParamsStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18194,9 +18194,9 @@ pub enum GetEvalRunOutputItemsParamsStatusEnum {
     #[serde(rename = "pass")]
     Pass,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GetEvalRunOutputItemsParamsStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GetEvalRunOutputItemsParamsStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `getEvalRunOutputItems`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18241,9 +18241,9 @@ pub enum GetEvalRunsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GetEvalRunsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GetEvalRunsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `GetEvalRunsParamsStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18259,9 +18259,9 @@ pub enum GetEvalRunsParamsStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GetEvalRunsParamsStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GetEvalRunsParamsStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `getEvalRuns`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18336,9 +18336,9 @@ pub enum GetRunStepParamsIncludeItemEnum {
     #[serde(rename = "step_details.tool_calls[*].file_search.results[*].content")]
     StepDetailsToolCallsFileSearchResultsContent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GetRunStepParamsIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GetRunStepParamsIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `getRunStep`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18540,9 +18540,9 @@ pub enum GraderLabelModelTypeEnum {
     #[serde(rename = "label_model")]
     LabelModel,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderLabelModelTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderLabelModelTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GraderMulti`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18575,9 +18575,9 @@ pub enum GraderMultiTypeEnum {
     #[serde(rename = "multi")]
     Multi,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderMultiTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderMultiTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GraderPython`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18598,9 +18598,9 @@ pub enum GraderPythonTypeEnum {
     #[serde(rename = "python")]
     Python,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderPythonTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderPythonTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GraderScoreModel`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18641,9 +18641,9 @@ pub enum GraderScoreModelTypeEnum {
     #[serde(rename = "score_model")]
     ScoreModel,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderScoreModelTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderScoreModelTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GraderStringCheck`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18670,9 +18670,9 @@ pub enum GraderStringCheckOperationEnum {
     #[serde(rename = "ilike")]
     Ilike,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderStringCheckOperationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderStringCheckOperationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `GraderStringCheckTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18680,9 +18680,9 @@ pub enum GraderStringCheckTypeEnum {
     #[serde(rename = "string_check")]
     StringCheck,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderStringCheckTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderStringCheckTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GraderTextSimilarity`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18723,9 +18723,9 @@ pub enum GraderTextSimilarityEvaluationMetricEnum {
     #[serde(rename = "rouge_l")]
     RougeL,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderTextSimilarityEvaluationMetricEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderTextSimilarityEvaluationMetricEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `GraderTextSimilarityTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18733,9 +18733,9 @@ pub enum GraderTextSimilarityTypeEnum {
     #[serde(rename = "text_similarity")]
     TextSimilarity,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GraderTextSimilarityTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GraderTextSimilarityTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `GrammarSyntax1`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18745,9 +18745,9 @@ pub enum GrammarSyntax1 {
     #[serde(rename = "regex")]
     Regex,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GrammarSyntax1 { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GrammarSyntax1 { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Group`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18767,9 +18767,9 @@ pub enum GroupObjectEnum {
     #[serde(rename = "group")]
     Group,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GroupRoleAssignment`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18787,9 +18787,9 @@ pub enum GroupRoleAssignmentObjectEnum {
     #[serde(rename = "group.role")]
     GroupRole,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupRoleAssignmentObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupRoleAssignmentObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /realtime/calls/{call_id}/hangup` (`hangup-realtime-call`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18849,9 +18849,9 @@ pub enum ImageDetail {
     #[serde(rename = "original")]
     Original,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageDetail { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageDetail { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImageGenActionEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18863,9 +18863,9 @@ pub enum ImageGenActionEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenActionEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenActionEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ImageGenInputUsageDetails`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18926,9 +18926,9 @@ pub enum ImageGenToolBackgroundEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolBackgroundEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolBackgroundEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ImageGenToolCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -18955,9 +18955,9 @@ pub enum ImageGenToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImageGenToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18965,9 +18965,9 @@ pub enum ImageGenToolCallTypeEnum {
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ImageGenToolInputImageMask`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19000,9 +19000,9 @@ pub enum ImageGenToolModelV1Enum {
     #[serde(rename = "gpt-image-1.5")]
     GptImage15,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImageGenToolModerationEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19012,9 +19012,9 @@ pub enum ImageGenToolModerationEnum {
     #[serde(rename = "low")]
     Low,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolModerationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolModerationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImageGenToolOutputFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19026,9 +19026,9 @@ pub enum ImageGenToolOutputFormatEnum {
     #[serde(rename = "jpeg")]
     Jpeg,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolOutputFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolOutputFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImageGenToolQualityEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19042,9 +19042,9 @@ pub enum ImageGenToolQualityEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolQualityEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolQualityEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ImageGenToolSizeUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19068,9 +19068,9 @@ pub enum ImageGenToolSizeV1Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolSizeV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolSizeV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImageGenToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19078,9 +19078,9 @@ pub enum ImageGenToolTypeEnum {
     #[serde(rename = "image_generation")]
     ImageGeneration,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImageGenToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImageGenToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ImageGenUsage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19144,9 +19144,9 @@ pub enum ImagesResponseBackgroundEnum {
     #[serde(rename = "opaque")]
     Opaque,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImagesResponseBackgroundEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImagesResponseBackgroundEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImagesResponseOutputFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19158,9 +19158,9 @@ pub enum ImagesResponseOutputFormatEnum {
     #[serde(rename = "jpeg")]
     Jpeg,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImagesResponseOutputFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImagesResponseOutputFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImagesResponseQualityEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19172,9 +19172,9 @@ pub enum ImagesResponseQualityEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImagesResponseQualityEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImagesResponseQualityEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ImagesResponseSizeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19186,9 +19186,9 @@ pub enum ImagesResponseSizeEnum {
     #[serde(rename = "1536x1024")]
     T1536x1024,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ImagesResponseSizeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ImagesResponseSizeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `IncludeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19210,9 +19210,9 @@ pub enum IncludeEnum {
     #[serde(rename = "message.output_text.logprobs")]
     MessageOutputTextLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for IncludeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for IncludeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InferenceOptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19243,9 +19243,9 @@ pub enum InlineSkillParamTypeEnum {
     #[serde(rename = "inline")]
     Inline,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InlineSkillParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InlineSkillParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InlineSkillSourceParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19264,9 +19264,9 @@ pub enum InlineSkillSourceParamMediaTypeEnum {
     #[serde(rename = "application/zip")]
     ApplicationZip,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InlineSkillSourceParamMediaTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InlineSkillSourceParamMediaTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InlineSkillSourceParamTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19274,9 +19274,9 @@ pub enum InlineSkillSourceParamTypeEnum {
     #[serde(rename = "base64")]
     Base64,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InlineSkillSourceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InlineSkillSourceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InputAudio`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19305,9 +19305,9 @@ pub enum InputAudioInputAudioFormatEnum {
     #[serde(rename = "wav")]
     Wav,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputAudioInputAudioFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputAudioInputAudioFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputAudioTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19315,9 +19315,9 @@ pub enum InputAudioTypeEnum {
     #[serde(rename = "input_audio")]
     InputAudio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputAudioTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputAudioTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputFidelity`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19327,9 +19327,9 @@ pub enum InputFidelity {
     #[serde(rename = "low")]
     Low,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputFidelity { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputFidelity { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InputFileContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19379,9 +19379,9 @@ pub enum InputFileContentParamTypeEnum {
     #[serde(rename = "input_file")]
     InputFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputFileContentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputFileContentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputFileContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19389,9 +19389,9 @@ pub enum InputFileContentTypeEnum {
     #[serde(rename = "input_file")]
     InputFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputFileContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputFileContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InputImageContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19432,9 +19432,9 @@ pub enum InputImageContentParamAutoParamTypeEnum {
     #[serde(rename = "input_image")]
     InputImage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputImageContentParamAutoParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputImageContentParamAutoParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputImageContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19442,9 +19442,9 @@ pub enum InputImageContentTypeEnum {
     #[serde(rename = "input_image")]
     InputImage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputImageContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputImageContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `InputItem`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19505,9 +19505,9 @@ pub enum InputMessageResourceRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputMessageResourceRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputMessageResourceRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputMessageResourceStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19519,9 +19519,9 @@ pub enum InputMessageResourceStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputMessageResourceStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputMessageResourceStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputMessageResourceTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19529,9 +19529,9 @@ pub enum InputMessageResourceTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputMessageResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputMessageResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputMessageRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19543,9 +19543,9 @@ pub enum InputMessageRoleEnum {
     #[serde(rename = "developer")]
     Developer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputMessageStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19557,9 +19557,9 @@ pub enum InputMessageStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputMessageStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputMessageStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19567,9 +19567,9 @@ pub enum InputMessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `InputParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19611,9 +19611,9 @@ pub enum InputTextContentParamTypeEnum {
     #[serde(rename = "input_text")]
     InputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputTextContentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputTextContentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InputTextContentTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19621,9 +19621,9 @@ pub enum InputTextContentTypeEnum {
     #[serde(rename = "input_text")]
     InputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InputTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InputTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `Item`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19713,9 +19713,9 @@ pub enum ItemReferenceParamTypeEnum {
     #[serde(rename = "item_reference")]
     ItemReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ItemReferenceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ItemReferenceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ItemResource`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19770,9 +19770,9 @@ pub enum KeyPressActionTypeEnum {
     #[serde(rename = "keypress")]
     Keypress,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for KeyPressActionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for KeyPressActionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /assistants` (`listAssistants`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19795,9 +19795,9 @@ pub enum ListAssistantsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListAssistantsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListAssistantsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListAssistantsResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19847,9 +19847,9 @@ pub enum ListBatchesResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListBatchesResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListBatchesResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listBatches`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19881,9 +19881,9 @@ pub enum ListChatCompletionsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListChatCompletionsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListChatCompletionsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listChatCompletions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19912,9 +19912,9 @@ pub enum ListContainerFilesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListContainerFilesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListContainerFilesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `ListContainerFiles`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19944,9 +19944,9 @@ pub enum ListContainersParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListContainersParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListContainersParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `ListContainers`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -19977,9 +19977,9 @@ pub enum ListConversationItemsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListConversationItemsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListConversationItemsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listConversationItems`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20009,9 +20009,9 @@ pub enum ListEvalsParamsOrderByEnum {
     #[serde(rename = "updated_at")]
     UpdatedAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListEvalsParamsOrderByEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListEvalsParamsOrderByEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ListEvalsParamsOrderEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20021,9 +20021,9 @@ pub enum ListEvalsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListEvalsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListEvalsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listEvals`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20061,9 +20061,9 @@ pub enum ListFilesInVectorStoreBatchParamsFilterEnum {
     #[serde(rename = "cancelled")]
     Cancelled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListFilesInVectorStoreBatchParamsFilterEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListFilesInVectorStoreBatchParamsFilterEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ListFilesInVectorStoreBatchParamsOrderEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20073,9 +20073,9 @@ pub enum ListFilesInVectorStoreBatchParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListFilesInVectorStoreBatchParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListFilesInVectorStoreBatchParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listFilesInVectorStoreBatch`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20105,9 +20105,9 @@ pub enum ListFilesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListFilesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListFilesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListFilesResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20148,9 +20148,9 @@ pub enum ListFineTuningCheckpointPermissionResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListFineTuningCheckpointPermissionResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListFineTuningCheckpointPermissionResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions` (`listFineTuningCheckpointPermissions`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20174,9 +20174,9 @@ pub enum ListFineTuningCheckpointPermissionsParamsOrderEnum {
     #[serde(rename = "descending")]
     Descending,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListFineTuningCheckpointPermissionsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListFineTuningCheckpointPermissionsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listFineTuningCheckpointPermissions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20232,9 +20232,9 @@ pub enum ListFineTuningJobCheckpointsResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListFineTuningJobCheckpointsResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListFineTuningJobCheckpointsResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listFineTuningJobCheckpoints`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20259,9 +20259,9 @@ pub enum ListFineTuningJobEventsResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListFineTuningJobEventsResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListFineTuningJobEventsResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /responses/{response_id}/input_items` (`listInputItems`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20285,9 +20285,9 @@ pub enum ListInputItemsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListInputItemsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListInputItemsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listInputItems`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20320,9 +20320,9 @@ pub enum ListMessagesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListMessagesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListMessagesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListMessagesResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20363,9 +20363,9 @@ pub enum ListModelsResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListModelsResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListModelsResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listModels`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20401,9 +20401,9 @@ pub enum ListPaginatedFineTuningJobsResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListPaginatedFineTuningJobsResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListPaginatedFineTuningJobsResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listPaginatedFineTuningJobs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20433,9 +20433,9 @@ pub enum ListProjectGroupRoleAssignmentsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectGroupRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectGroupRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-project-group-role-assignments`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20464,9 +20464,9 @@ pub enum ListProjectRolesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectRolesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectRolesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-project-roles`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20496,9 +20496,9 @@ pub enum ListProjectUserRoleAssignmentsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectUserRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectUserRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-project-user-role-assignments`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20531,9 +20531,9 @@ pub enum ListRunStepsParamsIncludeItemEnum {
     #[serde(rename = "step_details.tool_calls[*].file_search.results[*].content")]
     StepDetailsToolCallsFileSearchResultsContent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListRunStepsParamsIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListRunStepsParamsIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ListRunStepsParamsOrderEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20543,9 +20543,9 @@ pub enum ListRunStepsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListRunStepsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListRunStepsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListRunStepsResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20588,9 +20588,9 @@ pub enum ListRunsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListRunsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListRunsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListRunsResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20719,9 +20719,9 @@ pub enum ListVectorStoreFilesParamsFilterEnum {
     #[serde(rename = "cancelled")]
     Cancelled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListVectorStoreFilesParamsFilterEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListVectorStoreFilesParamsFilterEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ListVectorStoreFilesParamsOrderEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20731,9 +20731,9 @@ pub enum ListVectorStoreFilesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListVectorStoreFilesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListVectorStoreFilesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListVectorStoreFilesResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20775,9 +20775,9 @@ pub enum ListVectorStoresParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListVectorStoresParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListVectorStoresParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListVectorStoresResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20849,9 +20849,9 @@ pub enum LocalEnvironmentParamTypeEnum {
     #[serde(rename = "local")]
     Local,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalEnvironmentParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalEnvironmentParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `LocalEnvironmentResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20868,9 +20868,9 @@ pub enum LocalEnvironmentResourceTypeEnum {
     #[serde(rename = "local")]
     Local,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalEnvironmentResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalEnvironmentResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `LocalShellExecAction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20895,9 +20895,9 @@ pub enum LocalShellExecActionTypeEnum {
     #[serde(rename = "exec")]
     Exec,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalShellExecActionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalShellExecActionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `LocalShellToolCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20935,9 +20935,9 @@ pub enum LocalShellToolCallOutputStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalShellToolCallOutputStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalShellToolCallOutputStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `LocalShellToolCallOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20945,9 +20945,9 @@ pub enum LocalShellToolCallOutputTypeEnum {
     #[serde(rename = "local_shell_call_output")]
     LocalShellCallOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalShellToolCallOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalShellToolCallOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `LocalShellToolCallStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20959,9 +20959,9 @@ pub enum LocalShellToolCallStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalShellToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalShellToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `LocalShellToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20969,9 +20969,9 @@ pub enum LocalShellToolCallTypeEnum {
     #[serde(rename = "local_shell_call")]
     LocalShellCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalShellToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalShellToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `LocalShellToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -20988,9 +20988,9 @@ pub enum LocalShellToolParamTypeEnum {
     #[serde(rename = "local_shell")]
     LocalShell,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LocalShellToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LocalShellToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `LocalSkillParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21019,9 +21019,9 @@ pub enum LockedStatusTypeEnum {
     #[serde(rename = "locked")]
     Locked,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for LockedStatusTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for LockedStatusTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `LogProb`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21053,9 +21053,9 @@ pub enum MCPApprovalRequestTypeEnum {
     #[serde(rename = "mcp_approval_request")]
     McpApprovalRequest,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPApprovalRequestTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPApprovalRequestTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MCPApprovalResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21092,9 +21092,9 @@ pub enum MCPApprovalResponseResourceTypeEnum {
     #[serde(rename = "mcp_approval_response")]
     McpApprovalResponse,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPApprovalResponseResourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPApprovalResponseResourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MCPApprovalResponseTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21102,9 +21102,9 @@ pub enum MCPApprovalResponseTypeEnum {
     #[serde(rename = "mcp_approval_response")]
     McpApprovalResponse,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPApprovalResponseTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPApprovalResponseTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MCPListTools`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21139,9 +21139,9 @@ pub enum MCPListToolsTypeEnum {
     #[serde(rename = "mcp_list_tools")]
     McpListTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPListToolsTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPListToolsTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MCPTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21218,9 +21218,9 @@ pub enum MCPToolCallStatus {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPToolCallStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPToolCallStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MCPToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21228,9 +21228,9 @@ pub enum MCPToolCallTypeEnum {
     #[serde(rename = "mcp_call")]
     McpCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MCPToolConnectorIdEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21252,9 +21252,9 @@ pub enum MCPToolConnectorIdEnum {
     #[serde(rename = "connector_sharepoint")]
     ConnectorSharepoint,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPToolConnectorIdEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPToolConnectorIdEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MCPToolFilter`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21296,9 +21296,9 @@ pub enum MCPToolRequireApprovalV1Enum {
     #[serde(rename = "never")]
     Never,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPToolRequireApprovalV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPToolRequireApprovalV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MCPToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21306,9 +21306,9 @@ pub enum MCPToolTypeEnum {
     #[serde(rename = "mcp")]
     Mcp,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MCPToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MCPToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Message`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21355,9 +21355,9 @@ pub enum MessageContentImageFileObjectImageFileDetailEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentImageFileObjectImageFileDetailEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentImageFileObjectImageFileDetailEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageContentImageFileObjectTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21365,9 +21365,9 @@ pub enum MessageContentImageFileObjectTypeEnum {
     #[serde(rename = "image_file")]
     ImageFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentImageFileObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentImageFileObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MessageContentImageUrlObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21399,9 +21399,9 @@ pub enum MessageContentImageUrlObjectImageUrlDetailEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentImageUrlObjectImageUrlDetailEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentImageUrlObjectImageUrlDetailEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageContentImageUrlObjectTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21409,9 +21409,9 @@ pub enum MessageContentImageUrlObjectTypeEnum {
     #[serde(rename = "image_url")]
     ImageUrl,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentImageUrlObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentImageUrlObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `MessageContentItemUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21446,9 +21446,9 @@ pub enum MessageContentRefusalObjectTypeEnum {
     #[serde(rename = "refusal")]
     Refusal,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentRefusalObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentRefusalObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MessageContentTextAnnotationsFileCitationObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21477,9 +21477,9 @@ pub enum MessageContentTextAnnotationsFileCitationObjectTypeEnum {
     #[serde(rename = "file_citation")]
     FileCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentTextAnnotationsFileCitationObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentTextAnnotationsFileCitationObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MessageContentTextAnnotationsFilePathObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21508,9 +21508,9 @@ pub enum MessageContentTextAnnotationsFilePathObjectTypeEnum {
     #[serde(rename = "file_path")]
     FilePath,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentTextAnnotationsFilePathObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentTextAnnotationsFilePathObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MessageContentTextObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21547,9 +21547,9 @@ pub enum MessageContentTextObjectTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageContentTextObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageContentTextObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MessageObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21633,9 +21633,9 @@ pub enum MessageObjectIncompleteDetailsReasonEnum {
     #[serde(rename = "run_failed")]
     RunFailed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageObjectIncompleteDetailsReasonEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageObjectIncompleteDetailsReasonEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageObjectObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21643,9 +21643,9 @@ pub enum MessageObjectObjectEnum {
     #[serde(rename = "thread.message")]
     ThreadMessage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageObjectRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21655,9 +21655,9 @@ pub enum MessageObjectRoleEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageObjectRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageObjectRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageObjectStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21669,9 +21669,9 @@ pub enum MessageObjectStatusEnum {
     #[serde(rename = "completed")]
     Completed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageObjectStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageObjectStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessagePhase`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21681,9 +21681,9 @@ pub enum MessagePhase {
     #[serde(rename = "final_answer")]
     FinalAnswer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessagePhase { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessagePhase { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessagePhase2`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21693,9 +21693,9 @@ pub enum MessagePhase2 {
     #[serde(rename = "final_answer")]
     FinalAnswer,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessagePhase2 { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessagePhase2 { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `MessageRequestContentTextObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21713,9 +21713,9 @@ pub enum MessageRequestContentTextObjectTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageRequestContentTextObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageRequestContentTextObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageRole`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21737,9 +21737,9 @@ pub enum MessageRole {
     #[serde(rename = "tool")]
     Tool,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageRole { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageRole { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21751,9 +21751,9 @@ pub enum MessageStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `MessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21761,9 +21761,9 @@ pub enum MessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `Metadata`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21837,9 +21837,9 @@ pub enum ModelIdsResponsesV1Enum {
     #[serde(rename = "gpt-5.1-codex-max")]
     Gpt51CodexMax,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ModelIdsResponsesV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ModelIdsResponsesV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ModelIdsShared`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22017,9 +22017,9 @@ pub enum ModelIdsSharedV1Enum {
     #[serde(rename = "gpt-3.5-turbo-16k-0613")]
     Gpt35Turbo16k0613,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ModelIdsSharedV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ModelIdsSharedV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ModelObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22027,9 +22027,9 @@ pub enum ModelObjectEnum {
     #[serde(rename = "model")]
     Model,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ModelObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ModelObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Moderation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22065,9 +22065,9 @@ pub enum ModerationErrorBodyTypeEnum {
     #[serde(rename = "error")]
     Error,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ModerationErrorBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ModerationErrorBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ModerationInputType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22077,9 +22077,9 @@ pub enum ModerationInputType {
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ModerationInputType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ModerationInputType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ModerationInputUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22099,9 +22099,9 @@ pub enum ModerationMode {
     #[serde(rename = "block")]
     Block,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ModerationMode { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ModerationMode { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ModerationOutputUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22154,9 +22154,9 @@ pub enum ModerationResultBodyTypeEnum {
     #[serde(rename = "moderation_result")]
     ModerationResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ModerationResultBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ModerationResultBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /assistants/{assistant_id}` (`modifyAssistant`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22386,9 +22386,9 @@ pub enum MoveParamTypeEnum {
     #[serde(rename = "move")]
     Move,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for MoveParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for MoveParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `NamespaceToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22418,9 +22418,9 @@ pub enum NamespaceToolParamTypeEnum {
     #[serde(rename = "namespace")]
     Namespace,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for NamespaceToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for NamespaceToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `NoiseReductionType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22430,9 +22430,9 @@ pub enum NoiseReductionType {
     #[serde(rename = "far_field")]
     FarField,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for NoiseReductionType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for NoiseReductionType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OpenAIFile`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22458,9 +22458,9 @@ pub enum OpenAIFileObjectEnum {
     #[serde(rename = "file")]
     File,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OpenAIFileObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OpenAIFileObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OpenAIFilePurposeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22482,9 +22482,9 @@ pub enum OpenAIFilePurposeEnum {
     #[serde(rename = "user_data")]
     UserData,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OpenAIFilePurposeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OpenAIFilePurposeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OpenAIFileStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22496,9 +22496,9 @@ pub enum OpenAIFileStatusEnum {
     #[serde(rename = "error")]
     Error,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OpenAIFileStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OpenAIFileStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OrderEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22508,9 +22508,9 @@ pub enum OrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OtherChunkingStrategyResponseParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22527,9 +22527,9 @@ pub enum OtherChunkingStrategyResponseParamTypeEnum {
     #[serde(rename = "other")]
     Other,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OtherChunkingStrategyResponseParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OtherChunkingStrategyResponseParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `OutputItem`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22598,9 +22598,9 @@ pub enum OutputMessageRoleEnum {
     #[serde(rename = "assistant")]
     Assistant,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OutputMessageRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OutputMessageRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OutputMessageStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22612,9 +22612,9 @@ pub enum OutputMessageStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OutputMessageStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OutputMessageStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OutputMessageTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22622,9 +22622,9 @@ pub enum OutputMessageTypeEnum {
     #[serde(rename = "message")]
     Message,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OutputMessageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OutputMessageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OutputTextContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22644,9 +22644,9 @@ pub enum OutputTextContentTypeEnum {
     #[serde(rename = "output_text")]
     OutputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OutputTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OutputTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ParallelToolCalls`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22695,9 +22695,9 @@ pub enum PersonalityEnumV1Enum {
     #[serde(rename = "pragmatic")]
     Pragmatic,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PersonalityEnumV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PersonalityEnumV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `PredictionContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22725,9 +22725,9 @@ pub enum PredictionContentTypeEnum {
     #[serde(rename = "content")]
     Content,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PredictionContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PredictionContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Program`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22761,9 +22761,9 @@ pub enum ProgramItemParamTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProgramOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22797,9 +22797,9 @@ pub enum ProgramOutputItemParamTypeEnum {
     #[serde(rename = "program_output")]
     ProgramOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProgramOutputItemStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22809,9 +22809,9 @@ pub enum ProgramOutputItemStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramOutputItemStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramOutputItemStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProgramOutputStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22821,9 +22821,9 @@ pub enum ProgramOutputStatus {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramOutputStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramOutputStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProgramOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22831,9 +22831,9 @@ pub enum ProgramOutputTypeEnum {
     #[serde(rename = "program_output")]
     ProgramOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProgramToolCallCaller`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22861,9 +22861,9 @@ pub enum ProgramToolCallCallerParamTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramToolCallCallerParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramToolCallCallerParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProgramToolCallCallerTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22871,9 +22871,9 @@ pub enum ProgramToolCallCallerTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramToolCallCallerTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramToolCallCallerTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProgramTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22881,9 +22881,9 @@ pub enum ProgramTypeEnum {
     #[serde(rename = "program")]
     Program,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgramTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgramTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProgrammaticToolCallingParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22900,9 +22900,9 @@ pub enum ProgrammaticToolCallingParamTypeEnum {
     #[serde(rename = "programmatic_tool_calling")]
     ProgrammaticToolCalling,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `Prompt`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22927,9 +22927,9 @@ pub enum PromptCacheBreakpointConfigModeEnum {
     #[serde(rename = "explicit")]
     Explicit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PromptCacheBreakpointConfigModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PromptCacheBreakpointConfigModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `PromptCacheBreakpointParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22945,9 +22945,9 @@ pub enum PromptCacheBreakpointParamModeEnum {
     #[serde(rename = "explicit")]
     Explicit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PromptCacheBreakpointParamModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PromptCacheBreakpointParamModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `PromptCacheModeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22957,9 +22957,9 @@ pub enum PromptCacheModeEnum {
     #[serde(rename = "explicit")]
     Explicit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PromptCacheModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PromptCacheModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `PromptCacheOptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22989,9 +22989,9 @@ pub enum PromptCacheRetentionEnum {
     #[serde(rename = "24h")]
     T24h,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PromptCacheRetentionEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PromptCacheRetentionEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `PromptCacheTTLEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22999,9 +22999,9 @@ pub enum PromptCacheTTLEnum {
     #[serde(rename = "30m")]
     T30m,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PromptCacheTTLEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PromptCacheTTLEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `PromptV0`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23052,9 +23052,9 @@ pub enum PublicRoleListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PublicRoleListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PublicRoleListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `PublicUpdateOrganizationRoleBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23077,9 +23077,9 @@ pub enum RankerVersionType {
     #[serde(rename = "default-2024-11-15")]
     Default20241115,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RankerVersionType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RankerVersionType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RankingOptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23132,9 +23132,9 @@ pub enum RealtimeAudioFormatsV0TypeEnum {
     #[serde(rename = "audio/pcm")]
     AudioPcm,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeAudioFormatsV0TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeAudioFormatsV0TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeAudioFormatsV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23152,9 +23152,9 @@ pub enum RealtimeAudioFormatsV1TypeEnum {
     #[serde(rename = "audio/pcmu")]
     AudioPcmu,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeAudioFormatsV1TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeAudioFormatsV1TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeAudioFormatsV2`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23172,9 +23172,9 @@ pub enum RealtimeAudioFormatsV2TypeEnum {
     #[serde(rename = "audio/pcma")]
     AudioPcma,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeAudioFormatsV2TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeAudioFormatsV2TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeCallCreateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23276,9 +23276,9 @@ pub enum RealtimeCallCreateRequestSessionIncludeItemEnum {
     #[serde(rename = "item.input_audio_transcription.logprobs")]
     ItemInputAudioTranscriptionLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeCallCreateRequestSessionIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeCallCreateRequestSessionIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeCallCreateRequestSessionMaxOutputTokensUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23296,9 +23296,9 @@ pub enum RealtimeCallCreateRequestSessionMaxOutputTokensV1Enum {
     #[serde(rename = "inf")]
     Inf,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeCallCreateRequestSessionMaxOutputTokensV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeCallCreateRequestSessionMaxOutputTokensV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeCallCreateRequestSessionModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23352,9 +23352,9 @@ pub enum RealtimeCallCreateRequestSessionModelV1Enum {
     #[serde(rename = "gpt-audio-mini-2025-12-15")]
     GptAudioMini20251215,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeCallCreateRequestSessionModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeCallCreateRequestSessionModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeCallCreateRequestSessionOutputModalitiesItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23364,9 +23364,9 @@ pub enum RealtimeCallCreateRequestSessionOutputModalitiesItemEnum {
     #[serde(rename = "audio")]
     Audio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeCallCreateRequestSessionOutputModalitiesItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeCallCreateRequestSessionOutputModalitiesItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeCallCreateRequestSessionToolChoiceUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23405,9 +23405,9 @@ pub enum RealtimeCallCreateRequestSessionTracingV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeCallCreateRequestSessionTracingV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeCallCreateRequestSessionTracingV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeCallCreateRequestSessionTracingV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23428,9 +23428,9 @@ pub enum RealtimeCallCreateRequestSessionTypeEnum {
     #[serde(rename = "realtime")]
     Realtime,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeCallCreateRequestSessionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeCallCreateRequestSessionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeCallReferRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23477,9 +23477,9 @@ pub enum RealtimeCreateClientSecretRequestExpiresAfterAnchorEnum {
     #[serde(rename = "created_at")]
     CreatedAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeCreateClientSecretRequestExpiresAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeCreateClientSecretRequestExpiresAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeCreateClientSecretRequestSessionUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23533,9 +23533,9 @@ pub enum RealtimeFunctionToolTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeFunctionToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeFunctionToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeReasoning`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23560,9 +23560,9 @@ pub enum RealtimeReasoningEffort {
     #[serde(rename = "xhigh")]
     Xhigh,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeReasoningEffort { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeReasoningEffort { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeSessionCreateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23701,9 +23701,9 @@ pub enum RealtimeSessionCreateRequestGAIncludeItemEnum {
     #[serde(rename = "item.input_audio_transcription.logprobs")]
     ItemInputAudioTranscriptionLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestGAIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestGAIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateRequestGAMaxOutputTokensUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23721,9 +23721,9 @@ pub enum RealtimeSessionCreateRequestGAMaxOutputTokensV1Enum {
     #[serde(rename = "inf")]
     Inf,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestGAMaxOutputTokensV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestGAMaxOutputTokensV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateRequestGAModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23777,9 +23777,9 @@ pub enum RealtimeSessionCreateRequestGAModelV1Enum {
     #[serde(rename = "gpt-audio-mini-2025-12-15")]
     GptAudioMini20251215,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestGAModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestGAModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeSessionCreateRequestGAOutputModalitiesItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23789,9 +23789,9 @@ pub enum RealtimeSessionCreateRequestGAOutputModalitiesItemEnum {
     #[serde(rename = "audio")]
     Audio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestGAOutputModalitiesItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestGAOutputModalitiesItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateRequestGAToolChoiceUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23830,9 +23830,9 @@ pub enum RealtimeSessionCreateRequestGATracingV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestGATracingV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestGATracingV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeSessionCreateRequestGATracingV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23853,9 +23853,9 @@ pub enum RealtimeSessionCreateRequestGATypeEnum {
     #[serde(rename = "realtime")]
     Realtime,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestGATypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestGATypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeSessionCreateRequestInputAudioTranscription`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23882,9 +23882,9 @@ pub enum RealtimeSessionCreateRequestMaxResponseOutputTokensV1Enum {
     #[serde(rename = "inf")]
     Inf,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestMaxResponseOutputTokensV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestMaxResponseOutputTokensV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeSessionCreateRequestToolsItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23908,9 +23908,9 @@ pub enum RealtimeSessionCreateRequestToolsItemTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestToolsItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestToolsItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateRequestTracingUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23928,9 +23928,9 @@ pub enum RealtimeSessionCreateRequestTracingV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateRequestTracingV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateRequestTracingV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeSessionCreateRequestTracingV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24151,9 +24151,9 @@ pub enum RealtimeSessionCreateResponseGAIncludeItemEnum {
     #[serde(rename = "item.input_audio_transcription.logprobs")]
     ItemInputAudioTranscriptionLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseGAIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseGAIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateResponseGAMaxOutputTokensUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24171,9 +24171,9 @@ pub enum RealtimeSessionCreateResponseGAMaxOutputTokensV1Enum {
     #[serde(rename = "inf")]
     Inf,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseGAMaxOutputTokensV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseGAMaxOutputTokensV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateResponseGAModelUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24227,9 +24227,9 @@ pub enum RealtimeSessionCreateResponseGAModelV1Enum {
     #[serde(rename = "gpt-audio-mini-2025-12-15")]
     GptAudioMini20251215,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseGAModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseGAModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeSessionCreateResponseGAObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24237,9 +24237,9 @@ pub enum RealtimeSessionCreateResponseGAObjectEnum {
     #[serde(rename = "realtime.session")]
     RealtimeSession,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseGAObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseGAObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeSessionCreateResponseGAOutputModalitiesItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24249,9 +24249,9 @@ pub enum RealtimeSessionCreateResponseGAOutputModalitiesItemEnum {
     #[serde(rename = "audio")]
     Audio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseGAOutputModalitiesItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseGAOutputModalitiesItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateResponseGAToolChoiceUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24290,9 +24290,9 @@ pub enum RealtimeSessionCreateResponseGATracingV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseGATracingV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseGATracingV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeSessionCreateResponseGATracingV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24313,9 +24313,9 @@ pub enum RealtimeSessionCreateResponseGATypeEnum {
     #[serde(rename = "realtime")]
     Realtime,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseGATypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseGATypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeSessionCreateResponseIncludeItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24323,9 +24323,9 @@ pub enum RealtimeSessionCreateResponseIncludeItemEnum {
     #[serde(rename = "item.input_audio_transcription.logprobs")]
     ItemInputAudioTranscriptionLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateResponseMaxOutputTokensUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24343,9 +24343,9 @@ pub enum RealtimeSessionCreateResponseMaxOutputTokensV1Enum {
     #[serde(rename = "inf")]
     Inf,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseMaxOutputTokensV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseMaxOutputTokensV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeSessionCreateResponseTracingUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24363,9 +24363,9 @@ pub enum RealtimeSessionCreateResponseTracingV0Enum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeSessionCreateResponseTracingV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeSessionCreateResponseTracingV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeSessionCreateResponseTracingV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24466,9 +24466,9 @@ pub enum RealtimeTranscriptionSessionCreateRequestGAIncludeItemEnum {
     #[serde(rename = "item.input_audio_transcription.logprobs")]
     ItemInputAudioTranscriptionLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranscriptionSessionCreateRequestGAIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranscriptionSessionCreateRequestGAIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeTranscriptionSessionCreateRequestGATypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24476,9 +24476,9 @@ pub enum RealtimeTranscriptionSessionCreateRequestGATypeEnum {
     #[serde(rename = "transcription")]
     Transcription,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranscriptionSessionCreateRequestGATypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranscriptionSessionCreateRequestGATypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeTranscriptionSessionCreateRequestIncludeItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24486,9 +24486,9 @@ pub enum RealtimeTranscriptionSessionCreateRequestIncludeItemEnum {
     #[serde(rename = "item.input_audio_transcription.logprobs")]
     ItemInputAudioTranscriptionLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranscriptionSessionCreateRequestIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranscriptionSessionCreateRequestIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeTranscriptionSessionCreateRequestInputAudioFormatEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24500,9 +24500,9 @@ pub enum RealtimeTranscriptionSessionCreateRequestInputAudioFormatEnum {
     #[serde(rename = "g711_alaw")]
     G711Alaw,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranscriptionSessionCreateRequestInputAudioFormatEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranscriptionSessionCreateRequestInputAudioFormatEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeTranscriptionSessionCreateRequestInputAudioNoiseReduction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24536,9 +24536,9 @@ pub enum RealtimeTranscriptionSessionCreateRequestTurnDetectionTypeEnum {
     #[serde(rename = "server_vad")]
     ServerVad,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranscriptionSessionCreateRequestTurnDetectionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranscriptionSessionCreateRequestTurnDetectionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeTranscriptionSessionCreateResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24638,9 +24638,9 @@ pub enum RealtimeTranscriptionSessionCreateResponseGAIncludeItemEnum {
     #[serde(rename = "item.input_audio_transcription.logprobs")]
     ItemInputAudioTranscriptionLogprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranscriptionSessionCreateResponseGAIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranscriptionSessionCreateResponseGAIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RealtimeTranscriptionSessionCreateResponseGATypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24648,9 +24648,9 @@ pub enum RealtimeTranscriptionSessionCreateResponseGATypeEnum {
     #[serde(rename = "transcription")]
     Transcription,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranscriptionSessionCreateResponseGATypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranscriptionSessionCreateResponseGATypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeTranscriptionSessionCreateResponseTurnDetection`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24695,9 +24695,9 @@ pub enum RealtimeTranslationClientSecretCreateRequestExpiresAfterAnchorEnum {
     #[serde(rename = "created_at")]
     CreatedAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranslationClientSecretCreateRequestExpiresAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranslationClientSecretCreateRequestExpiresAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeTranslationClientSecretCreateResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24834,9 +24834,9 @@ pub enum RealtimeTranslationSessionTypeEnum {
     #[serde(rename = "translation")]
     Translation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTranslationSessionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTranslationSessionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeTruncation`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24856,9 +24856,9 @@ pub enum RealtimeTruncationV0Enum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTruncationV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTruncationV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RealtimeTruncationV1`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24887,9 +24887,9 @@ pub enum RealtimeTruncationV1TypeEnum {
     #[serde(rename = "retention_ratio")]
     RetentionRatio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTruncationV1TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTruncationV1TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RealtimeTurnDetection`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24958,9 +24958,9 @@ pub enum RealtimeTurnDetectionV0V1EagernessEnum {
     #[serde(rename = "auto")]
     Auto,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RealtimeTurnDetectionV0V1EagernessEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RealtimeTurnDetectionV0V1EagernessEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Reasoning`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24989,9 +24989,9 @@ pub enum ReasoningContextEnum {
     #[serde(rename = "all_turns")]
     AllTurns,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningContextEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningContextEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ReasoningEffort`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25020,9 +25020,9 @@ pub enum ReasoningEffortV0Enum {
     #[serde(rename = "max")]
     Max,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningEffortV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningEffortV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ReasoningGenerateSummaryEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25034,9 +25034,9 @@ pub enum ReasoningGenerateSummaryEnum {
     #[serde(rename = "detailed")]
     Detailed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningGenerateSummaryEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningGenerateSummaryEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ReasoningItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25065,9 +25065,9 @@ pub enum ReasoningItemStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningItemStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningItemStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ReasoningItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25075,9 +25075,9 @@ pub enum ReasoningItemTypeEnum {
     #[serde(rename = "reasoning")]
     Reasoning,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ReasoningModeEnum`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25097,9 +25097,9 @@ pub enum ReasoningModeEnumV1Enum {
     #[serde(rename = "pro")]
     Pro,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningModeEnumV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningModeEnumV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ReasoningSummaryEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25111,9 +25111,9 @@ pub enum ReasoningSummaryEnum {
     #[serde(rename = "detailed")]
     Detailed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningSummaryEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningSummaryEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ReasoningTextContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25131,9 +25131,9 @@ pub enum ReasoningTextContentTypeEnum {
     #[serde(rename = "reasoning_text")]
     ReasoningText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ReasoningTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ReasoningTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /realtime/calls/{call_id}/refer` (`refer-realtime-call`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25165,9 +25165,9 @@ pub enum RefusalContentTypeEnum {
     #[serde(rename = "refusal")]
     Refusal,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RefusalContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RefusalContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /realtime/calls/{call_id}/reject` (`reject-realtime-call`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25303,9 +25303,9 @@ pub enum ResponseErrorCode {
     #[serde(rename = "image_file_not_found")]
     ImageFileNotFound,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseErrorCode { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseErrorCode { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ResponseErrorV0`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25331,9 +25331,9 @@ pub enum ResponseFormatJsonObjectTypeEnum {
     #[serde(rename = "json_object")]
     JsonObject,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseFormatJsonObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseFormatJsonObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ResponseFormatJsonSchema`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25372,9 +25372,9 @@ pub enum ResponseFormatJsonSchemaTypeEnum {
     #[serde(rename = "json_schema")]
     JsonSchema,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseFormatJsonSchemaTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseFormatJsonSchemaTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ResponseFormatText`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25391,9 +25391,9 @@ pub enum ResponseFormatTextTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseFormatTextTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseFormatTextTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ResponseIncompleteDetails`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25412,9 +25412,9 @@ pub enum ResponseIncompleteDetailsReasonEnum {
     #[serde(rename = "content_filter")]
     ContentFilter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseIncompleteDetailsReasonEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseIncompleteDetailsReasonEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ResponseInstructionsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25444,9 +25444,9 @@ pub enum ResponseItemListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseItemListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseItemListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ResponseModalities`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25465,9 +25465,9 @@ pub enum ResponseModalitiesV0ItemEnum {
     #[serde(rename = "audio")]
     Audio,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseModalitiesV0ItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseModalitiesV0ItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ResponseObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25475,9 +25475,9 @@ pub enum ResponseObjectEnum {
     #[serde(rename = "response")]
     Response,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ResponseOutputText`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25506,9 +25506,9 @@ pub enum ResponseOutputTextTypeEnum {
     #[serde(rename = "output_text")]
     OutputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseOutputTextTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseOutputTextTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ResponsePromptCacheRetentionEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25518,9 +25518,9 @@ pub enum ResponsePromptCacheRetentionEnum {
     #[serde(rename = "24h")]
     T24h,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponsePromptCacheRetentionEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponsePromptCacheRetentionEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ResponsePromptVariables`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25559,9 +25559,9 @@ pub enum ResponseStatusEnum {
     #[serde(rename = "incomplete")]
     Incomplete,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ResponseStreamOptions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25600,9 +25600,9 @@ pub enum ResponseTruncationEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ResponseTruncationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ResponseTruncationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ResponseUsage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25843,9 +25843,9 @@ pub enum RoleDeletedResourceObjectEnum {
     #[serde(rename = "role.deleted")]
     RoleDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RoleDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RoleDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RoleListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -25865,9 +25865,9 @@ pub enum RoleListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RoleListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RoleListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RoleObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25875,9 +25875,9 @@ pub enum RoleObjectEnum {
     #[serde(rename = "role")]
     Role,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RoleObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RoleObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RunCompletionUsage`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26051,9 +26051,9 @@ pub enum RunObjectIncompleteDetailsReasonEnum {
     #[serde(rename = "max_prompt_tokens")]
     MaxPromptTokens,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunObjectIncompleteDetailsReasonEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunObjectIncompleteDetailsReasonEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunObjectLastError`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26074,9 +26074,9 @@ pub enum RunObjectLastErrorCodeEnum {
     #[serde(rename = "invalid_prompt")]
     InvalidPrompt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunObjectLastErrorCodeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunObjectLastErrorCodeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RunObjectObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26084,9 +26084,9 @@ pub enum RunObjectObjectEnum {
     #[serde(rename = "thread.run")]
     ThreadRun,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunObjectRequiredAction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26112,9 +26112,9 @@ pub enum RunObjectRequiredActionTypeEnum {
     #[serde(rename = "submit_tool_outputs")]
     SubmitToolOutputs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunObjectRequiredActionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunObjectRequiredActionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RunObjectStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26138,9 +26138,9 @@ pub enum RunObjectStatusEnum {
     #[serde(rename = "expired")]
     Expired,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunObjectStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunObjectStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RunObjectToolsItemUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26172,9 +26172,9 @@ pub enum RunObjectTruncationStrategyTypeEnum {
     #[serde(rename = "last_messages")]
     LastMessages,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunObjectTruncationStrategyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunObjectTruncationStrategyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RunStepCompletionUsage`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26219,9 +26219,9 @@ pub enum RunStepDetailsMessageCreationObjectTypeEnum {
     #[serde(rename = "message_creation")]
     MessageCreation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsMessageCreationObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsMessageCreationObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepDetailsToolCallsCodeObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26259,9 +26259,9 @@ pub enum RunStepDetailsToolCallsCodeObjectTypeEnum {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsToolCallsCodeObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsToolCallsCodeObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepDetailsToolCallsCodeOutputImageObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26287,9 +26287,9 @@ pub enum RunStepDetailsToolCallsCodeOutputImageObjectTypeEnum {
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsToolCallsCodeOutputImageObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsToolCallsCodeOutputImageObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepDetailsToolCallsCodeOutputLogsObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26307,9 +26307,9 @@ pub enum RunStepDetailsToolCallsCodeOutputLogsObjectTypeEnum {
     #[serde(rename = "logs")]
     Logs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsToolCallsCodeOutputLogsObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsToolCallsCodeOutputLogsObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepDetailsToolCallsFileSearchObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26339,9 +26339,9 @@ pub enum RunStepDetailsToolCallsFileSearchObjectTypeEnum {
     #[serde(rename = "file_search")]
     FileSearch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsToolCallsFileSearchObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsToolCallsFileSearchObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepDetailsToolCallsFileSearchRankingOptionsObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26382,9 +26382,9 @@ pub enum RunStepDetailsToolCallsFileSearchResultObjectContentItemTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsToolCallsFileSearchResultObjectContentItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsToolCallsFileSearchResultObjectContentItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepDetailsToolCallsFunctionObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26414,9 +26414,9 @@ pub enum RunStepDetailsToolCallsFunctionObjectTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsToolCallsFunctionObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsToolCallsFunctionObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepDetailsToolCallsObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26445,9 +26445,9 @@ pub enum RunStepDetailsToolCallsObjectTypeEnum {
     #[serde(rename = "tool_calls")]
     ToolCalls,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepDetailsToolCallsObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepDetailsToolCallsObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunStepObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26495,9 +26495,9 @@ pub enum RunStepObjectLastErrorCodeEnum {
     #[serde(rename = "rate_limit_exceeded")]
     RateLimitExceeded,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepObjectLastErrorCodeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepObjectLastErrorCodeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RunStepObjectObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26505,9 +26505,9 @@ pub enum RunStepObjectObjectEnum {
     #[serde(rename = "thread.run.step")]
     ThreadRunStep,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RunStepObjectStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26523,9 +26523,9 @@ pub enum RunStepObjectStatusEnum {
     #[serde(rename = "expired")]
     Expired,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepObjectStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepObjectStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `RunStepObjectStepDetailsUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26545,9 +26545,9 @@ pub enum RunStepObjectTypeEnum {
     #[serde(rename = "tool_calls")]
     ToolCalls,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunStepObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunStepObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RunToolCallObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26575,9 +26575,9 @@ pub enum RunToolCallObjectTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RunToolCallObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RunToolCallObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ScreenshotParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26594,9 +26594,9 @@ pub enum ScreenshotParamTypeEnum {
     #[serde(rename = "screenshot")]
     Screenshot,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ScreenshotParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ScreenshotParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ScrollParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26619,9 +26619,9 @@ pub enum ScrollParamTypeEnum {
     #[serde(rename = "scroll")]
     Scroll,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ScrollParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ScrollParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `SearchContentType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26631,9 +26631,9 @@ pub enum SearchContentType {
     #[serde(rename = "image")]
     Image,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SearchContentType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SearchContentType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `SearchContextSize`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26645,9 +26645,9 @@ pub enum SearchContextSize {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SearchContextSize { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SearchContextSize { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /vector_stores/{vector_store_id}/search` (`searchVectorStore`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26684,9 +26684,9 @@ pub enum ServiceTierEnum {
     #[serde(rename = "priority")]
     Priority,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ServiceTierEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ServiceTierEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ServiceTierV0Enum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26702,9 +26702,9 @@ pub enum ServiceTierV0Enum {
     #[serde(rename = "priority")]
     Priority,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ServiceTierV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ServiceTierV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SetDefaultSkillVersionBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26734,9 +26734,9 @@ pub enum SkillListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SkillListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SkillListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SkillReferenceParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26756,9 +26756,9 @@ pub enum SkillReferenceParamTypeEnum {
     #[serde(rename = "skill_reference")]
     SkillReference,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SkillReferenceParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SkillReferenceParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SkillResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26780,9 +26780,9 @@ pub enum SkillResourceObjectEnum {
     #[serde(rename = "skill")]
     Skill,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SkillResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SkillResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SkillVersionListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26804,9 +26804,9 @@ pub enum SkillVersionListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SkillVersionListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SkillVersionListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SkillVersionResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26828,9 +26828,9 @@ pub enum SkillVersionResourceObjectEnum {
     #[serde(rename = "skill.version")]
     SkillVersion,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SkillVersionResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SkillVersionResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SpecificApplyPatchParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26847,9 +26847,9 @@ pub enum SpecificApplyPatchParamTypeEnum {
     #[serde(rename = "apply_patch")]
     ApplyPatch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SpecificApplyPatchParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SpecificApplyPatchParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SpecificFunctionShellParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26866,9 +26866,9 @@ pub enum SpecificFunctionShellParamTypeEnum {
     #[serde(rename = "shell")]
     Shell,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SpecificFunctionShellParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SpecificFunctionShellParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SpecificProgrammaticToolCallingParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26885,9 +26885,9 @@ pub enum SpecificProgrammaticToolCallingParamTypeEnum {
     #[serde(rename = "programmatic_tool_calling")]
     ProgrammaticToolCalling,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SpecificProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SpecificProgrammaticToolCallingParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `StaticChunkingStrategy`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26915,9 +26915,9 @@ pub enum StaticChunkingStrategyRequestParamTypeEnum {
     #[serde(rename = "static")]
     Static,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for StaticChunkingStrategyRequestParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for StaticChunkingStrategyRequestParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `StaticChunkingStrategyResponseParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -26936,9 +26936,9 @@ pub enum StaticChunkingStrategyResponseParamTypeEnum {
     #[serde(rename = "static")]
     Static,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for StaticChunkingStrategyResponseParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for StaticChunkingStrategyResponseParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `StopConfiguration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27002,9 +27002,9 @@ pub enum SummaryTextContentTypeEnum {
     #[serde(rename = "summary_text")]
     SummaryText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SummaryTextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SummaryTextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `TaskGroupItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27026,9 +27026,9 @@ pub enum TaskGroupItemObjectEnum {
     #[serde(rename = "chatkit.thread_item")]
     ChatkitThreadItem,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TaskGroupItemObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TaskGroupItemObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `TaskGroupItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27036,9 +27036,9 @@ pub enum TaskGroupItemTypeEnum {
     #[serde(rename = "chatkit.task_group")]
     ChatkitTaskGroup,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TaskGroupItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TaskGroupItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `TaskGroupTask`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27077,9 +27077,9 @@ pub enum TaskItemObjectEnum {
     #[serde(rename = "chatkit.thread_item")]
     ChatkitThreadItem,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TaskItemObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TaskItemObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `TaskItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27087,9 +27087,9 @@ pub enum TaskItemTypeEnum {
     #[serde(rename = "chatkit.task")]
     ChatkitTask,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TaskItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TaskItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `TaskType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27099,9 +27099,9 @@ pub enum TaskType {
     #[serde(rename = "thought")]
     Thought,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TaskType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TaskType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `TextContent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27119,9 +27119,9 @@ pub enum TextContentTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TextContentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TextContentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `TextResponseFormatConfiguration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27155,9 +27155,9 @@ pub enum TextResponseFormatJsonSchemaTypeEnum {
     #[serde(rename = "json_schema")]
     JsonSchema,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TextResponseFormatJsonSchemaTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TextResponseFormatJsonSchemaTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ThreadItem`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27193,9 +27193,9 @@ pub enum ThreadItemListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ThreadItemListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ThreadItemListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ThreadListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27217,9 +27217,9 @@ pub enum ThreadListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ThreadListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ThreadListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ThreadObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27240,9 +27240,9 @@ pub enum ThreadObjectObjectEnum {
     #[serde(rename = "thread")]
     Thread,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ThreadObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ThreadObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ThreadObjectToolResources`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27293,9 +27293,9 @@ pub enum ThreadResourceObjectEnum {
     #[serde(rename = "chatkit.thread")]
     ChatkitThread,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ThreadResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ThreadResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ThreadResourceStatusUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27364,9 +27364,9 @@ pub enum TokenCountsResourceObjectEnum {
     #[serde(rename = "response.input_tokens")]
     ResponseInputTokens,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TokenCountsResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TokenCountsResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `Tool`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27439,9 +27439,9 @@ pub enum ToolChoiceAllowedModeEnum {
     #[serde(rename = "required")]
     Required,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolChoiceAllowedModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolChoiceAllowedModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ToolChoiceAllowedTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27449,9 +27449,9 @@ pub enum ToolChoiceAllowedTypeEnum {
     #[serde(rename = "allowed_tools")]
     AllowedTools,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolChoiceAllowedTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolChoiceAllowedTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToolChoiceCustom`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27469,9 +27469,9 @@ pub enum ToolChoiceCustomTypeEnum {
     #[serde(rename = "custom")]
     Custom,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolChoiceCustomTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolChoiceCustomTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToolChoiceFunction`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27489,9 +27489,9 @@ pub enum ToolChoiceFunctionTypeEnum {
     #[serde(rename = "function")]
     Function,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolChoiceFunctionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolChoiceFunctionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToolChoiceMCP`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27511,9 +27511,9 @@ pub enum ToolChoiceMCPTypeEnum {
     #[serde(rename = "mcp")]
     Mcp,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolChoiceMCPTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolChoiceMCPTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ToolChoiceOptions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27525,9 +27525,9 @@ pub enum ToolChoiceOptions {
     #[serde(rename = "required")]
     Required,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolChoiceOptions { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolChoiceOptions { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `ToolChoiceParam`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27575,9 +27575,9 @@ pub enum ToolChoiceTypesTypeEnum {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolChoiceTypesTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolChoiceTypesTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToolSearchCall`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27620,9 +27620,9 @@ pub enum ToolSearchCallItemParamTypeEnum {
     #[serde(rename = "tool_search_call")]
     ToolSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolSearchCallItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolSearchCallItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ToolSearchCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27630,9 +27630,9 @@ pub enum ToolSearchCallTypeEnum {
     #[serde(rename = "tool_search_call")]
     ToolSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolSearchCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolSearchCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ToolSearchExecutionType`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27642,9 +27642,9 @@ pub enum ToolSearchExecutionType {
     #[serde(rename = "client")]
     Client,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolSearchExecutionType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolSearchExecutionType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToolSearchOutput`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27687,9 +27687,9 @@ pub enum ToolSearchOutputItemParamTypeEnum {
     #[serde(rename = "tool_search_output")]
     ToolSearchOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolSearchOutputItemParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolSearchOutputItemParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ToolSearchOutputTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27697,9 +27697,9 @@ pub enum ToolSearchOutputTypeEnum {
     #[serde(rename = "tool_search_output")]
     ToolSearchOutput,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolSearchOutputTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolSearchOutputTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToolSearchToolParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27722,9 +27722,9 @@ pub enum ToolSearchToolParamTypeEnum {
     #[serde(rename = "tool_search")]
     ToolSearch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ToolSearchToolParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ToolSearchToolParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToolsArray`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27759,9 +27759,9 @@ pub enum TranscriptTextUsageDurationTypeEnum {
     #[serde(rename = "duration")]
     Duration,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TranscriptTextUsageDurationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TranscriptTextUsageDurationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `TranscriptTextUsageTokens`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27794,9 +27794,9 @@ pub enum TranscriptTextUsageTokensTypeEnum {
     #[serde(rename = "tokens")]
     Tokens,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TranscriptTextUsageTokensTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TranscriptTextUsageTokensTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `TranscriptionDiarizedSegment`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27818,9 +27818,9 @@ pub enum TranscriptionDiarizedSegmentTypeEnum {
     #[serde(rename = "transcript.text.segment")]
     TranscriptTextSegment,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TranscriptionDiarizedSegmentTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TranscriptionDiarizedSegmentTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `TranscriptionInclude`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27828,9 +27828,9 @@ pub enum TranscriptionInclude {
     #[serde(rename = "logprobs")]
     Logprobs,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TranscriptionInclude { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TranscriptionInclude { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `TranscriptionSegment`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27867,9 +27867,9 @@ pub enum TruncationEnum {
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TruncationEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TruncationEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `TypeParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -27887,9 +27887,9 @@ pub enum TypeParamTypeEnum {
     #[serde(rename = "type")]
     Type,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for TypeParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for TypeParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `DELETE /projects/{project_id}/groups/{group_id}/roles/{role_id}` (`unassign-project-group-role`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28070,9 +28070,9 @@ pub enum UpdateVectorStoreRequestExpiresAfterAnchorEnum {
     #[serde(rename = "last_active_at")]
     LastActiveAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateVectorStoreRequestExpiresAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateVectorStoreRequestExpiresAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /audio/voice_consents/{consent_id}` (`updateVoiceConsent`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28138,9 +28138,9 @@ pub enum UploadFileObjectEnum {
     #[serde(rename = "file")]
     File,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UploadFileObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UploadFileObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UploadFilePurposeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28162,9 +28162,9 @@ pub enum UploadFilePurposeEnum {
     #[serde(rename = "user_data")]
     UserData,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UploadFilePurposeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UploadFilePurposeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UploadFileStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28176,9 +28176,9 @@ pub enum UploadFileStatusEnum {
     #[serde(rename = "error")]
     Error,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UploadFileStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UploadFileStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UploadObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28186,9 +28186,9 @@ pub enum UploadObjectEnum {
     #[serde(rename = "upload")]
     Upload,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UploadObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UploadObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UploadPart`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28207,9 +28207,9 @@ pub enum UploadPartObjectEnum {
     #[serde(rename = "upload.part")]
     UploadPart,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UploadPartObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UploadPartObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UploadStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28223,9 +28223,9 @@ pub enum UploadStatusEnum {
     #[serde(rename = "expired")]
     Expired,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UploadStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UploadStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UrlAnnotation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28253,9 +28253,9 @@ pub enum UrlAnnotationSourceTypeEnum {
     #[serde(rename = "url")]
     Url,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UrlAnnotationSourceTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UrlAnnotationSourceTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UrlAnnotationTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28263,9 +28263,9 @@ pub enum UrlAnnotationTypeEnum {
     #[serde(rename = "url")]
     Url,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UrlAnnotationTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UrlAnnotationTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UrlCitationBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28286,9 +28286,9 @@ pub enum UrlCitationBodyTypeEnum {
     #[serde(rename = "url_citation")]
     UrlCitation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UrlCitationBodyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UrlCitationBodyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `User`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28342,9 +28342,9 @@ pub enum UserMessageInputTextTypeEnum {
     #[serde(rename = "input_text")]
     InputText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserMessageInputTextTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserMessageInputTextTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserMessageItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28379,9 +28379,9 @@ pub enum UserMessageItemObjectEnum {
     #[serde(rename = "chatkit.thread_item")]
     ChatkitThreadItem,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserMessageItemObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserMessageItemObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UserMessageItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28389,9 +28389,9 @@ pub enum UserMessageItemTypeEnum {
     #[serde(rename = "chatkit.user_message")]
     ChatkitUserMessage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserMessageItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserMessageItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserMessageQuotedText`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28409,9 +28409,9 @@ pub enum UserMessageQuotedTextTypeEnum {
     #[serde(rename = "quoted_text")]
     QuotedText,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserMessageQuotedTextTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserMessageQuotedTextTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UserObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28419,9 +28419,9 @@ pub enum UserObjectEnum {
     #[serde(rename = "organization.user")]
     OrganizationUser,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserProjects`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28451,9 +28451,9 @@ pub enum UserProjectsObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserProjectsObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserProjectsObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserRoleAssignment`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28471,9 +28471,9 @@ pub enum UserRoleAssignmentObjectEnum {
     #[serde(rename = "user.role")]
     UserRole,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserRoleAssignmentObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserRoleAssignmentObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserUser`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28502,9 +28502,9 @@ pub enum UserUserObjectEnum {
     #[serde(rename = "user")]
     User,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserUserObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserUserObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VadConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28527,9 +28527,9 @@ pub enum VadConfigTypeEnum {
     #[serde(rename = "server_vad")]
     ServerVad,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VadConfigTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VadConfigTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /fine_tuning/alpha/graders/validate` (`validateGrader`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28602,9 +28602,9 @@ pub enum VectorStoreExpirationAfterAnchorEnum {
     #[serde(rename = "last_active_at")]
     LastActiveAt,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreExpirationAfterAnchorEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreExpirationAfterAnchorEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `VectorStoreFileAttributes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28657,9 +28657,9 @@ pub enum VectorStoreFileBatchObjectObjectEnum {
     #[serde(rename = "vector_store.files_batch")]
     VectorStoreFilesBatch,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreFileBatchObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreFileBatchObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `VectorStoreFileBatchObjectStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28673,9 +28673,9 @@ pub enum VectorStoreFileBatchObjectStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreFileBatchObjectStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreFileBatchObjectStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VectorStoreFileContentResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28707,9 +28707,9 @@ pub enum VectorStoreFileContentResponseObjectEnum {
     #[serde(rename = "vector_store.file_content.page")]
     VectorStoreFileContentPage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreFileContentResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreFileContentResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VectorStoreFileObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28759,9 +28759,9 @@ pub enum VectorStoreFileObjectLastErrorCodeEnum {
     #[serde(rename = "invalid_file")]
     InvalidFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreFileObjectLastErrorCodeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreFileObjectLastErrorCodeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `VectorStoreFileObjectObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28769,9 +28769,9 @@ pub enum VectorStoreFileObjectObjectEnum {
     #[serde(rename = "vector_store.file")]
     VectorStoreFile,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreFileObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreFileObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `VectorStoreFileObjectStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28785,9 +28785,9 @@ pub enum VectorStoreFileObjectStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreFileObjectStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreFileObjectStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VectorStoreObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28828,9 +28828,9 @@ pub enum VectorStoreObjectObjectEnum {
     #[serde(rename = "vector_store")]
     VectorStore,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreObjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreObjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `VectorStoreObjectStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28842,9 +28842,9 @@ pub enum VectorStoreObjectStatusEnum {
     #[serde(rename = "completed")]
     Completed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreObjectStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreObjectStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VectorStoreSearchRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28903,9 +28903,9 @@ pub enum VectorStoreSearchRequestRankingOptionsRankerEnum {
     #[serde(rename = "default-2024-11-15")]
     Default20241115,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreSearchRequestRankingOptionsRankerEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreSearchRequestRankingOptionsRankerEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VectorStoreSearchResultContentObject`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28923,9 +28923,9 @@ pub enum VectorStoreSearchResultContentObjectTypeEnum {
     #[serde(rename = "text")]
     Text,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreSearchResultContentObjectTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreSearchResultContentObjectTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VectorStoreSearchResultItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -28958,9 +28958,9 @@ pub enum VectorStoreSearchResultsPageObjectEnum {
     #[serde(rename = "vector_store.search_results.page")]
     VectorStoreSearchResultsPage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VectorStoreSearchResultsPageObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VectorStoreSearchResultsPageObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `Verbosity`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28981,9 +28981,9 @@ pub enum VerbosityV0Enum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VerbosityV0Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VerbosityV0Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VideoCharacterResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29007,9 +29007,9 @@ pub enum VideoContentVariant {
     #[serde(rename = "spritesheet")]
     Spritesheet,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VideoContentVariant { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VideoContentVariant { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VideoListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29031,9 +29031,9 @@ pub enum VideoListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VideoListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VideoListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `VideoModel`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29059,9 +29059,9 @@ pub enum VideoModelV1Enum {
     #[serde(rename = "sora-2-2025-12-08")]
     Sora220251208,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VideoModelV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VideoModelV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VideoReferenceInputParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29102,9 +29102,9 @@ pub enum VideoResourceObjectEnum {
     #[serde(rename = "video")]
     Video,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VideoResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VideoResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `VideoSeconds`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29116,9 +29116,9 @@ pub enum VideoSeconds {
     #[serde(rename = "12")]
     T12,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VideoSeconds { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VideoSeconds { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `VideoSize`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29132,9 +29132,9 @@ pub enum VideoSize {
     #[serde(rename = "1792x1024")]
     T1792x1024,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VideoSize { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VideoSize { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `VideoStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29148,9 +29148,9 @@ pub enum VideoStatus {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VideoStatus { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VideoStatus { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VoiceConsentDeletedResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29168,9 +29168,9 @@ pub enum VoiceConsentDeletedResourceObjectEnum {
     #[serde(rename = "audio.voice_consent")]
     AudioVoiceConsent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VoiceConsentDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VoiceConsentDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VoiceConsentListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29192,9 +29192,9 @@ pub enum VoiceConsentListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VoiceConsentListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VoiceConsentListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VoiceConsentResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29214,9 +29214,9 @@ pub enum VoiceConsentResourceObjectEnum {
     #[serde(rename = "audio.voice_consent")]
     AudioVoiceConsent,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VoiceConsentResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VoiceConsentResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `VoiceIdsOrCustomVoice`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29270,9 +29270,9 @@ pub enum VoiceIdsSharedV1Enum {
     #[serde(rename = "cedar")]
     Cedar,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VoiceIdsSharedV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VoiceIdsSharedV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `VoiceResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29291,9 +29291,9 @@ pub enum VoiceResourceObjectEnum {
     #[serde(rename = "audio.voice")]
     AudioVoice,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for VoiceResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for VoiceResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WaitParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29310,9 +29310,9 @@ pub enum WaitParamTypeEnum {
     #[serde(rename = "wait")]
     Wait,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WaitParamTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WaitParamTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WebSearchActionFind`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29331,9 +29331,9 @@ pub enum WebSearchActionFindTypeEnum {
     #[serde(rename = "find_in_page")]
     FindInPage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchActionFindTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchActionFindTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WebSearchActionOpenPage`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29352,9 +29352,9 @@ pub enum WebSearchActionOpenPageTypeEnum {
     #[serde(rename = "open_page")]
     OpenPage,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchActionOpenPageTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchActionOpenPageTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WebSearchActionSearch`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29387,9 +29387,9 @@ pub enum WebSearchActionSearchSourcesItemTypeEnum {
     #[serde(rename = "url")]
     Url,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchActionSearchSourcesItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchActionSearchSourcesItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `WebSearchActionSearchTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29397,9 +29397,9 @@ pub enum WebSearchActionSearchTypeEnum {
     #[serde(rename = "search")]
     Search,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchActionSearchTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchActionSearchTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `WebSearchApproximateLocation`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29434,9 +29434,9 @@ pub enum WebSearchApproximateLocationV0TypeEnum {
     #[serde(rename = "approximate")]
     Approximate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchApproximateLocationV0TypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchApproximateLocationV0TypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `WebSearchContextSize`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29448,9 +29448,9 @@ pub enum WebSearchContextSize {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchContextSize { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchContextSize { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WebSearchLocation`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29490,9 +29490,9 @@ pub enum WebSearchPreviewToolTypeEnum {
     #[serde(rename = "web_search_preview_2025_03_11")]
     WebSearchPreview20250311,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchPreviewToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchPreviewToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WebSearchTool`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29544,9 +29544,9 @@ pub enum WebSearchToolCallStatusEnum {
     #[serde(rename = "failed")]
     Failed,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchToolCallStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchToolCallStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `WebSearchToolCallTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29554,9 +29554,9 @@ pub enum WebSearchToolCallTypeEnum {
     #[serde(rename = "web_search_call")]
     WebSearchCall,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchToolCallTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchToolCallTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WebSearchToolFilters`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29577,9 +29577,9 @@ pub enum WebSearchToolSearchContextSizeEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchToolSearchContextSizeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchToolSearchContextSizeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `WebSearchToolTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29589,9 +29589,9 @@ pub enum WebSearchToolTypeEnum {
     #[serde(rename = "web_search_2025_08_26")]
     WebSearch20250826,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WebSearchToolTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WebSearchToolTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WidgetMessageItem`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -29613,9 +29613,9 @@ pub enum WidgetMessageItemObjectEnum {
     #[serde(rename = "chatkit.thread_item")]
     ChatkitThreadItem,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WidgetMessageItemObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WidgetMessageItemObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `WidgetMessageItemTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29623,9 +29623,9 @@ pub enum WidgetMessageItemTypeEnum {
     #[serde(rename = "chatkit.widget")]
     ChatkitWidget,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for WidgetMessageItemTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for WidgetMessageItemTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `WorkflowParam`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

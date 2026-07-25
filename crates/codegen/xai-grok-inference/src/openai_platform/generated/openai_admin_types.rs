@@ -1,7 +1,6 @@
 //! Schema-derived types from pinned OpenAPI. DO NOT EDIT BY HAND.
 
 use serde::{Deserialize, Serialize};
-use crate::openai_platform::transport::SseEvent;
 
 /// Typed params for `POST /organization/certificates/activate` (`activateOrganizationCertificates`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -101,9 +100,9 @@ pub enum AdminApiKeyCreateResponseObjectEnum {
     #[serde(rename = "organization.admin_api_key")]
     OrganizationAdminApiKey,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AdminApiKeyCreateResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AdminApiKeyCreateResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AdminApiKeyCreateResponseOwner`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -131,9 +130,9 @@ pub enum AdminApiKeyObjectEnum {
     #[serde(rename = "organization.admin_api_key")]
     OrganizationAdminApiKey,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AdminApiKeyObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AdminApiKeyObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AdminApiKeyOwner`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -207,9 +206,9 @@ pub enum AdminApiKeysDeleteResultBodyObjectEnum {
     #[serde(rename = "organization.admin_api_key.deleted")]
     OrganizationAdminApiKeyDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AdminApiKeysDeleteResultBodyObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AdminApiKeysDeleteResultBodyObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/admin_api_keys/{key_id}` (`admin-api-keys-get`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -243,9 +242,9 @@ pub enum AdminApiKeysListParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AdminApiKeysListParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AdminApiKeysListParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `admin-api-keys-list`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -274,9 +273,9 @@ pub enum ApiKeyListObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ApiKeyListObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ApiKeyListObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /organization/projects/{project_id}/archive` (`archive-project`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -572,9 +571,9 @@ pub enum AuditLogActorApiKeyTypeEnum {
     #[serde(rename = "service_account")]
     ServiceAccount,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AuditLogActorApiKeyTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AuditLogActorApiKeyTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AuditLogActorServiceAccount`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -604,9 +603,9 @@ pub enum AuditLogActorTypeEnum {
     #[serde(rename = "api_key")]
     ApiKey,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AuditLogActorTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AuditLogActorTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AuditLogActorUser`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1064,9 +1063,9 @@ pub enum AuditLogEventType {
     #[serde(rename = "tenant.workspace_invite_email_settings.updated")]
     TenantWorkspaceInviteEmailSettingsUpdated,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AuditLogEventType { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AuditLogEventType { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AuditLogExternalKeyRegistered`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1493,9 +1492,9 @@ pub enum AuditLogRoleBoundToResourceSourceEnum {
     #[serde(rename = "connector_publish")]
     ConnectorPublish,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AuditLogRoleBoundToResourceSourceEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AuditLogRoleBoundToResourceSourceEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AuditLogRoleCreated`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1564,9 +1563,9 @@ pub enum AuditLogRoleUnboundFromResourceSourceEnum {
     #[serde(rename = "connector_publish")]
     ConnectorPublish,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for AuditLogRoleUnboundFromResourceSourceEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for AuditLogRoleUnboundFromResourceSourceEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `AuditLogRoleUpdated`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1828,9 +1827,9 @@ pub enum CertificateObjectEnum {
     #[serde(rename = "organization.project.certificate")]
     OrganizationProjectCertificate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CertificateObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CertificateObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CostsResult`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1867,9 +1866,9 @@ pub enum CostsResultObjectEnum {
     #[serde(rename = "organization.costs.result")]
     OrganizationCostsResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CostsResultObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CostsResultObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `CreateGroupBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2009,9 +2008,9 @@ pub enum CreateSpendAlertBodyCurrencyEnum {
     #[serde(rename = "USD")]
     USD,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateSpendAlertBodyCurrencyEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateSpendAlertBodyCurrencyEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `CreateSpendAlertBodyIntervalEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2019,9 +2018,9 @@ pub enum CreateSpendAlertBodyIntervalEnum {
     #[serde(rename = "month")]
     Month,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for CreateSpendAlertBodyIntervalEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for CreateSpendAlertBodyIntervalEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /organization/projects/{project_id}/service_accounts/{service_account_id}/api_keys` (`CreateanAPIkeyforaserviceaccount`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2086,9 +2085,9 @@ pub enum DeleteCertificateResponseObjectEnum {
     #[serde(rename = "certificate.deleted")]
     CertificateDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for DeleteCertificateResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for DeleteCertificateResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `deleteCertificate`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2279,9 +2278,9 @@ pub enum GetCertificateParamsIncludeItemEnum {
     #[serde(rename = "content")]
     Content,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GetCertificateParamsIncludeItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GetCertificateParamsIncludeItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `getCertificate`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2343,9 +2342,9 @@ pub enum GroupDeletedResourceObjectEnum {
     #[serde(rename = "group.deleted")]
     GroupDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GroupListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2365,9 +2364,9 @@ pub enum GroupListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GroupMemberUser`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2393,9 +2392,9 @@ pub enum GroupMemberUserUserTypeEnum {
     #[serde(rename = "tenant_user")]
     TenantUser,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupMemberUserUserTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupMemberUserUserTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `GroupObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2403,9 +2402,9 @@ pub enum GroupObjectEnum {
     #[serde(rename = "group")]
     Group,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GroupResourceWithSuccess`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2438,9 +2437,9 @@ pub enum GroupResponseGroupTypeEnum {
     #[serde(rename = "tenant_group")]
     TenantGroup,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupResponseGroupTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupResponseGroupTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GroupRoleAssignment`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2458,9 +2457,9 @@ pub enum GroupRoleAssignmentObjectEnum {
     #[serde(rename = "group.role")]
     GroupRole,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupRoleAssignmentObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupRoleAssignmentObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GroupUser`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2489,9 +2488,9 @@ pub enum GroupUserAssignmentObjectEnum {
     #[serde(rename = "group.user")]
     GroupUser,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupUserAssignmentObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupUserAssignmentObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `GroupUserDeletedResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2508,9 +2507,9 @@ pub enum GroupUserDeletedResourceObjectEnum {
     #[serde(rename = "group.user.deleted")]
     GroupUserDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for GroupUserDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for GroupUserDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `HostedToolPermission`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2562,9 +2561,9 @@ pub enum InviteDeleteResponseObjectEnum {
     #[serde(rename = "organization.invite.deleted")]
     OrganizationInviteDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteDeleteResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteDeleteResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InviteListResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2586,9 +2585,9 @@ pub enum InviteListResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteListResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteListResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InviteObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2596,9 +2595,9 @@ pub enum InviteObjectEnum {
     #[serde(rename = "organization.invite")]
     OrganizationInvite,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InviteProjectGroupBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2626,9 +2625,9 @@ pub enum InviteProjectsItemRoleEnum {
     #[serde(rename = "owner")]
     Owner,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteProjectsItemRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteProjectsItemRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `InviteRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2658,9 +2657,9 @@ pub enum InviteRequestProjectsItemRoleEnum {
     #[serde(rename = "owner")]
     Owner,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteRequestProjectsItemRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteRequestProjectsItemRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InviteRequestRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2670,9 +2669,9 @@ pub enum InviteRequestRoleEnum {
     #[serde(rename = "owner")]
     Owner,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteRequestRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteRequestRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InviteRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2682,9 +2681,9 @@ pub enum InviteRoleEnum {
     #[serde(rename = "reader")]
     Reader,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `InviteStatusEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2696,9 +2695,9 @@ pub enum InviteStatusEnum {
     #[serde(rename = "pending")]
     Pending,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for InviteStatusEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for InviteStatusEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /organization/invites` (`inviteUser`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2778,9 +2777,9 @@ pub enum ListAuditLogsResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListAuditLogsResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListAuditLogsResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-audit-logs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2809,9 +2808,9 @@ pub enum ListCertificatesResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListCertificatesResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListCertificatesResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/groups/{group_id}/roles` (`list-group-role-assignments`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2833,9 +2832,9 @@ pub enum ListGroupRoleAssignmentsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListGroupRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListGroupRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-group-role-assignments`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2864,9 +2863,9 @@ pub enum ListGroupUsersParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListGroupUsersParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListGroupUsersParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-group-users`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2894,9 +2893,9 @@ pub enum ListGroupsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListGroupsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListGroupsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-groups`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2940,9 +2939,9 @@ pub enum ListOrganizationCertificatesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListOrganizationCertificatesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListOrganizationCertificatesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listOrganizationCertificates`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2972,9 +2971,9 @@ pub enum ListOrganizationSpendAlertsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListOrganizationSpendAlertsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListOrganizationSpendAlertsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-organization-spend-alerts`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3005,9 +3004,9 @@ pub enum ListProjectApiKeysParamsOwnerProjectAccessEnum {
     #[serde(rename = "any")]
     Any,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectApiKeysParamsOwnerProjectAccessEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectApiKeysParamsOwnerProjectAccessEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-project-api-keys`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3036,9 +3035,9 @@ pub enum ListProjectCertificatesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectCertificatesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectCertificatesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ListProjectCertificatesResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3060,9 +3059,9 @@ pub enum ListProjectCertificatesResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectCertificatesResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectCertificatesResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `listProjectCertificates`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3091,9 +3090,9 @@ pub enum ListProjectGroupsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectGroupsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectGroupsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-project-groups`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3160,9 +3159,9 @@ pub enum ListProjectSpendAlertsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListProjectSpendAlertsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListProjectSpendAlertsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-project-spend-alerts`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3225,9 +3224,9 @@ pub enum ListRolesParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListRolesParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListRolesParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-roles`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3256,9 +3255,9 @@ pub enum ListUserRoleAssignmentsParamsOrderEnum {
     #[serde(rename = "desc")]
     Desc,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ListUserRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ListUserRoleAssignmentsParamsOrderEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `list-user-role-assignments`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3380,9 +3379,9 @@ pub enum OrganizationCertificateActivationResponseObjectEnum {
     #[serde(rename = "organization.certificate.activation")]
     OrganizationCertificateActivation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationCertificateActivationResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationCertificateActivationResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationCertificateCertificateDetails`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3410,9 +3409,9 @@ pub enum OrganizationCertificateDeactivationResponseObjectEnum {
     #[serde(rename = "organization.certificate.deactivation")]
     OrganizationCertificateDeactivation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationCertificateDeactivationResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationCertificateDeactivationResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OrganizationCertificateObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3420,9 +3419,9 @@ pub enum OrganizationCertificateObjectEnum {
     #[serde(rename = "organization.certificate")]
     OrganizationCertificate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationCertificateObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationCertificateObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationDataRetention`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3440,9 +3439,9 @@ pub enum OrganizationDataRetentionObjectEnum {
     #[serde(rename = "organization.data_retention")]
     OrganizationDataRetention,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationDataRetentionObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationDataRetentionObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OrganizationDataRetentionTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3456,9 +3455,9 @@ pub enum OrganizationDataRetentionTypeEnum {
     #[serde(rename = "enhanced_modified_abuse_monitoring")]
     EnhancedModifiedAbuseMonitoring,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationDataRetentionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationDataRetentionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationProjectCertificate`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3489,9 +3488,9 @@ pub enum OrganizationProjectCertificateActivationResponseObjectEnum {
     #[serde(rename = "organization.project.certificate.activation")]
     OrganizationProjectCertificateActivation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationProjectCertificateActivationResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationProjectCertificateActivationResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationProjectCertificateCertificateDetails`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3519,9 +3518,9 @@ pub enum OrganizationProjectCertificateDeactivationResponseObjectEnum {
     #[serde(rename = "organization.project.certificate.deactivation")]
     OrganizationProjectCertificateDeactivation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationProjectCertificateDeactivationResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationProjectCertificateDeactivationResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OrganizationProjectCertificateObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3529,9 +3528,9 @@ pub enum OrganizationProjectCertificateObjectEnum {
     #[serde(rename = "organization.project.certificate")]
     OrganizationProjectCertificate,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationProjectCertificateObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationProjectCertificateObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationSpendAlert`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3552,9 +3551,9 @@ pub enum OrganizationSpendAlertCurrencyEnum {
     #[serde(rename = "USD")]
     USD,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationSpendAlertCurrencyEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationSpendAlertCurrencyEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationSpendAlertDeletedResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3572,9 +3571,9 @@ pub enum OrganizationSpendAlertDeletedResourceObjectEnum {
     #[serde(rename = "organization.spend_alert.deleted")]
     OrganizationSpendAlertDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationSpendAlertDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationSpendAlertDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OrganizationSpendAlertIntervalEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3582,9 +3581,9 @@ pub enum OrganizationSpendAlertIntervalEnum {
     #[serde(rename = "month")]
     Month,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationSpendAlertIntervalEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationSpendAlertIntervalEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationSpendAlertListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3606,9 +3605,9 @@ pub enum OrganizationSpendAlertListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationSpendAlertListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationSpendAlertListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `OrganizationSpendAlertObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3616,9 +3615,9 @@ pub enum OrganizationSpendAlertObjectEnum {
     #[serde(rename = "organization.spend_alert")]
     OrganizationSpendAlert,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationSpendAlertObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationSpendAlertObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationSpendLimitDeletedResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3635,9 +3634,9 @@ pub enum OrganizationSpendLimitDeletedResourceObjectEnum {
     #[serde(rename = "organization.spend_limit.deleted")]
     OrganizationSpendLimitDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationSpendLimitDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationSpendLimitDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `OrganizationSpendLimitResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3657,9 +3656,9 @@ pub enum OrganizationSpendLimitResourceObjectEnum {
     #[serde(rename = "organization.spend_limit")]
     OrganizationSpendLimit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for OrganizationSpendLimitResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for OrganizationSpendLimitResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `Project`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3711,9 +3710,9 @@ pub enum ProjectApiKeyDeleteResponseObjectEnum {
     #[serde(rename = "organization.project.api_key.deleted")]
     OrganizationProjectApiKeyDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectApiKeyDeleteResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectApiKeyDeleteResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectApiKeyListResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3735,9 +3734,9 @@ pub enum ProjectApiKeyListResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectApiKeyListResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectApiKeyListResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectApiKeyObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3745,9 +3744,9 @@ pub enum ProjectApiKeyObjectEnum {
     #[serde(rename = "organization.project.api_key")]
     OrganizationProjectApiKey,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectApiKeyObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectApiKeyObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectApiKeyOwner`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3771,9 +3770,9 @@ pub enum ProjectApiKeyOwnerProjectAccessEnum {
     #[serde(rename = "inactive")]
     Inactive,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectApiKeyOwnerProjectAccessEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectApiKeyOwnerProjectAccessEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectApiKeyOwnerServiceAccount`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3794,9 +3793,9 @@ pub enum ProjectApiKeyOwnerTypeEnum {
     #[serde(rename = "service_account")]
     ServiceAccount,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectApiKeyOwnerTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectApiKeyOwnerTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectApiKeyOwnerUser`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3838,9 +3837,9 @@ pub enum ProjectDataRetentionObjectEnum {
     #[serde(rename = "project.data_retention")]
     ProjectDataRetention,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectDataRetentionObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectDataRetentionObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectDataRetentionTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3858,9 +3857,9 @@ pub enum ProjectDataRetentionTypeEnum {
     #[serde(rename = "enhanced_modified_abuse_monitoring")]
     EnhancedModifiedAbuseMonitoring,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectDataRetentionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectDataRetentionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectGroup`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3890,9 +3889,9 @@ pub enum ProjectGroupDeletedResourceObjectEnum {
     #[serde(rename = "project.group.deleted")]
     ProjectGroupDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectGroupDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectGroupDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectGroupGroupTypeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3902,9 +3901,9 @@ pub enum ProjectGroupGroupTypeEnum {
     #[serde(rename = "tenant_group")]
     TenantGroup,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectGroupGroupTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectGroupGroupTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectGroupListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3924,9 +3923,9 @@ pub enum ProjectGroupListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectGroupListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectGroupListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectGroupObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3934,9 +3933,9 @@ pub enum ProjectGroupObjectEnum {
     #[serde(rename = "project.group")]
     ProjectGroup,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectGroupObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectGroupObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectHostedToolPermissions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3987,9 +3986,9 @@ pub enum ProjectListResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectListResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectListResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectModelPermissions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4016,9 +4015,9 @@ pub enum ProjectModelPermissionsDeleteResponseObjectEnum {
     #[serde(rename = "project.model_permissions.deleted")]
     ProjectModelPermissionsDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectModelPermissionsDeleteResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectModelPermissionsDeleteResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectModelPermissionsModeEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4028,9 +4027,9 @@ pub enum ProjectModelPermissionsModeEnum {
     #[serde(rename = "deny_list")]
     DenyList,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectModelPermissionsModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectModelPermissionsModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectModelPermissionsObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4038,9 +4037,9 @@ pub enum ProjectModelPermissionsObjectEnum {
     #[serde(rename = "project.model_permissions")]
     ProjectModelPermissions,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectModelPermissionsObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectModelPermissionsObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectModelPermissionsUpdateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4059,9 +4058,9 @@ pub enum ProjectModelPermissionsUpdateRequestModeEnum {
     #[serde(rename = "deny_list")]
     DenyList,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectModelPermissionsUpdateRequestModeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectModelPermissionsUpdateRequestModeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4069,9 +4068,9 @@ pub enum ProjectObjectEnum {
     #[serde(rename = "organization.project")]
     OrganizationProject,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectRateLimit`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4113,9 +4112,9 @@ pub enum ProjectRateLimitListResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectRateLimitListResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectRateLimitListResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectRateLimitObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4123,9 +4122,9 @@ pub enum ProjectRateLimitObjectEnum {
     #[serde(rename = "project.rate_limit")]
     ProjectRateLimit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectRateLimitObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectRateLimitObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectRateLimitUpdateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4176,9 +4175,9 @@ pub enum ProjectServiceAccountApiKeyObjectEnum {
     #[serde(rename = "organization.project.service_account.api_key")]
     OrganizationProjectServiceAccountApiKey,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectServiceAccountApiKeyObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectServiceAccountApiKeyObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectServiceAccountCreateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4210,9 +4209,9 @@ pub enum ProjectServiceAccountCreateResponseObjectEnum {
     #[serde(rename = "organization.project.service_account")]
     OrganizationProjectServiceAccount,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectServiceAccountCreateResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectServiceAccountCreateResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectServiceAccountCreateResponseRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4222,9 +4221,9 @@ pub enum ProjectServiceAccountCreateResponseRoleEnum {
     #[serde(rename = "none")]
     None,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectServiceAccountCreateResponseRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectServiceAccountCreateResponseRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectServiceAccountDeleteResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4242,9 +4241,9 @@ pub enum ProjectServiceAccountDeleteResponseObjectEnum {
     #[serde(rename = "organization.project.service_account.deleted")]
     OrganizationProjectServiceAccountDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectServiceAccountDeleteResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectServiceAccountDeleteResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectServiceAccountListResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4266,9 +4265,9 @@ pub enum ProjectServiceAccountListResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectServiceAccountListResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectServiceAccountListResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectServiceAccountObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4276,9 +4275,9 @@ pub enum ProjectServiceAccountObjectEnum {
     #[serde(rename = "organization.project.service_account")]
     OrganizationProjectServiceAccount,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectServiceAccountObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectServiceAccountObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectServiceAccountRoleEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4290,9 +4289,9 @@ pub enum ProjectServiceAccountRoleEnum {
     #[serde(rename = "none")]
     None,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectServiceAccountRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectServiceAccountRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectSpendAlert`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4313,9 +4312,9 @@ pub enum ProjectSpendAlertCurrencyEnum {
     #[serde(rename = "USD")]
     USD,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectSpendAlertCurrencyEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectSpendAlertCurrencyEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectSpendAlertDeletedResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4333,9 +4332,9 @@ pub enum ProjectSpendAlertDeletedResourceObjectEnum {
     #[serde(rename = "project.spend_alert.deleted")]
     ProjectSpendAlertDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectSpendAlertDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectSpendAlertDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectSpendAlertIntervalEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4343,9 +4342,9 @@ pub enum ProjectSpendAlertIntervalEnum {
     #[serde(rename = "month")]
     Month,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectSpendAlertIntervalEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectSpendAlertIntervalEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectSpendAlertListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4367,9 +4366,9 @@ pub enum ProjectSpendAlertListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectSpendAlertListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectSpendAlertListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `ProjectSpendAlertObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4377,9 +4376,9 @@ pub enum ProjectSpendAlertObjectEnum {
     #[serde(rename = "project.spend_alert")]
     ProjectSpendAlert,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectSpendAlertObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectSpendAlertObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectSpendLimitDeletedResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4396,9 +4395,9 @@ pub enum ProjectSpendLimitDeletedResourceObjectEnum {
     #[serde(rename = "project.spend_limit.deleted")]
     ProjectSpendLimitDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectSpendLimitDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectSpendLimitDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectSpendLimitResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4418,9 +4417,9 @@ pub enum ProjectSpendLimitResourceObjectEnum {
     #[serde(rename = "project.spend_limit")]
     ProjectSpendLimit,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectSpendLimitResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectSpendLimitResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectUpdateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4478,9 +4477,9 @@ pub enum ProjectUserDeleteResponseObjectEnum {
     #[serde(rename = "organization.project.user.deleted")]
     OrganizationProjectUserDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectUserDeleteResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectUserDeleteResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectUserListResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4502,9 +4501,9 @@ pub enum ProjectUserObjectEnum {
     #[serde(rename = "organization.project.user")]
     OrganizationProjectUser,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ProjectUserObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ProjectUserObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ProjectUserUpdateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4552,9 +4551,9 @@ pub enum PublicRoleListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for PublicRoleListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for PublicRoleListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `PublicUpdateOrganizationRoleBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4720,9 +4719,9 @@ pub enum RetrieveProjectGroupParamsGroupTypeEnum {
     #[serde(rename = "tenant_group")]
     TenantGroup,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RetrieveProjectGroupParamsGroupTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RetrieveProjectGroupParamsGroupTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `retrieve-project-group`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4883,9 +4882,9 @@ pub enum RoleDeletedResourceObjectEnum {
     #[serde(rename = "role.deleted")]
     RoleDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RoleDeletedResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RoleDeletedResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `RoleListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4905,9 +4904,9 @@ pub enum RoleListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RoleListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RoleListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `RoleObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4915,9 +4914,9 @@ pub enum RoleObjectEnum {
     #[serde(rename = "role")]
     Role,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for RoleObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for RoleObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ServiceAccountApiKeyBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4937,9 +4936,9 @@ pub enum ServiceAccountApiKeyBodyObjectEnum {
     #[serde(rename = "organization.project.service_account.api_key")]
     OrganizationProjectServiceAccountApiKey,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for ServiceAccountApiKeyBodyObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for ServiceAccountApiKeyBodyObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SpendAlertNotificationChannel`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4959,9 +4958,9 @@ pub enum SpendAlertNotificationChannelTypeEnum {
     #[serde(rename = "email")]
     Email,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SpendAlertNotificationChannelTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SpendAlertNotificationChannelTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `SpendLimitCurrency`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4979,9 +4978,9 @@ pub enum SpendLimitCurrencyV1Enum {
     #[serde(rename = "USD")]
     USD,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SpendLimitCurrencyV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SpendLimitCurrencyV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `SpendLimitEnforcement`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5009,9 +5008,9 @@ pub enum SpendLimitEnforcementStatusV1Enum {
     #[serde(rename = "enforcing")]
     Enforcing,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SpendLimitEnforcementStatusV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SpendLimitEnforcementStatusV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `SpendLimitInterval`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5029,9 +5028,9 @@ pub enum SpendLimitIntervalV1Enum {
     #[serde(rename = "month")]
     Month,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for SpendLimitIntervalV1Enum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for SpendLimitIntervalV1Enum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `ToggleCertificatesRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5111,9 +5110,9 @@ pub enum UpdateOrganizationDataRetentionBodyRetentionTypeEnum {
     #[serde(rename = "enhanced_modified_abuse_monitoring")]
     EnhancedModifiedAbuseMonitoring,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateOrganizationDataRetentionBodyRetentionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateOrganizationDataRetentionBodyRetentionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /organization/data_retention` (`update-organization-data-retention`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5158,9 +5157,9 @@ pub enum UpdateOrganizationSpendLimitBodyCurrencyEnum {
     #[serde(rename = "USD")]
     USD,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateOrganizationSpendLimitBodyCurrencyEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateOrganizationSpendLimitBodyCurrencyEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UpdateOrganizationSpendLimitBodyIntervalEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5168,9 +5167,9 @@ pub enum UpdateOrganizationSpendLimitBodyIntervalEnum {
     #[serde(rename = "month")]
     Month,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateOrganizationSpendLimitBodyIntervalEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateOrganizationSpendLimitBodyIntervalEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UpdateProjectDataRetentionBody`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5196,9 +5195,9 @@ pub enum UpdateProjectDataRetentionBodyRetentionTypeEnum {
     #[serde(rename = "enhanced_modified_abuse_monitoring")]
     EnhancedModifiedAbuseMonitoring,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateProjectDataRetentionBodyRetentionTypeEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateProjectDataRetentionBodyRetentionTypeEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /organization/projects/{project_id}/data_retention` (`update-project-data-retention`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5276,9 +5275,9 @@ pub enum UpdateProjectServiceAccountBodyRoleEnum {
     #[serde(rename = "owner")]
     Owner,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateProjectServiceAccountBodyRoleEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateProjectServiceAccountBodyRoleEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /organization/projects/{project_id}/service_accounts/{service_account_id}` (`update-project-service-account`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5326,9 +5325,9 @@ pub enum UpdateProjectSpendLimitBodyCurrencyEnum {
     #[serde(rename = "USD")]
     USD,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateProjectSpendLimitBodyCurrencyEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateProjectSpendLimitBodyCurrencyEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UpdateProjectSpendLimitBodyIntervalEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5336,9 +5335,9 @@ pub enum UpdateProjectSpendLimitBodyIntervalEnum {
     #[serde(rename = "month")]
     Month,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UpdateProjectSpendLimitBodyIntervalEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UpdateProjectSpendLimitBodyIntervalEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `POST /organization/roles/{role_id}` (`update-role`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5438,9 +5437,9 @@ pub enum UsageAudioSpeechesParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageAudioSpeechesParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageAudioSpeechesParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageAudioSpeechesParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5454,9 +5453,9 @@ pub enum UsageAudioSpeechesParamsGroupByItemEnum {
     #[serde(rename = "model")]
     Model,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageAudioSpeechesParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageAudioSpeechesParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-audio-speeches`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5489,9 +5488,9 @@ pub enum UsageAudioSpeechesResult2ObjectEnum {
     #[serde(rename = "organization.usage.audio_speeches.result")]
     OrganizationUsageAudioSpeechesResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageAudioSpeechesResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageAudioSpeechesResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/usage/audio_transcriptions` (`usage-audio-transcriptions`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5527,9 +5526,9 @@ pub enum UsageAudioTranscriptionsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageAudioTranscriptionsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageAudioTranscriptionsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageAudioTranscriptionsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5543,9 +5542,9 @@ pub enum UsageAudioTranscriptionsParamsGroupByItemEnum {
     #[serde(rename = "model")]
     Model,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageAudioTranscriptionsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageAudioTranscriptionsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-audio-transcriptions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5578,9 +5577,9 @@ pub enum UsageAudioTranscriptionsResult2ObjectEnum {
     #[serde(rename = "organization.usage.audio_transcriptions.result")]
     OrganizationUsageAudioTranscriptionsResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageAudioTranscriptionsResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageAudioTranscriptionsResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/usage/code_interpreter_sessions` (`usage-code-interpreter-sessions`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5610,9 +5609,9 @@ pub enum UsageCodeInterpreterSessionsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCodeInterpreterSessionsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCodeInterpreterSessionsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageCodeInterpreterSessionsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5620,9 +5619,9 @@ pub enum UsageCodeInterpreterSessionsParamsGroupByItemEnum {
     #[serde(rename = "project_id")]
     ProjectId,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCodeInterpreterSessionsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCodeInterpreterSessionsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-code-interpreter-sessions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5648,9 +5647,9 @@ pub enum UsageCodeInterpreterSessionsResult2ObjectEnum {
     #[serde(rename = "organization.usage.code_interpreter_sessions.result")]
     OrganizationUsageCodeInterpreterSessionsResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCodeInterpreterSessionsResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCodeInterpreterSessionsResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/usage/completions` (`usage-completions`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5688,9 +5687,9 @@ pub enum UsageCompletionsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCompletionsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCompletionsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageCompletionsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5708,9 +5707,9 @@ pub enum UsageCompletionsParamsGroupByItemEnum {
     #[serde(rename = "service_tier")]
     ServiceTier,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCompletionsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCompletionsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-completions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5772,9 +5771,9 @@ pub enum UsageCompletionsResult2ObjectEnum {
     #[serde(rename = "organization.usage.completions.result")]
     OrganizationUsageCompletionsResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCompletionsResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCompletionsResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/costs` (`usage-costs`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5802,9 +5801,9 @@ pub enum UsageCostsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCostsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCostsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageCostsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5816,9 +5815,9 @@ pub enum UsageCostsParamsGroupByItemEnum {
     #[serde(rename = "api_key_id")]
     ApiKeyId,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageCostsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageCostsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-costs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5861,9 +5860,9 @@ pub enum UsageEmbeddingsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageEmbeddingsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageEmbeddingsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageEmbeddingsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5877,9 +5876,9 @@ pub enum UsageEmbeddingsParamsGroupByItemEnum {
     #[serde(rename = "model")]
     Model,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageEmbeddingsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageEmbeddingsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-embeddings`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5912,9 +5911,9 @@ pub enum UsageEmbeddingsResult2ObjectEnum {
     #[serde(rename = "organization.usage.embeddings.result")]
     OrganizationUsageEmbeddingsResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageEmbeddingsResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageEmbeddingsResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/usage/file_search_calls` (`usage-file-search-calls`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -5950,9 +5949,9 @@ pub enum UsageFileSearchCallsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageFileSearchCallsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageFileSearchCallsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageFileSearchCallsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5966,9 +5965,9 @@ pub enum UsageFileSearchCallsParamsGroupByItemEnum {
     #[serde(rename = "vector_store_id")]
     VectorStoreId,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageFileSearchCallsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageFileSearchCallsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-file-search-calls`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6000,9 +5999,9 @@ pub enum UsageFileSearchCallsResult2ObjectEnum {
     #[serde(rename = "organization.usage.file_searches.result")]
     OrganizationUsageFileSearchesResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageFileSearchCallsResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageFileSearchCallsResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/usage/images` (`usage-images`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6042,9 +6041,9 @@ pub enum UsageImagesParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageImagesParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageImagesParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageImagesParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6062,9 +6061,9 @@ pub enum UsageImagesParamsGroupByItemEnum {
     #[serde(rename = "source")]
     Source,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageImagesParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageImagesParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageImagesParamsSizesItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6080,9 +6079,9 @@ pub enum UsageImagesParamsSizesItemEnum {
     #[serde(rename = "1024x1792")]
     T1024x1792,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageImagesParamsSizesItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageImagesParamsSizesItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageImagesParamsSourcesItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6094,9 +6093,9 @@ pub enum UsageImagesParamsSourcesItemEnum {
     #[serde(rename = "image.variation")]
     ImageVariation,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageImagesParamsSourcesItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageImagesParamsSourcesItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-images`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6133,9 +6132,9 @@ pub enum UsageImagesResult2ObjectEnum {
     #[serde(rename = "organization.usage.images.result")]
     OrganizationUsageImagesResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageImagesResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageImagesResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/usage/moderations` (`usage-moderations`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6171,9 +6170,9 @@ pub enum UsageModerationsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageModerationsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageModerationsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageModerationsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6187,9 +6186,9 @@ pub enum UsageModerationsParamsGroupByItemEnum {
     #[serde(rename = "model")]
     Model,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageModerationsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageModerationsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-moderations`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6222,9 +6221,9 @@ pub enum UsageModerationsResult2ObjectEnum {
     #[serde(rename = "organization.usage.moderations.result")]
     OrganizationUsageModerationsResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageModerationsResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageModerationsResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UsageResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6244,9 +6243,9 @@ pub enum UsageResponseObjectEnum {
     #[serde(rename = "page")]
     Page,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UsageTimeBucket`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6265,9 +6264,9 @@ pub enum UsageTimeBucketObjectEnum {
     #[serde(rename = "bucket")]
     Bucket,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageTimeBucketObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageTimeBucketObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated union `UsageTimeBucketResultsItemUnion`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6316,9 +6315,9 @@ pub enum UsageVectorStoresParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageVectorStoresParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageVectorStoresParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageVectorStoresParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6326,9 +6325,9 @@ pub enum UsageVectorStoresParamsGroupByItemEnum {
     #[serde(rename = "project_id")]
     ProjectId,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageVectorStoresParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageVectorStoresParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-vector-stores`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6354,9 +6353,9 @@ pub enum UsageVectorStoresResult2ObjectEnum {
     #[serde(rename = "organization.usage.vector_stores.result")]
     OrganizationUsageVectorStoresResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageVectorStoresResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageVectorStoresResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Typed params for `GET /organization/usage/web_search_calls` (`usage-web-search-calls`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6394,9 +6393,9 @@ pub enum UsageWebSearchCallsParamsBucketWidthEnum {
     #[serde(rename = "1d")]
     T1d,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageWebSearchCallsParamsBucketWidthEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageWebSearchCallsParamsBucketWidthEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageWebSearchCallsParamsContextLevelsItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6408,9 +6407,9 @@ pub enum UsageWebSearchCallsParamsContextLevelsItemEnum {
     #[serde(rename = "high")]
     High,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageWebSearchCallsParamsContextLevelsItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageWebSearchCallsParamsContextLevelsItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UsageWebSearchCallsParamsGroupByItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6426,9 +6425,9 @@ pub enum UsageWebSearchCallsParamsGroupByItemEnum {
     #[serde(rename = "context_level")]
     ContextLevel,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageWebSearchCallsParamsGroupByItemEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageWebSearchCallsParamsGroupByItemEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// JSON result for `usage-web-search-calls`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6463,9 +6462,9 @@ pub enum UsageWebSearchCallsResult2ObjectEnum {
     #[serde(rename = "organization.usage.web_searches.result")]
     OrganizationUsageWebSearchesResult,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UsageWebSearchCallsResult2ObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UsageWebSearchCallsResult2ObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `User`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6519,9 +6518,9 @@ pub enum UserDeleteResponseObjectEnum {
     #[serde(rename = "organization.user.deleted")]
     OrganizationUserDeleted,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserDeleteResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserDeleteResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserListResource`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6541,9 +6540,9 @@ pub enum UserListResourceObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserListResourceObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserListResourceObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserListResponse`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6565,9 +6564,9 @@ pub enum UserListResponseObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserListResponseObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserListResponseObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated string enum `UserObjectEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6575,9 +6574,9 @@ pub enum UserObjectEnum {
     #[serde(rename = "organization.user")]
     OrganizationUser,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserProjects`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6607,9 +6606,9 @@ pub enum UserProjectsObjectEnum {
     #[serde(rename = "list")]
     List,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserProjectsObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserProjectsObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserRoleAssignment`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6627,9 +6626,9 @@ pub enum UserRoleAssignmentObjectEnum {
     #[serde(rename = "user.role")]
     UserRole,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserRoleAssignmentObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserRoleAssignmentObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }
 
 /// Generated object `UserRoleUpdateRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -6673,6 +6672,6 @@ pub enum UserUserObjectEnum {
     #[serde(rename = "user")]
     User,
     #[serde(untagged)]
-    Unknown(String),
+    UnknownValue(String),
 }
-impl Default for UserUserObjectEnum { fn default() -> Self { Self::Unknown(String::new()) } }
+impl Default for UserUserObjectEnum { fn default() -> Self { Self::UnknownValue(String::new()) } }

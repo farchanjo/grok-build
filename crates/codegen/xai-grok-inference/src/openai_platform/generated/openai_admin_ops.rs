@@ -2,9 +2,8 @@
 //! DO NOT EDIT BY HAND.
 
 use super::super::error::{PlatformError, PlatformResult};
-use super::super::transport::{CredentialKind, HttpRequestSpec, MultipartFiles};
+use super::super::transport::{CredentialKind, HttpRequestSpec};
 use super::openai_admin_types::*;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 fn query_value<T: serde::Serialize + ?Sized>(v: &T) -> String {
@@ -19,7 +18,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/admin_api_keys` — `admin-api-keys-list` (json).
     /// Transports: http_json.
     pub async fn admin_api_keys_list(&self, request: AdminApiKeysListParams) -> PlatformResult<AdminApiKeysListResult> {
-        let mut path = String::from("/organization/admin_api_keys");
+        let path = String::from("/organization/admin_api_keys");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.after.as_ref() { query.insert("after".into(), query_value(v)); }
         if let Some(v) = request.order.as_ref() { query.insert("order".into(), query_value(v)); }
@@ -37,8 +36,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/admin_api_keys` — `admin-api-keys-create` (json).
     /// Transports: http_json.
     pub async fn admin_api_keys_create(&self, request: AdminApiKeysCreateParams) -> PlatformResult<AdminApiKeysCreateResult> {
-        let mut path = String::from("/organization/admin_api_keys");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/admin_api_keys");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -54,7 +53,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn admin_api_keys_get(&self, request: AdminApiKeysGetParams) -> PlatformResult<AdminApiKeysGetResult> {
         let mut path = String::from("/organization/admin_api_keys/{key_id}");
         path = path.replace("{key_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.key_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -70,7 +69,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn admin_api_keys_delete(&self, request: AdminApiKeysDeleteParams) -> PlatformResult<AdminApiKeysDeleteResult> {
         let mut path = String::from("/organization/admin_api_keys/{key_id}");
         path = path.replace("{key_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.key_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -84,7 +83,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/audit_logs` — `list-audit-logs` (json).
     /// Transports: http_json.
     pub async fn list_audit_logs(&self, request: ListAuditLogsParams) -> PlatformResult<ListAuditLogsResult> {
-        let mut path = String::from("/organization/audit_logs");
+        let path = String::from("/organization/audit_logs");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.effective_at.as_ref() { query.insert("effective_at".into(), query_value(v)); }
         if let Some(v) = request.project_ids.as_ref() { query.insert("project_ids[]".into(), query_value(v)); }
@@ -109,7 +108,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/certificates` — `listOrganizationCertificates` (json).
     /// Transports: http_json.
     pub async fn list_organization_certificates(&self, request: ListOrganizationCertificatesParams) -> PlatformResult<ListOrganizationCertificatesResult> {
-        let mut path = String::from("/organization/certificates");
+        let path = String::from("/organization/certificates");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.limit.as_ref() { query.insert("limit".into(), query_value(v)); }
         if let Some(v) = request.after.as_ref() { query.insert("after".into(), query_value(v)); }
@@ -127,8 +126,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/certificates` — `uploadCertificate` (json).
     /// Transports: http_json.
     pub async fn upload_certificate(&self, request: UploadCertificateParams) -> PlatformResult<UploadCertificateResult> {
-        let mut path = String::from("/organization/certificates");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/certificates");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -142,8 +141,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/certificates/activate` — `activateOrganizationCertificates` (json).
     /// Transports: http_json.
     pub async fn activate_organization_certificates(&self, request: ActivateOrganizationCertificatesParams) -> PlatformResult<ActivateOrganizationCertificatesResult> {
-        let mut path = String::from("/organization/certificates/activate");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/certificates/activate");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -157,8 +156,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/certificates/deactivate` — `deactivateOrganizationCertificates` (json).
     /// Transports: http_json.
     pub async fn deactivate_organization_certificates(&self, request: DeactivateOrganizationCertificatesParams) -> PlatformResult<DeactivateOrganizationCertificatesResult> {
-        let mut path = String::from("/organization/certificates/deactivate");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/certificates/deactivate");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -191,7 +190,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn modify_certificate(&self, request: ModifyCertificateParams) -> PlatformResult<ModifyCertificateResult> {
         let mut path = String::from("/organization/certificates/{certificate_id}");
         path = path.replace("{certificate_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.certificate_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -207,7 +206,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn delete_certificate(&self, request: DeleteCertificateParams) -> PlatformResult<DeleteCertificateResult> {
         let mut path = String::from("/organization/certificates/{certificate_id}");
         path = path.replace("{certificate_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.certificate_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -221,7 +220,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/costs` — `usage-costs` (json).
     /// Transports: http_json.
     pub async fn usage_costs(&self, request: UsageCostsParams) -> PlatformResult<UsageCostsResult> {
-        let mut path = String::from("/organization/costs");
+        let path = String::from("/organization/costs");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -243,9 +242,9 @@ impl crate::openai_platform::client::OpenAiAdminClient {
 
     /// `GET /organization/data_retention` — `retrieve-organization-data-retention` (json).
     /// Transports: http_json.
-    pub async fn retrieve_organization_data_retention(&self, request: RetrieveOrganizationDataRetentionParams) -> PlatformResult<RetrieveOrganizationDataRetentionResult> {
-        let mut path = String::from("/organization/data_retention");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+    pub async fn retrieve_organization_data_retention(&self, _request: RetrieveOrganizationDataRetentionParams) -> PlatformResult<RetrieveOrganizationDataRetentionResult> {
+        let path = String::from("/organization/data_retention");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -259,8 +258,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/data_retention` — `update-organization-data-retention` (json).
     /// Transports: http_json.
     pub async fn update_organization_data_retention(&self, request: UpdateOrganizationDataRetentionParams) -> PlatformResult<UpdateOrganizationDataRetentionResult> {
-        let mut path = String::from("/organization/data_retention");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/data_retention");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -274,7 +273,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/groups` — `list-groups` (json).
     /// Transports: http_json.
     pub async fn list_groups(&self, request: ListGroupsParams) -> PlatformResult<ListGroupsResult> {
-        let mut path = String::from("/organization/groups");
+        let path = String::from("/organization/groups");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.limit.as_ref() { query.insert("limit".into(), query_value(v)); }
         if let Some(v) = request.after.as_ref() { query.insert("after".into(), query_value(v)); }
@@ -292,8 +291,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/groups` — `create-group` (json).
     /// Transports: http_json.
     pub async fn create_group(&self, request: CreateGroupParams) -> PlatformResult<CreateGroupResult> {
-        let mut path = String::from("/organization/groups");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/groups");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -309,7 +308,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_group(&self, request: RetrieveGroupParams) -> PlatformResult<RetrieveGroupResult> {
         let mut path = String::from("/organization/groups/{group_id}");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -325,7 +324,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn update_group(&self, request: UpdateGroupParams) -> PlatformResult<UpdateGroupResult> {
         let mut path = String::from("/organization/groups/{group_id}");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -341,7 +340,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn delete_group(&self, request: DeleteGroupParams) -> PlatformResult<DeleteGroupResult> {
         let mut path = String::from("/organization/groups/{group_id}");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -376,7 +375,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn assign_group_role(&self, request: AssignGroupRoleParams) -> PlatformResult<AssignGroupRoleResult> {
         let mut path = String::from("/organization/groups/{group_id}/roles");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -393,7 +392,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/groups/{group_id}/roles/{role_id}");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
         path = path.replace("{role_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.role_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -410,7 +409,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/groups/{group_id}/roles/{role_id}");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
         path = path.replace("{role_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.role_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -445,7 +444,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn add_group_user(&self, request: AddGroupUserParams) -> PlatformResult<AddGroupUserResult> {
         let mut path = String::from("/organization/groups/{group_id}/users");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -462,7 +461,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/groups/{group_id}/users/{user_id}");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -479,7 +478,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/groups/{group_id}/users/{user_id}");
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -493,7 +492,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/invites` — `list-invites` (json).
     /// Transports: http_json.
     pub async fn list_invites(&self, request: ListInvitesParams) -> PlatformResult<ListInvitesResult> {
-        let mut path = String::from("/organization/invites");
+        let path = String::from("/organization/invites");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.limit.as_ref() { query.insert("limit".into(), query_value(v)); }
         if let Some(v) = request.after.as_ref() { query.insert("after".into(), query_value(v)); }
@@ -510,8 +509,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/invites` — `inviteUser` (json).
     /// Transports: http_json.
     pub async fn invite_user(&self, request: InviteUserParams) -> PlatformResult<InviteUserResult> {
-        let mut path = String::from("/organization/invites");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/invites");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -527,7 +526,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_invite(&self, request: RetrieveInviteParams) -> PlatformResult<RetrieveInviteResult> {
         let mut path = String::from("/organization/invites/{invite_id}");
         path = path.replace("{invite_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.invite_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -543,7 +542,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn delete_invite(&self, request: DeleteInviteParams) -> PlatformResult<DeleteInviteResult> {
         let mut path = String::from("/organization/invites/{invite_id}");
         path = path.replace("{invite_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.invite_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -557,7 +556,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/projects` — `list-projects` (json).
     /// Transports: http_json.
     pub async fn list_projects(&self, request: ListProjectsParams) -> PlatformResult<ListProjectsResult> {
-        let mut path = String::from("/organization/projects");
+        let path = String::from("/organization/projects");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.limit.as_ref() { query.insert("limit".into(), query_value(v)); }
         if let Some(v) = request.after.as_ref() { query.insert("after".into(), query_value(v)); }
@@ -575,8 +574,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/projects` — `create-project` (json).
     /// Transports: http_json.
     pub async fn create_project(&self, request: CreateProjectParams) -> PlatformResult<CreateProjectResult> {
-        let mut path = String::from("/organization/projects");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/projects");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -592,7 +591,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_project(&self, request: RetrieveProjectParams) -> PlatformResult<RetrieveProjectResult> {
         let mut path = String::from("/organization/projects/{project_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -608,7 +607,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn modify_project(&self, request: ModifyProjectParams) -> PlatformResult<ModifyProjectResult> {
         let mut path = String::from("/organization/projects/{project_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -644,7 +643,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/api_keys/{api_key_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{api_key_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.api_key_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -661,7 +660,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/api_keys/{api_key_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{api_key_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.api_key_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -677,7 +676,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn archive_project(&self, request: ArchiveProjectParams) -> PlatformResult<ArchiveProjectResult> {
         let mut path = String::from("/organization/projects/{project_id}/archive");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -712,7 +711,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn activate_project_certificates(&self, request: ActivateProjectCertificatesParams) -> PlatformResult<ActivateProjectCertificatesResult> {
         let mut path = String::from("/organization/projects/{project_id}/certificates/activate");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -728,7 +727,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn deactivate_project_certificates(&self, request: DeactivateProjectCertificatesParams) -> PlatformResult<DeactivateProjectCertificatesResult> {
         let mut path = String::from("/organization/projects/{project_id}/certificates/deactivate");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -744,7 +743,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_project_data_retention(&self, request: RetrieveProjectDataRetentionParams) -> PlatformResult<RetrieveProjectDataRetentionResult> {
         let mut path = String::from("/organization/projects/{project_id}/data_retention");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -760,7 +759,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn update_project_data_retention(&self, request: UpdateProjectDataRetentionParams) -> PlatformResult<UpdateProjectDataRetentionResult> {
         let mut path = String::from("/organization/projects/{project_id}/data_retention");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -795,7 +794,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn add_project_group(&self, request: AddProjectGroupParams) -> PlatformResult<AddProjectGroupResult> {
         let mut path = String::from("/organization/projects/{project_id}/groups");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -830,7 +829,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/groups/{group_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{group_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.group_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -846,7 +845,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_project_hosted_tool_permissions(&self, request: RetrieveProjectHostedToolPermissionsParams) -> PlatformResult<RetrieveProjectHostedToolPermissionsResult> {
         let mut path = String::from("/organization/projects/{project_id}/hosted_tool_permissions");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -862,7 +861,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn update_project_hosted_tool_permissions(&self, request: UpdateProjectHostedToolPermissionsParams) -> PlatformResult<UpdateProjectHostedToolPermissionsResult> {
         let mut path = String::from("/organization/projects/{project_id}/hosted_tool_permissions");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -878,7 +877,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_project_model_permissions(&self, request: RetrieveProjectModelPermissionsParams) -> PlatformResult<RetrieveProjectModelPermissionsResult> {
         let mut path = String::from("/organization/projects/{project_id}/model_permissions");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -894,7 +893,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn update_project_model_permissions(&self, request: UpdateProjectModelPermissionsParams) -> PlatformResult<UpdateProjectModelPermissionsResult> {
         let mut path = String::from("/organization/projects/{project_id}/model_permissions");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -910,7 +909,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn delete_project_model_permissions(&self, request: DeleteProjectModelPermissionsParams) -> PlatformResult<DeleteProjectModelPermissionsResult> {
         let mut path = String::from("/organization/projects/{project_id}/model_permissions");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -946,7 +945,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/rate_limits/{rate_limit_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{rate_limit_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.rate_limit_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -980,7 +979,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn create_project_service_account(&self, request: CreateProjectServiceAccountParams) -> PlatformResult<CreateProjectServiceAccountResult> {
         let mut path = String::from("/organization/projects/{project_id}/service_accounts");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -997,7 +996,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/service_accounts/{service_account_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{service_account_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.service_account_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1014,7 +1013,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/service_accounts/{service_account_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{service_account_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.service_account_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1031,7 +1030,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/service_accounts/{service_account_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{service_account_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.service_account_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1048,7 +1047,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/service_accounts/{service_account_id}/api_keys");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{service_account_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.service_account_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1084,7 +1083,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn create_project_spend_alert(&self, request: CreateProjectSpendAlertParams) -> PlatformResult<CreateProjectSpendAlertResult> {
         let mut path = String::from("/organization/projects/{project_id}/spend_alerts");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1101,7 +1100,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/spend_alerts/{alert_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{alert_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.alert_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1118,7 +1117,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/spend_alerts/{alert_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{alert_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.alert_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1135,7 +1134,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/spend_alerts/{alert_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{alert_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.alert_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1151,7 +1150,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn getprojectspendlimit(&self, request: GetprojectspendlimitParams) -> PlatformResult<GetprojectspendlimitResult> {
         let mut path = String::from("/organization/projects/{project_id}/spend_limit");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1167,7 +1166,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn deleteprojectspendlimit(&self, request: DeleteprojectspendlimitParams) -> PlatformResult<DeleteprojectspendlimitResult> {
         let mut path = String::from("/organization/projects/{project_id}/spend_limit");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1183,7 +1182,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn updateprojectspendlimit(&self, request: UpdateprojectspendlimitParams) -> PlatformResult<UpdateprojectspendlimitResult> {
         let mut path = String::from("/organization/projects/{project_id}/spend_limit");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1217,7 +1216,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn create_project_user(&self, request: CreateProjectUserParams) -> PlatformResult<CreateProjectUserResult> {
         let mut path = String::from("/organization/projects/{project_id}/users");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1234,7 +1233,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/users/{user_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1251,7 +1250,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/users/{user_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1268,7 +1267,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/projects/{project_id}/users/{user_id}");
         path = path.replace("{project_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.project_id));
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1282,7 +1281,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/roles` — `list-roles` (json).
     /// Transports: http_json.
     pub async fn list_roles(&self, request: ListRolesParams) -> PlatformResult<ListRolesResult> {
-        let mut path = String::from("/organization/roles");
+        let path = String::from("/organization/roles");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.limit.as_ref() { query.insert("limit".into(), query_value(v)); }
         if let Some(v) = request.after.as_ref() { query.insert("after".into(), query_value(v)); }
@@ -1300,8 +1299,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/roles` — `create-role` (json).
     /// Transports: http_json.
     pub async fn create_role(&self, request: CreateRoleParams) -> PlatformResult<CreateRoleResult> {
-        let mut path = String::from("/organization/roles");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/roles");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1317,7 +1316,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_role(&self, request: RetrieveRoleParams) -> PlatformResult<RetrieveRoleResult> {
         let mut path = String::from("/organization/roles/{role_id}");
         path = path.replace("{role_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.role_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1333,7 +1332,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn update_role(&self, request: UpdateRoleParams) -> PlatformResult<UpdateRoleResult> {
         let mut path = String::from("/organization/roles/{role_id}");
         path = path.replace("{role_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.role_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1349,7 +1348,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn delete_role(&self, request: DeleteRoleParams) -> PlatformResult<DeleteRoleResult> {
         let mut path = String::from("/organization/roles/{role_id}");
         path = path.replace("{role_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.role_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1363,7 +1362,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/spend_alerts` — `list-organization-spend-alerts` (json).
     /// Transports: http_json.
     pub async fn list_organization_spend_alerts(&self, request: ListOrganizationSpendAlertsParams) -> PlatformResult<ListOrganizationSpendAlertsResult> {
-        let mut path = String::from("/organization/spend_alerts");
+        let path = String::from("/organization/spend_alerts");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.limit.as_ref() { query.insert("limit".into(), query_value(v)); }
         if let Some(v) = request.order.as_ref() { query.insert("order".into(), query_value(v)); }
@@ -1382,8 +1381,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/spend_alerts` — `create-organization-spend-alert` (json).
     /// Transports: http_json.
     pub async fn create_organization_spend_alert(&self, request: CreateOrganizationSpendAlertParams) -> PlatformResult<CreateOrganizationSpendAlertResult> {
-        let mut path = String::from("/organization/spend_alerts");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/spend_alerts");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1399,7 +1398,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_organization_spend_alert(&self, request: RetrieveOrganizationSpendAlertParams) -> PlatformResult<RetrieveOrganizationSpendAlertResult> {
         let mut path = String::from("/organization/spend_alerts/{alert_id}");
         path = path.replace("{alert_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.alert_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1415,7 +1414,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn update_organization_spend_alert(&self, request: UpdateOrganizationSpendAlertParams) -> PlatformResult<UpdateOrganizationSpendAlertResult> {
         let mut path = String::from("/organization/spend_alerts/{alert_id}");
         path = path.replace("{alert_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.alert_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1431,7 +1430,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn delete_organization_spend_alert(&self, request: DeleteOrganizationSpendAlertParams) -> PlatformResult<DeleteOrganizationSpendAlertResult> {
         let mut path = String::from("/organization/spend_alerts/{alert_id}");
         path = path.replace("{alert_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.alert_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1444,9 +1443,9 @@ impl crate::openai_platform::client::OpenAiAdminClient {
 
     /// `GET /organization/spend_limit` — `Getorganizationspendlimit` (json).
     /// Transports: http_json.
-    pub async fn getorganizationspendlimit(&self, request: GetorganizationspendlimitParams) -> PlatformResult<GetorganizationspendlimitResult> {
-        let mut path = String::from("/organization/spend_limit");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+    pub async fn getorganizationspendlimit(&self, _request: GetorganizationspendlimitParams) -> PlatformResult<GetorganizationspendlimitResult> {
+        let path = String::from("/organization/spend_limit");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1460,8 +1459,8 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `POST /organization/spend_limit` — `Updateorganizationspendlimit` (json).
     /// Transports: http_json.
     pub async fn updateorganizationspendlimit(&self, request: UpdateorganizationspendlimitParams) -> PlatformResult<UpdateorganizationspendlimitResult> {
-        let mut path = String::from("/organization/spend_limit");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let path = String::from("/organization/spend_limit");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1474,9 +1473,9 @@ impl crate::openai_platform::client::OpenAiAdminClient {
 
     /// `DELETE /organization/spend_limit` — `Deleteorganizationspendlimit` (json).
     /// Transports: http_json.
-    pub async fn deleteorganizationspendlimit(&self, request: DeleteorganizationspendlimitParams) -> PlatformResult<DeleteorganizationspendlimitResult> {
-        let mut path = String::from("/organization/spend_limit");
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+    pub async fn deleteorganizationspendlimit(&self, _request: DeleteorganizationspendlimitParams) -> PlatformResult<DeleteorganizationspendlimitResult> {
+        let path = String::from("/organization/spend_limit");
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1490,7 +1489,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/audio_speeches` — `usage-audio-speeches` (json).
     /// Transports: http_json.
     pub async fn usage_audio_speeches(&self, request: UsageAudioSpeechesParams) -> PlatformResult<UsageAudioSpeechesResult> {
-        let mut path = String::from("/organization/usage/audio_speeches");
+        let path = String::from("/organization/usage/audio_speeches");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1515,7 +1514,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/audio_transcriptions` — `usage-audio-transcriptions` (json).
     /// Transports: http_json.
     pub async fn usage_audio_transcriptions(&self, request: UsageAudioTranscriptionsParams) -> PlatformResult<UsageAudioTranscriptionsResult> {
-        let mut path = String::from("/organization/usage/audio_transcriptions");
+        let path = String::from("/organization/usage/audio_transcriptions");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1540,7 +1539,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/code_interpreter_sessions` — `usage-code-interpreter-sessions` (json).
     /// Transports: http_json.
     pub async fn usage_code_interpreter_sessions(&self, request: UsageCodeInterpreterSessionsParams) -> PlatformResult<UsageCodeInterpreterSessionsResult> {
-        let mut path = String::from("/organization/usage/code_interpreter_sessions");
+        let path = String::from("/organization/usage/code_interpreter_sessions");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1562,7 +1561,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/completions` — `usage-completions` (json).
     /// Transports: http_json.
     pub async fn usage_completions(&self, request: UsageCompletionsParams) -> PlatformResult<UsageCompletionsResult> {
-        let mut path = String::from("/organization/usage/completions");
+        let path = String::from("/organization/usage/completions");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1588,7 +1587,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/embeddings` — `usage-embeddings` (json).
     /// Transports: http_json.
     pub async fn usage_embeddings(&self, request: UsageEmbeddingsParams) -> PlatformResult<UsageEmbeddingsResult> {
-        let mut path = String::from("/organization/usage/embeddings");
+        let path = String::from("/organization/usage/embeddings");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1613,7 +1612,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/file_search_calls` — `usage-file-search-calls` (json).
     /// Transports: http_json.
     pub async fn usage_file_search_calls(&self, request: UsageFileSearchCallsParams) -> PlatformResult<UsageFileSearchCallsResult> {
-        let mut path = String::from("/organization/usage/file_search_calls");
+        let path = String::from("/organization/usage/file_search_calls");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1638,7 +1637,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/images` — `usage-images` (json).
     /// Transports: http_json.
     pub async fn usage_images(&self, request: UsageImagesParams) -> PlatformResult<UsageImagesResult> {
-        let mut path = String::from("/organization/usage/images");
+        let path = String::from("/organization/usage/images");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1665,7 +1664,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/moderations` — `usage-moderations` (json).
     /// Transports: http_json.
     pub async fn usage_moderations(&self, request: UsageModerationsParams) -> PlatformResult<UsageModerationsResult> {
-        let mut path = String::from("/organization/usage/moderations");
+        let path = String::from("/organization/usage/moderations");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1690,7 +1689,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/vector_stores` — `usage-vector-stores` (json).
     /// Transports: http_json.
     pub async fn usage_vector_stores(&self, request: UsageVectorStoresParams) -> PlatformResult<UsageVectorStoresResult> {
-        let mut path = String::from("/organization/usage/vector_stores");
+        let path = String::from("/organization/usage/vector_stores");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1712,7 +1711,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/usage/web_search_calls` — `usage-web-search-calls` (json).
     /// Transports: http_json.
     pub async fn usage_web_search_calls(&self, request: UsageWebSearchCallsParams) -> PlatformResult<UsageWebSearchCallsResult> {
-        let mut path = String::from("/organization/usage/web_search_calls");
+        let path = String::from("/organization/usage/web_search_calls");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         query.insert("start_time".into(), query_value(&request.start_time));
         if let Some(v) = request.end_time.as_ref() { query.insert("end_time".into(), query_value(v)); }
@@ -1738,7 +1737,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     /// `GET /organization/users` — `list-users` (json).
     /// Transports: http_json.
     pub async fn list_users(&self, request: ListUsersParams) -> PlatformResult<ListUsersResult> {
-        let mut path = String::from("/organization/users");
+        let path = String::from("/organization/users");
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         if let Some(v) = request.limit.as_ref() { query.insert("limit".into(), query_value(v)); }
         if let Some(v) = request.after.as_ref() { query.insert("after".into(), query_value(v)); }
@@ -1758,7 +1757,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn retrieve_user(&self, request: RetrieveUserParams) -> PlatformResult<RetrieveUserResult> {
         let mut path = String::from("/organization/users/{user_id}");
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1774,7 +1773,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn modify_user(&self, request: ModifyUserParams) -> PlatformResult<ModifyUserResult> {
         let mut path = String::from("/organization/users/{user_id}");
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1790,7 +1789,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn delete_user(&self, request: DeleteUserParams) -> PlatformResult<DeleteUserResult> {
         let mut path = String::from("/organization/users/{user_id}");
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
@@ -1825,7 +1824,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
     pub async fn assign_user_role(&self, request: AssignUserRoleParams) -> PlatformResult<AssignUserRoleResult> {
         let mut path = String::from("/organization/users/{user_id}/roles");
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body = Some(serde_json::to_value(&request.body).map_err(|e| PlatformError::InvalidRequest(e.to_string()))?);
         let spec = HttpRequestSpec {
             method: "POST", path, query, body, credential: CredentialKind::Admin,
@@ -1842,7 +1841,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/users/{user_id}/roles/{role_id}");
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
         path = path.replace("{role_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.role_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET", path, query, body, credential: CredentialKind::Admin,
@@ -1859,7 +1858,7 @@ impl crate::openai_platform::client::OpenAiAdminClient {
         let mut path = String::from("/organization/users/{user_id}/roles/{role_id}");
         path = path.replace("{user_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.user_id));
         path = path.replace("{role_id}", &crate::openai_platform::url_policy::encode_path_segment(&request.role_id));
-        let mut query: BTreeMap<String, String> = BTreeMap::new();
+        let query: BTreeMap<String, String> = BTreeMap::new();
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE", path, query, body, credential: CredentialKind::Admin,
