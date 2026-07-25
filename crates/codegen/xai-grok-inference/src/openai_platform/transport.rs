@@ -2,10 +2,19 @@
 
 use super::error::{CredentialClass, ErrorCategory, PlatformError, PlatformResult, redact_preview};
 use super::url_policy::NormalizedBaseUrl;
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_tungstenite::MaybeTlsStream;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 
 /// Which credential store entry the transport may inject.
@@ -84,6 +93,107 @@ pub struct SseEvent {
     pub data: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+}
+
+type RealtimeSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Connected, bounded Realtime WebSocket session with typed JSON events.
+pub struct RealtimeSession {
+    socket: RealtimeSocket,
+    max_event_bytes: usize,
+    cancel: CancellationToken,
+}
+
+impl RealtimeSession {
+    /// Send a pinned-schema OpenAI Realtime client event.
+    pub async fn send_client_event(
+        &mut self,
+        event: &super::realtime::RealtimeClientEvent,
+    ) -> PlatformResult<()> {
+        self.send(event).await
+    }
+
+    /// Receive a pinned-schema OpenAI Realtime server event.
+    pub async fn recv_server_event(
+        &mut self,
+    ) -> PlatformResult<Option<super::realtime::RealtimeServerEvent>> {
+        self.recv().await
+    }
+
+    /// Send one typed client event as a bounded JSON text frame.
+    pub async fn send<T: Serialize>(&mut self, event: &T) -> PlatformResult<()> {
+        let payload = serde_json::to_string(event)
+            .map_err(|error| PlatformError::InvalidRequest(error.to_string()))?;
+        if payload.len() > self.max_event_bytes {
+            return Err(PlatformError::OversizedResponse {
+                limit_bytes: self.max_event_bytes,
+            });
+        }
+        tokio::select! {
+            _ = self.cancel.cancelled() => Err(PlatformError::Cancelled),
+            result = self.socket.send(Message::Text(payload.into())) => {
+                result.map_err(|error| PlatformError::Transport(error.to_string()))
+            }
+        }
+    }
+
+    /// Receive and deserialize the next typed server event.
+    ///
+    /// Ping/Pong and binary frames are handled or rejected internally. A
+    /// graceful close returns `Ok(None)`.
+    pub async fn recv<T: DeserializeOwned>(&mut self) -> PlatformResult<Option<T>> {
+        loop {
+            let frame = tokio::select! {
+                _ = self.cancel.cancelled() => return Err(PlatformError::Cancelled),
+                frame = self.socket.next() => frame,
+            };
+            match frame {
+                Some(Ok(Message::Text(text))) => {
+                    if text.len() > self.max_event_bytes {
+                        return Err(PlatformError::OversizedResponse {
+                            limit_bytes: self.max_event_bytes,
+                        });
+                    }
+                    return serde_json::from_str(&text)
+                        .map(Some)
+                        .map_err(|error| PlatformError::Decode(error.to_string()));
+                }
+                Some(Ok(Message::Binary(bytes))) => {
+                    if bytes.len() > self.max_event_bytes {
+                        return Err(PlatformError::OversizedResponse {
+                            limit_bytes: self.max_event_bytes,
+                        });
+                    }
+                    return Err(PlatformError::Decode(
+                        "expected Realtime JSON text event, received binary frame".into(),
+                    ));
+                }
+                Some(Ok(Message::Ping(payload))) => {
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => return Err(PlatformError::Cancelled),
+                        result = self.socket.send(Message::Pong(payload)) => {
+                            result.map_err(|error| PlatformError::Transport(error.to_string()))?;
+                        }
+                    }
+                }
+                Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
+                Some(Ok(Message::Close(_))) | None => return Ok(None),
+                Some(Err(error)) => {
+                    return Err(PlatformError::Transport(error.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Close the Realtime session cleanly.
+    pub async fn close(mut self) -> PlatformResult<()> {
+        tokio::select! {
+            _ = self.cancel.cancelled() => Err(PlatformError::Cancelled),
+            result = self.socket.close(None) => {
+                result.map_err(|error| PlatformError::Transport(error.to_string()))
+            }
+        }
+    }
 }
 
 /// Multipart form file parts for upload operations.
@@ -361,7 +471,12 @@ impl PlatformTransport {
         if bytes.is_empty() {
             return Ok(Value::Object(Default::default()));
         }
-        serde_json::from_slice(&bytes).map_err(|e| PlatformError::Decode(e.to_string()))
+        if let Ok(value) = serde_json::from_slice(&bytes) {
+            return Ok(value);
+        }
+        String::from_utf8(bytes.to_vec())
+            .map(Value::String)
+            .map_err(|error| PlatformError::Decode(error.to_string()))
     }
 
     /// Bounded/streamed binary download. When `sink` is set, writes to the file
@@ -395,26 +510,85 @@ impl PlatformTransport {
         Ok((bytes, content_type))
     }
 
-    /// WebSocket/Realtime handshake: validates same-origin upgrade URL and
-    /// credentials without following cross-origin redirects with auth.
-    pub async fn execute_websocket_handshake(&self, spec: HttpRequestSpec) -> PlatformResult<()> {
+    /// Open a bounded Realtime WebSocket and return a typed event session.
+    ///
+    /// WebSocket redirects are disabled by tungstenite. The request is built
+    /// only from the normalized configured origin, so credentials can never be
+    /// forwarded to an unrelated host.
+    pub async fn connect_realtime(&self, spec: HttpRequestSpec) -> PlatformResult<RealtimeSession> {
         if self.cancel.is_cancelled() {
             return Err(PlatformError::Cancelled);
         }
-        let _token = self
+        let token = self
             .credentials
             .resolve(spec.credential)?
-            .filter(|t| !t.trim().is_empty())
+            .filter(|token| !token.trim().is_empty())
             .ok_or_else(|| PlatformError::MissingCredential(spec.credential.into()))?;
-        let url = self.base.join_path(&spec.path)?;
-        if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
-            return Err(PlatformError::InvalidUrl(format!(
-                "unsupported websocket scheme {}",
-                url.scheme()
-            )));
+        let mut url = self.base.join_path(&spec.path)?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in &spec.query {
+                pairs.append_pair(key, value);
+            }
         }
-        let _ = (url, _token);
-        Ok(())
+        match url.scheme() {
+            "https" => url.set_scheme("wss").map_err(|()| {
+                PlatformError::InvalidUrl("failed to select secure WebSocket scheme".into())
+            })?,
+            "http" => url.set_scheme("ws").map_err(|()| {
+                PlatformError::InvalidUrl("failed to select WebSocket scheme".into())
+            })?,
+            scheme => {
+                return Err(PlatformError::InvalidUrl(format!(
+                    "unsupported Realtime base scheme {scheme}"
+                )));
+            }
+        }
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|error| PlatformError::InvalidUrl(error.to_string()))?;
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|error| PlatformError::InvalidRequest(format!("auth header: {error}")))?,
+        );
+        request.headers_mut().insert(
+            "OpenAI-Request-Id",
+            uuid::Uuid::new_v4().to_string().parse().map_err(|error| {
+                PlatformError::InvalidRequest(format!("request id header: {error}"))
+            })?,
+        );
+        for (name, value) in &self.extra_headers {
+            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                PlatformError::InvalidRequest(format!("header name `{name}`: {error}"))
+            })?;
+            let header_value = HeaderValue::try_from(value.as_str()).map_err(|error| {
+                PlatformError::InvalidRequest(format!("header `{name}`: {error}"))
+            })?;
+            request.headers_mut().insert(header_name, header_value);
+        }
+        let limit = self.policy.max_response_bytes;
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
+        let connect = tokio_tungstenite::connect_async_with_config(request, Some(config), false);
+        let (socket, _) = tokio::select! {
+            _ = self.cancel.cancelled() => return Err(PlatformError::Cancelled),
+            result = tokio::time::timeout(self.policy.connect_timeout, connect) => {
+                result
+                    .map_err(|_| PlatformError::Timeout {
+                        operation_id: Some(spec.operation_id.to_owned()),
+                    })?
+                    .map_err(|error| map_websocket_error(error, &spec, &self.provider_id))?
+            }
+        };
+        Ok(RealtimeSession {
+            socket,
+            max_event_bytes: limit,
+            cancel: self.cancel.clone(),
+        })
     }
 
     pub async fn execute(&self, spec: HttpRequestSpec) -> PlatformResult<ResponseBody> {
@@ -608,6 +782,29 @@ impl PlatformTransport {
             return Ok(ResponseBody::Json(value));
         }
     }
+}
+
+fn map_websocket_error(
+    error: tokio_tungstenite::tungstenite::Error,
+    spec: &HttpRequestSpec,
+    provider_id: &str,
+) -> PlatformError {
+    if let tokio_tungstenite::tungstenite::Error::Http(response) = &error {
+        let status = response.status().as_u16();
+        return PlatformError::Http {
+            status,
+            category: ErrorCategory::from_status(status),
+            message: "Realtime WebSocket upgrade rejected".into(),
+            request_id: response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+            operation_id: Some(spec.operation_id.to_owned()),
+            provider_id: Some(provider_id.to_owned()),
+        };
+    }
+    PlatformError::Transport(error.to_string())
 }
 
 fn validate_extra_headers(headers: &ExtraHeaders) -> PlatformResult<()> {

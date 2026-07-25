@@ -11,6 +11,7 @@ pub mod client;
 pub mod error;
 pub mod generated;
 pub mod inventory_coverage;
+pub mod realtime;
 pub mod transport;
 pub mod types;
 pub mod url_policy;
@@ -27,7 +28,9 @@ pub use generated::{
 pub use inventory_coverage::{
     assert_zero_uncovered_operations, coverage_report_json, uncovered_operations,
 };
+pub use realtime::{RealtimeClientEvent, RealtimeEventPayload, RealtimeServerEvent};
 pub use transport::{
-    CredentialKind, HttpRequestSpec, MultipartFiles, PlatformTransport, SseEvent, TransportPolicy,
+    CredentialKind, HttpRequestSpec, MultipartFiles, PlatformTransport, RealtimeSession, SseEvent,
+    TransportPolicy,
 };
 pub use types::{DeleteStatus, JsonObject, ListQuery, PathParams, PlatformPage};

@@ -86,6 +86,31 @@ impl OpenAiClient {
         &self.transport
     }
 
+    /// Connect to the OpenAI Realtime API with typed client/server events.
+    pub async fn connect_realtime(
+        &self,
+        model: Option<&str>,
+    ) -> PlatformResult<super::transport::RealtimeSession> {
+        let mut query = std::collections::BTreeMap::new();
+        if let Some(model) = model {
+            query.insert("model".to_owned(), model.to_owned());
+        }
+        self.transport
+            .connect_realtime(super::transport::HttpRequestSpec {
+                method: "GET",
+                path: "/realtime".into(),
+                query,
+                body: None,
+                credential: CredentialKind::Application,
+                expect_sse: false,
+                expect_binary: false,
+                multipart: false,
+                operation_id: "connectRealtime",
+                idempotent: false,
+            })
+            .await
+    }
+
     /// Structural guard: application client never resolves admin credentials.
     pub fn resolve_application_token(&self) -> PlatformResult<Option<String>> {
         self.transport
