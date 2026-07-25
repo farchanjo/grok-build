@@ -22,7 +22,9 @@ pub enum ProviderCliCommand {
     /// List providers (built-in + configured).
     List,
     /// Show one provider.
-    Show { id: String },
+    Show {
+        id: String,
+    },
     /// Add an OpenAI-compatible provider to config.toml.
     Add {
         id: String,
@@ -43,8 +45,12 @@ pub enum ProviderCliCommand {
         #[arg(long)]
         display_name: Option<String>,
     },
-    Enable { id: String },
-    Disable { id: String },
+    Enable {
+        id: String,
+    },
+    Disable {
+        id: String,
+    },
     Remove {
         id: String,
         #[arg(long)]
@@ -73,20 +79,28 @@ pub enum ProviderCliCommand {
         #[arg(long)]
         from_env: Option<String>,
     },
-    ClearKey { id: String },
+    ClearKey {
+        id: String,
+    },
     SetAdminKey {
         id: String,
         #[arg(long)]
         from_env: Option<String>,
     },
-    ClearAdminKey { id: String },
+    ClearAdminKey {
+        id: String,
+    },
     Capabilities {
         id: String,
         #[arg(long)]
         json: bool,
     },
-    RefreshModels { id: String },
-    Test { id: String },
+    RefreshModels {
+        id: String,
+    },
+    Test {
+        id: String,
+    },
 }
 
 /// Typed OpenAI platform CLI (`grok openai --provider <id> …`).
@@ -104,6 +118,9 @@ pub struct OpenAiPlatformCliArgs {
     pub stream: bool,
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Multipart file field bindings as `field=/path/to/file` (repeatable).
+    #[arg(long = "file", value_name = "FIELD=PATH")]
+    pub files: Vec<String>,
     #[command(subcommand)]
     pub command: OpenAiPlatformCommand,
 }
@@ -151,8 +168,12 @@ pub enum OpenAiModelsCommand {
         #[arg(long)]
         input: Option<String>,
     },
-    Retrieve { model_id: String },
-    Delete { model_id: String },
+    Retrieve {
+        model_id: String,
+    },
+    Delete {
+        model_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]

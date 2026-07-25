@@ -158,6 +158,7 @@ async fn run_openai_platform_cli(args: &xai_grok_pager::app::OpenAiPlatformCliAr
         yes: args.yes,
         output: args.output.clone(),
         stream: args.stream,
+        files: args.files.clone(),
         command: match &args.command {
             OpenAiPlatformCommand::Ops { json } => shell_oa::OpenAiCliCommand::Ops { json: *json },
             OpenAiPlatformCommand::Call {
@@ -176,9 +177,11 @@ async fn run_openai_platform_cli(args: &xai_grok_pager::app::OpenAiPlatformCliAr
                     OpenAiModelsCommand::List { input } => shell_oa::ModelsCommand::List {
                         input: input.clone(),
                     },
-                    OpenAiModelsCommand::Retrieve { model_id } => shell_oa::ModelsCommand::Retrieve {
-                        model_id: model_id.clone(),
-                    },
+                    OpenAiModelsCommand::Retrieve { model_id } => {
+                        shell_oa::ModelsCommand::Retrieve {
+                            model_id: model_id.clone(),
+                        }
+                    }
                     OpenAiModelsCommand::Delete { model_id } => shell_oa::ModelsCommand::Delete {
                         model_id: model_id.clone(),
                     },
@@ -193,20 +196,24 @@ async fn run_openai_platform_cli(args: &xai_grok_pager::app::OpenAiPlatformCliAr
             },
             OpenAiPlatformCommand::Responses { command } => shell_oa::OpenAiCliCommand::Responses {
                 command: match command {
-                    OpenAiResponsesCommand::Create { input } => shell_oa::ResponsesCommand::Create {
-                        input: input.clone(),
-                    },
-                },
-            },
-            OpenAiPlatformCommand::Embeddings { command } => shell_oa::OpenAiCliCommand::Embeddings {
-                command: match command {
-                    OpenAiEmbeddingsCommand::Create { input } => {
-                        shell_oa::EmbeddingsCommand::Create {
+                    OpenAiResponsesCommand::Create { input } => {
+                        shell_oa::ResponsesCommand::Create {
                             input: input.clone(),
                         }
                     }
                 },
             },
+            OpenAiPlatformCommand::Embeddings { command } => {
+                shell_oa::OpenAiCliCommand::Embeddings {
+                    command: match command {
+                        OpenAiEmbeddingsCommand::Create { input } => {
+                            shell_oa::EmbeddingsCommand::Create {
+                                input: input.clone(),
+                            }
+                        }
+                    },
+                }
+            }
             OpenAiPlatformCommand::Admin { command } => shell_oa::OpenAiCliCommand::Admin {
                 command: match command {
                     OpenAiAdminCommand::Ops => shell_oa::AdminCommand::Ops,
@@ -330,7 +337,9 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
                 "openrouter" => {
                     manager
                         .remove_api_key(ProviderId::OpenRouter)
-                        .map_err(|e| anyhow::anyhow!("Failed to clear OpenRouter credentials: {e}"))?;
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to clear OpenRouter credentials: {e}")
+                        })?;
                     println!("Disconnected OpenRouter.");
                 }
                 other => {
@@ -347,7 +356,9 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
             // Forward dynamic registry commands to the shell lifecycle CLI.
             let mapped = match other {
                 ProviderCliCommand::List => ProviderLifecycleCommand::List,
-                ProviderCliCommand::Show { id } => ProviderLifecycleCommand::Show { id: id.clone() },
+                ProviderCliCommand::Show { id } => {
+                    ProviderLifecycleCommand::Show { id: id.clone() }
+                }
                 ProviderCliCommand::Add {
                     id,
                     base_url,
