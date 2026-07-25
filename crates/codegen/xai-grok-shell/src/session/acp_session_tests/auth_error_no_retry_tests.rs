@@ -867,7 +867,11 @@ async fn reconstruct_full_config_honors_reasoning_effort_when_support_unknown() 
                 "xai-static-key".to_string(),
             )
             .await;
-            let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+            let mut cfg = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
             cfg.reasoning_effort = Some(ReasoningEffort::Low);
             actor.chat_state_handle.update_inference_settings(cfg);
             // Manual TOML model: `supports_reasoning_effort = None` (unknown).
@@ -1485,6 +1489,1072 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
                 Some(token.as_str()),
                 "credentials must be unchanged when the guard blocks the re-mint"
             );
+        })
+        .await;
+}
+
+/// Milestone 1 regression: a Moonshot model routed through OpenRouter that
+/// receives HTTP 401 must retain OpenRouter identity on the shell→pager
+/// RetryState boundary, never trigger xAI OAuth recovery, and never emit a
+/// global `/login` repair path.
+#[tokio::test(flavor = "current_thread")]
+async fn moonshot_openrouter_401_retains_openrouter_provider_context() {
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+    use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+    use crate::session::storage::SessionUpdate;
+    use xai_grok_inference_types::ApiErrorDiagnostics;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, mut persistence_rx) = make_actor_with_auth_and_credentials(
+                Some(am),
+                xai_chat_state::AuthType::ApiKey,
+                "or-bad-key".to_string(),
+            )
+            .await;
+
+            // Catalog: Moonshot model served exclusively through OpenRouter.
+            let catalog_id = "openrouter:moonshotai/kimi-k2";
+            let model_slug = "moonshotai/kimi-k2";
+            let mut entry = ModelEntry {
+                info: ModelInfo::fallback(model_slug),
+                model_provider: Some(ResolvedModelProvider {
+                    id: "openrouter".to_string(),
+                    kind: ModelProviderKind::OpenRouter,
+                    openrouter_fallback_models: Vec::new(),
+                    openrouter_provider_preferences: None,
+                    openrouter_plugins: Vec::new(),
+                    command: Vec::new(),
+                }),
+                api_key: None,
+                env_key: None,
+                auth_provider: None,
+                api_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            };
+            entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+            entry.info.model = model_slug.to_string();
+            actor
+                .models_manager
+                .insert_test_entry(catalog_id, entry.clone());
+            // Also index by the raw upstream slug used on the wire.
+            actor.models_manager.insert_test_entry(model_slug, entry);
+
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .expect("settings");
+            settings.model = model_slug.to_string();
+            settings.base_url = "https://openrouter.ai/api/v1".to_string();
+            settings.api_backend = crate::inference::ApiBackend::ChatCompletions;
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            let mut err = auth_error();
+            err.message = "Unauthorized (401) from https://openrouter.ai/api/v1/chat/completions: \
+                 User not found."
+                .to_string();
+            err.diagnostics = Some(ApiErrorDiagnostics {
+                provider_name: Some("OpenRouter".to_string()),
+                generation_id: Some("gen-test-moonshot-401".to_string()),
+                ..Default::default()
+            });
+
+            let result = actor.handle_sampling_failure(err).await;
+            assert!(
+                result.is_err(),
+                "OpenRouter API-key 401 must be terminal (no silent retry)"
+            );
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "OpenRouter 401 must never initiate xAI OAuth / session refresh"
+            );
+
+            let mut saw_openrouter_failed = false;
+            while let Ok(msg) = persistence_rx.try_recv() {
+                if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                    && let XaiSessionUpdate::RetryState(
+                        crate::extensions::notification::RetryState::Failed {
+                            error_type,
+                            message,
+                            provider,
+                        },
+                    ) = &notif.update
+                {
+                    use crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE;
+                    assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
+                    assert!(
+                        message.contains("OpenRouter") && message.contains("/providers"),
+                        "message={message}"
+                    );
+                    assert!(
+                        !message.contains("/login"),
+                        "message must not mention /login: {message}"
+                    );
+                    assert!(
+                        !message.contains("Unauthorized (401)"),
+                        "legacy-safe message must omit Unauthorized (401): {message}"
+                    );
+                    assert!(
+                        !message.contains("grok login"),
+                        "must not mention grok login: {message}"
+                    );
+                    let provider = provider
+                        .as_ref()
+                        .expect("OpenRouter 401 must attach provider credential failure context");
+                    assert_eq!(provider.provider_id, "openrouter");
+                    assert_eq!(provider.provider_name, "OpenRouter");
+                    assert_eq!(
+                        provider.failed_model_id.as_deref(),
+                        Some(model_slug),
+                        "failed model id must retain the Moonshot slug"
+                    );
+                    assert_eq!(provider.http_status, Some(401));
+                    assert_eq!(
+                        provider.generation_id.as_deref(),
+                        Some("gen-test-moonshot-401")
+                    );
+                    assert_eq!(
+                        provider.error_category.as_deref(),
+                        Some(PROVIDER_CREDENTIAL_ERROR_TYPE)
+                    );
+                    assert!(
+                        provider
+                            .backend
+                            .as_deref()
+                            .is_some_and(|b| b.contains("chat")),
+                        "backend={:?}",
+                        provider.backend
+                    );
+                    saw_openrouter_failed = true;
+                }
+            }
+            assert!(
+                saw_openrouter_failed,
+                "expected RetryState::Failed with OpenRouter provider context"
+            );
+        })
+        .await;
+}
+
+/// Realistic regression: session-based ACP method (`cached_token`) + loaded
+/// xAI WebLogin/OIDC AuthManager + OpenRouter catalog entry **without** an
+/// inline model key + OpenRouter 401.
+///
+/// Must never call the xAI refresher, never return RefreshAuthAndResubmit,
+/// and emit provider-scoped OpenRouter repair (no `/login` / `grok login`).
+#[tokio::test(flavor = "current_thread")]
+async fn moonshot_openrouter_401_with_weblogin_loaded_skips_xai_recovery() {
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+    use crate::auth::{AuthMode, GrokAuth};
+    use crate::extensions::notification::{
+        PROVIDER_CREDENTIAL_ERROR_TYPE, SessionUpdate as XaiSessionUpdate,
+    };
+    use crate::session::storage::SessionUpdate;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let dir = tempfile::tempdir().expect("tempdir");
+            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            // Active WebLogin/OIDC session present concurrently.
+            am.hot_swap(GrokAuth {
+                key: "xai-weblogin-token".into(),
+                auth_mode: AuthMode::WebLogin,
+                refresh_token: Some("rt".into()),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                ..GrokAuth::test_default()
+            });
+            am.set_refresher(refresher);
+
+            // Session-based ACP method (the real mis-recovery path).
+            let (actor, mut persistence_rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "xai-session-jwt".to_string(),
+            )
+            .await;
+
+            let model_slug = "moonshotai/kimi-k2";
+            // No inline api_key — key would live in OpenRouter vault.
+            let mut entry = ModelEntry {
+                info: ModelInfo::fallback(model_slug),
+                model_provider: Some(ResolvedModelProvider {
+                    id: "openrouter".to_string(),
+                    kind: ModelProviderKind::OpenRouter,
+                    openrouter_fallback_models: Vec::new(),
+                    openrouter_provider_preferences: None,
+                    openrouter_plugins: Vec::new(),
+                    command: Vec::new(),
+                }),
+                api_key: None,
+                env_key: None,
+                auth_provider: None,
+                api_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            };
+            entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+            entry.info.model = model_slug.to_string();
+            assert!(
+                !entry.has_own_credentials(),
+                "fixture must have no inline key (vault-style)"
+            );
+            assert!(entry.is_provider_scoped_byok());
+            actor.models_manager.insert_test_entry(model_slug, entry);
+
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .expect("settings");
+            settings.model = model_slug.to_string();
+            settings.base_url = "https://openrouter.ai/api/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            // Provider-scoped BYOK must disable session-token recovery.
+            assert!(
+                !crate::agent::auth_method::session_token_auth_gate(
+                    true, // session-based ACP method
+                    crate::agent::auth_method::ModelByok::Byok,
+                    false,
+                ),
+                "Byok models must not activate session-token recovery"
+            );
+
+            let result = actor.handle_sampling_failure(auth_error()).await;
+            assert!(
+                result.is_err(),
+                "OpenRouter 401 must be terminal, not recovery"
+            );
+            assert!(
+                !matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                "must not return RefreshAuthAndResubmit for OpenRouter"
+            );
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "must not call xAI OIDC refresher for OpenRouter failure"
+            );
+
+            let mut saw = false;
+            while let Ok(msg) = persistence_rx.try_recv() {
+                if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                    && let XaiSessionUpdate::RetryState(
+                        crate::extensions::notification::RetryState::Failed {
+                            error_type,
+                            message,
+                            provider,
+                        },
+                    ) = &notif.update
+                {
+                    assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
+                    assert!(!message.contains("/login"));
+                    assert!(!message.contains("grok login"));
+                    assert!(!message.contains("WebLogin"));
+                    let p = provider.as_ref().expect("provider context");
+                    assert_eq!(p.provider_id, "openrouter");
+                    saw = true;
+                }
+            }
+            assert!(saw, "expected OpenRouter provider-scoped failure");
+        })
+        .await;
+}
+
+/// Official OpenAI API-key route (no inline key) under session ACP method
+/// + loaded xAI OIDC AuthManager must skip xAI recovery on 401.
+#[tokio::test(flavor = "current_thread")]
+async fn openai_api_key_401_with_session_method_skips_xai_recovery() {
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+    use crate::auth::{AuthMode, GrokAuth};
+    use crate::extensions::notification::{
+        PROVIDER_CREDENTIAL_ERROR_TYPE, SessionUpdate as XaiSessionUpdate,
+    };
+    use crate::session::storage::SessionUpdate;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let dir = tempfile::tempdir().expect("tempdir");
+            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            am.hot_swap(GrokAuth {
+                key: "xai-oidc-token".into(),
+                auth_mode: AuthMode::Oidc,
+                refresh_token: Some("rt".into()),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                ..GrokAuth::test_default()
+            });
+            am.set_refresher(refresher);
+            let (actor, mut persistence_rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "xai-session-jwt".to_string(),
+            )
+            .await;
+
+            let model_slug = "gpt-4o";
+            // No inline api_key — key lives in OpenAI provider vault.
+            let mut entry = ModelEntry {
+                info: ModelInfo::fallback(model_slug),
+                model_provider: Some(ResolvedModelProvider {
+                    id: "openai".to_string(),
+                    kind: ModelProviderKind::OpenAi,
+                    openrouter_fallback_models: Vec::new(),
+                    openrouter_provider_preferences: None,
+                    openrouter_plugins: Vec::new(),
+                    command: Vec::new(),
+                }),
+                api_key: None,
+                env_key: None,
+                auth_provider: None,
+                api_base_url: Some("https://api.openai.com/v1".to_string()),
+            };
+            entry.info.base_url = "https://api.openai.com/v1".to_string();
+            entry.info.model = model_slug.to_string();
+            assert!(!entry.has_own_credentials());
+            assert!(entry.is_provider_scoped_byok());
+            actor.models_manager.insert_test_entry(model_slug, entry);
+
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = model_slug.to_string();
+            settings.base_url = "https://api.openai.com/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            let result = actor.handle_sampling_failure(auth_error()).await;
+            assert!(
+                result.is_err(),
+                "OpenAI API-key 401 must be terminal, not recovery"
+            );
+            assert!(!called.load(Ordering::SeqCst));
+            assert!(!matches!(
+                result,
+                Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)
+            ));
+
+            let mut saw = false;
+            while let Ok(msg) = persistence_rx.try_recv() {
+                if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                    && let XaiSessionUpdate::RetryState(
+                        crate::extensions::notification::RetryState::Failed {
+                            error_type,
+                            message,
+                            provider,
+                        },
+                    ) = &notif.update
+                {
+                    assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
+                    assert!(message.contains("OpenAI"));
+                    assert!(!message.contains("/login"));
+                    assert!(!message.contains("grok login"));
+                    assert_eq!(
+                        provider.as_ref().map(|p| p.provider_id.as_str()),
+                        Some("openai")
+                    );
+                    saw = true;
+                }
+            }
+            assert!(saw);
+        })
+        .await;
+}
+
+/// Control: first-party xAI under session method still runs OIDC recovery.
+#[tokio::test(flavor = "current_thread")]
+async fn first_party_xai_401_still_runs_session_recovery() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "initial-test-key".to_string(),
+            )
+            .await;
+            // Default test model is first-party (no OpenRouter provider).
+            let result = actor.handle_sampling_failure(auth_error()).await;
+            assert!(
+                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                "first-party xAI must still recover via session refresh"
+            );
+            assert!(
+                called.load(Ordering::SeqCst),
+                "first-party xAI must invoke the OIDC refresher"
+            );
+        })
+        .await;
+}
+
+/// Diagnostics allowlist canary: fake secrets in messages/keys must never
+/// appear in the structured terminal-failure payload.
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_failure_diagnostics_redact_secrets_and_prompts() {
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+    use xai_grok_inference_types::ApiErrorDiagnostics;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = make_actor_with_auth_and_credentials(
+                None,
+                xai_chat_state::AuthType::ApiKey,
+                "sk-CANARY-OPENROUTER-SECRET-KEY".to_string(),
+            )
+            .await;
+            let model_slug = "moonshotai/kimi-k2";
+            let mut entry = ModelEntry {
+                info: ModelInfo::fallback(model_slug),
+                model_provider: Some(ResolvedModelProvider {
+                    id: "openrouter".to_string(),
+                    kind: ModelProviderKind::OpenRouter,
+                    openrouter_fallback_models: Vec::new(),
+                    openrouter_provider_preferences: None,
+                    openrouter_plugins: Vec::new(),
+                    command: Vec::new(),
+                }),
+                api_key: None,
+                env_key: None,
+                auth_provider: None,
+                api_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            };
+            entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+            entry.info.model = model_slug.to_string();
+            actor.models_manager.insert_test_entry(model_slug, entry);
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = model_slug.to_string();
+            settings.base_url = "https://openrouter.ai/api/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            let mut err = auth_error();
+            err.message =
+                "Unauthorized (401) Authorization: Bearer sk-CANARY-OPENROUTER-SECRET-KEY \
+                 prompt=Please rewrite my confidential memo RESPONSE_BODY_CANARY"
+                    .to_string();
+            err.diagnostics = Some(ApiErrorDiagnostics {
+                generation_id: Some("gen-safe-id".into()),
+                ..Default::default()
+            });
+
+            // Exercise the path; redaction is verified by inspecting the
+            // provider context construction (allowlisted fields only).
+            let provider = actor
+                .provider_credential_failure_context(
+                    model_slug,
+                    Some(401),
+                    "provider_credential",
+                    err.diagnostics.as_ref(),
+                )
+                .await
+                .expect("openrouter context");
+            let encoded = serde_json::to_string(&provider).expect("json");
+            assert!(!encoded.contains("sk-CANARY"));
+            assert!(!encoded.contains("Authorization"));
+            assert!(!encoded.contains("confidential memo"));
+            assert!(!encoded.contains("RESPONSE_BODY_CANARY"));
+            assert!(!encoded.contains("Bearer"));
+            assert_eq!(provider.generation_id.as_deref(), Some("gen-safe-id"));
+            assert_eq!(provider.provider_id, "openrouter");
+            let _ = actor.handle_sampling_failure(err).await;
+        })
+        .await;
+}
+
+/// Exact-host matching rejects URL spoof shapes.
+#[tokio::test(flavor = "current_thread")]
+async fn provider_host_fallback_rejects_url_spoofs() {
+    use crate::extensions::notification::{approved_provider_for_exact_host, host_from_base_url};
+
+    let cases = [
+        "https://openrouter.ai.evil.invalid/api/v1",
+        "https://evil.example/?next=openrouter.ai",
+        "https://not-openrouter.ai/api/v1",
+        "ftp://openrouter.ai/api/v1",
+        "not-a-url",
+    ];
+    for url in cases {
+        let host = host_from_base_url(url);
+        if let Some(h) = host {
+            assert!(
+                approved_provider_for_exact_host(&h).is_none(),
+                "spoof must not approve host for {url}: {h}"
+            );
+        }
+    }
+    assert_eq!(
+        approved_provider_for_exact_host(
+            &host_from_base_url("https://openrouter.ai/api/v1").unwrap()
+        ),
+        Some(("openrouter", "OpenRouter"))
+    );
+    assert_eq!(
+        approved_provider_for_exact_host(&host_from_base_url("https://api.openai.com/v1").unwrap()),
+        Some(("openai", "OpenAI"))
+    );
+}
+
+// ── B1: reconstruct_full_config must not wire xAI bearer_resolver for
+// provider-scoped vault models (catalog-only OpenRouter/OpenAI). ──────────
+
+fn insert_openrouter_vault_model(actor: &SessionActor, model_slug: &str) {
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+    let mut entry = ModelEntry {
+        info: ModelInfo::fallback(model_slug),
+        model_provider: Some(ResolvedModelProvider {
+            id: "openrouter".to_string(),
+            kind: ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        }),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+    };
+    entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+    entry.info.model = model_slug.to_string();
+    assert!(!entry.has_own_credentials());
+    assert!(entry.is_provider_scoped_byok());
+    actor.models_manager.insert_test_entry(model_slug, entry);
+}
+
+fn insert_openai_api_vault_model(actor: &SessionActor, model_slug: &str) {
+    use crate::agent::config::{ModelEntry, ModelInfo};
+    use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+    let mut entry = ModelEntry {
+        info: ModelInfo::fallback(model_slug),
+        model_provider: Some(ResolvedModelProvider {
+            id: "openai".to_string(),
+            kind: ModelProviderKind::OpenAi,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        }),
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: Some("https://api.openai.com/v1".to_string()),
+    };
+    entry.info.base_url = "https://api.openai.com/v1".to_string();
+    entry.info.model = model_slug.to_string();
+    assert!(entry.is_provider_scoped_byok());
+    actor.models_manager.insert_test_entry(model_slug, entry);
+}
+
+/// Session ACP + loaded xAI OIDC + OpenRouter catalog vault model (no inline
+/// key): reconstructed config must not install xAI bearer_resolver, and the
+/// provider key on credentials must remain selected.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_openrouter_vault_model_no_xai_bearer_resolver() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("xai-session-jwt-for-resolver");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "openrouter-provider-key".to_string(),
+            )
+            .await;
+
+            let model_slug = "moonshotai/kimi-k2";
+            insert_openrouter_vault_model(&actor, model_slug);
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .expect("settings");
+            settings.model = model_slug.to_string();
+            settings.base_url = "https://openrouter.ai/api/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_none(),
+                "OpenRouter vault model must not install xAI bearer_resolver"
+            );
+            assert_eq!(
+                cfg.api_key.as_deref(),
+                Some("openrouter-provider-key"),
+                "provider key must remain selected (not overwritten by xAI session)"
+            );
+            assert_eq!(
+                cfg.provider_identity,
+                xai_grok_inference::config::ProviderIdentity::OpenRouter
+            );
+            // Guard: even if a resolver leaked in, it must not surface the xAI token.
+            if let Some(resolver) = cfg.bearer_resolver.as_ref() {
+                let bearer = resolver.current_bearer();
+                assert_ne!(
+                    bearer.as_deref(),
+                    Some("xai-session-jwt-for-resolver"),
+                    "xAI session token must never be the live bearer for OpenRouter"
+                );
+            }
+        })
+        .await;
+}
+
+/// Official OpenAI API-key vault model under session ACP: no xAI resolver.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_openai_api_vault_model_no_xai_bearer_resolver() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("xai-session-jwt-for-resolver");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "openai-api-key-on-wire".to_string(),
+            )
+            .await;
+
+            let model_slug = "gpt-4o";
+            insert_openai_api_vault_model(&actor, model_slug);
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = model_slug.to_string();
+            settings.base_url = "https://api.openai.com/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(cfg.bearer_resolver.is_none());
+            assert_eq!(cfg.api_key.as_deref(), Some("openai-api-key-on-wire"));
+            assert_eq!(
+                cfg.provider_identity,
+                xai_grok_inference::config::ProviderIdentity::OpenAi
+            );
+        })
+        .await;
+}
+
+/// Catalog miss + exact OpenRouter host still withholds xAI resolver.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_catalog_miss_openrouter_host_no_xai_bearer_resolver() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("xai-session-jwt-for-resolver");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "or-key".to_string(),
+            )
+            .await;
+            // No catalog entry — only host identity.
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = "unknown-or-model".to_string();
+            settings.base_url = "https://openrouter.ai/api/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_none(),
+                "catalog miss on openrouter.ai must not install xAI bearer_resolver"
+            );
+            assert_eq!(
+                cfg.provider_identity,
+                xai_grok_inference::config::ProviderIdentity::OpenRouter
+            );
+        })
+        .await;
+}
+
+/// Catalog miss + ChatGPT Codex base URL is OpenAI identity, never xAI recovery.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_catalog_miss_codex_url_is_openai_not_xai() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("xai-session-jwt");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "chatgpt-access".to_string(),
+            )
+            .await;
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = "codex-unknown".to_string();
+            settings.base_url = crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL.to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(cfg.bearer_resolver.is_none());
+            assert_eq!(
+                cfg.provider_identity,
+                xai_grok_inference::config::ProviderIdentity::OpenAi
+            );
+        })
+        .await;
+}
+
+/// Control: first-party xAI under session method still wires the live resolver.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_first_party_xai_still_wires_bearer_resolver() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_dir, am) = auth_manager_with_valid_token("fresh-xai-session");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "stale-buffered".to_string(),
+            )
+            .await;
+            // Default test model is first-party xAI.
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_some(),
+                "first-party xAI session method must wire live bearer_resolver"
+            );
+            assert_eq!(
+                cfg.bearer_resolver
+                    .as_ref()
+                    .and_then(|r| r.current_bearer())
+                    .as_deref(),
+                Some("fresh-xai-session"),
+            );
+        })
+        .await;
+}
+
+// ── B2: ChatGPT OAuth pre-turn must be scoped to the active Codex route. ─
+
+#[test]
+fn chatgpt_oauth_preturn_applies_only_to_codex_base_url() {
+    use super::inference_turn::{chatgpt_oauth_preturn_applies, is_chatgpt_codex_base_url};
+
+    assert!(is_chatgpt_codex_base_url(
+        crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL
+    ));
+    assert!(is_chatgpt_codex_base_url(
+        "https://chatgpt.com/backend-api/codex/responses"
+    ));
+    assert!(chatgpt_oauth_preturn_applies(
+        crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL
+    ));
+
+    // Must never apply to unrelated routes even when ChatGPT is "connected".
+    assert!(!chatgpt_oauth_preturn_applies(
+        "https://openrouter.ai/api/v1"
+    ));
+    assert!(!chatgpt_oauth_preturn_applies("https://api.openai.com/v1"));
+    assert!(!chatgpt_oauth_preturn_applies("https://api.x.ai/v1"));
+    assert!(!chatgpt_oauth_preturn_applies("http://127.0.0.1:8000/v1"));
+    // Host spoof
+    assert!(!is_chatgpt_codex_base_url(
+        "https://chatgpt.com.evil.invalid/backend-api/codex"
+    ));
+    assert!(!is_chatgpt_codex_base_url(
+        "https://evil.example/?h=chatgpt.com/backend-api/codex"
+    ));
+}
+
+/// ChatGPT OAuth tokens on disk + active OpenRouter: credentials unchanged,
+/// no ChatGPT path, xAI refresh not blocked (but gate is inactive for OR).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(stored_key_home)]
+async fn preturn_chatgpt_connected_openrouter_preserves_provider_key() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let home = tempfile::tempdir().expect("temp home");
+            crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+            // Fake ChatGPT OAuth "connected" under the test home.
+            crate::auth::chatgpt_oauth::store_tokens(
+                home.path(),
+                &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                    access_token: "chatgpt-access-MUST-NOT-LEAK".into(),
+                    refresh_token: "rt".into(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+                    account_id: Some("acc".into()),
+                    email: None,
+                },
+            )
+            .expect("store chatgpt tokens");
+            assert_eq!(
+                crate::auth::chatgpt_oauth::status(home.path()),
+                crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected
+            );
+
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "openrouter-provider-key".to_string(),
+            )
+            .await;
+            let model_slug = "moonshotai/kimi-k2";
+            insert_openrouter_vault_model(&actor, model_slug);
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = model_slug.to_string();
+            settings.base_url = "https://openrouter.ai/api/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            actor.refresh_token_if_expired().await;
+
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_credentials()
+                    .await
+                    .api_key
+                    .as_deref(),
+                Some("openrouter-provider-key"),
+                "ChatGPT OAuth must not overwrite OpenRouter credentials"
+            );
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "OpenRouter must not trigger xAI OIDC refresher either"
+            );
+
+            crate::agent::providers::set_stored_key_home_for_tests(None);
+        })
+        .await;
+}
+
+/// ChatGPT OAuth connected + active official OpenAI API-key route: key preserved.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(stored_key_home)]
+async fn preturn_chatgpt_connected_openai_api_key_preserved() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let home = tempfile::tempdir().expect("temp home");
+            crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+            crate::auth::chatgpt_oauth::store_tokens(
+                home.path(),
+                &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                    access_token: "chatgpt-access-MUST-NOT-LEAK".into(),
+                    refresh_token: "rt".into(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+                    account_id: None,
+                    email: None,
+                },
+            )
+            .unwrap();
+
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "xai.api_key",
+                xai_chat_state::AuthType::ApiKey,
+                "openai-api-key-on-wire".to_string(),
+            )
+            .await;
+            insert_openai_api_vault_model(&actor, "gpt-4o");
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = "gpt-4o".to_string();
+            settings.base_url = "https://api.openai.com/v1".to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            actor.refresh_token_if_expired().await;
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_credentials()
+                    .await
+                    .api_key
+                    .as_deref(),
+                Some("openai-api-key-on-wire"),
+            );
+
+            crate::agent::providers::set_stored_key_home_for_tests(None);
+        })
+        .await;
+}
+
+/// Active ChatGPT Codex route: own OAuth access token is applied to credentials.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(stored_key_home)]
+async fn preturn_chatgpt_oauth_active_model_updates_own_credential() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let home = tempfile::tempdir().expect("temp home");
+            crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+            crate::auth::chatgpt_oauth::store_tokens(
+                home.path(),
+                &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                    access_token: "chatgpt-fresh-access".into(),
+                    refresh_token: "rt".into(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+                    account_id: Some("acc".into()),
+                    email: None,
+                },
+            )
+            .unwrap();
+
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "stale-or-placeholder".to_string(),
+            )
+            .await;
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            settings.model = "gpt-5.3-codex".to_string();
+            settings.base_url = crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL.to_string();
+            actor.chat_state_handle.update_inference_settings(settings);
+
+            actor.refresh_token_if_expired().await;
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_credentials()
+                    .await
+                    .api_key
+                    .as_deref(),
+                Some("chatgpt-fresh-access"),
+                "Codex route must install ChatGPT OAuth access token"
+            );
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "ChatGPT OAuth route must not invoke xAI refresher"
+            );
+
+            crate::agent::providers::set_stored_key_home_for_tests(None);
+        })
+        .await;
+}
+
+/// ChatGPT OAuth connected + active first-party xAI: xAI refresh still runs;
+/// ChatGPT token is not used.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(stored_key_home)]
+async fn preturn_chatgpt_connected_first_party_xai_still_refreshes_xai() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let home = tempfile::tempdir().expect("temp home");
+            crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+            crate::auth::chatgpt_oauth::store_tokens(
+                home.path(),
+                &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                    access_token: "chatgpt-access-MUST-NOT-LEAK".into(),
+                    refresh_token: "rt".into(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+                    account_id: None,
+                    email: None,
+                },
+            )
+            .unwrap();
+
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "initial-test-key".to_string(),
+            )
+            .await;
+            // Default model is first-party; ensure base_url is xAI if set.
+            let mut settings = actor
+                .chat_state_handle
+                .get_inference_settings()
+                .await
+                .unwrap();
+            if settings.base_url.is_empty() {
+                settings.base_url = "https://api.x.ai/v1".to_string();
+                actor.chat_state_handle.update_inference_settings(settings);
+            }
+
+            actor.refresh_token_if_expired().await;
+            assert!(
+                called.load(Ordering::SeqCst),
+                "first-party xAI must still invoke OIDC refresher when ChatGPT is connected"
+            );
+            let key = actor
+                .chat_state_handle
+                .get_credentials()
+                .await
+                .api_key
+                .expect("key");
+            assert_ne!(key, "chatgpt-access-MUST-NOT-LEAK");
+            assert_eq!(key, "refreshed-test-token");
+
+            crate::agent::providers::set_stored_key_home_for_tests(None);
         })
         .await;
 }

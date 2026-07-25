@@ -4395,6 +4395,25 @@ impl ModelEntry {
     pub fn has_own_credentials(&self) -> bool {
         self.own_credential().is_some() || self.auth_provider.is_some()
     }
+
+    /// `true` when the entry is governed by a provider-scoped credential
+    /// (OpenRouter API key, official OpenAI API key, or ChatGPT OAuth), even
+    /// when the key lives in the provider vault rather than inline on the
+    /// model entry.
+    ///
+    /// Authoritative for main-session BYOK gates and subagent auth type.
+    /// Such models must never borrow the xAI session token or trigger xAI
+    /// OIDC recovery on 401. ChatGPT OAuth remains provider-scoped OAuth
+    /// (refresh only its own credential via `auth_provider`); it is still
+    /// `Byok` from the session-token gate's perspective.
+    pub fn is_provider_scoped_byok(&self) -> bool {
+        self.model_provider.as_ref().is_some_and(|provider| {
+            matches!(
+                provider.kind,
+                ModelProviderKind::OpenAi | ModelProviderKind::OpenRouter
+            )
+        })
+    }
 }
 impl std::ops::Deref for ModelEntry {
     type Target = ModelInfo;
@@ -4988,7 +5007,11 @@ pub fn resolve_model_auth_facts_and_provider(
 fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
     match lookup {
         ModelLookup::ConfigUnavailable => ModelByok::Unknown,
-        ModelLookup::Loaded(Some(e)) if e.has_own_credentials() => ModelByok::Byok,
+        // Inline keys, named auth providers, and OpenRouter/OpenAI vault
+        // routes are all non-session credentials — never xAI token refresh.
+        ModelLookup::Loaded(Some(e)) if e.has_own_credentials() || e.is_provider_scoped_byok() => {
+            ModelByok::Byok
+        }
         ModelLookup::Loaded(_) => ModelByok::NotByok,
     }
 }
@@ -5225,10 +5248,12 @@ pub fn inference_config_for_model(
             .or_insert_with(|| "enabled".to_string());
     }
     // ChatGPT subscription OAuth: Codex/OpenAI wire headers (not Grok-branded).
-    if credentials.base_url.contains("chatgpt.com/backend-api/codex") {
+    if credentials
+        .base_url
+        .contains("chatgpt.com/backend-api/codex")
+    {
         let account_id = crate::agent::providers::stored_openai_oauth_account_id();
-        for (key, value) in crate::auth::chatgpt_oauth::oauth_extra_headers(account_id.as_deref())
-        {
+        for (key, value) in crate::auth::chatgpt_oauth::oauth_extra_headers(account_id.as_deref()) {
             extra_headers.entry(key).or_insert(value);
         }
     }
@@ -5957,8 +5982,12 @@ reasoning_effort = "low"
             model: "grok-build".into(),
             ..Default::default()
         };
-        let (model, cfg) =
-            finalize_image_describe_inference_config(Some(aux), &active, Some("cli".into()), Some(7));
+        let (model, cfg) = finalize_image_describe_inference_config(
+            Some(aux),
+            &active,
+            Some("cli".into()),
+            Some(7),
+        );
         assert_eq!(model, "grok-build");
         assert_eq!(cfg.model, "grok-build");
         assert_eq!(cfg.client_identifier.as_deref(), Some("cli"));
@@ -7165,7 +7194,155 @@ reasoning_effort = "low"
             byok_from_lookup(&ModelLookup::Loaded(Some(&session))),
             ModelByok::NotByok,
         );
+        // OpenRouter vault key (no inline api_key) is still Byok.
+        let mut openrouter = test_model_entry(
+            "moonshotai/kimi-k2",
+            "https://openrouter.ai/api/v1",
+            None,
+            None,
+            None,
+        );
+        openrouter.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "openrouter".to_string(),
+            kind: ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        });
+        assert!(!openrouter.has_own_credentials());
+        assert!(openrouter.is_provider_scoped_byok());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&openrouter))),
+            ModelByok::Byok,
+        );
+        // Official OpenAI API-key route (no inline key) is Byok.
+        let mut openai = test_model_entry("gpt-4o", "https://api.openai.com/v1", None, None, None);
+        openai.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "openai".to_string(),
+            kind: ModelProviderKind::OpenAi,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        });
+        assert!(openai.is_provider_scoped_byok());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&openai))),
+            ModelByok::Byok,
+        );
+        // Custom provider without credentials is NotByok.
+        let mut custom = test_model_entry("local", "http://127.0.0.1:8000/v1", None, None, None);
+        custom.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "local".to_string(),
+            kind: ModelProviderKind::Custom,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        });
+        assert!(!custom.is_provider_scoped_byok());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&custom))),
+            ModelByok::NotByok,
+        );
     }
+
+    #[test]
+    fn is_provider_scoped_byok_matrix() {
+        // First-party xAI: never provider-scoped BYOK.
+        let xai = test_model_entry("grok", "https://api.x.ai/v1", None, None, None);
+        assert!(!xai.is_provider_scoped_byok());
+        assert!(!xai.has_own_credentials());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&xai))),
+            ModelByok::NotByok
+        );
+
+        // OpenRouter vault key (no inline api_key).
+        let mut or = test_model_entry("m", "https://openrouter.ai/api/v1", None, None, None);
+        or.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "openrouter".into(),
+            kind: ModelProviderKind::OpenRouter,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        });
+        assert!(!or.has_own_credentials());
+        assert!(or.is_provider_scoped_byok());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&or))),
+            ModelByok::Byok
+        );
+
+        // Official OpenAI API-key route (no inline key).
+        let mut oai = test_model_entry("m", "https://api.openai.com/v1", None, None, None);
+        oai.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "openai".into(),
+            kind: ModelProviderKind::OpenAi,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        });
+        assert!(!oai.has_own_credentials());
+        assert!(oai.is_provider_scoped_byok());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&oai))),
+            ModelByok::Byok
+        );
+
+        // ChatGPT OAuth: provider-scoped OAuth (own auth_provider), still Byok
+        // for the session-token gate so xAI recovery never runs. Not "API-key
+        // only" — has_own_credentials is true via auth_provider.
+        let mut chatgpt = test_model_entry("m", "https://api.openai.com/v1", None, None, None);
+        chatgpt.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "openai".into(),
+            kind: ModelProviderKind::OpenAi,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        });
+        chatgpt.auth_provider = Some(crate::auth::AuthProviderRef::unresolved(
+            "chatgpt_oauth".into(),
+        ));
+        assert!(chatgpt.has_own_credentials());
+        assert!(chatgpt.is_provider_scoped_byok());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&chatgpt))),
+            ModelByok::Byok
+        );
+
+        // Custom provider without credentials: NotByok (may share session if
+        // first-party host; otherwise host-based gates apply elsewhere).
+        let mut custom = test_model_entry("local", "http://127.0.0.1:8000/v1", None, None, None);
+        custom.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "local".into(),
+            kind: ModelProviderKind::Custom,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            command: Vec::new(),
+        });
+        assert!(!custom.is_provider_scoped_byok());
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&custom))),
+            ModelByok::NotByok
+        );
+
+        // Missing catalog entry → NotByok; config unavailable → Unknown.
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(None)),
+            ModelByok::NotByok
+        );
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::ConfigUnavailable),
+            ModelByok::Unknown
+        );
+    }
+
     #[test]
     fn resolve_model_auth_facts_empty_model_id_is_unknown() {
         assert_eq!(

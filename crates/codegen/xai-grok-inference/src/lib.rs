@@ -24,9 +24,10 @@ pub mod config;
 pub mod doom_loop;
 pub mod events;
 pub mod handle;
-pub mod metrics;
-pub mod retry;
 pub mod inference_log;
+pub mod metrics;
+pub mod openrouter_baseline;
+pub mod retry;
 mod shared_http;
 pub mod stream;
 pub mod types;
@@ -34,22 +35,27 @@ pub mod types;
 // Public re-exports — the API surface consumers see.
 pub use actor::InferenceActor;
 pub use attribution::{
-    Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, InferenceConsumer, SharedAttributionCallback,
+    Auth401AttributionCallback, InferenceConsumer, SENT_BEARER_PREFIX_LEN,
+    SharedAttributionCallback,
 };
 pub use client::{ApiBackend, InferenceClient, user_agent_string_for};
 pub use config::{
-    AuthScheme, BearerResolver, HeaderInjector, OpenRouterMaxPrice, OpenRouterPlugin,
-    OpenRouterProviderPreferences, OriginClientInfo, RetryPolicy, InferenceConfig,
+    AuthScheme, BearerResolver, HeaderInjector, InferenceConfig, OpenRouterMaxPrice,
+    OpenRouterPlugin, OpenRouterProviderPreferences, OriginClientInfo, RetryPolicy,
     SharedBearerResolver, SharedHeaderInjector,
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent};
 pub use handle::InferenceHandle;
+pub use inference_log::AuthInfo;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
+pub use openrouter_baseline::{
+    OpenRouterEndpoint, OpenRouterEndpointInventory, coding_agent_priority_endpoints,
+    inventory_has_endpoint, openrouter_endpoint_inventory, schema_field_names,
+};
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,
     format_inference_error, resolve_max_retries, retry_backoff_with_jitter,
 };
-pub use inference_log::AuthInfo;
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;

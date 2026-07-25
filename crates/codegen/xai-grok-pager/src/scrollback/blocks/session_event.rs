@@ -89,7 +89,22 @@ pub enum SessionEvent {
     /// recovery was exhausted. Rendered as a prominent call-to-action that
     /// points the user at `/login` to re-authenticate, replacing the raw
     /// "Retry failed: Unauthorized (401) …" dump.
+    ///
+    /// Reserved for first-party / session-token auth. Provider API-key
+    /// rejections use [`Self::ProviderCredentialRequired`] so the repair
+    /// path names the configured provider and never suggests `/login`.
     ReAuthRequired,
+    /// A configured third-party provider (OpenRouter, OpenAI, …) rejected its
+    /// API key. Points the user at `/providers` for that provider only — never
+    /// at global `/login` or xAI OAuth.
+    ProviderCredentialRequired {
+        /// Stable provider slug (`openrouter`, `openai`, …).
+        provider_id: String,
+        /// User-facing provider label (`OpenRouter`, `OpenAI`, …).
+        provider_name: String,
+        /// Catalog / routed model that failed, when known.
+        failed_model_id: Option<String>,
+    },
     /// Terminal context overflow — ideally unreachable, since auto-compaction should
     /// shrink the conversation first; a safeguard for when it didn't (estimate drift
     /// vs the server's max_prompt_length, or compaction suppressed/failed). One actionable
@@ -232,6 +247,20 @@ impl SessionEvent {
                  credentials were rejected. Run /login to re-authenticate, then resend \
                  your message."
                     .to_string()
+            }
+            SessionEvent::ProviderCredentialRequired {
+                provider_name,
+                failed_model_id,
+                ..
+            } => {
+                let mut msg =
+                    xai_grok_shell::extensions::notification::provider_credential_repair_message(
+                        provider_name,
+                    );
+                if let Some(model) = failed_model_id.as_deref().filter(|m| !m.is_empty()) {
+                    msg.push_str(&format!(" Failed model: {model}."));
+                }
+                msg
             }
             SessionEvent::ContextTooLarge => {
                 "This conversation is too large for the model's context window. \
@@ -650,6 +679,7 @@ impl BlockContent for SessionEventBlock {
         let style = if matches!(
             self.event,
             SessionEvent::ReAuthRequired
+                | SessionEvent::ProviderCredentialRequired { .. }
                 | SessionEvent::ContextTooLarge
                 | SessionEvent::ImageInputUnsupported
                 | SessionEvent::RetryFailed { .. }
@@ -701,6 +731,7 @@ impl BlockContent for SessionEventBlock {
         if matches!(
             self.event,
             SessionEvent::ReAuthRequired
+                | SessionEvent::ProviderCredentialRequired { .. }
                 | SessionEvent::ContextTooLarge
                 | SessionEvent::ImageInputUnsupported
                 | SessionEvent::RetryFailed { .. }
@@ -969,6 +1000,20 @@ mod tests {
                 || msg.to_lowercase().contains("credentials"),
             "must explain it is an auth problem: {msg}"
         );
+    }
+
+    #[test]
+    fn provider_credential_required_names_openrouter_not_login() {
+        let event = SessionEvent::ProviderCredentialRequired {
+            provider_id: "openrouter".into(),
+            provider_name: "OpenRouter".into(),
+            failed_model_id: Some("moonshotai/kimi-k2".into()),
+        };
+        let msg = event.message();
+        assert!(msg.contains("OpenRouter"), "{msg}");
+        assert!(msg.contains("/providers"), "{msg}");
+        assert!(msg.contains("moonshotai/kimi-k2"), "{msg}");
+        assert!(!msg.contains("/login"), "{msg}");
     }
 
     #[test]

@@ -349,6 +349,7 @@
             &RetryState::Failed {
                 error_type: "proxy_error".into(),
                 message: "status 403: run out of credits".into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -380,6 +381,7 @@
                 message:
                     "API error (status 402 Payment Required): Grok Build usage balance exhausted"
                         .into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -405,6 +407,7 @@
             &RetryState::Failed {
                 error_type: "server_error".into(),
                 message: "internal server error".into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -451,6 +454,7 @@
                 message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/messages: \
                           no auth context"
                     .into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -462,6 +466,133 @@
             "auth 401 must surface the actionable re-auth prompt"
         );
         assert!(!session.credit_limit_blocked);
+    }
+
+    /// Milestone 1: Moonshot-through-OpenRouter 401 retains OpenRouter
+    /// identity at the pager boundary, renders `/providers` repair copy,
+    /// never mentions `/login`, and never routes to the global re-auth
+    /// (xAI OAuth) path.
+    #[test]
+    fn apply_retry_state_openrouter_moonshot_401_provider_repair_no_login() {
+        use xai_grok_shell::extensions::notification::{
+            provider_credential_repair_message, ProviderCredentialFailure,
+            PROVIDER_CREDENTIAL_ERROR_TYPE,
+        };
+
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.in_flight_prompt = Some(InFlightPrompt {
+            text: "moonshot via openrouter".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(9),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: PROVIDER_CREDENTIAL_ERROR_TYPE.into(),
+                message: provider_credential_repair_message("OpenRouter"),
+                provider: Some(ProviderCredentialFailure {
+                    provider_id: "openrouter".into(),
+                    provider_name: "OpenRouter".into(),
+                    failed_model_id: Some("moonshotai/kimi-k2".into()),
+                    http_status: Some(401),
+                    request_id: None,
+                    generation_id: Some("gen-test-moonshot-401".into()),
+                    backend: Some("chatcompletions".into()),
+                    error_category: Some(PROVIDER_CREDENTIAL_ERROR_TYPE.into()),
+                }),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+
+        let event = last_session_event(&scrollback).expect("session event");
+        let msg = event.message();
+        match &event {
+            SessionEvent::ProviderCredentialRequired {
+                provider_id,
+                provider_name,
+                failed_model_id,
+            } => {
+                assert_eq!(provider_id, "openrouter");
+                assert_eq!(provider_name, "OpenRouter");
+                assert_eq!(failed_model_id.as_deref(), Some("moonshotai/kimi-k2"));
+            }
+            other => panic!("expected ProviderCredentialRequired, got {other:?}"),
+        }
+        assert!(
+            msg.contains("OpenRouter"),
+            "repair copy must name OpenRouter: {msg}"
+        );
+        assert!(
+            msg.contains("/providers"),
+            "repair copy must direct to /providers: {msg}"
+        );
+        assert!(
+            !msg.contains("/login"),
+            "OpenRouter 401 must never mention /login: {msg}"
+        );
+        assert!(
+            !matches!(event, SessionEvent::ReAuthRequired),
+            "must not use the global ReAuthRequired /login path"
+        );
+        assert!(
+            session.in_flight_prompt.is_some(),
+            "provider-scoped auth failure preserves the in-flight prompt"
+        );
+    }
+
+    /// Legacy-reader compatibility: a new OpenRouter payload whose additive
+    /// `provider` field is ignored (defaults to None) must not become global
+    /// `ReAuthRequired`, because error_type is `provider_credential` and the
+    /// message omits `Unauthorized (401)`.
+    #[test]
+    fn legacy_reader_openrouter_payload_does_not_become_reauth_required() {
+        use xai_grok_shell::extensions::notification::{
+            provider_credential_repair_message, PROVIDER_CREDENTIAL_ERROR_TYPE,
+        };
+
+        // Simulate an older pager that only sees error_type + message.
+        let retry = RetryState::Failed {
+            error_type: PROVIDER_CREDENTIAL_ERROR_TYPE.into(),
+            message: provider_credential_repair_message("OpenRouter"),
+            provider: None,
+        };
+        // Round-trip JSON without provider must also stay non-reauthable.
+        let json = serde_json::to_value(&retry).expect("serialize");
+        assert!(json.get("provider").is_none() || json.get("provider").unwrap().is_null());
+        let decoded: RetryState = serde_json::from_value(json).expect("deserialize");
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&decoded, &mut session, &mut scrollback, false);
+        let event = last_session_event(&scrollback).expect("event");
+        assert!(
+            !matches!(event, SessionEvent::ReAuthRequired),
+            "legacy reader must not open global /login for OpenRouter payload: {event:?}"
+        );
+        assert!(
+            matches!(event, SessionEvent::RetryFailed { .. }),
+            "legacy path should surface RetryFailed, not ReAuthRequired: {event:?}"
+        );
+    }
+
+    /// First-party xAI auth payloads remain compatible with ReAuthRequired.
+    #[test]
+    fn legacy_first_party_auth_payload_still_reauth_required() {
+        let retry = RetryState::Failed {
+            error_type: "auth".into(),
+            message: "Unauthorized (401) from first-party proxy".into(),
+            provider: None,
+        };
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&retry, &mut session, &mut scrollback, false);
+        assert!(matches!(
+            last_session_event(&scrollback),
+            Some(SessionEvent::ReAuthRequired)
+        ));
     }
 
     /// A recoverable auth failure preserves `in_flight_prompt` so the
@@ -481,6 +612,7 @@
             &RetryState::Failed {
                 error_type: "auth".into(),
                 message: "Unauthorized (401) from https://proxy/v1/messages".into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -502,6 +634,7 @@
                 error_type: "api".into(),
                 message: "Unauthorized (401) from https://proxy/v1/responses: invalid credentials"
                     .into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -523,6 +656,7 @@
                 message: "Unauthorized (401) ... deprecated authentication method (WebLogin) ... \
                           run `grok logout` then `grok login`"
                     .into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -541,6 +675,7 @@
             &RetryState::Failed {
                 error_type: "server_error".into(),
                 message: "internal server error".into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -560,6 +695,7 @@
                 message: "API error (status 404 Not Found): \
                           No endpoints found that support image input"
                     .into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback,
@@ -588,6 +724,7 @@
                 message: "API error (status 500): the prompt is too long for this model's \
                           context window"
                     .into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -613,6 +750,7 @@
             &RetryState::Failed {
                 error_type: "context_length".into(),
                 message: "the prompt is too long for this model's context window".into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -886,6 +1024,7 @@
             &RetryState::Failed {
                 error_type: "encrypted_content_mismatch".into(),
                 message: "incompatible history".into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -905,6 +1044,7 @@
             &RetryState::Failed {
                 error_type: "api_400".into(),
                 message: "bad request".into(),
+                provider: None,
             },
             &mut session,
             &mut scrollback, false);

@@ -1131,36 +1131,18 @@ async fn read_parent_inference_config(
         .model_compaction_at_tokens(ctx.model_id.0.as_ref());
     (fallback, ctx.model_id.clone())
 }
-/// `true` when the entry is governed by a provider-scoped BYOK vault
-/// (OpenRouter or OpenAI). Such models are always API-key authenticated even
-/// when `has_own_credentials()` is false (their key lives in the provider
-/// vault, not on the per-model entry).
-///
-/// Per the OpenRouter parity design, the auth *type* is `ApiKey` whenever the
-/// model provider is OpenRouter or OpenAI, regardless of whether a key is
-/// currently present. A missing key fails closed at request time with the
-/// existing missing-key UX; it must never fall through to `SessionToken`,
-/// which would mislabel an OpenRouter child as borrowing the parent's xAI
-/// session.
-fn is_provider_scoped_byok(entry: &crate::agent::config::ModelEntry) -> bool {
-    use crate::agent::model_providers::ModelProviderKind;
-    entry.model_provider.as_ref().is_some_and(|provider| {
-        matches!(
-            provider.kind,
-            ModelProviderKind::OpenAi | ModelProviderKind::OpenRouter
-        )
-    })
-}
-
 /// `AuthType` for a subagent: BYOK or provider-scoped BYOK (OpenRouter/OpenAI)
 /// ⇒ `ApiKey` (don't overwrite the BYOK key and don't mislabel as session);
 /// session-based ACP method ⇒ `SessionToken` (keep refresh wired);
 /// otherwise `ApiKey`.
+///
+/// Uses the shared [`ModelEntry::is_provider_scoped_byok`] helper so main
+/// session gates and subagent auth cannot drift.
 fn subagent_auth_type(
     model: Option<&crate::agent::config::ModelEntry>,
     auth_method_id: &acp::AuthMethodId,
 ) -> xai_chat_state::AuthType {
-    if model.is_some_and(|m| m.has_own_credentials() || is_provider_scoped_byok(m)) {
+    if model.is_some_and(|m| m.has_own_credentials() || m.is_provider_scoped_byok()) {
         xai_chat_state::AuthType::ApiKey
     } else if crate::agent::auth_method::is_session_based_method(auth_method_id) {
         xai_chat_state::AuthType::SessionToken
@@ -1174,7 +1156,7 @@ fn resolve_model_override_to_config(
     model_id: &str,
     ctx: &SubagentSpawnContext,
 ) -> Option<(xai_grok_inference::InferenceConfig, acp::ModelId)> {
-    use crate::agent::config::{resolve_credentials, inference_config_for_model};
+    use crate::agent::config::{inference_config_for_model, resolve_credentials};
     let entry = crate::agent::config::find_model_by_id(&ctx.available_models, model_id).cloned()?;
     let canonical_model_id = if ctx.available_models.contains_key(model_id) {
         acp::ModelId::new(model_id)
@@ -1191,7 +1173,7 @@ fn resolve_model_override_to_config(
     // third-party endpoint. Returning None here surfaces the failure as an
     // unresolvable override rather than spawning a child that would emit a
     // misleading upstream 401 (or worse, borrow the xAI session).
-    if is_provider_scoped_byok(&entry) && credentials.api_key.is_none() {
+    if entry.is_provider_scoped_byok() && credentials.api_key.is_none() {
         let provider_name = entry
             .model_provider
             .as_ref()

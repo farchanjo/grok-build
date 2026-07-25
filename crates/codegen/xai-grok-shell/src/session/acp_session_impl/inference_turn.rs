@@ -60,9 +60,15 @@ impl SessionTokenAuthGate {
         )
     }
 }
-/// Run a tool call; on an auth-shaped failure, attempt recovery via
-/// `AuthManager` and one retry. When `shared_recovery` is `Some`, concurrent
+/// Run a **tool** call; on an auth-shaped failure, attempt xAI session recovery
+/// via `AuthManager` and one retry. When `shared_recovery` is `Some`, concurrent
 /// 401s in the same batch deduplicate via `OnceCell::get_or_init`.
+///
+/// **M1 scope note:** this path is tool-only (media gen, MCP tools, etc.). It
+/// never wraps provider inference sampling. Provider-scoped OpenRouter/OpenAI
+/// 401s are handled in [`SessionActor::handle_sampling_failure`], which resolves
+/// provider identity before any xAI OIDC recovery. Do not route sampler failures
+/// through this helper.
 pub(super) async fn call_with_auth_retry<F, Fut>(
     auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
     shared_recovery: Option<&tokio::sync::OnceCell<bool>>,
@@ -106,6 +112,35 @@ where
         );
         result
     }
+}
+
+/// `true` when `base_url` is the ChatGPT / Codex subscription Responses route.
+///
+/// Exact host + path fragment only (no substring host spoofing of the form
+/// `chatgpt.com.evil`). Used to scope ChatGPT OAuth pre-turn refresh to the
+/// active model route.
+pub(crate) fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
+    use crate::extensions::notification::host_from_base_url;
+    let Some(host) = host_from_base_url(base_url) else {
+        return false;
+    };
+    if host != "chatgpt.com" && host != "www.chatgpt.com" {
+        return false;
+    }
+    // Path must include the Codex backend segment.
+    let path = url::Url::parse(base_url)
+        .ok()
+        .map(|u| u.path().to_ascii_lowercase())
+        .unwrap_or_default();
+    path.contains("/backend-api/codex")
+}
+
+/// Whether ChatGPT OAuth pre-turn refresh may update credentials for the
+/// **active** model. Disk-global ChatGPT connection alone is never enough —
+/// OpenRouter, official OpenAI API-key, custom, and first-party xAI must not
+/// receive a ChatGPT access token or skip their own refresh.
+pub(crate) fn chatgpt_oauth_preturn_applies(base_url: &str) -> bool {
+    is_chatgpt_codex_base_url(base_url)
 }
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
@@ -344,12 +379,63 @@ impl SessionActor {
         self.set_chat_api_key(new_key).await;
         true
     }
+    /// Authoritative per-model BYOK status for session gates and bearer
+    /// resolver wiring. Single source used by [`Self::auth_gate`],
+    /// [`Self::reconstruct_full_config`], and pre-turn refresh.
+    ///
+    /// Priority:
+    /// 1. Live catalog (`models_manager`): provider-scoped OpenRouter/OpenAI
+    ///    or own credentials → `Byok` (vault keys need not be inline).
+    /// 2. Config-layer [`Self::model_auth_facts`].
+    /// 3. Catalog/config miss on an exact approved third-party host (or ChatGPT
+    ///    Codex URL) → `Unknown` (never `NotByok`), so
+    ///    [`session_token_auth_gate`] requires a first-party endpoint and will
+    ///    not install an xAI bearer resolver on OpenRouter/OpenAI hosts.
+    fn resolve_session_model_byok(
+        &self,
+        model_id: &str,
+        base_url: &str,
+    ) -> crate::agent::auth_method::ModelByok {
+        use crate::agent::auth_method::ModelByok;
+        use crate::extensions::notification::{
+            approved_provider_for_exact_host, host_from_base_url,
+        };
+
+        let models = self.models_manager.models();
+        if let Some(entry) = crate::agent::config::find_model_by_id(&models, model_id) {
+            if entry.is_provider_scoped_byok() || entry.has_own_credentials() {
+                return ModelByok::Byok;
+            }
+        }
+
+        let byok = self.model_auth_facts(model_id).byok;
+        if byok == ModelByok::Byok {
+            return ModelByok::Byok;
+        }
+
+        // Catalog/config miss or NotByok: never treat approved third-party
+        // hosts as NotByok (that would enable session-token resolver/recovery).
+        if is_chatgpt_codex_base_url(base_url) {
+            return ModelByok::Unknown;
+        }
+        if let Some(host) = host_from_base_url(base_url)
+            && approved_provider_for_exact_host(&host).is_some()
+        {
+            return ModelByok::Unknown;
+        }
+
+        byok
+    }
+
     /// Gate inputs for `model_id` routed to `base_url`. See
     /// [`crate::agent::auth_method::session_token_auth_gate`] for the rationale
     /// (`base_url` keeps an `Unknown` BYOK status refreshable only
     /// against first-party xAI hosts).
+    ///
+    /// Uses [`Self::resolve_session_model_byok`] so catalog vault models and
+    /// exact third-party hosts never activate xAI session refresh/resolver.
     fn auth_gate(&self, model_id: &str, base_url: &str) -> SessionTokenAuthGate {
-        let byok = self.model_auth_facts(model_id).byok;
+        let byok = self.resolve_session_model_byok(model_id, base_url);
         let auth_method = self.auth_method_id.load();
         SessionTokenAuthGate::new(auth_method.as_deref(), byok, base_url)
     }
@@ -438,9 +524,11 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
-        let auth_method = self.auth_method_id.load();
-        let gate =
-            SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
+        // Catalog-aware gate (same helper as 401 recovery / pre-turn): never
+        // install an xAI bearer_resolver for OpenRouter/OpenAI vault models
+        // that only appear in models_manager, or for exact third-party hosts
+        // when the catalog misses.
+        let gate = self.auth_gate(cfg.model.as_str(), &cfg.base_url);
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         let auth_scheme = model_facts.auth_scheme;
@@ -476,13 +564,31 @@ impl SessionActor {
         }
         // Derive provider identity from the resolved model entry so the
         // per-turn reconstruction matches `inference_config_for_model`. A
-        // missing entry falls back to the default (`Custom`): a model that
-        // isn't in the catalog is not a built-in xAI first-party model.
+        // missing entry falls back to exact-host approved providers, else
+        // `Custom` (never silently first-party xAI).
         let models = self.models_manager.models();
         let resolved_entry = crate::agent::config::find_model_by_id(&models, cfg.model.as_str());
-        let provider_identity = resolved_entry
-            .map(crate::agent::config::provider_identity_for_model)
-            .unwrap_or_default();
+        let provider_identity = {
+            use crate::extensions::notification::{
+                approved_provider_for_exact_host, host_from_base_url,
+            };
+            use xai_grok_inference::config::ProviderIdentity;
+            if let Some(entry) = resolved_entry {
+                crate::agent::config::provider_identity_for_model(entry)
+            } else if is_chatgpt_codex_base_url(&cfg.base_url) {
+                ProviderIdentity::OpenAi
+            } else if let Some(host) = host_from_base_url(&cfg.base_url)
+                && let Some((id, _)) = approved_provider_for_exact_host(&host)
+            {
+                match id {
+                    "openrouter" => ProviderIdentity::OpenRouter,
+                    "openai" => ProviderIdentity::OpenAi,
+                    _ => ProviderIdentity::Custom,
+                }
+            } else {
+                ProviderIdentity::Custom
+            }
+        };
         // Wire shaping (H4): mirror `inference_config_for_model` — strip
         // `reasoning_effort` when the resolved model explicitly disclaims
         // reasoning support (`Some(false)`). `Some(true)` and `None` (unknown)
@@ -745,8 +851,8 @@ impl SessionActor {
         self.refresh_token_if_expired().await;
         let mut full_config = self.reconstruct_full_config().await;
         full_config.force_http1 = force_http1;
-        let sampling_client =
-            xai_grok_inference::InferenceClient::new(full_config).map_err(|e| self.to_acp_error(e))?;
+        let sampling_client = xai_grok_inference::InferenceClient::new(full_config)
+            .map_err(|e| self.to_acp_error(e))?;
         Ok(sampling_client)
     }
     /// Push a fresh `InferenceConfig` into the per-session sampler actor
@@ -771,27 +877,150 @@ impl SessionActor {
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
     }
-    fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
-        let auth = self
-            .auth_manager
-            .as_ref()
-            .and_then(|am| am.current_or_expired());
-        let reauthable = is_reauthable_failure(Some(error_type), message);
+    fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, _message: &str) {
+        self.log_terminal_failure_safe(error_type, status_code, None);
+    }
+
+    /// Safe terminal-failure breadcrumb with a **strict allowlist**.
+    ///
+    /// Never logs: credentials, key/token prefixes or suffixes, auth expiry,
+    /// Authorization headers, raw/truncated provider messages, response
+    /// bodies, prompt fragments, or arbitrary response-derived text.
+    ///
+    /// Allowed keys only: provider_id, provider_name, failed_model_id,
+    /// backend, http_status, request_id, generation_id, error_category.
+    fn log_terminal_failure_safe(
+        &self,
+        error_type: &str,
+        status_code: Option<u16>,
+        provider: Option<&crate::extensions::notification::ProviderCredentialFailure>,
+    ) {
+        use crate::extensions::notification::{bound_safe_id, sanitize_error_category};
+        let category = provider
+            .and_then(|p| p.error_category.as_deref())
+            .map(sanitize_error_category)
+            .unwrap_or_else(|| sanitize_error_category(error_type));
         xai_grok_telemetry::unified_log::warn(
             "turn.terminal_failure",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
-                "error_type": error_type,
-                "status_code": status_code,
-                "reauthable": reauthable,
-                "auth_mode": auth.as_ref().map(|a| format!("{:?}", a.auth_mode)),
-                "key_prefix": auth.as_ref().map(|a| crate::auth::token_suffix(&a.key).to_owned()),
-                "expires_at": auth
-                    .as_ref()
-                    .and_then(|a| a.expires_at.map(|e| e.to_rfc3339())),
-                "message": crate::util::truncate(message, 300),
+                "provider_id": provider.map(|p| p.provider_id.as_str()),
+                "provider_name": provider.map(|p| p.provider_name.as_str()),
+                "failed_model_id": provider.and_then(|p| p.failed_model_id.as_deref()),
+                "backend": provider.and_then(|p| p.backend.as_deref()),
+                "http_status": status_code.or_else(|| provider.and_then(|p| p.http_status)),
+                "request_id": provider
+                    .and_then(|p| p.request_id.as_deref())
+                    .and_then(|id| bound_safe_id(Some(id))),
+                "generation_id": provider
+                    .and_then(|p| p.generation_id.as_deref())
+                    .and_then(|id| bound_safe_id(Some(id))),
+                "error_category": category,
             })),
         );
+    }
+
+    /// Emit provider-scoped terminal failure (OpenRouter / OpenAI API key).
+    /// Never triggers xAI OIDC, devbox recovery, or global `/login` copy.
+    async fn surface_provider_credential_failure(
+        &self,
+        provider: crate::extensions::notification::ProviderCredentialFailure,
+        status_code: Option<u16>,
+        kind: xai_grok_inference::InferenceErrorKind,
+    ) -> Result<InferenceFailureRecovery, acp::Error> {
+        use crate::extensions::notification::provider_credential_repair_message;
+        let repair = provider_credential_repair_message(&provider.provider_name);
+        let mut msg = repair;
+        if let Some(model) = provider.failed_model_id.as_deref() {
+            msg.push_str(&format!(" Failed model: {model}."));
+        }
+        self.log_terminal_failure_safe(
+            crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE,
+            status_code,
+            Some(&provider),
+        );
+        self.send_xai_notification(XaiSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::failed_with_provider(
+                msg.clone(),
+                provider,
+            ),
+        ))
+        .await;
+        Err(
+            acp::Error::internal_error().data(crate::inference::error::terminal_error_data(
+                msg,
+                status_code,
+                kind,
+            )),
+        )
+    }
+
+    /// Resolve provider-scoped credential failure for the active/failed model.
+    /// Returns `None` for first-party xAI (legacy global re-auth path).
+    pub(crate) async fn provider_credential_failure_context(
+        &self,
+        failed_model_id: &str,
+        status_code: Option<u16>,
+        error_category: &str,
+        diagnostics: Option<&xai_grok_inference_types::ApiErrorDiagnostics>,
+    ) -> Option<crate::extensions::notification::ProviderCredentialFailure> {
+        use crate::extensions::notification::{
+            ProviderCredentialFailure, approved_provider_for_exact_host, bound_safe_id,
+            host_from_base_url, sanitize_error_category,
+        };
+        use xai_grok_inference::config::ProviderIdentity;
+
+        let models = self.models_manager.models();
+        let entry = crate::agent::config::find_model_by_id(&models, failed_model_id);
+        let mut identity = entry
+            .map(crate::agent::config::provider_identity_for_model)
+            .unwrap_or(ProviderIdentity::Custom);
+
+        // Reconstruct only when catalog miss — prefer catalog identity.
+        if entry.is_none() {
+            let cfg = self.reconstruct_full_config().await;
+            if !matches!(cfg.provider_identity, ProviderIdentity::Custom) {
+                identity = cfg.provider_identity;
+            }
+        }
+
+        let settings = self.chat_state_handle.get_inference_settings().await;
+        let base_url = settings.as_ref().map(|c| c.base_url.as_str()).unwrap_or("");
+        let backend = settings
+            .as_ref()
+            .map(|c| format!("{:?}", c.api_backend).to_ascii_lowercase());
+
+        // Exact-host fallback only when catalog identity is unknown/custom.
+        // Never substring-match URLs (suffix-confusion / query spoofs).
+        if matches!(identity, ProviderIdentity::Custom)
+            && let Some(host) = host_from_base_url(base_url)
+            && let Some((id, name)) = approved_provider_for_exact_host(&host)
+        {
+            let _ = (id, name);
+            identity = match id {
+                "openrouter" => ProviderIdentity::OpenRouter,
+                "openai" => ProviderIdentity::OpenAi,
+                _ => identity,
+            };
+        }
+
+        let (provider_id, provider_name) = match identity {
+            ProviderIdentity::OpenRouter => ("openrouter", "OpenRouter"),
+            ProviderIdentity::OpenAi => ("openai", "OpenAI"),
+            ProviderIdentity::Xai => return None,
+            ProviderIdentity::Custom => return None,
+        };
+
+        Some(ProviderCredentialFailure {
+            provider_id: provider_id.to_owned(),
+            provider_name: provider_name.to_owned(),
+            failed_model_id: (!failed_model_id.is_empty()).then(|| failed_model_id.to_owned()),
+            http_status: status_code,
+            request_id: None,
+            generation_id: bound_safe_id(diagnostics.and_then(|d| d.generation_id.as_deref())),
+            backend,
+            error_category: Some(sanitize_error_category(error_category).to_owned()),
+        })
     }
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
@@ -872,6 +1101,7 @@ impl SessionActor {
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "encrypted_content_mismatch".to_string(),
                     message: friendly.clone(),
+                    provider: None,
                 },
             ))
             .await;
@@ -900,12 +1130,55 @@ impl SessionActor {
             .await
             .map(|c| (c.model, c.base_url))
             .unwrap_or_default();
-        let auth_provider =
-            if matches!(error.kind, InferenceErrorKind::Auth) || error.status_code == Some(401) {
-                self.model_auth_provider(&failed_model_id)
-            } else {
-                None
-            };
+        let is_auth_401 =
+            matches!(error.kind, InferenceErrorKind::Auth) || error.status_code == Some(401);
+        let error_type = if xai_grok_inference_types::is_context_length_error(&error.message) {
+            "context_length"
+        } else {
+            error.kind.as_str()
+        };
+
+        // ── Provider-scoped routes FIRST (before any xAI recovery) ─────────
+        // OpenRouter / official OpenAI (API key or ChatGPT OAuth) must never
+        // run xAI OIDC, devbox, session refresh, or WebLogin copy — even when
+        // ACP method is `cached_token` and an xAI WebLogin session is loaded.
+        // Built-in OpenRouter models store keys in the provider vault, so
+        // `has_own_credentials()` is false; classification uses
+        // `is_provider_scoped_byok` / `provider_credential_failure_context`.
+        if is_auth_401 {
+            let provider_failure = self
+                .provider_credential_failure_context(
+                    &failed_model_id,
+                    error.status_code,
+                    crate::extensions::notification::PROVIDER_CREDENTIAL_ERROR_TYPE,
+                    error.diagnostics.as_ref(),
+                )
+                .await;
+            if let Some(provider_ctx) = provider_failure {
+                // ChatGPT OAuth (and other AuthProviderRef-backed OpenAI
+                // routes) may remint *their own* credential only — never xAI.
+                if let Some(auth_provider) = self.model_auth_provider(&failed_model_id)
+                    && self.try_provider_401_recovery(&auth_provider).await
+                {
+                    self.prepare_sampler_for_turn().await;
+                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                }
+                return self
+                    .surface_provider_credential_failure(
+                        provider_ctx,
+                        error.status_code,
+                        error.kind,
+                    )
+                    .await;
+            }
+        }
+
+        // ── First-party xAI recovery only below this line ──────────────────
+        let auth_provider = if is_auth_401 {
+            self.model_auth_provider(&failed_model_id)
+        } else {
+            None
+        };
         let auth_recovery_eligible = matches!(error.kind, InferenceErrorKind::Auth) && {
             let gate = self.auth_gate(&failed_model_id, &failed_base_url);
             let eligible = gate.active();
@@ -1033,6 +1306,8 @@ impl SessionActor {
             }
             self.signals_handle().record_error_typed("empty_response");
         }
+
+        // First-party xAI only: legacy WebLogin guidance.
         let auth_mode = self
             .auth_manager
             .as_ref()
@@ -1054,6 +1329,7 @@ impl SessionActor {
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "legacy_auth".to_string(),
                     message: msg.clone(),
+                    provider: None,
                 },
             ))
             .await;
@@ -1080,12 +1356,10 @@ impl SessionActor {
             msg.push_str(&format!("\n  Model:     {current_model}"));
             msg.push_str(&format!("\n  Auth:      {auth_mode_str}"));
             if let Some(ref provider) = auth_provider {
-                msg.push_str(
-                    &format!(
+                msg.push_str(&format!(
                     "\n  Provider:  [auth_provider.{}] (check the provider command and the debug log)",
                     provider.name
-                ),
-                );
+                ));
             }
             msg.push_str(&format!("\n  Version:   {client_version}"));
             if available.is_empty() {
@@ -1104,17 +1378,12 @@ impl SessionActor {
         } else {
             detailed_message
         };
-        let error_type = if xai_grok_inference_types::is_context_length_error(&error.message) {
-            "context_length"
-        } else {
-            error.kind.as_str()
-        };
-        self.log_terminal_failure(error_type, error.status_code, &detailed_message);
+        self.log_terminal_failure_safe(error_type, error.status_code, None);
         self.send_xai_notification(XaiSessionUpdate::RetryState(
-            crate::extensions::notification::RetryState::Failed {
-                error_type: error_type.to_string(),
-                message: detailed_message.clone(),
-            },
+            crate::extensions::notification::RetryState::failed(
+                error_type,
+                detailed_message.clone(),
+            ),
         ))
         .await;
         Err(
@@ -1202,50 +1471,46 @@ impl SessionActor {
     /// Soft failures with a still-usable access token still return here
     /// (grace / optimistic send); 401 recovery remains the safety net.
     pub(crate) async fn refresh_token_if_expired(&self) {
-        // ChatGPT subscription OAuth (OpenAI provider): refresh access token
-        // when near expiry. Independent of xAI AuthManager session path.
-        {
-            let base_url = self
-                .chat_state_handle
-                .get_inference_settings()
-                .await
-                .map(|c| c.base_url)
-                .unwrap_or_default();
-            let home = crate::util::grok_home::grok_home();
-            let oauth_connected = crate::auth::chatgpt_oauth::status(&home)
-                == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected;
-            if oauth_connected || base_url.contains("chatgpt.com/backend-api/codex") {
-                match crate::auth::chatgpt_oauth::valid_access_token(&home).await {
-                    Ok(Some((access, _account))) => {
-                        let creds = self.chat_state_handle.get_credentials().await;
-                        if creds.api_key.as_deref() != Some(access.as_str()) {
-                            let mut creds = creds;
-                            creds.api_key = Some(access);
-                            self.chat_state_handle.update_credentials(creds);
-                        }
-                        // When OAuth is the active OpenAI credential, skip xAI refresh.
-                        if oauth_connected {
-                            return;
-                        }
+        let (model_id, base_url) = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|c| (c.model, c.base_url))
+            .unwrap_or_default();
+
+        // ChatGPT subscription OAuth: only when the *active model* is the
+        // Codex Responses route. Disk-global ChatGPT connection must never
+        // overwrite OpenRouter / OpenAI API-key / xAI credentials or skip
+        // their refresh paths.
+        if chatgpt_oauth_preturn_applies(&base_url) {
+            // Prefer credential-lookup home so tests can inject a temp store
+            // via `set_stored_key_home_for_tests` without touching ~/.grokdev.
+            let home = crate::agent::providers::provider_credential_home();
+            match crate::auth::chatgpt_oauth::valid_access_token(&home).await {
+                Ok(Some((access, _account))) => {
+                    let creds = self.chat_state_handle.get_credentials().await;
+                    if creds.api_key.as_deref() != Some(access.as_str()) {
+                        let mut creds = creds;
+                        creds.api_key = Some(access);
+                        self.chat_state_handle.update_credentials(creds);
                     }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "ChatGPT OAuth pre-turn refresh failed");
-                        if oauth_connected {
-                            return;
-                        }
-                    }
+                    // Active ChatGPT OAuth route: never fall through to xAI.
+                    return;
+                }
+                Ok(None) => {
+                    // No usable OAuth token — leave credentials alone; do not
+                    // fall through to xAI session refresh for a Codex route.
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ChatGPT OAuth pre-turn refresh failed");
+                    return;
                 }
             }
         }
+
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
-            let (model_id, base_url) = self
-                .chat_state_handle
-                .get_inference_settings()
-                .await
-                .map(|c| (c.model, c.base_url))
-                .unwrap_or_default();
             if self.auth_gate(&model_id, &base_url).active() {
                 match am.get_valid_token().await {
                     Ok(key) => {
@@ -1289,19 +1554,9 @@ impl SessionActor {
         const REFRESH_THRESHOLD: chrono::Duration = chrono::Duration::minutes(5);
         let creds = self.chat_state_handle.get_credentials().await;
         let current_key = creds.api_key;
-        let current_model_id = self
-            .chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
-        if let Some(provider) = self.model_auth_provider(&current_model_id) {
-            self.refresh_provider_token_pre_turn(
-                &provider,
-                current_key.as_deref(),
-                &current_model_id,
-            )
-            .await;
+        if let Some(provider) = self.model_auth_provider(&model_id) {
+            self.refresh_provider_token_pre_turn(&provider, current_key.as_deref(), &model_id)
+                .await;
             return;
         }
         let Some(ref key) = current_key else { return };
@@ -1309,13 +1564,13 @@ impl SessionActor {
             if let Some(exp) = parse_jwt_expiration(key) {
                 let remaining_secs = (exp - chrono::Utc::now()).num_seconds();
                 tracing::debug!(
-                    model = %current_model_id,
+                    model = %model_id,
                     remaining_secs,
                     "JWT token valid, no refresh needed"
                 );
             } else {
                 tracing::debug!(
-                    model = %current_model_id,
+                    model = %model_id,
                     key_len = key.len(),
                     "Token is not a JWT, expiry-based refresh not applicable"
                 );
@@ -1325,16 +1580,16 @@ impl SessionActor {
         let remaining_secs =
             parse_jwt_expiration(key).map_or(0, |exp| (exp - chrono::Utc::now()).num_seconds());
         tracing::info!(
-            model = %current_model_id,
+            model = %model_id,
             remaining_secs,
             "JWT near expiry, refreshing from config.toml"
         );
-        let Some(new_key) = self.reload_api_key_from_config(&current_model_id) else {
+        let Some(new_key) = self.reload_api_key_from_config(&model_id) else {
             return;
         };
         if key == &new_key {
             tracing::warn!(
-                model = %current_model_id,
+                model = %model_id,
                 "Config.toml returned same token (not yet rotated by external process?)"
             );
             return;
@@ -1342,7 +1597,7 @@ impl SessionActor {
         let new_remaining_secs = parse_jwt_expiration(&new_key)
             .map_or(0, |exp| (exp - chrono::Utc::now()).num_seconds());
         tracing::info!(
-            model = %current_model_id,
+            model = %model_id,
             new_remaining_secs,
             key_len = new_key.len(),
             "Refreshed API token from config.toml"

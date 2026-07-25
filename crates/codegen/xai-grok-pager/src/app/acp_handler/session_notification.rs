@@ -1303,14 +1303,26 @@ pub(super) fn apply_retry_state(
         RetryState::Failed {
             error_type,
             message,
+            provider,
         } => {
             session.set_retry_activity(None);
             if error_type == "encrypted_content_mismatch" {
                 session.model_incompatible = true;
             }
             is_credit_limit = super::super::dispatch::is_credit_limit_error(None, message);
+            // Branch on provider data *before* any global reauth classifier so
+            // OpenRouter/OpenAI never fall through to `/login`/xAI OAuth.
             if is_credit_limit {
                 session.credit_limit_blocked = true;
+            } else if let Some(provider) = provider {
+                is_reauth = true;
+                scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::ProviderCredentialRequired {
+                        provider_id: provider.provider_id.clone(),
+                        provider_name: provider.provider_name.clone(),
+                        failed_model_id: provider.failed_model_id.clone(),
+                    },
+                ));
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));

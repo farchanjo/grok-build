@@ -370,6 +370,63 @@ structured error bodies are truncated head+tail (120 + 140 chars with an
 ellipsis) so the actionable portion OpenRouter puts at the end is never lost;
 non-JSON bodies (HTML edge pages) are never surfaced verbatim.
 
+HTTP 401 from OpenRouter (including models such as Moonshot that are only
+reached through OpenRouter) keeps **OpenRouter identity** through the shell
+and pager — including auto-compaction and model-switch compaction failures.
+OpenRouter and official OpenAI API-key routes are treated as provider-scoped
+credentials even when the key lives in the provider vault (not inline on the
+model). On 401 the runtime resolves that identity **before** any xAI session
+token refresh, OIDC recovery, or WebLogin copy, so a concurrent xAI
+`cached_token` / WebLogin session cannot refresh and resubmit. Per-turn
+sampler reconstruction uses the same catalog-aware gate, so an xAI
+`bearer_resolver` is never installed for OpenRouter/OpenAI vault models (or
+for exact approved third-party hosts when the catalog misses). ChatGPT
+OAuth pre-turn refresh applies only when the active model base URL is the
+Codex Responses route; a disk-global ChatGPT login never overwrites
+OpenRouter, OpenAI API-key, or first-party xAI credentials. The repair
+prompt names OpenRouter (or OpenAI) and directs you to `/providers` to
+replace or test the key. It does **not** mention `/login` and does not start
+xAI OAuth. ChatGPT OAuth may remint only its own OpenAI credential. First-party
+xAI session failures still use the existing session recovery path until
+provider-scoped login fully replaces it.
+
+Safe terminal diagnostics use a strict allowlist only: provider ID/name,
+catalog model ID, backend, HTTP status, bounded request/generation IDs, and a
+controlled error-category enum. Credentials, token/key prefixes or suffixes,
+auth expiry, Authorization headers, raw provider messages, response bodies,
+and prompt fragments are never logged.
+
+#### OpenAPI baseline (developers)
+
+Grok Build pins a compact OpenRouter OpenAPI endpoint/field inventory under
+`crates/codegen/xai-grok-inference/baselines/openrouter/` with provenance
+(source URL, fetch date, content SHA-256 = `90c87070…`, content size =
+`1653634` bytes) and the deterministic generator
+`generate_inventory.py`. The full OpenAPI document is not vendored. Tests
+never fetch network content; regenerate from a **local** OpenAPI file with
+the generator's exact invocation (see `PROVENANCE.md`).
+
+Executable regression matrix (exact filters; under `~/.grokdev` env):
+
+- Inventory integrity: `cargo test -p xai-grok-inference openrouter_baseline`
+- Checklist: `cargo test -p xai-grok-inference openrouter_regression`
+- Catalog/credits: `cargo test -p xai-grok-shell --lib parse_openrouter_`
+- Chat/fallbacks/cost/tools/reasoning stream: `cargo test -p xai-grok-inference openrouter_`
+- Mid-stream error: `cargo test -p xai-grok-inference mid_stream_error`
+- 402: `cargo test -p xai-grok-inference status_402_openrouter`
+- 429 pacing/retry: included in `openrouter_` (pacing + rate-limit threshold)
+- Cancel: `cargo test -p xai-grok-inference cancel_in_flight`
+- Moonshot OpenRouter 401 shell/pager/compaction (incl. session-method +
+  WebLogin concurrent xAI session must not refresh):
+  `cargo test -p xai-grok-shell --lib moonshot_openrouter_401`
+  `cargo test -p xai-grok-shell --lib openai_api_key_401`
+  `cargo test -p xai-grok-shell --lib first_party_xai_401`
+  `cargo test -p xai-grok-shell --lib is_provider_scoped_byok_matrix`
+  `cargo test -p xai-grok-shell --lib reconstruct_openrouter_vault`
+  `cargo test -p xai-grok-shell --lib preturn_chatgpt_connected`
+  `cargo test -p xai-grok-pager --lib openrouter_moonshot`
+  `cargo test -p xai-grok-shell --lib surface_compact_auth_failure_openrouter`
+
 #### `reasoning_effort` stripping
 
 Some OpenRouter models hard-400 the whole request when `reasoning_effort` is

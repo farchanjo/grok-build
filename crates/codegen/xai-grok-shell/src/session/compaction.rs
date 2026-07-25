@@ -675,24 +675,41 @@ impl SessionActor {
             );
             let message = match reason {
                 SuppressReason::CreditBlock => {
-                    "out of credits or over your spending limit. Add credits and retry."
+                    "out of credits or over your spending limit. Add credits and retry.".to_owned()
                 }
-                SuppressReason::Auth => {
-                    "authentication problem — re-authenticate using /login and retry."
-                }
-                SuppressReason::Size => "this conversation is too large to compact.",
-                SuppressReason::Schema => "this conversation can't be summarized.",
+                SuppressReason::Auth => self.compact_auth_suppress_message().await,
+                SuppressReason::Size => "this conversation is too large to compact.".to_owned(),
+                SuppressReason::Schema => "this conversation can't be summarized.".to_owned(),
                 SuppressReason::Other => {
-                    "it'll retry on the next turn, or start a new session using /new."
+                    "it'll retry on the next turn, or start a new session using /new.".to_owned()
                 }
             };
             self.send_xai_notification(
                 crate::extensions::notification::SessionUpdate::AutoCompactFailed {
-                    error: message.to_string(),
+                    error: message,
                 },
             )
             .await;
         }
+    }
+
+    /// Provider-aware compact-auth suppress copy. OpenRouter/OpenAI name
+    /// `/providers`; first-party xAI keeps `/login`.
+    async fn compact_auth_suppress_message(&self) -> String {
+        use crate::extensions::notification::provider_credential_repair_message;
+        let model_id = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|c| c.model)
+            .unwrap_or_default();
+        if let Some(provider) = self
+            .provider_credential_failure_context(&model_id, Some(401), "provider_credential", None)
+            .await
+        {
+            return provider_credential_repair_message(&provider.provider_name);
+        }
+        "authentication problem — re-authenticate using /login and retry.".to_owned()
     }
     /// Map a deterministic failure's error text to a fixed, content-free
     /// [`SuppressReason`] (drives telemetry + sticky-vs-per-turn scope).
@@ -734,43 +751,104 @@ impl SessionActor {
             SuppressReason::Auth
         )
     }
-    /// Terminal auth compact failure: emit RetryState auth (reauth stash) + auth_required.
-    /// Separate from `AutoCompactFailed` (user-facing); this aborts the turn.
+    /// Terminal auth compact failure: emit RetryState for reauth stash.
+    /// OpenRouter/OpenAI get provider-scoped credential failure (no `/login`,
+    /// no xAI OAuth). First-party xAI keeps the legacy reauth path.
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
-        let detailed = Self::acp_error_message(&err);
-        let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
-            detailed
-        } else {
-            format!(
-                "Unauthorized (401): compaction failed — re-authenticate with /login \
-                 and retry. ({detailed})"
-            )
+        use crate::extensions::notification::{
+            PROVIDER_CREDENTIAL_ERROR_TYPE, SessionUpdate as XaiSessionUpdate,
+            provider_credential_repair_message,
         };
+        let detailed = Self::acp_error_message(&err);
+        let model_id = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|c| c.model)
+            .unwrap_or_default();
+        let provider = self
+            .provider_credential_failure_context(
+                &model_id,
+                Some(401),
+                PROVIDER_CREDENTIAL_ERROR_TYPE,
+                None,
+            )
+            .await;
+
+        let (retry_state, message, acp_err) = if let Some(provider) = provider {
+            let mut msg = provider_credential_repair_message(&provider.provider_name);
+            msg.push_str(" Compaction could not complete until the key is repaired.");
+            if let Some(model) = provider.failed_model_id.as_deref() {
+                msg.push_str(&format!(" Failed model: {model}."));
+            }
+            let state = crate::extensions::notification::RetryState::failed_with_provider(
+                msg.clone(),
+                provider,
+            );
+            // Provider-scoped: do not emit global auth_required (that triggers
+            // xAI OAuth /login flows in some clients).
+            let err =
+                acp::Error::internal_error().data(crate::inference::error::terminal_error_data(
+                    msg.clone(),
+                    Some(401),
+                    xai_grok_inference::InferenceErrorKind::Auth,
+                ));
+            (state, msg, err)
+        } else {
+            let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
+                detailed
+            } else {
+                format!(
+                    "Unauthorized (401): compaction failed — re-authenticate with /login \
+                     and retry. ({detailed})"
+                )
+            };
+            let state =
+                crate::extensions::notification::RetryState::failed("auth", message.clone());
+            let err =
+                acp::Error::auth_required().data(crate::inference::error::terminal_error_data(
+                    message.clone(),
+                    Some(401),
+                    xai_grok_inference::InferenceErrorKind::Auth,
+                ));
+            (state, message, err)
+        };
+
         tracing::warn!(
             session_id = %self.session_info.id.0,
-            error = %message,
+            provider_scoped = matches!(
+                &retry_state,
+                crate::extensions::notification::RetryState::Failed {
+                    provider: Some(_),
+                    ..
+                }
+            ),
             "auto-compact auth failure: aborting turn for re-auth"
         );
+        // Strict allowlist: no message body, keys, or prompts.
         xai_grok_telemetry::unified_log::warn(
-            "auto-compact auth failure: aborting turn for re-auth",
+            "auto-compact auth failure",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
-                "message": crate::util::truncate(&message, 300),
+                "error_category": if matches!(
+                    &retry_state,
+                    crate::extensions::notification::RetryState::Failed {
+                        provider: Some(_),
+                        ..
+                    }
+                ) {
+                    PROVIDER_CREDENTIAL_ERROR_TYPE
+                } else {
+                    "auth"
+                },
+                "http_status": 401,
+                "failed_model_id": model_id,
             })),
         );
-        self.send_xai_notification(XaiSessionUpdate::RetryState(
-            crate::extensions::notification::RetryState::Failed {
-                error_type: "auth".to_string(),
-                message: message.clone(),
-            },
-        ))
-        .await;
-        acp::Error::auth_required().data(crate::inference::error::terminal_error_data(
-            message,
-            Some(401),
-            xai_grok_inference::InferenceErrorKind::Auth,
-        ))
+        let _ = message;
+        self.send_xai_notification(XaiSessionUpdate::RetryState(retry_state))
+            .await;
+        acp_err
     }
     /// Clear [`SUPPRESS_AUTH`] on login/token refresh (credit suppress waits for a 200).
     pub(crate) fn clear_auth_compact_suppression(&self) {
@@ -2821,10 +2899,12 @@ mod inline_auto_compact_flow_tests {
                             crate::extensions::notification::RetryState::Failed {
                                 error_type,
                                 message,
+                                provider,
                             },
                         ) = &notif.update
                     {
                         assert_eq!(error_type, "auth");
+                        assert!(provider.is_none(), "first-party compact stays global");
                         assert!(
                             message.contains("Unauthorized (401)") || message.contains("401"),
                             "message={message}"
@@ -2836,6 +2916,165 @@ mod inline_auto_compact_flow_tests {
                     saw_retry_auth,
                     "expected RetryState::Failed auth notification"
                 );
+            })
+            .await;
+    }
+
+    /// Auto-compaction 401 on an OpenRouter model emits provider-scoped
+    /// credential failure (no `/login`, no global auth_required).
+    #[tokio::test(flavor = "current_thread")]
+    async fn surface_compact_auth_failure_openrouter_provider_scoped() {
+        use crate::agent::config::{ModelEntry, ModelInfo};
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+        use crate::extensions::notification::{
+            PROVIDER_CREDENTIAL_ERROR_TYPE, SessionUpdate as XaiSessionUpdate,
+        };
+        use crate::session::storage::SessionUpdate;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+                let actor =
+                    create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await;
+                let model_slug = "moonshotai/kimi-k2";
+                let mut entry = ModelEntry {
+                    info: ModelInfo::fallback(model_slug),
+                    model_provider: Some(ResolvedModelProvider {
+                        id: "openrouter".to_string(),
+                        kind: ModelProviderKind::OpenRouter,
+                        openrouter_fallback_models: Vec::new(),
+                        openrouter_provider_preferences: None,
+                        openrouter_plugins: Vec::new(),
+                        command: Vec::new(),
+                    }),
+                    api_key: None,
+                    env_key: None,
+                    auth_provider: None,
+                    api_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                };
+                entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+                entry.info.model = model_slug.to_string();
+                actor.models_manager.insert_test_entry(model_slug, entry);
+                let mut settings = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
+                settings.model = model_slug.to_string();
+                settings.base_url = "https://openrouter.ai/api/v1".to_string();
+                actor.chat_state_handle.update_inference_settings(settings);
+
+                let err = acp::Error::internal_error()
+                    .data("compact failed: API error (status 401 Unauthorized)");
+                let out = actor.surface_compact_auth_failure(err).await;
+                assert_ne!(
+                    out.code,
+                    acp::Error::auth_required().code,
+                    "OpenRouter compact must not emit global auth_required"
+                );
+                let mut saw = false;
+                while let Ok(msg) = persistence_rx.try_recv() {
+                    if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                        && let XaiSessionUpdate::RetryState(
+                            crate::extensions::notification::RetryState::Failed {
+                                error_type,
+                                message,
+                                provider,
+                            },
+                        ) = &notif.update
+                    {
+                        assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
+                        assert!(message.contains("OpenRouter"));
+                        assert!(message.contains("/providers"));
+                        assert!(!message.contains("/login"));
+                        assert_eq!(
+                            provider.as_ref().map(|p| p.provider_id.as_str()),
+                            Some("openrouter")
+                        );
+                        saw = true;
+                    }
+                }
+                assert!(saw, "expected OpenRouter provider-scoped RetryState");
+            })
+            .await;
+    }
+
+    /// Model-switch compaction 401 on OpenRouter is also provider-scoped
+    /// (same surface_compact_auth_failure path used by model-switch).
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_switch_compact_auth_failure_openrouter_provider_scoped() {
+        use crate::agent::config::{ModelEntry, ModelInfo};
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+        use crate::extensions::notification::{
+            PROVIDER_CREDENTIAL_ERROR_TYPE, SessionUpdate as XaiSessionUpdate,
+        };
+        use crate::session::storage::SessionUpdate;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+                let actor =
+                    create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await;
+                let model_slug = "moonshotai/kimi-k2";
+                let mut entry = ModelEntry {
+                    info: ModelInfo::fallback(model_slug),
+                    model_provider: Some(ResolvedModelProvider {
+                        id: "openrouter".to_string(),
+                        kind: ModelProviderKind::OpenRouter,
+                        openrouter_fallback_models: Vec::new(),
+                        openrouter_provider_preferences: None,
+                        openrouter_plugins: Vec::new(),
+                        command: Vec::new(),
+                    }),
+                    api_key: None,
+                    env_key: None,
+                    auth_provider: None,
+                    api_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                };
+                entry.info.base_url = "https://openrouter.ai/api/v1".to_string();
+                entry.info.model = model_slug.to_string();
+                actor.models_manager.insert_test_entry(model_slug, entry);
+                let mut settings = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
+                settings.model = model_slug.to_string();
+                settings.base_url = "https://openrouter.ai/api/v1".to_string();
+                actor.chat_state_handle.update_inference_settings(settings);
+
+                // Same API as model-switch compact failure path.
+                assert!(SessionActor::is_auth_compact_error(
+                    &acp::Error::internal_error()
+                        .data("compact failed: API error (status 401 Unauthorized)")
+                ));
+                let out = actor
+                    .surface_compact_auth_failure(
+                        acp::Error::internal_error()
+                            .data("model-switch compact: status 401 Unauthorized"),
+                    )
+                    .await;
+                assert_ne!(out.code, acp::Error::auth_required().code);
+                let mut saw = false;
+                while let Ok(msg) = persistence_rx.try_recv() {
+                    if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                        && let XaiSessionUpdate::RetryState(
+                            crate::extensions::notification::RetryState::Failed {
+                                error_type,
+                                message,
+                                provider: Some(p),
+                            },
+                        ) = &notif.update
+                    {
+                        assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
+                        assert!(!message.contains("/login"));
+                        assert_eq!(p.provider_id, "openrouter");
+                        saw = true;
+                    }
+                }
+                assert!(saw);
             })
             .await;
     }
@@ -2943,7 +3182,11 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_401_server().await;
-                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let mut cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 cfg.base_url = base_url;
                 actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
@@ -2980,9 +3223,11 @@ mod inline_auto_compact_flow_tests {
                                 crate::extensions::notification::RetryState::Failed {
                                     error_type,
                                     message,
+                                    provider,
                                 },
                             ) => {
                                 assert_eq!(error_type, "auth");
+                                assert!(provider.is_none(), "first-party path keeps global auth");
                                 assert!(
                                     message.contains("Unauthorized") || message.contains("401"),
                                     "message={message}"
@@ -3029,7 +3274,11 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_401_server().await;
-                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let mut cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 cfg.base_url = base_url;
                 actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
@@ -3066,10 +3315,12 @@ mod inline_auto_compact_flow_tests {
                             crate::extensions::notification::RetryState::Failed {
                                 error_type,
                                 message,
+                                provider,
                             },
                         ) = &notif.update
                     {
                         assert_eq!(error_type, "auth");
+                        assert!(provider.is_none(), "first-party path keeps global auth");
                         assert!(
                             message.contains("Unauthorized") || message.contains("401"),
                             "message={message}"
@@ -3098,7 +3349,11 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_400_server().await;
-                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let mut cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 cfg.base_url = base_url;
                 actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
@@ -3164,7 +3419,11 @@ mod inline_auto_compact_flow_tests {
                     context_window: 400_000,
                 }));
                 let base_url = spawn_deterministic_400_server().await;
-                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let mut cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 cfg.base_url = base_url;
                 actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
@@ -3199,7 +3458,11 @@ mod inline_auto_compact_flow_tests {
                     create_test_actor(50_000, 200_000, 85, gateway_tx, persistence_tx).await,
                 );
                 let base_url = spawn_deterministic_400_server().await;
-                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let mut cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 cfg.base_url = base_url;
                 actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(vec![
@@ -3256,7 +3519,11 @@ mod inline_auto_compact_flow_tests {
                 let actor = Arc::new(actor);
                 let server = MockInferenceServer::start().await.unwrap();
                 server.set_response("Summary of prior work. ".repeat(30));
-                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let mut cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 cfg.base_url = server.url();
                 actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(conv);
@@ -3331,7 +3598,11 @@ mod inline_auto_compact_flow_tests {
                 let actor = Arc::new(actor);
                 let server = MockInferenceServer::start().await.unwrap();
                 server.set_response("Summary. ".repeat(70));
-                let mut cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let mut cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 cfg.base_url = server.url();
                 actor.chat_state_handle.update_inference_settings(cfg);
                 actor.chat_state_handle.replace_conversation(conv);
@@ -3670,7 +3941,9 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    fn api_error_with_context_window(context_window: u64) -> xai_grok_inference::InferenceErrorInfo {
+    fn api_error_with_context_window(
+        context_window: u64,
+    ) -> xai_grok_inference::InferenceErrorInfo {
         xai_grok_inference::InferenceErrorInfo {
             kind: xai_grok_inference::InferenceErrorKind::Api,
             status_code: Some(400),
@@ -3787,7 +4060,11 @@ mod inline_auto_compact_flow_tests {
                 assert!(prev.is_some());
                 let prev = prev.unwrap();
                 assert_eq!(prev.context_window, 200_000);
-                let cfg = actor.chat_state_handle.get_inference_settings().await.unwrap();
+                let cfg = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
                 assert!(prev.context_window > cfg.context_window.get());
                 let total = actor.chat_state_handle.get_estimated_total_tokens().await;
                 let trigger = actor.should_auto_compact(total, cfg.context_window);

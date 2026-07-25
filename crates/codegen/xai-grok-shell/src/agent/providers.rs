@@ -302,7 +302,6 @@ impl ProviderManager {
         self
     }
 
-
     pub fn presets() -> Vec<ProviderModelPreset> {
         vec![
             ProviderModelPreset {
@@ -444,8 +443,9 @@ impl ProviderManager {
             .ok()
             .flatten()
             .is_some();
-        let openai_oauth = crate::auth::chatgpt_oauth::status(&credential_lookup_manager().grok_home)
-            == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected;
+        let openai_oauth =
+            crate::auth::chatgpt_oauth::status(&credential_lookup_manager().grok_home)
+                == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected;
         let openai_configured = openai_api_key || openai_oauth;
         let mut presets = Self::presets();
         // API-key catalog only when OAuth is not the active method.
@@ -604,7 +604,8 @@ impl ProviderManager {
                 let oauth_expired = matches!(oauth, ChatGptOAuthStatus::Expired);
                 let api_key_source = self.credential_source(provider).ok().flatten();
                 // Mutual exclusion: OAuth wins when present.
-                let api_key_configured = !oauth_connected && !oauth_expired && api_key_source.is_some();
+                let api_key_configured =
+                    !oauth_connected && !oauth_expired && api_key_source.is_some();
                 let mut openai_presets = presets;
                 if oauth_connected {
                     openai_presets = static_chatgpt_oauth_presets();
@@ -818,7 +819,7 @@ impl ProviderManager {
             ProviderId::Xai => &self.xai_models_url,
             ProviderId::OpenAi => &self.openai_models_url,
             ProviderId::OpenRouter => &self.openrouter_models_url,
-                    };
+        };
         let response = reqwest::Client::builder()
             .timeout(CONNECTION_TIMEOUT)
             .build()
@@ -1139,7 +1140,9 @@ fn parse_version_triplet(value: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-fn codex_models_to_presets(_models: Vec<()>) -> Vec<ProviderModelPreset> { static_chatgpt_oauth_presets() }
+fn codex_models_to_presets(_models: Vec<()>) -> Vec<ProviderModelPreset> {
+    static_chatgpt_oauth_presets()
+}
 
 /// Whether ChatGPT OAuth should use the headless device-code path.
 ///
@@ -1210,7 +1213,9 @@ fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
         .collect()
 }
 
-fn static_codex_presets() -> Vec<ProviderModelPreset> { static_chatgpt_oauth_presets() }
+fn static_codex_presets() -> Vec<ProviderModelPreset> {
+    static_chatgpt_oauth_presets()
+}
 
 /// Resolve a key saved by [`ProviderManager`] for the model resolver. This is
 /// intentionally crate-private: callers should use the manager, which keeps
@@ -1233,7 +1238,9 @@ pub(crate) struct StoredOpenAiCredentials {
     pub account_id: Option<String>,
 }
 
-pub(crate) fn stored_openai_credentials(kind: ModelProviderKind) -> Option<StoredOpenAiCredentials> {
+pub(crate) fn stored_openai_credentials(
+    kind: ModelProviderKind,
+) -> Option<StoredOpenAiCredentials> {
     if kind != ModelProviderKind::OpenAi {
         return None;
     }
@@ -1288,6 +1295,13 @@ fn credential_lookup_manager() -> ProviderManager {
         return ProviderManager::new(home);
     }
     ProviderManager::default()
+}
+
+/// Home directory used for provider vault / ChatGPT OAuth token reads.
+/// Respects the test-only stored-key home override so session pre-turn paths
+/// and credential lookup share one store without touching production profiles.
+pub(crate) fn provider_credential_home() -> PathBuf {
+    credential_lookup_manager().grok_home.clone()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2594,10 +2608,7 @@ mod tests {
             Some(372_000),
             "Codex product catalog caps GPT-5.6 Sol at 372k (not API 1.05M)"
         );
-        assert_eq!(
-            by_id["openai-gpt-5.6-terra"].context_window,
-            Some(372_000)
-        );
+        assert_eq!(by_id["openai-gpt-5.6-terra"].context_window, Some(372_000));
         assert_eq!(by_id["openai-gpt-5.6-luna"].context_window, Some(372_000));
         assert_eq!(by_id["openai-gpt-5.5"].context_window, Some(400_000));
         assert_eq!(by_id["openai-gpt-5.4"].context_window, Some(400_000));
@@ -2605,7 +2616,6 @@ mod tests {
     }
 
     // removed obsolete codex app-server test
-
 
     #[test]
     #[serial_test::serial]

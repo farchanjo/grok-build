@@ -3704,9 +3704,9 @@ fn provider_scoped_byok_detects_openrouter_and_openai_entries() {
     // OpenRouter/OpenAI entries have no per-model key, so has_own_credentials
     // is false — but is_provider_scoped_byok must still report true.
     assert!(!or_entry.has_own_credentials());
-    assert!(super::is_provider_scoped_byok(&or_entry));
-    assert!(super::is_provider_scoped_byok(&oai_entry));
-    assert!(!super::is_provider_scoped_byok(&plain));
+    assert!(or_entry.is_provider_scoped_byok());
+    assert!(oai_entry.is_provider_scoped_byok());
+    assert!(!plain.is_provider_scoped_byok());
 }
 
 #[test]

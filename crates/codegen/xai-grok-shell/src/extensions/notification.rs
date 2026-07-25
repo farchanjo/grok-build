@@ -1059,7 +1059,92 @@ pub enum RetryState {
         error_type: String,
         /// Human-readable error message
         message: String,
+        /// When set, the pager renders provider-scoped credential repair
+        /// guidance (for example OpenRouter → `/providers`) instead of the
+        /// global xAI `/login` banner. Absent for first-party session auth.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<ProviderCredentialFailure>,
     },
+}
+
+/// Error type for provider API-key rejections.
+///
+/// Intentionally **not** `"auth"` and never paired with an
+/// `"Unauthorized (401)"` message so older pagers that ignore the additive
+/// `provider` field cannot classify the payload as global `ReAuthRequired`.
+pub const PROVIDER_CREDENTIAL_ERROR_TYPE: &str = "provider_credential";
+
+/// Controlled error-category allowlist for safe terminal diagnostics.
+/// Values outside this set are collapsed to `"unknown"`.
+pub const SAFE_ERROR_CATEGORIES: &[&str] = &[
+    "auth",
+    "provider_credential",
+    "rate_limited",
+    "context_length",
+    "encrypted_content_mismatch",
+    "api",
+    "server",
+    "legacy_auth",
+    "idle_timeout",
+    "empty_response",
+    "output_budget_usage_unknown",
+    "workflow_child_sampling_failed",
+    "unknown",
+];
+
+/// Safe, credential-free context describing which configured provider
+/// rejected a request. Never includes API keys, prompts, or response bodies.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCredentialFailure {
+    /// Stable provider slug (`openrouter`, `openai`, ...).
+    pub provider_id: String,
+    /// User-facing provider label (`OpenRouter`, `OpenAI`, ...).
+    pub provider_name: String,
+    /// Catalog / routed model id that failed (e.g. `moonshotai/kimi-k2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_model_id: Option<String>,
+    /// HTTP status when known (typically 401).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Bounded safe request identifier (opaque id only; never headers/body).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Bounded safe generation id from router diagnostics (opaque id only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    /// Inference backend label (`chatcompletions`, `responses`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Controlled error category (see [`sanitize_error_category`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_category: Option<String>,
+}
+
+impl RetryState {
+    /// Non-retryable failure without provider-scoped repair context.
+    pub fn failed(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Failed {
+            error_type: error_type.into(),
+            message: message.into(),
+            provider: None,
+        }
+    }
+
+    /// Provider API-key rejection: uses [`PROVIDER_CREDENTIAL_ERROR_TYPE`] and
+    /// repair copy so legacy pagers cannot collapse this to global `/login`.
+    pub fn failed_with_provider(
+        message: impl Into<String>,
+        mut provider: ProviderCredentialFailure,
+    ) -> Self {
+        provider.error_category =
+            Some(sanitize_error_category(PROVIDER_CREDENTIAL_ERROR_TYPE).to_owned());
+        Self::Failed {
+            error_type: PROVIDER_CREDENTIAL_ERROR_TYPE.to_owned(),
+            message: message.into(),
+            provider: Some(provider),
+        }
+    }
 }
 
 /// Whether a terminal retry failure is a recoverable authentication error
@@ -1069,11 +1154,160 @@ pub enum RetryState {
 /// `legacy_auth` is intentionally excluded: those failures carry their own
 /// detailed migration guidance (`grok logout` / `grok login`) in the
 /// message, so we surface that verbatim instead of the generic prompt.
+///
+/// `provider_credential` is also excluded from *global* reauth: the pager
+/// must branch on the `provider` field first. Older pagers that ignore
+/// `provider` will treat this as a non-reauthable failure (RetryFailed),
+/// which is preferred over wrongly opening xAI `/login`.
 pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
-    if error_type == Some("legacy_auth") {
+    if error_type == Some("legacy_auth") || error_type == Some(PROVIDER_CREDENTIAL_ERROR_TYPE) {
         return false;
     }
     error_type == Some("auth") || message.contains("Unauthorized (401)")
+}
+
+/// User-facing repair copy for a provider-scoped API-key rejection.
+///
+/// Never mentions `/login` or xAI OAuth; always directs the operator to
+/// `/providers` for the named provider. Never includes `"Unauthorized (401)"`
+/// so legacy global reauth classifiers do not fire.
+pub fn provider_credential_repair_message(provider_name: &str) -> String {
+    format!(
+        "{provider_name} rejected its API key. Open /providers, select \
+         {provider_name}, and replace or test the key."
+    )
+}
+
+/// Collapse free-form error labels to the controlled diagnostics allowlist.
+pub fn sanitize_error_category(raw: &str) -> &'static str {
+    for category in SAFE_ERROR_CATEGORIES {
+        if *category == raw {
+            return category;
+        }
+    }
+    "unknown"
+}
+
+/// Parse a base URL and return its host when the scheme is `http`/`https`.
+///
+/// Rejects invalid URLs, non-http schemes, and empty hosts. Callers must
+/// compare the returned host exactly (or via
+/// [`approved_provider_for_exact_host`]) — never with substring search.
+pub fn host_from_base_url(base_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(base_url).ok()?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return None,
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    Some(host)
+}
+
+/// Map an exact approved API host to `(provider_id, provider_name)`.
+///
+/// Only exact hosts are accepted. Suffix-confused hosts such as
+/// `openrouter.ai.evil.invalid` and userinfo/query-only spoofs never match.
+pub fn approved_provider_for_exact_host(host: &str) -> Option<(&'static str, &'static str)> {
+    match host {
+        "openrouter.ai" => Some(("openrouter", "OpenRouter")),
+        "api.openai.com" => Some(("openai", "OpenAI")),
+        _ => None,
+    }
+}
+
+/// Bound opaque diagnostic ids (request/generation) to a safe length.
+pub fn bound_safe_id(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Reject values that look like headers, secrets, or free-form prose.
+    if s.len() > 128
+        || s.contains('\n')
+        || s.contains(' ')
+        || s.to_ascii_lowercase().contains("bearer")
+        || s.to_ascii_lowercase().contains("authorization")
+    {
+        return None;
+    }
+    Some(s.to_owned())
+}
+
+#[cfg(test)]
+mod provider_host_tests {
+    use super::*;
+
+    #[test]
+    fn host_from_base_url_accepts_exact_openrouter() {
+        assert_eq!(
+            host_from_base_url("https://openrouter.ai/api/v1").as_deref(),
+            Some("openrouter.ai")
+        );
+    }
+
+    #[test]
+    fn host_from_base_url_rejects_suffix_confusion() {
+        let host = host_from_base_url("https://openrouter.ai.evil.invalid/api/v1")
+            .expect("URL parses but host is not approved");
+        assert_eq!(host, "openrouter.ai.evil.invalid");
+        assert!(approved_provider_for_exact_host(&host).is_none());
+    }
+
+    #[test]
+    fn host_from_base_url_ignores_userinfo_and_query_spoofs() {
+        // userinfo does not change host: still openrouter.ai when legitimate.
+        assert_eq!(
+            host_from_base_url("https://attacker:pw@openrouter.ai/api/v1").as_deref(),
+            Some("openrouter.ai")
+        );
+        // Query string cannot inject host.
+        let host = host_from_base_url("https://evil.example/?h=openrouter.ai").unwrap();
+        assert!(approved_provider_for_exact_host(&host).is_none());
+    }
+
+    #[test]
+    fn host_from_base_url_rejects_invalid_and_non_http() {
+        assert!(host_from_base_url("not a url").is_none());
+        assert!(host_from_base_url("ftp://openrouter.ai/api").is_none());
+        assert!(host_from_base_url("").is_none());
+    }
+
+    #[test]
+    fn approved_hosts_match_only_exact() {
+        assert_eq!(
+            approved_provider_for_exact_host("openrouter.ai"),
+            Some(("openrouter", "OpenRouter"))
+        );
+        assert_eq!(
+            approved_provider_for_exact_host("api.openai.com"),
+            Some(("openai", "OpenAI"))
+        );
+        assert!(approved_provider_for_exact_host("www.openrouter.ai").is_none());
+        assert!(approved_provider_for_exact_host("openrouter.ai.evil").is_none());
+    }
+
+    #[test]
+    fn is_reauthable_failure_excludes_provider_credential() {
+        assert!(!is_reauthable_failure(
+            Some(PROVIDER_CREDENTIAL_ERROR_TYPE),
+            &provider_credential_repair_message("OpenRouter")
+        ));
+        assert!(is_reauthable_failure(Some("auth"), "Unauthorized (401)"));
+    }
+
+    #[test]
+    fn bound_safe_id_rejects_secrets_and_prose() {
+        assert_eq!(
+            bound_safe_id(Some("gen-abc123")).as_deref(),
+            Some("gen-abc123")
+        );
+        assert!(bound_safe_id(Some("Bearer sk-secret")).is_none());
+        assert!(bound_safe_id(Some("Authorization: Bearer x")).is_none());
+        assert!(bound_safe_id(Some("please fix my prompt now")).is_none());
+    }
 }
 
 /// Status updates for relay sync (session sharing) feature.

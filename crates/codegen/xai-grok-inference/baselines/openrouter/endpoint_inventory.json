@@ -1,0 +1,1792 @@
+{
+  "format_version": 1,
+  "provider": "openrouter",
+  "baseline": {
+    "title": "OpenRouter API",
+    "version": "1.0.0",
+    "openapi": "3.1.0",
+    "source_url": "https://openrouter.ai/openapi.json",
+    "yaml_url": "https://openrouter.ai/openapi.yaml",
+    "docs_url": "https://openrouter.ai/docs/api_reference/overview",
+    "fetched_at_utc": "2026-07-24T22:27:00Z",
+    "content_sha256": "90c87070f5c2bd83c4d8e8b336dc7a4ea265e901198812d300a069a977b3f203",
+    "content_bytes": 1653634,
+    "path_count": 69,
+    "endpoint_count": 89,
+    "schema_count": 712
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/activity",
+      "operation_id": "getUserActivity",
+      "tags": [
+        "Analytics"
+      ],
+      "summary": "Get user activity grouped by endpoint"
+    },
+    {
+      "method": "GET",
+      "path": "/analytics/meta",
+      "operation_id": "getAnalyticsMeta",
+      "tags": [
+        "beta.Analytics"
+      ],
+      "summary": "Get available analytics metrics and dimensions"
+    },
+    {
+      "method": "POST",
+      "path": "/analytics/query",
+      "operation_id": "queryAnalytics",
+      "tags": [
+        "beta.Analytics"
+      ],
+      "summary": "Query analytics data"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/speech",
+      "operation_id": "createAudioSpeech",
+      "tags": [
+        "TTS"
+      ],
+      "summary": "Create speech"
+    },
+    {
+      "method": "POST",
+      "path": "/audio/transcriptions",
+      "operation_id": "createAudioTranscriptions",
+      "tags": [
+        "STT"
+      ],
+      "summary": "Create transcription"
+    },
+    {
+      "method": "POST",
+      "path": "/auth/keys",
+      "operation_id": "exchangeAuthCodeForAPIKey",
+      "tags": [
+        "OAuth"
+      ],
+      "summary": "Exchange authorization code for API key"
+    },
+    {
+      "method": "POST",
+      "path": "/auth/keys/code",
+      "operation_id": "createAuthKeysCode",
+      "tags": [
+        "OAuth"
+      ],
+      "summary": "Create authorization code"
+    },
+    {
+      "method": "GET",
+      "path": "/benchmarks",
+      "operation_id": "getBenchmarks",
+      "tags": [
+        "Benchmarks"
+      ],
+      "summary": "List Benchmarks"
+    },
+    {
+      "method": "GET",
+      "path": "/byok",
+      "operation_id": "listBYOKKeys",
+      "tags": [
+        "BYOK"
+      ],
+      "summary": "List BYOK provider credentials"
+    },
+    {
+      "method": "POST",
+      "path": "/byok",
+      "operation_id": "createBYOKKey",
+      "tags": [
+        "BYOK"
+      ],
+      "summary": "Create a BYOK provider credential"
+    },
+    {
+      "method": "DELETE",
+      "path": "/byok/{id}",
+      "operation_id": "deleteBYOKKey",
+      "tags": [
+        "BYOK"
+      ],
+      "summary": "Delete a BYOK provider credential"
+    },
+    {
+      "method": "GET",
+      "path": "/byok/{id}",
+      "operation_id": "getBYOKKey",
+      "tags": [
+        "BYOK"
+      ],
+      "summary": "Get a BYOK provider credential"
+    },
+    {
+      "method": "PATCH",
+      "path": "/byok/{id}",
+      "operation_id": "updateBYOKKey",
+      "tags": [
+        "BYOK"
+      ],
+      "summary": "Update a BYOK provider credential"
+    },
+    {
+      "method": "POST",
+      "path": "/chat/completions",
+      "operation_id": "sendChatCompletionRequest",
+      "tags": [
+        "Chat"
+      ],
+      "summary": "Create a chat completion"
+    },
+    {
+      "method": "GET",
+      "path": "/classifications/task",
+      "operation_id": "getTaskClassifications",
+      "tags": [
+        "Classifications"
+      ],
+      "summary": "Task classification market share"
+    },
+    {
+      "method": "GET",
+      "path": "/credits",
+      "operation_id": "getCredits",
+      "tags": [
+        "Credits"
+      ],
+      "summary": "Get remaining credits"
+    },
+    {
+      "method": "POST",
+      "path": "/credits/coinbase",
+      "operation_id": "createCoinbaseCharge",
+      "tags": [
+        "Credits"
+      ],
+      "summary": "Deprecated Coinbase Commerce charge endpoint"
+    },
+    {
+      "method": "GET",
+      "path": "/datasets/app-rankings",
+      "operation_id": "getAppRankings",
+      "tags": [
+        "Datasets"
+      ],
+      "summary": "Top apps by token usage"
+    },
+    {
+      "method": "GET",
+      "path": "/datasets/rankings-daily",
+      "operation_id": "getRankingsDaily",
+      "tags": [
+        "Datasets"
+      ],
+      "summary": "Daily token totals for top 50 models"
+    },
+    {
+      "method": "POST",
+      "path": "/embeddings",
+      "operation_id": "createEmbeddings",
+      "tags": [
+        "Embeddings"
+      ],
+      "summary": "Submit an embedding request"
+    },
+    {
+      "method": "GET",
+      "path": "/embeddings/models",
+      "operation_id": "listEmbeddingsModels",
+      "tags": [
+        "Embeddings"
+      ],
+      "summary": "List all embeddings models"
+    },
+    {
+      "method": "GET",
+      "path": "/endpoints/zdr",
+      "operation_id": "listEndpointsZdr",
+      "tags": [
+        "Endpoints"
+      ],
+      "summary": "Preview the impact of ZDR on the available endpoints"
+    },
+    {
+      "method": "GET",
+      "path": "/files",
+      "operation_id": "listFiles",
+      "tags": [
+        "Files"
+      ],
+      "summary": "List files"
+    },
+    {
+      "method": "POST",
+      "path": "/files",
+      "operation_id": "uploadFile",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Upload a file"
+    },
+    {
+      "method": "DELETE",
+      "path": "/files/{file_id}",
+      "operation_id": "deleteFile",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Delete a file"
+    },
+    {
+      "method": "GET",
+      "path": "/files/{file_id}",
+      "operation_id": "getFileMetadata",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Get file metadata"
+    },
+    {
+      "method": "GET",
+      "path": "/files/{file_id}/content",
+      "operation_id": "downloadFileContent",
+      "tags": [
+        "Files"
+      ],
+      "summary": "Download file content"
+    },
+    {
+      "method": "GET",
+      "path": "/generation",
+      "operation_id": "getGeneration",
+      "tags": [
+        "Generations"
+      ],
+      "summary": "Get request & usage metadata for a generation"
+    },
+    {
+      "method": "GET",
+      "path": "/generation/content",
+      "operation_id": "listGenerationContent",
+      "tags": [
+        "Generations"
+      ],
+      "summary": "Get stored prompt and completion content for a generation"
+    },
+    {
+      "method": "POST",
+      "path": "/generation/feedback",
+      "operation_id": "submitGenerationFeedback",
+      "tags": [
+        "Generations"
+      ],
+      "summary": "Submit feedback for a generation"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails",
+      "operation_id": "listGuardrails",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "List guardrails"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails",
+      "operation_id": "createGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Create a guardrail"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/assignments/keys",
+      "operation_id": "listKeyAssignments",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "List all key assignments"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/assignments/members",
+      "operation_id": "listMemberAssignments",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "List all member assignments"
+    },
+    {
+      "method": "DELETE",
+      "path": "/guardrails/{id}",
+      "operation_id": "deleteGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Delete a guardrail"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/{id}",
+      "operation_id": "getGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Get a guardrail"
+    },
+    {
+      "method": "PATCH",
+      "path": "/guardrails/{id}",
+      "operation_id": "updateGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Update a guardrail"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/{id}/assignments/keys",
+      "operation_id": "listGuardrailKeyAssignments",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "List key assignments for a guardrail"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/keys",
+      "operation_id": "bulkAssignKeysToGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Bulk assign keys to a guardrail"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/keys/remove",
+      "operation_id": "bulkUnassignKeysFromGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Bulk unassign keys from a guardrail"
+    },
+    {
+      "method": "GET",
+      "path": "/guardrails/{id}/assignments/members",
+      "operation_id": "listGuardrailMemberAssignments",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "List member assignments for a guardrail"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/members",
+      "operation_id": "bulkAssignMembersToGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Bulk assign members to a guardrail"
+    },
+    {
+      "method": "POST",
+      "path": "/guardrails/{id}/assignments/members/remove",
+      "operation_id": "bulkUnassignMembersFromGuardrail",
+      "tags": [
+        "Guardrails"
+      ],
+      "summary": "Bulk unassign members from a guardrail"
+    },
+    {
+      "method": "POST",
+      "path": "/images",
+      "operation_id": "createImages",
+      "tags": [
+        "Images"
+      ],
+      "summary": "Generate an image"
+    },
+    {
+      "method": "GET",
+      "path": "/images/models",
+      "operation_id": "listImageModels",
+      "tags": [
+        "Images"
+      ],
+      "summary": "List image generation models"
+    },
+    {
+      "method": "GET",
+      "path": "/images/models/{author}/{slug}/endpoints",
+      "operation_id": "listImageModelEndpoints",
+      "tags": [
+        "Images"
+      ],
+      "summary": "List endpoints for an image model"
+    },
+    {
+      "method": "GET",
+      "path": "/key",
+      "operation_id": "getCurrentKey",
+      "tags": [
+        "API Keys"
+      ],
+      "summary": "Get current API key"
+    },
+    {
+      "method": "GET",
+      "path": "/keys",
+      "operation_id": "list",
+      "tags": [
+        "API Keys"
+      ],
+      "summary": "List API keys"
+    },
+    {
+      "method": "POST",
+      "path": "/keys",
+      "operation_id": "createKeys",
+      "tags": [
+        "API Keys"
+      ],
+      "summary": "Create a new API key"
+    },
+    {
+      "method": "DELETE",
+      "path": "/keys/{hash}",
+      "operation_id": "deleteKeys",
+      "tags": [
+        "API Keys"
+      ],
+      "summary": "Delete an API key"
+    },
+    {
+      "method": "GET",
+      "path": "/keys/{hash}",
+      "operation_id": "getKey",
+      "tags": [
+        "API Keys"
+      ],
+      "summary": "Get a single API key"
+    },
+    {
+      "method": "PATCH",
+      "path": "/keys/{hash}",
+      "operation_id": "updateKeys",
+      "tags": [
+        "API Keys"
+      ],
+      "summary": "Update an API key"
+    },
+    {
+      "method": "POST",
+      "path": "/messages",
+      "operation_id": "createMessages",
+      "tags": [
+        "Anthropic Messages"
+      ],
+      "summary": "Create a message"
+    },
+    {
+      "method": "GET",
+      "path": "/model/{author}/{slug}",
+      "operation_id": "getModel",
+      "tags": [
+        "Models"
+      ],
+      "summary": "Get a model by its slug"
+    },
+    {
+      "method": "GET",
+      "path": "/models",
+      "operation_id": "getModels",
+      "tags": [
+        "Models"
+      ],
+      "summary": "List all models and their properties"
+    },
+    {
+      "method": "GET",
+      "path": "/models/count",
+      "operation_id": "listModelsCount",
+      "tags": [
+        "Models"
+      ],
+      "summary": "Get total count of available models"
+    },
+    {
+      "method": "GET",
+      "path": "/models/user",
+      "operation_id": "listModelsUser",
+      "tags": [
+        "Models"
+      ],
+      "summary": "List models filtered by user provider preferences, privacy settings, and guardrails"
+    },
+    {
+      "method": "GET",
+      "path": "/models/{author}/{slug}/endpoints",
+      "operation_id": "listEndpoints",
+      "tags": [
+        "Endpoints"
+      ],
+      "summary": "List all endpoints for a model"
+    },
+    {
+      "method": "GET",
+      "path": "/observability/destinations",
+      "operation_id": "listObservabilityDestinations",
+      "tags": [
+        "Observability"
+      ],
+      "summary": "List observability destinations"
+    },
+    {
+      "method": "POST",
+      "path": "/observability/destinations",
+      "operation_id": "createObservabilityDestination",
+      "tags": [
+        "Observability"
+      ],
+      "summary": "Create an observability destination"
+    },
+    {
+      "method": "DELETE",
+      "path": "/observability/destinations/{id}",
+      "operation_id": "deleteObservabilityDestination",
+      "tags": [
+        "Observability"
+      ],
+      "summary": "Delete an observability destination"
+    },
+    {
+      "method": "GET",
+      "path": "/observability/destinations/{id}",
+      "operation_id": "getObservabilityDestination",
+      "tags": [
+        "Observability"
+      ],
+      "summary": "Get an observability destination"
+    },
+    {
+      "method": "PATCH",
+      "path": "/observability/destinations/{id}",
+      "operation_id": "updateObservabilityDestination",
+      "tags": [
+        "Observability"
+      ],
+      "summary": "Update an observability destination"
+    },
+    {
+      "method": "GET",
+      "path": "/organization/members",
+      "operation_id": "listOrganizationMembers",
+      "tags": [
+        "Organization"
+      ],
+      "summary": "List organization members"
+    },
+    {
+      "method": "GET",
+      "path": "/presets",
+      "operation_id": "listPresets",
+      "tags": [
+        "Presets"
+      ],
+      "summary": "List presets"
+    },
+    {
+      "method": "GET",
+      "path": "/presets/{slug}",
+      "operation_id": "getPreset",
+      "tags": [
+        "Presets"
+      ],
+      "summary": "Get a preset"
+    },
+    {
+      "method": "POST",
+      "path": "/presets/{slug}/chat/completions",
+      "operation_id": "createPresetsChatCompletions",
+      "tags": [
+        "Presets"
+      ],
+      "summary": "Create a preset from a chat-completions request body"
+    },
+    {
+      "method": "POST",
+      "path": "/presets/{slug}/messages",
+      "operation_id": "createPresetsMessages",
+      "tags": [
+        "Presets"
+      ],
+      "summary": "Create a preset from a messages request body"
+    },
+    {
+      "method": "POST",
+      "path": "/presets/{slug}/responses",
+      "operation_id": "createPresetsResponses",
+      "tags": [
+        "Presets"
+      ],
+      "summary": "Create a preset from a responses request body"
+    },
+    {
+      "method": "GET",
+      "path": "/presets/{slug}/versions",
+      "operation_id": "listPresetVersions",
+      "tags": [
+        "Presets"
+      ],
+      "summary": "List versions of a preset"
+    },
+    {
+      "method": "GET",
+      "path": "/presets/{slug}/versions/{version}",
+      "operation_id": "getPresetVersion",
+      "tags": [
+        "Presets"
+      ],
+      "summary": "Get a specific version of a preset"
+    },
+    {
+      "method": "GET",
+      "path": "/providers",
+      "operation_id": "listProviders",
+      "tags": [
+        "Providers"
+      ],
+      "summary": "List all providers"
+    },
+    {
+      "method": "POST",
+      "path": "/rerank",
+      "operation_id": "createRerank",
+      "tags": [
+        "Rerank"
+      ],
+      "summary": "Submit a rerank request"
+    },
+    {
+      "method": "POST",
+      "path": "/responses",
+      "operation_id": "createResponses",
+      "tags": [
+        "beta.responses"
+      ],
+      "summary": "Create a response"
+    },
+    {
+      "method": "POST",
+      "path": "/videos",
+      "operation_id": "createVideos",
+      "tags": [
+        "Video Generation"
+      ],
+      "summary": "Submit a video generation request"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/models",
+      "operation_id": "listVideosModels",
+      "tags": [
+        "Video Generation"
+      ],
+      "summary": "List all video generation models"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/{jobId}",
+      "operation_id": "getVideos",
+      "tags": [
+        "Video Generation"
+      ],
+      "summary": "Poll video generation status"
+    },
+    {
+      "method": "GET",
+      "path": "/videos/{jobId}/content",
+      "operation_id": "listVideosContent",
+      "tags": [
+        "Video Generation"
+      ],
+      "summary": "Download generated video content"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces",
+      "operation_id": "listWorkspaces",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "List workspaces"
+    },
+    {
+      "method": "POST",
+      "path": "/workspaces",
+      "operation_id": "createWorkspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Create a workspace"
+    },
+    {
+      "method": "DELETE",
+      "path": "/workspaces/{id}",
+      "operation_id": "deleteWorkspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Delete a workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces/{id}",
+      "operation_id": "getWorkspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Get a workspace"
+    },
+    {
+      "method": "PATCH",
+      "path": "/workspaces/{id}",
+      "operation_id": "updateWorkspace",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Update a workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces/{id}/budgets",
+      "operation_id": "listWorkspaceBudgets",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "List workspace budgets"
+    },
+    {
+      "method": "DELETE",
+      "path": "/workspaces/{id}/budgets/{interval}",
+      "operation_id": "deleteWorkspaceBudget",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Delete a workspace budget"
+    },
+    {
+      "method": "PUT",
+      "path": "/workspaces/{id}/budgets/{interval}",
+      "operation_id": "upsertWorkspaceBudget",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Create or update a workspace budget"
+    },
+    {
+      "method": "GET",
+      "path": "/workspaces/{id}/members",
+      "operation_id": "listWorkspaceMembers",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "List workspace members"
+    },
+    {
+      "method": "POST",
+      "path": "/workspaces/{id}/members/add",
+      "operation_id": "bulkAddWorkspaceMembers",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Bulk add members to a workspace"
+    },
+    {
+      "method": "POST",
+      "path": "/workspaces/{id}/members/remove",
+      "operation_id": "bulkRemoveWorkspaceMembers",
+      "tags": [
+        "Workspaces"
+      ],
+      "summary": "Bulk remove members from a workspace"
+    }
+  ],
+  "coding_agent_schema_fields": [
+    {
+      "schema": "ChatRequest",
+      "field_count": 42,
+      "fields": [
+        {
+          "name": "cache_control",
+          "required": false,
+          "ref": "AnthropicCacheControlDirective"
+        },
+        {
+          "name": "debug",
+          "required": false,
+          "ref": "ChatDebugOptions"
+        },
+        {
+          "name": "frequency_penalty",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "image_config",
+          "required": false,
+          "ref": "ImageConfig"
+        },
+        {
+          "name": "logit_bias",
+          "required": false,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        {
+          "name": "logprobs",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "name": "max_completion_tokens",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "max_tokens",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "messages",
+          "required": true,
+          "type": "array"
+        },
+        {
+          "name": "metadata",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "name": "min_p",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "modalities",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "model",
+          "required": false,
+          "ref": "ModelName"
+        },
+        {
+          "name": "models",
+          "required": false,
+          "ref": "ChatModelNames"
+        },
+        {
+          "name": "parallel_tool_calls",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "name": "plugins",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "prediction",
+          "required": false,
+          "ref": "Prediction"
+        },
+        {
+          "name": "presence_penalty",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "prompt_cache_key",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "prompt_cache_options",
+          "required": false,
+          "ref": "PromptCacheOptions"
+        },
+        {
+          "name": "provider",
+          "required": false,
+          "ref": "ProviderPreferences"
+        },
+        {
+          "name": "reasoning",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "name": "reasoning_effort",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "max",
+            "xhigh",
+            "high",
+            "medium",
+            "low",
+            "minimal",
+            "none",
+            null
+          ]
+        },
+        {
+          "name": "repetition_penalty",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "response_format",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "route",
+          "required": false,
+          "ref": "DeprecatedRoute"
+        },
+        {
+          "name": "seed",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "service_tier",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "auto",
+            "default",
+            "flex",
+            "priority",
+            "scale",
+            null
+          ]
+        },
+        {
+          "name": "session_id",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "stop",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "stop_server_tools_when",
+          "required": false,
+          "ref": "StopServerToolsWhen"
+        },
+        {
+          "name": "stream",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "name": "stream_options",
+          "required": false,
+          "ref": "ChatStreamOptions"
+        },
+        {
+          "name": "temperature",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "tool_choice",
+          "required": false,
+          "ref": "ChatToolChoice"
+        },
+        {
+          "name": "tools",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "top_a",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "top_k",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "top_logprobs",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "top_p",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "trace",
+          "required": false,
+          "ref": "TraceConfig"
+        },
+        {
+          "name": "user",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "schema": "ResponsesRequest",
+      "field_count": 40,
+      "fields": [
+        {
+          "name": "background",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "name": "cache_control",
+          "required": false,
+          "ref": "AnthropicCacheControlDirective"
+        },
+        {
+          "name": "debug",
+          "required": false,
+          "ref": "ChatDebugOptions"
+        },
+        {
+          "name": "frequency_penalty",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "image_config",
+          "required": false,
+          "ref": "ImageConfig"
+        },
+        {
+          "name": "include",
+          "required": false,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        {
+          "name": "input",
+          "required": false,
+          "ref": "Inputs"
+        },
+        {
+          "name": "instructions",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "max_output_tokens",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "max_tool_calls",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "metadata",
+          "required": false,
+          "ref": "RequestMetadata"
+        },
+        {
+          "name": "modalities",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "model",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "models",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "parallel_tool_calls",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "name": "plugins",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "presence_penalty",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "previous_response_id",
+          "required": false
+        },
+        {
+          "name": "prompt",
+          "required": false,
+          "ref": "StoredPromptTemplate"
+        },
+        {
+          "name": "prompt_cache_key",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "prompt_cache_options",
+          "required": false,
+          "ref": "PromptCacheOptions"
+        },
+        {
+          "name": "provider",
+          "required": false,
+          "ref": "ProviderPreferences"
+        },
+        {
+          "name": "reasoning",
+          "required": false,
+          "ref": "ReasoningConfig"
+        },
+        {
+          "name": "route",
+          "required": false,
+          "ref": "DeprecatedRoute"
+        },
+        {
+          "name": "safety_identifier",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "service_tier",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "auto",
+            "default",
+            "flex",
+            "priority",
+            "scale",
+            null
+          ]
+        },
+        {
+          "name": "session_id",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "stop_server_tools_when",
+          "required": false,
+          "ref": "StopServerToolsWhen"
+        },
+        {
+          "name": "store",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "name": "stream",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "name": "temperature",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "text",
+          "required": false,
+          "ref": "TextExtendedConfig"
+        },
+        {
+          "name": "tool_choice",
+          "required": false,
+          "ref": "OpenAIResponsesToolChoice"
+        },
+        {
+          "name": "tools",
+          "required": false,
+          "type": "array"
+        },
+        {
+          "name": "top_k",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "top_logprobs",
+          "required": false,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        {
+          "name": "top_p",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "trace",
+          "required": false,
+          "ref": "TraceConfig"
+        },
+        {
+          "name": "truncation",
+          "required": false,
+          "ref": "OpenAIResponsesTruncation"
+        },
+        {
+          "name": "user",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "schema": "ProviderPreferences",
+      "field_count": 13,
+      "fields": [
+        {
+          "name": "allow_fallbacks",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "name": "data_collection",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "deny",
+            "allow",
+            null
+          ]
+        },
+        {
+          "name": "enforce_distillable_text",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "name": "ignore",
+          "required": false,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        {
+          "name": "max_price",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "name": "only",
+          "required": false,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        {
+          "name": "order",
+          "required": false,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        {
+          "name": "preferred_max_latency",
+          "required": false,
+          "ref": "PreferredMaxLatency"
+        },
+        {
+          "name": "preferred_min_throughput",
+          "required": false,
+          "ref": "PreferredMinThroughput"
+        },
+        {
+          "name": "quantizations",
+          "required": false,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        {
+          "name": "require_parameters",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "name": "sort",
+          "required": false,
+          "union": true
+        },
+        {
+          "name": "zdr",
+          "required": false,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "ChatUsage",
+      "field_count": 9,
+      "fields": [
+        {
+          "name": "completion_tokens",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "name": "completion_tokens_details",
+          "required": false,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        {
+          "name": "cost",
+          "required": false,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        {
+          "name": "cost_details",
+          "required": false,
+          "ref": "CostDetails"
+        },
+        {
+          "name": "is_byok",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "name": "prompt_tokens",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "name": "prompt_tokens_details",
+          "required": false,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        {
+          "name": "server_tool_use_details",
+          "required": false,
+          "ref": "ServerToolUseDetails"
+        },
+        {
+          "name": "total_tokens",
+          "required": true,
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "schema": "ChatToolCall",
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "function",
+          "required": true,
+          "type": "object"
+        },
+        {
+          "name": "id",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "type",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "function"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "ChatStreamToolCall",
+      "field_count": 4,
+      "fields": [
+        {
+          "name": "function",
+          "required": false,
+          "type": "object"
+        },
+        {
+          "name": "id",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "index",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "name": "type",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "function"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "ChatReasoningDetails",
+      "field_count": 0,
+      "fields": []
+    },
+    {
+      "schema": "ChatStreamReasoningDetails",
+      "field_count": 0,
+      "fields": []
+    },
+    {
+      "schema": "ReasoningDetailText",
+      "field_count": 6,
+      "fields": [
+        {
+          "name": "format",
+          "required": false,
+          "ref": "ReasoningFormat"
+        },
+        {
+          "name": "id",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "index",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "signature",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "text",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "type",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "reasoning.text"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "ReasoningDetailSummary",
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "format",
+          "required": false,
+          "ref": "ReasoningFormat"
+        },
+        {
+          "name": "id",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "index",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "summary",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "type",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "reasoning.summary"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "ReasoningDetailEncrypted",
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "data",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "format",
+          "required": false,
+          "ref": "ReasoningFormat"
+        },
+        {
+          "name": "id",
+          "required": false,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        {
+          "name": "index",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "name": "type",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "reasoning.encrypted"
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "OpenAIResponsesUsage",
+      "field_count": 5,
+      "fields": [
+        {
+          "name": "input_tokens",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "name": "input_tokens_details",
+          "required": true,
+          "type": "object"
+        },
+        {
+          "name": "output_tokens",
+          "required": true,
+          "type": "integer"
+        },
+        {
+          "name": "output_tokens_details",
+          "required": true,
+          "type": "object"
+        },
+        {
+          "name": "total_tokens",
+          "required": true,
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "schema": "ModelsListResponse",
+      "field_count": 3,
+      "fields": [
+        {
+          "name": "data",
+          "required": true,
+          "ref": "ModelsListResponseData"
+        },
+        {
+          "name": "links",
+          "required": true,
+          "type": "object"
+        },
+        {
+          "name": "total_count",
+          "required": true,
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "schema": "GenerationResponse",
+      "field_count": 1,
+      "fields": [
+        {
+          "name": "data",
+          "required": true,
+          "type": "object"
+        }
+      ]
+    }
+  ],
+  "coding_agent_priority_endpoints": [
+    "POST /chat/completions",
+    "POST /responses",
+    "POST /messages",
+    "GET /models",
+    "GET /key",
+    "GET /credits",
+    "GET /generation",
+    "POST /embeddings"
+  ],
+  "notes": [
+    "Compact inventory only; full OpenAPI is not vendored.",
+    "Regenerate with generate_inventory.py from a local OpenAPI file.",
+    "No network I/O in the generator or in unit tests."
+  ]
+}

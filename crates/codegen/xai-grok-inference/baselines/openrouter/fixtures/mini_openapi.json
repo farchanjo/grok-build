@@ -1,0 +1,171 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenRouter API Mini",
+    "version": "1.0.0-test"
+  },
+  "paths": {
+    "/chat/completions": {
+      "post": {
+        "operationId": "sendChat",
+        "tags": [
+          "Chat"
+        ],
+        "summary": "chat"
+      }
+    },
+    "/responses": {
+      "post": {
+        "operationId": "createResp",
+        "tags": [
+          "beta.responses"
+        ]
+      }
+    },
+    "/messages": {
+      "post": {
+        "operationId": "createMsg",
+        "tags": [
+          "Anthropic Messages"
+        ]
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "listModels",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/key": {
+      "get": {
+        "operationId": "getKey",
+        "tags": [
+          "API Keys"
+        ]
+      }
+    },
+    "/credits": {
+      "get": {
+        "operationId": "getCredits",
+        "tags": [
+          "Credits"
+        ]
+      }
+    },
+    "/generation": {
+      "get": {
+        "operationId": "getGen",
+        "tags": [
+          "Generations"
+        ]
+      }
+    },
+    "/embeddings": {
+      "post": {
+        "operationId": "embed",
+        "tags": [
+          "Embeddings"
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChatRequest": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "models": {
+            "type": "array"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ProviderPreferences"
+          },
+          "plugins": {
+            "type": "array"
+          },
+          "tools": {
+            "type": "array"
+          },
+          "tool_choice": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "response_format": {
+            "type": "object"
+          },
+          "reasoning": {
+            "type": "object"
+          },
+          "reasoning_effort": {
+            "type": "string"
+          }
+        }
+      },
+      "ResponsesRequest": {
+        "type": "object",
+        "properties": {
+          "input": {},
+          "model": {},
+          "models": {},
+          "provider": {},
+          "plugins": {},
+          "store": {},
+          "previous_response_id": {},
+          "stream": {},
+          "tools": {},
+          "reasoning": {}
+        }
+      },
+      "ProviderPreferences": {
+        "type": "object",
+        "properties": {
+          "order": {},
+          "only": {},
+          "ignore": {},
+          "allow_fallbacks": {},
+          "require_parameters": {},
+          "data_collection": {},
+          "zdr": {},
+          "quantizations": {},
+          "sort": {},
+          "max_price": {},
+          "enforce_distillable_text": {},
+          "preferred_max_latency": {},
+          "preferred_min_throughput": {}
+        }
+      },
+      "ChatUsage": {
+        "type": "object",
+        "properties": {
+          "prompt_tokens": {},
+          "completion_tokens": {}
+        }
+      },
+      "GenerationResponse": {
+        "type": "object",
+        "properties": {
+          "id": {}
+        }
+      },
+      "ModelsListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {}
+        }
+      }
+    }
+  }
+}

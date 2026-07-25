@@ -117,9 +117,10 @@ pub(super) fn dispatch_switch_account(app: &mut AppView) -> Vec<Effect> {
 }
 
 /// Scan the trailing run of session-event / system blocks for a
-/// [`SessionEvent::ReAuthRequired`] prompt. Used by the `PromptResponse`
+/// credential-repair prompt ([`SessionEvent::ReAuthRequired`] or
+/// [`SessionEvent::ProviderCredentialRequired`]). Used by the `PromptResponse`
 /// handler to suppress the redundant "Turn failed" block after a 401 — the
-/// re-auth prompt is pushed by the `RetryState` handler, which runs first.
+/// repair prompt is pushed by the `RetryState` handler, which runs first.
 pub(super) fn scrollback_has_recent_reauth_prompt(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {
@@ -127,7 +128,10 @@ pub(super) fn scrollback_has_recent_reauth_prompt(
     for idx in (0..scrollback.len()).rev() {
         match scrollback.entry(idx).map(|e| &e.block) {
             Some(RenderBlock::SessionEvent(ev)) => {
-                if matches!(ev.event, SessionEvent::ReAuthRequired) {
+                if matches!(
+                    ev.event,
+                    SessionEvent::ReAuthRequired | SessionEvent::ProviderCredentialRequired { .. }
+                ) {
                     return true;
                 }
             }
@@ -182,6 +186,7 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
                 if matches!(
                     &ev.event,
                     SessionEvent::ReAuthRequired
+                        | SessionEvent::ProviderCredentialRequired { .. }
                         | SessionEvent::RetryFailed { .. }
                         | SessionEvent::TurnFailed { .. }
                 ) =>
