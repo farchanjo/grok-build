@@ -444,7 +444,9 @@ mod tests {
     fn every_endpoint_has_validated_transports_and_media_types() {
         for inv in [openai_inventory(), openrouter_inventory()] {
             for ep in &inv.endpoints {
-                let id = ep.to_identity().expect(ep.method_path_key().as_str());
+                let id = ep
+                    .to_identity()
+                    .unwrap_or_else(|_| panic!("{}", ep.method_path_key()));
                 assert!(!id.transports.is_empty());
             }
         }
