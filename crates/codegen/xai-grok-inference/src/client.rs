@@ -89,6 +89,11 @@ impl GrokRequestHeaders<'_> {
 /// (OpenAI OAuth / Codex / async-openai). Not a model API event.
 const RESPONSES_KEEPALIVE_TYPE: &str = "keepalive";
 
+/// Exact SSE `event:` name / JSON `type` for Codex-only Responses control
+/// frames that carry optional turn-state headers and verification metadata.
+/// Absent from async-openai's strict `ResponseStreamEvent` union.
+const RESPONSES_METADATA_TYPE: &str = "response.metadata";
+
 /// True when an SSE frame is a Responses transport keepalive / heartbeat.
 ///
 /// Matches either:
@@ -112,6 +117,33 @@ fn is_responses_keepalive(event_name: &str, data: &str) -> bool {
             .is_ok_and(|v| v.get("type").and_then(|t| t.as_str()) == Some(RESPONSES_KEEPALIVE_TYPE))
 }
 
+/// True when an SSE frame is the Codex-only `response.metadata` control event.
+///
+/// OpenAI Codex's permissive stream shape includes exact `type ==
+/// "response.metadata"` frames with optional top-level `headers` (for example
+/// `x-codex-turn-state`) and optional verification/moderation metadata.
+/// async-openai's strict `ResponseStreamEvent` union does not model this
+/// variant, so unfiltered frames become a user-facing serialization failure.
+///
+/// Matches either:
+/// - the SSE `event:` field exactly `response.metadata`, or
+/// - a valid JSON payload whose top-level `"type"` is exactly
+///   `"response.metadata"`.
+///
+/// Absorbed as a no-op: do not emit model output, do not forward headers or
+/// turn state (no channel exists today), and do not reset Layer-2 content
+/// idle timers. Other unknown `response.*` events remain fail-closed.
+fn is_responses_metadata(event_name: &str, data: &str) -> bool {
+    if event_name == RESPONSES_METADATA_TYPE {
+        return true;
+    }
+    // Cheap substring precheck; confirm via the exact top-level `type` tag so
+    // nested mentions or unrelated events are not swallowed.
+    data.contains(RESPONSES_METADATA_TYPE)
+        && serde_json::from_str::<serde_json::Value>(data)
+            .is_ok_and(|v| v.get("type").and_then(|t| t.as_str()) == Some(RESPONSES_METADATA_TYPE))
+}
+
 /// Deserialize a Responses API SSE event, with a fallback for xAI-specific
 /// tool types (e.g., `x_search`) that `async_openai` can't parse.
 ///
@@ -132,8 +164,8 @@ fn is_responses_keepalive(event_name: &str, data: &str) -> bool {
 /// passes through unchanged.
 ///
 /// Callers must filter transport control frames (see
-/// [`is_responses_keepalive`]) before invoking this; keepalives are not
-/// representable as `ResponseStreamEvent`.
+/// [`is_responses_keepalive`] and [`is_responses_metadata`]) before invoking
+/// this; those frames are not representable as `ResponseStreamEvent`.
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
@@ -1713,11 +1745,11 @@ impl InferenceClient {
                             return std::future::ready(None);
                         }
 
-                        // Transport heartbeats first — before the info-level
-                        // `sse_chunk` log that dumps the payload. Keepalives
-                        // can arrive often on long OAuth streams; logging them
-                        // at info would flood the journal and must never echo
-                        // response body data.
+                        // Transport / Codex control frames first — before the
+                        // info-level `sse_chunk` log that dumps the payload.
+                        // Keepalives can arrive often on long OAuth streams;
+                        // `response.metadata` may carry turn-state headers and
+                        // moderation fields. Never log either payload.
                         if is_responses_keepalive(&event.event, data) {
                             tracing::debug!(
                                 target: crate::inference_log::TARGET,
@@ -1725,6 +1757,16 @@ impl InferenceClient {
                                 backend = "responses",
                                 sse_event = %event.event,
                                 "ignoring Responses transport keepalive"
+                            );
+                            return std::future::ready(Some(None));
+                        }
+                        if is_responses_metadata(&event.event, data) {
+                            tracing::debug!(
+                                target: crate::inference_log::TARGET,
+                                event = "sse_response_metadata",
+                                backend = "responses",
+                                sse_event = %event.event,
+                                "ignoring Responses metadata control event"
                             );
                             return std::future::ready(Some(None));
                         }
@@ -3552,6 +3594,64 @@ mod tests {
             "response.completed",
             r#"{"type":"response.completed"}"#
         ));
+        // Codex metadata control events are a separate filter.
+        assert!(!is_responses_keepalive(
+            "response.metadata",
+            r#"{"type":"response.metadata"}"#
+        ));
+    }
+
+    /// Codex-only `response.metadata` must be recognized before strict
+    /// `ResponseStreamEvent` deserialization (async-openai has no variant).
+    #[test]
+    fn is_responses_metadata_matches_event_name_and_json_type() {
+        // Named SSE event form (payload may be empty or minimal).
+        assert!(is_responses_metadata("response.metadata", ""));
+        assert!(is_responses_metadata("response.metadata", "{}"));
+        assert!(is_responses_metadata(
+            "response.metadata",
+            r#"{"type":"response.metadata"}"#
+        ));
+
+        // Data-only / default `message` frames with exact top-level type.
+        assert!(is_responses_metadata(
+            "message",
+            r#"{"type":"response.metadata"}"#
+        ));
+        // Realistic Codex payload: optional headers + verification metadata.
+        assert!(is_responses_metadata(
+            "message",
+            r#"{
+                "type":"response.metadata",
+                "headers":{"x-codex-turn-state":"turn_state_fixture"},
+                "metadata":{"verification":{"status":"ok"},"moderation":{"flagged":false}}
+            }"#
+        ));
+
+        // Ordinary API events and nested mentions must not match.
+        assert!(!is_responses_metadata(
+            "response.output_text.delta",
+            r#"{"type":"response.output_text.delta","delta":"response.metadata"}"#
+        ));
+        assert!(!is_responses_metadata(
+            "message",
+            r#"{"type":"response.created","sequence_number":0,"response":{"id":"r"}}"#
+        ));
+        assert!(!is_responses_metadata("message", "not json at all"));
+        assert!(!is_responses_metadata(
+            "response.completed",
+            r#"{"type":"response.completed"}"#
+        ));
+        // Keepalives stay on the keepalive filter only.
+        assert!(!is_responses_metadata(
+            "keepalive",
+            r#"{"type":"keepalive"}"#
+        ));
+        // Substring in nested field with a different top-level type.
+        assert!(!is_responses_metadata(
+            "message",
+            r#"{"type":"response.output_item.added","item":{"type":"response.metadata"}}"#
+        ));
     }
 
     /// Keepalives are not representable as `ResponseStreamEvent`; the SSE scan
@@ -3565,6 +3665,25 @@ mod tests {
         assert!(
             msg.contains("serialization error:") && msg.contains("keepalive"),
             "expected serialization error mentioning keepalive, got: {msg}"
+        );
+    }
+
+    /// `response.metadata` is not in async-openai's union; the scan path must
+    /// absorb it. Direct deserialize reproduces the pre-fix failure mode.
+    #[test]
+    fn deserialize_response_event_rejects_metadata_json_type() {
+        let err = deserialize_response_event(
+            r#"{"type":"response.metadata","headers":{"x-codex-turn-state":"s"}}"#,
+        )
+        .expect_err("response.metadata is not a ResponseStreamEvent");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("serialization error:"),
+            "expected serialization error, got: {msg}"
+        );
+        assert!(
+            msg.contains("response.metadata") || msg.contains("unknown variant"),
+            "expected unknown-variant detail for response.metadata, got: {msg}"
         );
     }
 

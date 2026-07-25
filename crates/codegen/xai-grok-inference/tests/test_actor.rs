@@ -931,8 +931,100 @@ async fn responses_keepalive_frames_do_not_abort_stream() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Responses Codex metadata control frames (OpenAI OAuth / Codex)
+// ---------------------------------------------------------------------------
+
+/// Codex `response.metadata` frames (named SSE event and data-only JSON with
+/// exact `type: "response.metadata"`, including realistic headers/metadata)
+/// must not abort the stream. The turn continues through text and completed;
+/// metadata is not treated as model output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_metadata_frames_do_not_abort_stream() {
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async move {
+            let events = sse_events_to_axum(sse::responses_api_with_metadata_frames(
+                "hello after metadata",
+                "test-model",
+            ));
+            Sse::new(stream::iter(
+                events.into_iter().map(Ok::<_, std::convert::Infallible>),
+            ))
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let result = handle
+        .submit_and_collect(RequestId::from("req-metadata"), user_request("hi"))
+        .await;
+    server.shutdown();
+
+    let (response, _metrics) = result.expect("metadata must not surface as serialization error");
+    let text = response.assistant_text();
+    assert!(
+        text.contains("hello after metadata"),
+        "expected streamed text after metadata frames, got {text:?}"
+    );
+    // Control-frame payload must not leak into assistant content.
+    assert!(
+        !text.contains("x-codex-turn-state")
+            && !text.contains("turn_state_fixture")
+            && !text.contains("response.metadata"),
+        "metadata/headers must not become model output, got {text:?}"
+    );
+}
+
+/// Keepalive and `response.metadata` can interleave on the same OAuth stream;
+/// both control filters must absorb their frames without aborting the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_keepalive_and_metadata_frames_do_not_abort_stream() {
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async move {
+            let events = sse_events_to_axum(sse::responses_api_with_keepalive_and_metadata_frames(
+                "hello after control frames",
+                "test-model",
+            ));
+            Sse::new(stream::iter(
+                events.into_iter().map(Ok::<_, std::convert::Infallible>),
+            ))
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let result = handle
+        .submit_and_collect(
+            RequestId::from("req-keepalive-metadata"),
+            user_request("hi"),
+        )
+        .await;
+    server.shutdown();
+
+    let (response, _metrics) = result.expect("control frames must not abort the stream");
+    assert!(
+        response
+            .assistant_text()
+            .contains("hello after control frames"),
+        "expected streamed text after keepalive+metadata, got {:?}",
+        response.assistant_text()
+    );
+}
+
 /// An unknown semantic `response.*` event still fails closed (not silently
-/// swallowed like transport keepalives).
+/// swallowed like transport keepalives or Codex `response.metadata`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_unknown_semantic_event_fails_closed() {
     let app = Router::new().route(

@@ -1067,10 +1067,11 @@ mod tests {
         }
     }
 
-    /// Keepalives are absorbed at L1 before Layer-2, so a keepalive-only
-    /// Responses wire presents here as a permanently pending stream. The
-    /// semantic idle deadline must still fire — transport heartbeats must
-    /// not keep a dead stream alive indefinitely.
+    /// L1-absorbed control frames (`keepalive`, Codex `response.metadata`) never
+    /// reach Layer-2, so a control-only Responses wire presents here as a
+    /// permanently pending stream. The semantic idle deadline must still fire —
+    /// transport/control activity must not keep a dead stream alive indefinitely
+    /// and must not reset content progress timers.
     #[tokio::test(start_paused = true)]
     async fn idle_timeout_when_only_transport_activity_then_stalls() {
         let raw = stream::pending::<Result<rs::ResponseStreamEvent, InferenceError>>().boxed();
@@ -1089,7 +1090,7 @@ mod tests {
             }
             other => panic!("expected Failed(IdleTimeout), got {other:?}"),
         }
-        // No model output / completion from a keepalive-only wire.
+        // No model output / completion from a control-frame-only wire.
         assert!(
             !events
                 .iter()
@@ -1102,9 +1103,10 @@ mod tests {
         );
     }
 
-    /// Non-content status transitions (L2 analogue of filtered keepalives:
-    /// they wake the outer poll but do not reset content progress) must not
-    /// prevent the content-aware idle deadline from firing.
+    /// Non-content status transitions (L2 analogue of L1-filtered control
+    /// frames such as keepalive / `response.metadata`: they wake the outer
+    /// poll but do not reset content progress) must not prevent the
+    /// content-aware idle deadline from firing.
     #[tokio::test(start_paused = true)]
     async fn idle_timeout_on_repeated_non_content_status_events() {
         use async_stream::stream as async_stream;

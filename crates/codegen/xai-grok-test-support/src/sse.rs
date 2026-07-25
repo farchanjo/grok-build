@@ -209,6 +209,78 @@ pub fn responses_api_with_keepalive_frames(text: &str, model: &str) -> Vec<SseEv
     events
 }
 
+/// SSE `event:` name for Codex-only Responses metadata control frames.
+pub const RESPONSES_METADATA_EVENT: &str = "response.metadata";
+
+/// Minimal JSON body for a `response.metadata` control frame.
+pub const RESPONSES_METADATA_JSON: &str = r#"{"type":"response.metadata"}"#;
+
+/// Realistic Codex `response.metadata` payload: optional top-level headers
+/// (including `x-codex-turn-state`) and verification/moderation metadata.
+///
+/// Fixture only — production code must absorb this event without logging or
+/// forwarding the payload (no turn-state channel in the current architecture).
+pub const RESPONSES_METADATA_REALISTIC_JSON: &str = r#"{
+  "type": "response.metadata",
+  "headers": {
+    "x-codex-turn-state": "turn_state_fixture_abc"
+  },
+  "metadata": {
+    "verification": { "status": "ok" },
+    "moderation": { "flagged": false }
+  }
+}"#;
+
+/// Splice Codex-only `response.metadata` control frames into an otherwise-normal
+/// text turn (after `response.created`, between text deltas, and before completed).
+///
+/// Covers both wire forms the client must tolerate:
+/// - named `event: response.metadata` with a minimal JSON body
+/// - unnamed data-only realistic headers/metadata payload
+///
+/// Used to prove the stream continues to subsequent text / completed events
+/// without a serialization failure and without treating metadata as model output.
+pub fn responses_api_with_metadata_frames(text: &str, model: &str) -> Vec<SseEvent> {
+    let mut events = responses_api_script_exact(text, model);
+    // After response.created: named metadata control event.
+    events.insert(
+        1,
+        SseEvent::with_event(RESPONSES_METADATA_EVENT, RESPONSES_METADATA_JSON),
+    );
+    // After the first text delta: data-only realistic payload.
+    // Layout after the first insert: [created, named-md, delta..., completed, DONE]
+    if events.len() > 4 {
+        events.insert(3, SseEvent::data(RESPONSES_METADATA_REALISTIC_JSON));
+    }
+    // Immediately before response.completed.
+    let before_completed = events.len().saturating_sub(2);
+    events.insert(
+        before_completed,
+        SseEvent::with_event(
+            RESPONSES_METADATA_EVENT,
+            r#"{"type":"response.metadata","sequence_number":0}"#,
+        ),
+    );
+    events
+}
+
+/// Splice both transport keepalives and Codex `response.metadata` frames into
+/// one text turn so both control filters can be regression-tested together.
+pub fn responses_api_with_keepalive_and_metadata_frames(text: &str, model: &str) -> Vec<SseEvent> {
+    let mut events = responses_api_with_keepalive_frames(text, model);
+    // After response.created (index 0) the first keepalive sits at index 1;
+    // insert a named metadata event immediately after it.
+    events.insert(
+        2,
+        SseEvent::with_event(RESPONSES_METADATA_EVENT, RESPONSES_METADATA_JSON),
+    );
+    // Mid-stream realistic data-only metadata (after first delta + data-only ka).
+    if events.len() > 6 {
+        events.insert(5, SseEvent::data(RESPONSES_METADATA_REALISTIC_JSON));
+    }
+    events
+}
+
 /// `split_inclusive(' ')` keeps each chunk's trailing space, so concatenating
 /// the chunks reconstructs `text` byte-for-byte (newlines included).
 fn responses_api_deltas(text: &str) -> Vec<String> {
@@ -801,18 +873,18 @@ pub fn chat_completions_reasoning_then_tool_call_events(
 mod tests {
     use super::*;
 
+    fn json_type(data: &str) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(data)
+            .ok()
+            .and_then(|v| v.get("type")?.as_str().map(str::to_owned))
+    }
+
     /// Pin the insertion layout of [`responses_api_with_keepalive_frames`]:
     /// named keepalive after `response.created`, data-only keepalive after the
     /// first text delta, and another named keepalive immediately before
     /// `response.completed`. Regression guard so index math stays explicit.
     #[test]
     fn responses_api_with_keepalive_frames_insertion_shape() {
-        fn json_type(data: &str) -> Option<String> {
-            serde_json::from_str::<serde_json::Value>(data)
-                .ok()
-                .and_then(|v| v.get("type")?.as_str().map(str::to_owned))
-        }
-
         let events = responses_api_with_keepalive_frames("hello world", "m");
         assert!(
             events.len() >= 6,
@@ -860,6 +932,88 @@ mod tests {
         );
     }
 
+    /// Pin the insertion layout of [`responses_api_with_metadata_frames`]:
+    /// named metadata after `response.created`, data-only realistic payload
+    /// after the first text delta, and another named metadata before completed.
+    #[test]
+    fn responses_api_with_metadata_frames_insertion_shape() {
+        let events = responses_api_with_metadata_frames("hello world", "m");
+        assert!(
+            events.len() >= 6,
+            "created + 3 metadata + ≥1 delta + completed + DONE"
+        );
+        assert_eq!(events.last().map(|e| e.data.as_str()), Some("[DONE]"));
+
+        assert_eq!(
+            json_type(&events[0].data).as_deref(),
+            Some("response.created")
+        );
+        assert_eq!(
+            events[1].event.as_deref(),
+            Some(RESPONSES_METADATA_EVENT),
+            "first splice must be event: response.metadata"
+        );
+        assert_eq!(
+            json_type(&events[1].data).as_deref(),
+            Some("response.metadata")
+        );
+
+        // Data-only realistic payload with headers must appear mid-stream.
+        assert!(
+            events.iter().any(|e| {
+                e.event.is_none()
+                    && json_type(&e.data).as_deref() == Some("response.metadata")
+                    && e.data.contains("x-codex-turn-state")
+            }),
+            "fixture must include an unnamed realistic metadata payload"
+        );
+
+        let completed_idx = events
+            .iter()
+            .position(|e| json_type(&e.data).as_deref() == Some("response.completed"))
+            .expect("completed present");
+        assert_eq!(
+            events[completed_idx - 1].event.as_deref(),
+            Some(RESPONSES_METADATA_EVENT),
+            "named metadata must sit immediately before response.completed"
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| json_type(&e.data).as_deref() == Some("response.output_text.delta")),
+            "text deltas must survive metadata splicing"
+        );
+    }
+
+    /// Combined keepalive + metadata fixture retains both control event kinds
+    /// and semantic text.
+    #[test]
+    fn responses_api_with_keepalive_and_metadata_frames_insertion_shape() {
+        let events = responses_api_with_keepalive_and_metadata_frames("hello world", "m");
+        assert!(
+            events.iter().any(|e| {
+                e.event.as_deref() == Some(RESPONSES_KEEPALIVE_EVENT)
+                    || json_type(&e.data).as_deref() == Some("keepalive")
+            }),
+            "combined fixture must include keepalive frames"
+        );
+        assert!(
+            events.iter().any(|e| {
+                e.event.as_deref() == Some(RESPONSES_METADATA_EVENT)
+                    || json_type(&e.data).as_deref() == Some("response.metadata")
+            }),
+            "combined fixture must include response.metadata frames"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| json_type(&e.data).as_deref() == Some("response.output_text.delta")),
+            "text deltas must survive combined control-frame splicing"
+        );
+        assert_eq!(events.last().map(|e| e.data.as_str()), Some("[DONE]"));
+    }
+
     /// Both byte-exact delta encoders must reconstruct a multi-line response
     /// (incl. a ```mermaid fence) byte-for-byte. This is load-bearing:
     /// `split_whitespace` would collapse the fence's newlines onto one line,
@@ -874,11 +1028,9 @@ mod tests {
 
         // The reconstruction preserves the fence as a real, newline-delimited
         // code block (the property diagram detection depends on).
-        assert!(
-            chat_completion_deltas(text)
-                .concat()
-                .contains("```mermaid\nflowchart TD\n")
-        );
+        assert!(chat_completion_deltas(text)
+            .concat()
+            .contains("```mermaid\nflowchart TD\n"));
     }
 
     /// Multiple consecutive spaces and a trailing newline survive too (no
