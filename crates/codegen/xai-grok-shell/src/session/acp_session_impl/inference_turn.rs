@@ -1165,7 +1165,7 @@ impl SessionActor {
             provider_kind = Some(match id {
                 "openrouter" => ModelProviderKind::OpenRouter,
                 "openai" => ModelProviderKind::OpenAi,
-                _ => ModelProviderKind::Custom,
+                _ => ModelProviderKind::OpenAiCompatible,
             });
         }
 
@@ -1188,11 +1188,12 @@ impl SessionActor {
             }
         };
         let provider_id = provider_id.unwrap_or_else(|| default_id.to_owned());
-        let provider_name = match provider_kind.unwrap_or(ModelProviderKind::Custom) {
+        let provider_name = match provider_kind.unwrap_or(ModelProviderKind::OpenAiCompatible) {
             ModelProviderKind::OpenRouter => "OpenRouter".to_owned(),
             ModelProviderKind::OpenAi => "OpenAI".to_owned(),
             ModelProviderKind::Xai => return None,
-            ModelProviderKind::Custom => default_name.to_owned(),
+            ModelProviderKind::Zai => "Z.ai".to_owned(),
+            ModelProviderKind::OpenAiCompatible => default_name.to_owned(),
         };
 
         let (credential_kind, recommended_action) =

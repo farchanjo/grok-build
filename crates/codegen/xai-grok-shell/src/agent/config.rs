@@ -5223,7 +5223,9 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
         Some(ModelProviderKind::Xai) => ProviderIdentity::Xai,
         Some(ModelProviderKind::OpenAi) => ProviderIdentity::OpenAi,
         Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
-        Some(ModelProviderKind::Custom) => ProviderIdentity::Custom,
+        Some(ModelProviderKind::OpenAiCompatible) | Some(ModelProviderKind::Zai) => {
+            ProviderIdentity::Custom
+        }
     }
 }
 
@@ -7251,7 +7253,7 @@ reasoning_effort = "low"
         let mut custom = test_model_entry("local", "http://127.0.0.1:8000/v1", None, None, None);
         custom.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
             id: "local".to_string(),
-            kind: ModelProviderKind::Custom,
+            kind: ModelProviderKind::OpenAiCompatible,
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),
@@ -7340,7 +7342,7 @@ reasoning_effort = "low"
         let mut custom = test_model_entry("local", "http://127.0.0.1:8000/v1", None, None, None);
         custom.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
             id: "local".into(),
-            kind: ModelProviderKind::Custom,
+            kind: ModelProviderKind::OpenAiCompatible,
             openrouter_fallback_models: Vec::new(),
             openrouter_provider_preferences: None,
             openrouter_plugins: Vec::new(),

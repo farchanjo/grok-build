@@ -78,9 +78,10 @@ fn provider_label(entry: &ModelEntry) -> String {
             ModelProviderKind::OpenRouter => "openrouter".to_string(),
             ModelProviderKind::OpenAi => "openai".to_string(),
             ModelProviderKind::Xai => "xai".to_string(),
-            ModelProviderKind::Custom => {
+            ModelProviderKind::Zai => "zai".to_string(),
+            ModelProviderKind::OpenAiCompatible => {
                 if provider.id.is_empty() {
-                    "custom".to_string()
+                    "openai_compatible".to_string()
                 } else {
                     provider.id.clone()
                 }

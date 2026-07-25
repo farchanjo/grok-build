@@ -13,7 +13,10 @@ pub mod model_providers;
 pub mod model_search;
 pub mod models;
 pub mod mvp_agent;
+pub mod provider_discovery;
 pub mod providers;
+/// First-class Z.ai Model API profile and wire extensions.
+pub mod zai;
 pub(crate) mod proxy;
 pub mod relay;
 pub(crate) mod restore_code;

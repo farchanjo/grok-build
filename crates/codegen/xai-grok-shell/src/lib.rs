@@ -13,6 +13,12 @@ pub use xai_tracing_macros::{teprintln, timed, tprintln};
 pub mod active_sessions;
 pub mod agent;
 pub mod auth;
+/// Dynamic multi-provider registry, secrets, caches, and TOML lifecycle.
+pub mod provider_registry;
+/// Typed provider / OpenAI / OpenRouter CLI command trees.
+pub mod cli;
+/// Ignored/manual hosted and remote conformance harnesses (Z.ai, solaris).
+pub mod conformance;
 pub mod builtin;
 pub mod bundle;
 pub mod claude_import;

@@ -10,14 +10,19 @@ pub(crate) const NATIVE_AGENT_PROVIDER_HEADER: &str = "x-grok-native-agent-provi
 
 /// The upstream represented by a `[model_providers.<id>]` entry.
 ///
-/// `custom` preserves the existing OpenAI-compatible endpoint behavior.
-/// Named kinds let the runtime apply provider-specific policy without
-/// inferring identity from a mutable URL.
+/// `openai_compatible` is the explicit custom kind. Legacy `kind = "custom"`
+/// remains accepted as an alias and deserializes to the same variant. Named
+/// kinds let the runtime apply provider-specific policy without inferring
+/// identity from a mutable URL.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProviderKind {
+    /// OpenAI-compatible HTTP endpoint (vLLM, SGLang, Z.ai, gateways, …).
+    ///
+    /// Serialized as `openai_compatible`. Legacy TOML `custom` still loads.
     #[default]
-    Custom,
+    #[serde(rename = "openai_compatible", alias = "custom")]
+    OpenAiCompatible,
     #[serde(rename = "xai")]
     Xai,
     /// OpenAI API key or ChatGPT subscription OAuth (single provider).
@@ -28,6 +33,30 @@ pub enum ModelProviderKind {
     OpenAi,
     #[serde(rename = "openrouter")]
     OpenRouter,
+    /// First-class Z.ai Model API profile (`https://api.z.ai/api/paas/v4`).
+    #[serde(rename = "zai")]
+    Zai,
+}
+
+impl ModelProviderKind {
+    /// Whether this kind is treated as an OpenAI-compatible HTTP backend for
+    /// credential scopes, discovery, and the platform client.
+    pub const fn is_openai_compatible_family(self) -> bool {
+        matches!(
+            self,
+            Self::OpenAiCompatible | Self::OpenAi | Self::OpenRouter | Self::Zai
+        )
+    }
+
+    pub const fn as_config_str(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai_compatible",
+            Self::Xai => "xai",
+            Self::OpenAi => "openai",
+            Self::OpenRouter => "openrouter",
+            Self::Zai => "zai",
+        }
+    }
 }
 
 // Re-exported from the sampler crate so the shell TOML layer and the sampler
@@ -67,15 +96,38 @@ pub struct ResolvedModelProvider {
     pub command: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default)]
 pub struct ModelProviderConfig {
     pub kind: ModelProviderKind,
+    /// Optional human-readable label for `/providers` and CLI output.
+    pub display_name: Option<String>,
     pub base_url: Option<String>,
     pub api_base_url: Option<String>,
+    /// Optional separate administration base URL.
+    pub admin_base_url: Option<String>,
+    /// When false, provider is retained in config but excluded from catalogs.
+    pub enabled: bool,
+    /// Default agent backend (`chat_completions` / `responses`).
+    pub default_backend: Option<String>,
+    /// Auth scheme: `bearer` (default), `none`, or `custom_header`.
+    pub auth_scheme: Option<String>,
     pub env_key: Option<EnvKeys>,
+    /// Environment variable name for an administration credential (never auto-persisted).
+    pub admin_env_key: Option<String>,
     pub api_key: Option<String>,
     pub api_backend: Option<ApiBackend>,
+    /// Discover models via authenticated `GET …/models` for this provider.
+    pub catalog_enabled: bool,
+    /// Capability discovery mode: `auto`, `manual`, or `off`.
+    pub capability_mode: Option<String>,
+    pub catalog_ttl_secs: Option<u64>,
+    pub request_timeout_secs: Option<u64>,
+    pub organization: Option<String>,
+    pub project: Option<String>,
+    /// Explicit capability overrides (`[model_providers.<id>.capabilities]`).
+    #[serde(default)]
+    pub capabilities: IndexMap<String, bool>,
     /// OpenRouter models to try after a model's primary `model` slug.
     /// Ignored unless `kind = "openrouter"`.
     #[serde(default)]
@@ -102,6 +154,41 @@ pub struct ModelProviderConfig {
     pub context_window: Option<u64>,
     /// Unused legacy field (previously Codex app-server command override).
     pub command: Vec<String>,
+}
+
+impl Default for ModelProviderConfig {
+    fn default() -> Self {
+        Self {
+            kind: ModelProviderKind::default(),
+            display_name: None,
+            base_url: None,
+            api_base_url: None,
+            admin_base_url: None,
+            enabled: true,
+            default_backend: None,
+            auth_scheme: None,
+            env_key: None,
+            admin_env_key: None,
+            api_key: None,
+            api_backend: None,
+            catalog_enabled: true,
+            capability_mode: None,
+            catalog_ttl_secs: None,
+            request_timeout_secs: None,
+            organization: None,
+            project: None,
+            capabilities: IndexMap::new(),
+            openrouter_fallback_models: Vec::new(),
+            provider_preferences: None,
+            plugins: Vec::new(),
+            openrouter_pacing: false,
+            extra_headers: IndexMap::new(),
+            auth_provider: None,
+            auth: None,
+            context_window: None,
+            command: Vec::new(),
+        }
+    }
 }
 
 impl ModelProviderConfig {
@@ -232,6 +319,48 @@ pub(crate) fn parse_model_providers(
                     .as_deref()
                     .map(str::trim)
                     .is_some_and(|k| !k.is_empty());
+                // Validate provider id slug for configured instances.
+                if let Err(err) = crate::provider_registry::validate_provider_id_str(id) {
+                    warnings.push(ConfigWarning::model_provider(
+                        id,
+                        None,
+                        ConfigWarningKind::InvalidValue,
+                        format!("invalid provider id ({err}); provider skipped"),
+                    ));
+                    continue;
+                }
+                if let Some(url) = provider.base_url.as_deref().or(provider.api_base_url.as_deref())
+                    && let Err(err) = crate::provider_registry::lifecycle::validate_http_base_url(url)
+                {
+                    warnings.push(ConfigWarning::model_provider(
+                        id,
+                        Some("base_url"),
+                        ConfigWarningKind::InvalidValue,
+                        format!("{err}; provider skipped"),
+                    ));
+                    continue;
+                }
+                if let Some(url) = provider.admin_base_url.as_deref()
+                    && let Err(err) = crate::provider_registry::lifecycle::validate_http_base_url(url)
+                {
+                    warnings.push(ConfigWarning::model_provider(
+                        id,
+                        Some("admin_base_url"),
+                        ConfigWarningKind::InvalidValue,
+                        format!("{err}; provider skipped"),
+                    ));
+                    continue;
+                }
+                if let Err(err) =
+                    crate::provider_registry::lifecycle::validate_extra_headers(&provider.extra_headers)
+                {
+                    warnings.push(ConfigWarning::model_provider(
+                        id,
+                        Some("extra_headers"),
+                        ConfigWarningKind::InvalidValue,
+                        format!("{err}; restricted headers ignored at runtime"),
+                    ));
+                }
                 if has_helper && has_static_api_key {
                     warnings.push(ConfigWarning::model_provider(
                         id,
@@ -293,11 +422,24 @@ impl ConfigModelOverride {
     ) -> Self {
         let ModelProviderConfig {
             kind: _,
+            display_name: _,
             base_url,
             api_base_url,
+            admin_base_url: _,
+            enabled: _,
+            default_backend: _,
+            auth_scheme: _,
             env_key,
+            admin_env_key: _,
             api_key,
             api_backend,
+            catalog_enabled: _,
+            capability_mode: _,
+            catalog_ttl_secs: _,
+            request_timeout_secs: _,
+            organization: _,
+            project: _,
+            capabilities: _,
             openrouter_fallback_models,
             provider_preferences,
             plugins,
@@ -413,7 +555,7 @@ mod tests {
             .as_ref()
             .expect("provider identity survives default expansion");
         assert_eq!(provider.id, "gateway");
-        assert_eq!(provider.kind, super::ModelProviderKind::Custom);
+        assert_eq!(provider.kind, super::ModelProviderKind::OpenAiCompatible);
         assert!(
             model.has_own_credentials(),
             "a custom endpoint without a credential is BYOK, not session-authed"
@@ -1618,7 +1760,7 @@ mod tests {
             .model_provider
             .as_ref()
             .expect("provider retained");
-        assert_eq!(provider.kind, super::ModelProviderKind::Custom);
+        assert_eq!(provider.kind, super::ModelProviderKind::OpenAiCompatible);
         assert!(
             provider.openrouter_pacing,
             "custom proxy may opt into pacing without openrouter kind"
@@ -1743,5 +1885,81 @@ mod tests {
             None,
         );
         assert!(!sampling.openrouter_pacing);
+    }
+
+    #[test]
+    fn openai_compatible_kind_alias_accepts_custom_and_serializes_clear_name() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.legacy]
+            kind = "custom"
+            base_url = "http://127.0.0.1:9/v1"
+
+            [model_providers.modern]
+            kind = "openai_compatible"
+            base_url = "http://127.0.0.1:10/v1"
+            display_name = "Modern"
+            enabled = true
+            catalog_enabled = true
+
+            [model.a]
+            model = "m"
+            model_provider = "legacy"
+
+            [model.b]
+            model = "m"
+            model_provider = "modern"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        assert_eq!(
+            cfg.model_providers["legacy"].kind,
+            super::ModelProviderKind::OpenAiCompatible
+        );
+        assert_eq!(
+            cfg.model_providers["modern"].kind,
+            super::ModelProviderKind::OpenAiCompatible
+        );
+        let json = serde_json::to_string(&super::ModelProviderKind::OpenAiCompatible).unwrap();
+        assert_eq!(json, "\"openai_compatible\"");
+    }
+
+    #[test]
+    fn invalid_base_url_skips_provider() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.bad]
+            kind = "openai_compatible"
+            base_url = "https://user:pass@evil/v1"
+
+            [model.x]
+            model = "m"
+            model_provider = "bad"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        assert!(
+            !cfg.model_providers.contains_key("bad"),
+            "credential-embedding URL must skip the provider"
+        );
+    }
+
+    #[test]
+    fn zai_profile_installs_with_paas_v4_base() {
+        use super::super::providers::ProviderManager;
+        let mut model_providers = indexmap::IndexMap::new();
+        let mut config_models = indexmap::IndexMap::new();
+        ProviderManager::install_model_presets_into(&mut model_providers, &mut config_models);
+        let zai = model_providers
+            .get(crate::agent::zai::ZAI_PROVIDER_ID)
+            .expect("zai profile installed");
+        assert_eq!(zai.kind, super::ModelProviderKind::Zai);
+        assert_eq!(
+            zai.base_url.as_deref(),
+            Some(crate::agent::zai::ZAI_DEFAULT_BASE_URL)
+        );
+        assert!(zai.api_key.is_none(), "never inline a Z.ai key");
     }
 }
