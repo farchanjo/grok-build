@@ -931,14 +931,8 @@ impl InferenceClient {
             }
         }
         {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
+            // Presence/scheme only — never log Authorization / x-api-key values
+            // or stable prefixes (Anthropic sk-ant-… must never enter logs).
             tracing::info!(
                 target: crate::inference_log::TARGET,
                 event = "client_post",
@@ -949,8 +943,6 @@ impl InferenceClient {
                 has_bearer_resolver = self.bearer_resolver.is_some(),
                 has_authorization_header = headers.get(AUTHORIZATION).is_some(),
                 has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
             );
         }
         if let Some(injector) = &self.header_injector {
@@ -1033,16 +1025,21 @@ impl InferenceClient {
             .unwrap_or(&self.provider_label)
     }
 
+    /// Non-secret auth facts for sampling logs (scheme + presence only).
+    /// Never returns credential values or stable prefixes.
     pub fn auth_info(&self) -> crate::inference_log::AuthInfo {
-        let auth_prefix = self.current_sent_bearer_prefix();
-        let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
-            (AuthScheme::XApiKey, Some(_)) => "x-api-key",
-            (AuthScheme::Bearer, Some(_)) => "bearer",
-            (_, None) => "none",
+        let has_credential = self.current_sent_bearer_prefix().is_some();
+        let auth_type = if !has_credential {
+            "none"
+        } else {
+            match self.defaults.auth_scheme {
+                AuthScheme::XApiKey => "x-api-key",
+                AuthScheme::Bearer => "bearer",
+            }
         };
         crate::inference_log::AuthInfo {
             auth_type,
-            auth_prefix,
+            has_credential,
         }
     }
 

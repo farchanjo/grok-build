@@ -5,9 +5,52 @@ use crate::agent::execution_backend::ExternalAgentKind;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Session-bound inputs for constructing an external runtime.
+///
+/// Carries the live [`PermissionHandle`] and host/session capability mode so
+/// production Claude CLI (and future backends) attach real policy without
+/// downcasting the runtime trait object.
+#[derive(Clone)]
+pub struct ExternalRuntimeSessionContext {
+    /// Live session permission manager (PolicyDeny wins under yolo).
+    pub permission_handle: xai_grok_workspace::permission::PermissionHandle,
+    /// Host mode label: `plan`, `auto`, `yolo` / `always-approve`, `default`, …
+    pub host_mode_label: String,
+    /// Explicit always-approve / yolo from the live permission handle.
+    pub always_approve: bool,
+}
+
+impl ExternalRuntimeSessionContext {
+    pub fn new(
+        permission_handle: xai_grok_workspace::permission::PermissionHandle,
+        host_mode_label: impl Into<String>,
+        always_approve: bool,
+    ) -> Self {
+        Self {
+            permission_handle,
+            host_mode_label: host_mode_label.into(),
+            always_approve,
+        }
+    }
+}
+
 /// Creates an [`ExternalAgentRuntime`] for a given kind.
 pub trait ExternalRuntimeFactory: Send + Sync {
+    /// Create a runtime without session binding (probes / bootstrap only).
     fn create(&self, kind: ExternalAgentKind) -> Arc<dyn ExternalAgentRuntime>;
+
+    /// Create a session-bound runtime with live permission + capability mode.
+    ///
+    /// Default ignores session context (stubs). Production factories override
+    /// to attach [`PermissionHandle`] and derive capability mode.
+    fn create_for_session(
+        &self,
+        kind: ExternalAgentKind,
+        ctx: &ExternalRuntimeSessionContext,
+    ) -> Arc<dyn ExternalAgentRuntime> {
+        let _ = ctx;
+        self.create(kind)
+    }
 }
 
 /// Default factory: every known kind maps to the unavailable stub.
@@ -38,13 +81,25 @@ impl ExternalRuntimeRegistry {
         self.factories.insert(kind, factory);
     }
 
+    fn factory_for(&self, kind: ExternalAgentKind) -> Arc<dyn ExternalRuntimeFactory> {
+        self.factories
+            .get(&kind)
+            .cloned()
+            .unwrap_or_else(|| self.fallback.clone())
+    }
+
+    /// Create without session binding (probes / bootstrap).
     pub fn create(&self, kind: ExternalAgentKind) -> Option<Arc<dyn ExternalAgentRuntime>> {
-        let factory = self.factories.get(&kind).cloned().unwrap_or_else(|| {
-            // Always provide a stub for known kinds so selection fails closed
-            // rather than panicking when the registry is empty.
-            self.fallback.clone()
-        });
-        Some(factory.create(kind))
+        Some(self.factory_for(kind).create(kind))
+    }
+
+    /// Create a session-bound runtime (production path).
+    pub fn create_for_session(
+        &self,
+        kind: ExternalAgentKind,
+        ctx: &ExternalRuntimeSessionContext,
+    ) -> Option<Arc<dyn ExternalAgentRuntime>> {
+        Some(self.factory_for(kind).create_for_session(kind, ctx))
     }
 }
 

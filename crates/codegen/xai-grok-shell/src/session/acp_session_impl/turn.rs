@@ -3,6 +3,93 @@
 use super::*;
 
 impl SessionActor {
+    /// Host capability label for external runtimes (plan / yolo / auto / default).
+    ///
+    /// Plan stays read-only. Yolo/always-approve selects the broad allowlist
+    /// (still brokered). Default and auto map to brokered all mode.
+    pub(crate) fn external_host_mode_label(&self) -> String {
+        use crate::session::plan_mode::PlanModeState;
+        let plan_active = self.plan_mode.lock().state() != PlanModeState::Inactive
+            || *self.current_prompt_mode.lock() == PromptMode::Plan;
+        if plan_active {
+            return "plan".to_owned();
+        }
+        if self.permissions.is_yolo_mode() {
+            return "yolo".to_owned();
+        }
+        if self.permissions.is_auto_mode() {
+            return "auto".to_owned();
+        }
+        match *self.current_prompt_mode.lock() {
+            PromptMode::Ask => "read_only".to_owned(),
+            PromptMode::Plan => "plan".to_owned(),
+            PromptMode::Agent => "default".to_owned(),
+        }
+    }
+
+    /// Obtain or create the session-scoped external runtime (PermissionHandle +
+    /// live capability mode). Reuses one Arc across turns when kind and mode
+    /// label are unchanged.
+    pub(crate) async fn ensure_external_agent_runtime(
+        &self,
+        kind: crate::agent::execution_backend::ExternalAgentKind,
+    ) -> Result<
+        std::sync::Arc<dyn crate::agent::external_runtime::ExternalAgentRuntime>,
+        crate::agent::external_runtime::ExternalRuntimeError,
+    > {
+        use crate::agent::external_runtime::{
+            ExternalRuntimeSessionContext, RetainedExternalAgentRuntime, default_registry,
+        };
+
+        let mode_label = self.external_host_mode_label();
+        {
+            let guard = self.external_agent_runtime.borrow();
+            if let Some(retained) = guard.as_ref() {
+                if retained.kind == kind && retained.mode_label == mode_label {
+                    return Ok(retained.runtime.clone());
+                }
+            }
+        }
+        // Kind or capability mode changed: shut down prior instance first.
+        self.shutdown_external_agent_runtime().await;
+
+        let ctx = ExternalRuntimeSessionContext::new(
+            self.permissions.clone(),
+            mode_label.clone(),
+            self.permissions.is_yolo_mode(),
+        );
+        let runtime = default_registry()
+            .create_for_session(kind, &ctx)
+            .ok_or_else(|| {
+                crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
+            })?;
+        *self.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
+            kind,
+            mode_label,
+            runtime.clone(),
+        ));
+        Ok(runtime)
+    }
+
+    /// Shut down and drop the retained external runtime (bridge, temp dirs,
+    /// persistent child). Safe to call when none is retained.
+    pub(crate) async fn shutdown_external_agent_runtime(&self) {
+        let retained = self.external_agent_runtime.borrow_mut().take();
+        if let Some(retained) = retained {
+            let envelope = self.external_runtime.borrow().clone().unwrap_or_else(|| {
+                crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(retained.kind)
+            });
+            if let Err(e) = retained.runtime.shutdown(&envelope).await {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    kind = %retained.kind,
+                    error = %e,
+                    "external agent runtime shutdown returned error"
+                );
+            }
+        }
+    }
+
     /// Fail closed when the session's execution backend is an external agent
     /// that is not available (gates closed, missing binary, probe failure).
     /// Safe to call before any turn mutation (`increment_turn`, history append).
@@ -20,14 +107,11 @@ impl SessionActor {
                 None,
             )
         })?;
-        let runtime = crate::agent::external_runtime::default_registry()
-            .create(kind)
-            .ok_or_else(|| {
-                crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
-            })?;
-        // Successful probe is required before turn establishment. PR6 implements
-        // the real turn path after preflight; probe failure fails closed with
-        // no session mutation.
+        // Session-aware factory: attach PermissionHandle + capability mode.
+        // Preflight and turn share the retained Arc.
+        let runtime = self.ensure_external_agent_runtime(kind).await?;
+        // Successful probe is required before turn establishment. Probe
+        // failure fails closed with no session mutation of turn_count/history.
         runtime.probe().await?;
         Ok(())
     }
@@ -35,6 +119,9 @@ impl SessionActor {
     /// Run one external-agent turn (Claude CLI, …), mapping normalized events
     /// into ACP SessionUpdates. Does **not** enter InferenceActor / Grok tool
     /// loop / compaction / memory / goals / workflow machinery.
+    ///
+    /// Reuses the session-scoped runtime Arc. Successful assistant text is
+    /// persisted as a text-only ConversationItem (Claude tools are display-only).
     pub(crate) async fn run_external_agent_turn(
         self: &std::sync::Arc<Self>,
         prompt_id: &str,
@@ -55,12 +142,10 @@ impl SessionActor {
             .into_acp_error()
         })?;
 
-        let runtime = crate::agent::external_runtime::default_registry()
-            .create(kind)
-            .ok_or_else(|| {
-                crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
-                    .into_acp_error()
-            })?;
+        let runtime = self
+            .ensure_external_agent_runtime(kind)
+            .await
+            .map_err(|e| e.into_acp_error())?;
 
         // Unsupported host operations for external turns (explicit report).
         if self.goal_harness_enabled() {
@@ -106,7 +191,7 @@ impl SessionActor {
             crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind).into_acp_error()
         })?;
 
-        // Wire cancel: if the session turn_cancel fires, cancel the runtime.
+        // Wire cancel: if the session turn_cancel fires, cancel the *retained* runtime.
         let cancel_token = self.turn_cancel.borrow().clone();
         let runtime_for_cancel = runtime.clone();
         let env_for_cancel = envelope.clone();
@@ -135,9 +220,11 @@ impl SessionActor {
                 if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
                     // Persist best-effort partial envelope (session pointer) so
                     // the next turn can --resume; emit any partial events.
+                    let mut partial_text = String::new();
                     for event in &e.partial_events {
                         match event {
                             ExternalRuntimeTurnEvent::TextDelta { text } if !text.is_empty() => {
+                                partial_text.push_str(text);
                                 self.send_update(
                                     acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
                                         acp::ContentBlock::Text(acp::TextContent::new(
@@ -161,6 +248,11 @@ impl SessionActor {
                             }
                             _ => {}
                         }
+                    }
+                    // Persist partial assistant text for replay/export/rewind.
+                    if !partial_text.is_empty() {
+                        self.chat_state_handle
+                            .push_assistant_response(ConversationItem::assistant(partial_text));
                     }
                     if let Some(partial) = e.partial_envelope.clone() {
                         if let Ok(validated) = partial.clone().validated() {
@@ -197,12 +289,15 @@ impl SessionActor {
         };
 
         // Map normalized events → ACP SessionUpdates (no second protocol).
+        // Collect assistant text only (never Claude tool events as Grok tools).
+        let mut assistant_text = String::new();
         for event in &outcome.events {
             match event {
                 ExternalRuntimeTurnEvent::TextDelta { text } => {
                     if text.is_empty() {
                         continue;
                     }
+                    assistant_text.push_str(text);
                     self.send_update(
                         acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
                             acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
@@ -212,7 +307,8 @@ impl SessionActor {
                     .await;
                 }
                 ExternalRuntimeTurnEvent::ToolCall { name, summary } => {
-                    // Display/audit only — never dispatch to Grok tool executor.
+                    // Display/audit only — never dispatch to Grok tool executor
+                    // and never record as Grok tool_call ConversationItems.
                     let msg = match summary {
                         Some(s) => format!("[Claude tool: {name} ({s})]"),
                         None => format!("[Claude tool: {name}]"),
@@ -246,6 +342,13 @@ impl SessionActor {
                     .await;
                 }
             }
+        }
+
+        // Persist successful external assistant text as a normalized text-only
+        // ConversationItem for replay/export/rewind (no tool_calls).
+        if !assistant_text.is_empty() {
+            self.chat_state_handle
+                .push_assistant_response(ConversationItem::assistant(assistant_text));
         }
 
         // Persist redacted envelope only (no raw NDJSON).
@@ -1162,8 +1265,9 @@ impl SessionActor {
             None,
         )
         .await;
-        // External agent path: one process per Grok turn, no InferenceActor /
-        // Grok tool loop / compaction / memory / goals / workflow machinery.
+        // External agent path: session-scoped runtime (persistent multi-turn
+        // when capability-supported), no InferenceActor / Grok tool loop /
+        // compaction / memory / goals / workflow machinery.
         if self.execution_backend.get().is_external() {
             let prompt_for_external = {
                 // Prefer the hook text (post-parse); fall back to concatenated blocks.

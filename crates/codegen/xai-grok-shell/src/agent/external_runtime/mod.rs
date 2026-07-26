@@ -35,7 +35,10 @@ pub use envelope::{
     EnvelopeValidationError, ExternalResultMetadata, ExternalRuntimeEnvelope,
     ExternalUsageMetadata, MAX_ENVELOPE_JSON_BYTES, MAX_SESSION_POINTER_LEN,
 };
-pub use registry::{ExternalRuntimeFactory, ExternalRuntimeRegistry, default_registry};
+pub use registry::{
+    ExternalRuntimeFactory, ExternalRuntimeRegistry, ExternalRuntimeSessionContext,
+    default_registry,
+};
 pub use stub::UnavailableExternalRuntime;
 pub use types::{
     EXTERNAL_RUNTIME_UNAVAILABLE, EXTERNAL_RUNTIME_UNAVAILABLE_MESSAGE,
@@ -45,6 +48,7 @@ pub use types::{
 
 use crate::agent::execution_backend::ExternalAgentKind;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Shell-owned interface for an external agent execution backend.
 ///
@@ -116,6 +120,32 @@ pub struct ExternalTurnOutcome {
     pub usage: Option<ExternalUsageMetadata>,
 }
 
+/// Session-retained external runtime instance (one per SessionActor).
+///
+/// Preflight and turn reuse the same Arc so permission bridge temp dirs,
+/// optional persistent Claude children, and cancel tokens stay coherent.
+#[derive(Clone)]
+pub struct RetainedExternalAgentRuntime {
+    pub kind: ExternalAgentKind,
+    /// Host mode label snapshotted at create (plan / auto / yolo / default).
+    pub mode_label: String,
+    pub runtime: Arc<dyn ExternalAgentRuntime>,
+}
+
+impl RetainedExternalAgentRuntime {
+    pub fn new(
+        kind: ExternalAgentKind,
+        mode_label: impl Into<String>,
+        runtime: Arc<dyn ExternalAgentRuntime>,
+    ) -> Self {
+        Self {
+            kind,
+            mode_label: mode_label.into(),
+            runtime,
+        }
+    }
+}
+
 /// Capability / UI descriptors for the model and provider pickers.
 ///
 /// Claude Agent CLI is labeled experimental. Selectable only when the compile
@@ -132,8 +162,9 @@ pub mod capability_matrix {
 Experimental subscription-backed Claude Agent CLI. Claude owns auth and tools; \
 Grok owns the permission broker, outer process/sandbox, and UI. No Grok tool \
 loop, compaction, memory, goals, hooks, checkpoints, or workflow accounting. \
-No API keys. No bypassPermissions. Persistent multi-turn only when the binary \
-advertises streaming input capabilities; otherwise one process per Grok turn.";
+No API keys. No bypassPermissions. Session-scoped runtime reuse across turns; \
+persistent multi-turn child when the binary advertises streaming input, \
+otherwise one process per turn on the retained runtime.";
 
     /// Static compile-time hint only (feature present). Not sufficient for
     /// catalog selectability — see [`claude_cli_selectable`].

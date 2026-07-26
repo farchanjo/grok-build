@@ -12,6 +12,20 @@ impl SessionActor {
         execution_backend: crate::agent::execution_backend::ExecutionBackend,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(inference_config.model.clone());
+        let prev_backend = self.execution_backend.get();
+        // When leaving external mode, or switching to a different external kind,
+        // shut down the retained runtime (bridge + temp resources + child).
+        let backend_incompatible = match (
+            prev_backend.external_kind(),
+            execution_backend.external_kind(),
+        ) {
+            (Some(a), Some(b)) if a != b => true,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if backend_incompatible {
+            self.shutdown_external_agent_runtime().await;
+        }
         self.execution_backend.set(execution_backend);
         if execution_backend.is_native() {
             *self.external_runtime.borrow_mut() = None;

@@ -1642,6 +1642,7 @@ pub(crate) async fn spawn_session_actor(
             crate::agent::execution_backend::ExecutionBackend::NativeInference,
         ),
         external_runtime: std::cell::RefCell::new(None),
+        external_agent_runtime: std::cell::RefCell::new(None),
         rebuild_spec: rebuild_spec.clone(),
         image_description_model,
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),

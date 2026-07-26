@@ -1051,6 +1051,11 @@ pub(crate) struct SessionActor {
     /// selected model/effort). `None` for native sessions.
     pub(crate) external_runtime:
         std::cell::RefCell<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
+    /// Session-scoped live external agent runtime (process, permission bridge,
+    /// temp MCP config). One Arc retained across turns; shut down on session
+    /// end or when switching away from / between incompatible backends.
+    pub(crate) external_agent_runtime:
+        std::cell::RefCell<Option<crate::agent::external_runtime::RetainedExternalAgentRuntime>>,
     /// Cached recipe for constructing this session's [`xai_grok_agent::Agent`].
     ///
     /// Populated once at session spawn and then reused by
@@ -1418,6 +1423,9 @@ mod client_hooks_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/external_runtime_preflight_tests.rs"]
 mod external_runtime_preflight_tests;
+
+#[path = "acp_session_tests/external_runtime_session_tests.rs"]
+mod external_runtime_session_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;

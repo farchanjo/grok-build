@@ -9,8 +9,8 @@
 //!
 //! On child death: persist session pointer, then fall back to one-shot
 //! `--resume` only when the capability matrix permits. If capability is absent,
-//! retain PR6 one-process-per-turn. Interrupt/cancel when supported.
-//! Process bridge + Claude + descendants form one lifecycle tree.
+//! each turn spawns one process on the session-scoped runtime. Interrupt/cancel
+//! when supported. Process bridge + Claude + descendants form one lifecycle tree.
 
 use std::path::PathBuf;
 use std::sync::Arc;

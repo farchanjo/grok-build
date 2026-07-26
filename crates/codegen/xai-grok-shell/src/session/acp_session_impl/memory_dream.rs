@@ -132,6 +132,13 @@ impl SessionActor {
             );
             return;
         }
+        if self.execution_backend.get().is_external() {
+            tracing::debug!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_EXTERNAL_SKIP: skipping dream for external execution backend"
+            );
+            return;
+        }
 
         use crate::session::memory::dream::*;
 

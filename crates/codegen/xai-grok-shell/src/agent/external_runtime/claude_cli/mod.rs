@@ -48,5 +48,6 @@ pub const CLAUDE_CLI_UI_LIMITATIONS: &str = "\
 Experimental subscription-backed Claude Agent CLI. Claude owns auth and tools; \
 Grok owns the permission broker, outer process/sandbox, and UI. No Grok tool \
 loop, compaction, memory, goals, hooks, checkpoints, or workflow accounting. \
-No API keys. No bypassPermissions. Persistent multi-turn only when the binary \
-advertises streaming input capabilities; otherwise one process per Grok turn.";
+No API keys. No bypassPermissions. Session-scoped runtime reuse across turns; \
+persistent multi-turn child when the binary advertises streaming input, \
+otherwise one process per turn on the retained runtime.";

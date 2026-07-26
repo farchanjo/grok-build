@@ -247,6 +247,7 @@ async fn create_test_actor(
             crate::agent::execution_backend::ExecutionBackend::NativeInference,
         ),
         external_runtime: std::cell::RefCell::new(None),
+        external_agent_runtime: std::cell::RefCell::new(None),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -722,6 +723,7 @@ async fn create_test_actor_with_memory(
             crate::agent::execution_backend::ExecutionBackend::NativeInference,
         ),
         external_runtime: std::cell::RefCell::new(None),
+        external_agent_runtime: std::cell::RefCell::new(None),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -1509,6 +1511,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
                 ),
                 external_runtime: std::cell::RefCell::new(None),
+                external_agent_runtime: std::cell::RefCell::new(None),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),

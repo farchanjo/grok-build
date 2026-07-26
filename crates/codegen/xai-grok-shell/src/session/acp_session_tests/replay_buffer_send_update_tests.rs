@@ -253,6 +253,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             crate::agent::execution_backend::ExecutionBackend::NativeInference,
         ),
         external_runtime: std::cell::RefCell::new(None),
+        external_agent_runtime: std::cell::RefCell::new(None),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),

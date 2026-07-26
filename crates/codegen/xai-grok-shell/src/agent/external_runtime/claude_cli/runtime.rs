@@ -1,8 +1,10 @@
 //! [`ClaudeCliRuntime`] — process-backed [`ExternalAgentRuntime`] for Claude CLI.
 //!
-//! PR6: one-process-per-turn MVP. PR7: permission bridge, strict MCP config,
-//! capability-mode tool restriction, resume hardening, optional persistent
-//! multi-turn when capabilities advertise streaming input.
+//! Session-scoped: one runtime instance is retained per Grok session and reused
+//! across turns. When the binary advertises streaming input, multi-turn uses a
+//! persistent child; otherwise each turn is one process (still the same runtime
+//! object for bridge/cancel/shutdown). PR7: permission bridge, strict MCP
+//! config, capability-mode tool restriction, resume hardening.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -272,6 +274,24 @@ impl ClaudeCliRuntime {
         };
         let bridge = *self.bridge_ready.lock().await;
         provider_status::build_status(binary_ready, ver, detail, None, bridge)
+    }
+
+    /// Test-only: session-bound capability mode.
+    #[cfg(test)]
+    pub fn test_capability_mode(&self) -> ClaudeCapabilityMode {
+        self.capability_mode
+    }
+
+    /// Test-only: whether a live PermissionHandle was attached.
+    #[cfg(test)]
+    pub fn test_has_permission_handle(&self) -> bool {
+        self.permission_handle.is_some()
+    }
+
+    /// Test-only: always-approve opt-in flag (allowlist only; still brokered).
+    #[cfg(test)]
+    pub fn test_always_approve_opt_in(&self) -> bool {
+        self.always_approve_opt_in
     }
 }
 
@@ -547,7 +567,7 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             return outcome;
         }
 
-        // --- PR6 one-process-per-turn path ---
+        // --- One process per turn (session-scoped runtime still retained) ---
         let argv = self.build_turn_argv(
             &d,
             envelope,
@@ -848,7 +868,34 @@ impl ExternalRuntimeFactory for ClaudeCliRuntimeFactory {
     fn create(&self, kind: ExternalAgentKind) -> Arc<dyn ExternalAgentRuntime> {
         match kind {
             ExternalAgentKind::ClaudeCli => {
+                // Probe/bootstrap path only — no PermissionHandle. Production
+                // turns must use create_for_session.
                 Arc::new(ClaudeCliRuntime::new(self.configured_path.clone()))
+            }
+        }
+    }
+
+    fn create_for_session(
+        &self,
+        kind: ExternalAgentKind,
+        ctx: &crate::agent::external_runtime::ExternalRuntimeSessionContext,
+    ) -> Arc<dyn ExternalAgentRuntime> {
+        match kind {
+            ExternalAgentKind::ClaudeCli => {
+                let mode = ClaudeCapabilityMode::from_host_label(&ctx.host_mode_label);
+                // Yolo selects AlwaysApprove allowlist; still attach the live
+                // handle so PolicyDeny wins on every bridge decision.
+                let mode = if ctx.always_approve {
+                    ClaudeCapabilityMode::AlwaysApprove
+                } else {
+                    mode
+                };
+                Arc::new(
+                    ClaudeCliRuntime::new(self.configured_path.clone())
+                        .with_capability_mode(mode)
+                        .with_permission_handle(ctx.permission_handle.clone())
+                        .with_always_approve_opt_in(ctx.always_approve),
+                )
             }
         }
     }

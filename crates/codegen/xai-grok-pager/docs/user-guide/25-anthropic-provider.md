@@ -299,7 +299,7 @@ Anthropic key is configured, independent of the CLI feature.
 | Sandbox | Grok OS sandbox | Outer Grok process/sandbox posture; CLI child constrained |
 | MCP | Grok host MCP | Strict bridge MCP config only (no arbitrary servers) |
 | Compaction / memory / goals / hooks / workflows | Full Grok stack | **Not** applied inside Claude’s loop |
-| Multi-turn process | Stateless HTTP turns | Persistent multi-turn only if binary advertises streaming input; else one process per Grok turn |
+| Multi-turn process | Stateless HTTP turns | Session-scoped runtime reuse; persistent multi-turn child if binary advertises streaming input, else one process per turn on the retained runtime |
 | Cancel | Grok turn cancel | Cancel envelope / process teardown semantics (no hang) |
 | Cross-mode switch | N/A | After the first user turn, switching Native ↔ Claude CLI requires `/new` |
 

@@ -3,6 +3,10 @@
 //! `env_clear` then re-apply only the documented minimal set needed for the
 //! official binary and subscription auth. Never forwards provider/Grok/cloud
 //! credentials or arbitrary inherited env.
+//!
+//! Proxy values are preserved only when they can be sanitized to strip URL
+//! userinfo (`user:pass@host`). Malformed or non-Unicode proxy values are
+//! dropped (fail closed). The allowlist itself is not weakened.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -27,11 +31,23 @@ pub const ALLOWLIST_KEYS: &[&str] = &[
     "TZ",
     // Official Claude config directory (binary owns login; tests use temp dirs)
     "CLAUDE_CONFIG_DIR",
-    // Optional TLS / proxy (no credentials)
+    // Optional TLS / proxy (values sanitized; credentials stripped)
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+/// Proxy-related keys whose values must be sanitized (strip URL userinfo).
+const PROXY_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -87,6 +103,7 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
 ///
 /// Starts empty (callers use `env_clear`). Copies only allowlisted keys from
 /// the current process env, plus optional `extra` (still subject to forbid).
+/// Proxy values are sanitized (userinfo stripped) or dropped.
 pub fn build_scrubbed_env(extra: &[(&str, OsString)]) -> Vec<(OsString, OsString)> {
     let allow: HashSet<&str> = ALLOWLIST_KEYS.iter().copied().collect();
     let forbid: HashSet<&str> = FORBIDDEN_KEYS.iter().copied().collect();
@@ -98,7 +115,9 @@ pub fn build_scrubbed_env(extra: &[(&str, OsString)]) -> Vec<(OsString, OsString
         if !is_allowed_key(key.as_ref(), &allow, &forbid) {
             continue;
         }
-        out.push((k, v));
+        if let Some(sanitized) = sanitize_env_value(key.as_ref(), &v) {
+            out.push((k, sanitized));
+        }
     }
 
     for (k, v) in extra {
@@ -106,10 +125,100 @@ pub fn build_scrubbed_env(extra: &[(&str, OsString)]) -> Vec<(OsString, OsString
             continue;
         }
         out.retain(|(ek, _)| ek.as_os_str() != OsStr::new(*k));
-        out.push((OsString::from(*k), v.clone()));
+        if let Some(sanitized) = sanitize_env_value(k, v) {
+            out.push((OsString::from(*k), sanitized));
+        }
     }
 
     out
+}
+
+fn is_proxy_key(key: &str) -> bool {
+    PROXY_KEYS.iter().any(|k| *k == key)
+}
+
+/// Sanitize an allowlisted value. Proxy keys: strip URL userinfo, drop on
+/// non-Unicode or unparseable forms. Non-proxy keys: pass through as OsString.
+fn sanitize_env_value(key: &str, value: &OsString) -> Option<OsString> {
+    if !is_proxy_key(key) {
+        return Some(value.clone());
+    }
+    let s = value.to_str()?;
+    sanitize_proxy_value(key, s).map(OsString::from)
+}
+
+/// Strip credentials from a proxy URL value. `NO_PROXY` / `no_proxy` are host
+/// lists (not URLs) and are passed through only when valid Unicode without
+/// embedded credentials of the form `user:pass@`.
+///
+/// Returns `None` to drop the variable (fail closed).
+pub fn sanitize_proxy_value(key: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Host-list forms (NO_PROXY): reject obvious userinfo, otherwise pass through.
+    if key.eq_ignore_ascii_case("NO_PROXY") {
+        if trimmed.contains('@') {
+            // e.g. user:pass@host in a no_proxy list is malformed / credential-like.
+            return None;
+        }
+        return Some(trimmed.to_owned());
+    }
+    // URL-like proxy values. Accept with or without scheme.
+    // Forms: http://user:pass@host:port, user:pass@host:port, host:port, http://host
+    let after_scheme = if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if scheme.is_empty()
+            || !scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        {
+            return None;
+        }
+        Some((scheme, rest))
+    } else {
+        None
+    };
+
+    let (scheme_prefix, authority_and_path) = match after_scheme {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, trimmed),
+    };
+
+    // Authority is up to first '/' or '?' (path/query rare for proxy vars).
+    let (authority, path_suffix) = match authority_and_path.find(['/', '?']) {
+        Some(i) => (&authority_and_path[..i], &authority_and_path[i..]),
+        None => (authority_and_path, ""),
+    };
+
+    if authority.is_empty() {
+        return None;
+    }
+
+    // Strip userinfo: everything before the last '@' in authority is credentials.
+    let host_port = if let Some(at) = authority.rfind('@') {
+        let host = &authority[at + 1..];
+        if host.is_empty() {
+            return None;
+        }
+        host
+    } else {
+        authority
+    };
+
+    // Basic host:port sanity — no whitespace, no second '@'.
+    if host_port.chars().any(|c| c.is_whitespace()) || host_port.contains('@') {
+        return None;
+    }
+
+    let mut out = String::new();
+    if let Some(scheme) = scheme_prefix {
+        out.push_str(scheme);
+        out.push_str("://");
+    }
+    out.push_str(host_port);
+    out.push_str(path_suffix);
+    Some(out)
 }
 
 fn is_allowed_key(key: &str, allow: &HashSet<&str>, forbid: &HashSet<&str>) -> bool {
@@ -228,5 +337,61 @@ mod tests {
     fn extra_cannot_reinject_api_key() {
         let env = build_scrubbed_env(&[("ANTHROPIC_API_KEY", OsString::from("evil"))]);
         assert!(!env_contains_key(&env, "ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn sanitize_proxy_strips_userinfo() {
+        assert_eq!(
+            sanitize_proxy_value("HTTPS_PROXY", "http://user:s3cret@proxy.example:8080"),
+            Some("http://proxy.example:8080".into())
+        );
+        assert_eq!(
+            sanitize_proxy_value("HTTP_PROXY", "user:pass@10.0.0.1:3128"),
+            Some("10.0.0.1:3128".into())
+        );
+        assert_eq!(
+            sanitize_proxy_value("https_proxy", "https://proxy.local"),
+            Some("https://proxy.local".into())
+        );
+        assert_eq!(
+            sanitize_proxy_value("ALL_PROXY", "socks5://alice:bob@socks:1080"),
+            Some("socks5://socks:1080".into())
+        );
+    }
+
+    #[test]
+    fn sanitize_proxy_drops_malformed() {
+        assert_eq!(sanitize_proxy_value("HTTP_PROXY", ""), None);
+        assert_eq!(sanitize_proxy_value("HTTP_PROXY", "   "), None);
+        assert_eq!(sanitize_proxy_value("HTTP_PROXY", "http://user@"), None);
+        assert_eq!(sanitize_proxy_value("NO_PROXY", "user:pass@host"), None);
+        assert_eq!(
+            sanitize_proxy_value("NO_PROXY", "localhost,127.0.0.1"),
+            Some("localhost,127.0.0.1".into())
+        );
+    }
+
+    #[test]
+    fn build_scrubbed_env_sanitizes_proxy_and_drops_secrets_in_value() {
+        unsafe {
+            std::env::set_var("HTTPS_PROXY", "http://proxyuser:proxypass@corp-proxy:8080");
+            std::env::set_var("NO_PROXY", "localhost");
+        }
+        let env = build_scrubbed_env(&[]);
+        let https = env
+            .iter()
+            .find(|(k, _)| k.as_os_str() == OsStr::new("HTTPS_PROXY"))
+            .map(|(_, v)| v.to_string_lossy().into_owned());
+        assert_eq!(https.as_deref(), Some("http://corp-proxy:8080"));
+        assert!(
+            https
+                .as_ref()
+                .is_none_or(|v| !v.contains("proxypass") && !v.contains("proxyuser")),
+            "proxy credentials must not be forwarded: {https:?}"
+        );
+        unsafe {
+            std::env::remove_var("HTTPS_PROXY");
+            std::env::remove_var("NO_PROXY");
+        }
     }
 }
