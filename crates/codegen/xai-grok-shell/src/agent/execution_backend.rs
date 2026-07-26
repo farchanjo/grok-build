@@ -33,7 +33,7 @@ impl ExternalAgentKind {
 
     pub const fn display_name(self) -> &'static str {
         match self {
-            Self::ClaudeCli => "Claude Agent CLI",
+            Self::ClaudeCli => "Claude Agent (CLI, Experimental)",
         }
     }
 

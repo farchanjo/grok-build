@@ -56,7 +56,12 @@ impl ProviderKind {
             Self::Xai => "Grok/xAI account (OAuth) or xAI API key".into(),
             Self::OpenAi => "ChatGPT OAuth or API key · Responses".into(),
             Self::OpenRouter => "Chat Completions · key stored securely".into(),
-            Self::Anthropic => "Messages API · x-api-key stored securely".into(),
+            Self::Anthropic => {
+                // API key path is independent of the experimental Claude Agent CLI
+                // subscription path (build-gated + runtime opt-in elsewhere).
+                "Messages API · x-api-key stored securely · Claude Agent (CLI, Experimental) when gated"
+                    .into()
+            }
             Self::Configured(id) if id == "zai-model-api" || id == "zai" => {
                 "Z.ai Model API · Chat Completions · key stored securely".into()
             }

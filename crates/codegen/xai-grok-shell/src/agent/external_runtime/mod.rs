@@ -4,14 +4,18 @@
 //! backends (Claude Agent CLI, …) implement [`ExternalAgentRuntime`] and are
 //! selected through [`ExternalRuntimeRegistry`].
 //!
-//! PR5 provides the typed foundation and a fail-closed unavailable stub. PR6
-//! wires the real Claude CLI process integration — this module must not spawn
-//! processes or probe the official CLI.
+//! PR5: typed foundation + fail-closed unavailable stub.
+//! PR6: optional Claude CLI process integration behind `claude-cli-runtime`
+//! feature **and** runtime opt-in ([`gates`]).
 
 mod envelope;
+pub mod gates;
 mod registry;
 mod stub;
 mod types;
+
+#[cfg(feature = "claude-cli-runtime")]
+pub mod claude_cli;
 
 pub use envelope::{
     EnvelopeValidationError, ExternalResultMetadata, ExternalRuntimeEnvelope,
@@ -100,29 +104,65 @@ pub struct ExternalTurnOutcome {
 
 /// Capability / UI descriptors for the model and provider pickers.
 ///
-/// Claude Agent CLI is labeled experimental and is **not** selectable until
-/// PR6 wires the real runtime (`selectable = false` by default).
+/// Claude Agent CLI is labeled experimental. Selectable only when the compile
+/// feature, runtime opt-in, **and** a successful binary probe all pass.
 pub mod capability_matrix {
     use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
+    use crate::agent::external_runtime::gates;
 
-    /// When `true`, a Claude CLI catalog entry may appear as user-selectable.
-    /// PR5 keeps this off; PR6 may flip it behind a feature flag.
-    pub const CLAUDE_CLI_MODEL_SELECTABLE: bool = false;
+    /// UI label under the Anthropic provider card.
+    pub const CLAUDE_CLI_UI_LABEL: &str = "Claude Agent (CLI, Experimental)";
+
+    /// Limitations blurb for pickers / status.
+    pub const CLAUDE_CLI_UI_LIMITATIONS: &str = "\
+Experimental subscription-backed Claude Agent CLI. One process per Grok turn; \
+Claude owns auth and tools. No Grok tool loop, compaction, memory, goals, or \
+workflow. No API keys. Persistent input / permission bridge / MCP deferred to a later PR.";
+
+    /// Static compile-time hint (not the full selectability check).
+    ///
+    /// Prefer [`claude_cli_selectable`] which also considers runtime opt-in.
+    /// Kept for PR5 tests that assert the experimental / default-off posture.
+    pub const CLAUDE_CLI_MODEL_SELECTABLE: bool = cfg!(feature = "claude-cli-runtime");
+
+    /// Gates open (feature + runtime opt-in). Probe is separate.
+    pub fn claude_cli_gates_open() -> bool {
+        gates::claude_cli_both_gates_open()
+    }
+
+    /// Full selectability: both gates open. Probe success is applied by
+    /// [`apply_catalog_visibility`] when a recent probe cache is provided, or
+    /// by session preflight before a turn.
+    pub fn claude_cli_selectable() -> bool {
+        gates::claude_cli_both_gates_open()
+    }
 
     /// UI-facing capability row for an execution backend.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ExecutionCapabilityDescriptor {
         pub backend: ExecutionBackend,
-        /// Short label for pickers (e.g. "Native inference", "Claude Agent CLI").
+        /// Short label for pickers.
         pub label: &'static str,
         /// Longer description for experimental badges / help text.
         pub description: &'static str,
         pub experimental: bool,
         /// Whether the picker may offer a model that selects this backend.
+        /// Dynamic for Claude CLI — see [`Self::is_selectable_now`].
         pub selectable: bool,
-        /// Catalog peer id (`anthropic`, `xai`, …) for grouping — not a
-        /// ModelProviderKind overload for external process identity.
+        /// Catalog peer id (`anthropic`, `xai`, …) for grouping.
         pub provider_peer_id: Option<&'static str>,
+    }
+
+    impl ExecutionCapabilityDescriptor {
+        /// Effective selectability (static flag ∧ live gates for Claude CLI).
+        pub fn is_selectable_now(&self) -> bool {
+            match self.backend {
+                ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli) => {
+                    self.selectable && claude_cli_selectable()
+                }
+                _ => self.selectable,
+            }
+        }
     }
 
     /// Static matrix used by the provider/model picker to label execution modes.
@@ -138,9 +178,11 @@ pub mod capability_matrix {
             },
             ExecutionCapabilityDescriptor {
                 backend: ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli),
-                label: "Claude Agent CLI",
-                description: "Experimental external Claude Agent CLI runtime (not the Anthropic HTTP API).",
+                label: CLAUDE_CLI_UI_LABEL,
+                description: CLAUDE_CLI_UI_LIMITATIONS,
                 experimental: true,
+                // Feature-compiled builds may advertise the row; runtime gate
+                // still required via is_selectable_now / apply_catalog_visibility.
                 selectable: CLAUDE_CLI_MODEL_SELECTABLE,
                 provider_peer_id: Some("anthropic"),
             },
@@ -154,8 +196,7 @@ pub mod capability_matrix {
         descriptors().iter().find(|d| d.backend == backend)
     }
 
-    /// Experimental external backends that share the Anthropic provider peer
-    /// in the UI but remain distinct from native Anthropic Messages API models.
+    /// Experimental external backends that share the Anthropic provider peer.
     pub fn experimental_anthropic_peer_backends()
     -> impl Iterator<Item = &'static ExecutionCapabilityDescriptor> {
         descriptors()
@@ -164,20 +205,44 @@ pub mod capability_matrix {
     }
 
     /// Force `hidden` + `!user_selectable` on catalog entries whose execution
-    /// backend is not yet selectable (PR5: Claude CLI). Idempotent.
+    /// backend is not selectable under current gates. When
+    /// `claude_cli_probe_ok` is `Some(false)`, Claude CLI stays hidden even if
+    /// gates are open. `None` means "gates only" (probe not yet run).
     pub fn apply_catalog_visibility(
         catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+    ) {
+        apply_catalog_visibility_with_probe(catalog, None);
+    }
+
+    /// Like [`apply_catalog_visibility`] with an optional recent probe result.
+    pub fn apply_catalog_visibility_with_probe(
+        catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+        claude_cli_probe_ok: Option<bool>,
     ) {
         for entry in catalog.values_mut() {
             if !entry.info.execution_backend.is_external() {
                 continue;
             }
-            let selectable = for_backend(entry.info.execution_backend)
-                .map(|d| d.selectable)
-                .unwrap_or(false);
+            let selectable = match entry.info.execution_backend {
+                ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli) => {
+                    let gates = claude_cli_selectable();
+                    match claude_cli_probe_ok {
+                        Some(true) => gates,
+                        Some(false) => false,
+                        None => gates,
+                    }
+                }
+                _ => for_backend(entry.info.execution_backend)
+                    .map(|d| d.is_selectable_now())
+                    .unwrap_or(false),
+            };
             if !selectable {
                 entry.info.hidden = true;
                 entry.info.user_selectable = false;
+            } else {
+                // Gates+probe allow selection: unhide if it was only hidden by us.
+                entry.info.hidden = false;
+                entry.info.user_selectable = true;
             }
         }
     }
@@ -185,6 +250,9 @@ pub mod capability_matrix {
 
 #[cfg(test)]
 mod pr5_foundation_tests;
+
+#[cfg(all(test, feature = "claude-cli-runtime"))]
+mod pr6_claude_cli_tests;
 
 #[cfg(test)]
 mod tests {
@@ -202,37 +270,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_resolves_claude_cli_to_unavailable_stub() {
+    async fn registry_resolves_without_feature_to_unavailable() {
+        // Without opt-in / or without feature, default registry still provides
+        // a runtime object that fails closed on probe when gates are shut.
         let registry = default_registry();
         let runtime = registry
             .create(ExternalAgentKind::ClaudeCli)
             .expect("factory registered");
-        let err = runtime
-            .turn(
-                &ExternalRuntimeEnvelope::for_kind(ExternalAgentKind::ClaudeCli),
-                ExternalTurnRequest {
-                    prompt: "hi".into(),
-                    selected_model: None,
-                    reasoning_effort: None,
-                    token_budget: None,
-                },
-            )
-            .await
-            .expect_err("stub turn fails closed");
-        assert_eq!(err.kind, ExternalRuntimeErrorKind::Unavailable);
-        assert!(!err.is_auth_error());
+        if !gates::claude_cli_both_gates_open() {
+            let err = runtime.probe().await;
+            // Either unavailable stub or gated ClaudeCliRuntime both fail closed.
+            assert!(err.is_err());
+            let e = err.unwrap_err();
+            assert!(!e.is_auth_error());
+        }
     }
 
     #[test]
-    fn capability_matrix_labels_claude_cli_experimental_not_selectable() {
+    fn capability_matrix_labels_claude_cli_experimental() {
         let d = capability_matrix::for_backend(ExecutionBackend::ExternalAgent(
             ExternalAgentKind::ClaudeCli,
         ))
         .expect("descriptor");
         assert!(d.experimental);
-        assert!(!d.selectable);
         assert_eq!(d.provider_peer_id, Some("anthropic"));
-        assert!(d.label.contains("Claude"));
+        assert!(d.label.contains("Claude Agent"));
+        assert!(d.label.contains("Experimental"));
     }
 
     #[test]
@@ -266,5 +329,13 @@ mod tests {
         assert_eq!(back.kind, ExternalAgentKind::ClaudeCli);
         assert_eq!(back.session_pointer.as_deref(), Some("sess_abc"));
         assert_eq!(back.selected_model.as_deref(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn feature_off_means_not_selectable_via_gates() {
+        if !cfg!(feature = "claude-cli-runtime") {
+            assert!(!capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE);
+            assert!(!capability_matrix::claude_cli_selectable());
+        }
     }
 }

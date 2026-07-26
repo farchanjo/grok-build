@@ -10,7 +10,7 @@ pub trait ExternalRuntimeFactory: Send + Sync {
     fn create(&self, kind: ExternalAgentKind) -> Arc<dyn ExternalAgentRuntime>;
 }
 
-/// Default factory: every known kind maps to the unavailable stub (PR5).
+/// Default factory: every known kind maps to the unavailable stub.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnavailableStubFactory;
 
@@ -21,9 +21,6 @@ impl ExternalRuntimeFactory for UnavailableStubFactory {
 }
 
 /// Registry of factories keyed by [`ExternalAgentKind`].
-///
-/// PR6 may replace the Claude CLI entry with a real process-backed factory
-/// without changing call sites.
 pub struct ExternalRuntimeRegistry {
     factories: HashMap<ExternalAgentKind, Arc<dyn ExternalRuntimeFactory>>,
     fallback: Arc<dyn ExternalRuntimeFactory>,
@@ -54,16 +51,25 @@ impl ExternalRuntimeRegistry {
 impl Default for ExternalRuntimeRegistry {
     fn default() -> Self {
         let mut reg = Self::new(Arc::new(UnavailableStubFactory));
-        // Explicit registration keeps the branch point visible for PR6.
-        reg.register(
-            ExternalAgentKind::ClaudeCli,
-            Arc::new(UnavailableStubFactory),
-        );
+        #[cfg(feature = "claude-cli-runtime")]
+        {
+            reg.register(
+                ExternalAgentKind::ClaudeCli,
+                Arc::new(super::claude_cli::ClaudeCliRuntimeFactory::from_env()),
+            );
+        }
+        #[cfg(not(feature = "claude-cli-runtime"))]
+        {
+            reg.register(
+                ExternalAgentKind::ClaudeCli,
+                Arc::new(UnavailableStubFactory),
+            );
+        }
         reg
     }
 }
 
-/// Process-wide default registry (unavailable stubs until PR6).
+/// Process-wide default registry.
 pub fn default_registry() -> ExternalRuntimeRegistry {
     ExternalRuntimeRegistry::default()
 }

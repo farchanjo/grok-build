@@ -4,8 +4,8 @@ use super::*;
 
 impl SessionActor {
     /// Fail closed when the session's execution backend is an external agent
-    /// that is not available in this build (PR5 stub). Safe to call before any
-    /// turn mutation (`increment_turn`, history append).
+    /// that is not available (gates closed, missing binary, probe failure).
+    /// Safe to call before any turn mutation (`increment_turn`, history append).
     pub(crate) async fn preflight_external_execution_backend(
         &self,
     ) -> Result<(), crate::agent::external_runtime::ExternalRuntimeError> {
@@ -25,14 +25,232 @@ impl SessionActor {
             .ok_or_else(|| {
                 crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
             })?;
-        match runtime.probe().await {
-            Err(e) => Err(e),
-            Ok(_) => {
-                // PR6 will implement turns; a successful probe without a turn
-                // path still fails closed here so we never invent process I/O.
-                Err(crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind))
+        // Successful probe is required before turn establishment. PR6 implements
+        // the real turn path after preflight; probe failure fails closed with
+        // no session mutation.
+        runtime.probe().await?;
+        Ok(())
+    }
+
+    /// Run one external-agent turn (Claude CLI, …), mapping normalized events
+    /// into ACP SessionUpdates. Does **not** enter InferenceActor / Grok tool
+    /// loop / compaction / memory / goals / workflow machinery.
+    pub(crate) async fn run_external_agent_turn(
+        self: &std::sync::Arc<Self>,
+        prompt_id: &str,
+        prompt_text: &str,
+    ) -> crate::session::commands::PromptTurnResult {
+        use crate::agent::external_runtime::{
+            ExternalRuntimeTurnEvent, ExternalStartRequest, ExternalTurnRequest,
+        };
+        use crate::session::commands::ok_end_turn;
+
+        let backend = self.execution_backend.get();
+        let kind = backend.external_kind().ok_or_else(|| {
+            crate::agent::external_runtime::ExternalRuntimeError {
+                kind: crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                message: "external execution backend selected without a kind".into(),
+                agent_kind: None,
+            }
+            .into_acp_error()
+        })?;
+
+        let runtime = crate::agent::external_runtime::default_registry()
+            .create(kind)
+            .ok_or_else(|| {
+                crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
+                    .into_acp_error()
+            })?;
+
+        // Unsupported host operations for external turns (explicit report).
+        if self.goal_harness_enabled() {
+            return Err(
+                crate::agent::external_runtime::ExternalRuntimeError {
+                    kind: crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                    message: "Goals are not supported on Claude Agent CLI sessions. Start /new with a native model.".into(),
+                    agent_kind: Some(kind),
+                }
+                .into_acp_error(),
+            );
+        }
+
+        let cwd = self.tool_context.cwd.as_str().to_owned();
+        let selected_model = self.current_model_id().await;
+        let effort = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .and_then(|c| c.reasoning_effort.map(|e| e.as_str().to_owned()));
+
+        let mut envelope = self.external_runtime.borrow().clone();
+        if envelope.is_none() {
+            let started = runtime
+                .start(ExternalStartRequest {
+                    cwd: cwd.clone(),
+                    worktree_identity: None,
+                    selected_model: Some(selected_model.clone()),
+                    reasoning_effort: effort.clone(),
+                    token_budget: None,
+                })
+                .await
+                .map_err(|e| e.into_acp_error())?;
+            envelope = Some(started);
+        } else if let Some(ref env) = envelope {
+            // Resume path validates pointer when present.
+            if env.session_pointer.as_ref().is_some_and(|s| !s.is_empty()) {
+                let resumed = runtime.resume(env).await.map_err(|e| e.into_acp_error())?;
+                envelope = Some(resumed);
             }
         }
+        let envelope = envelope.ok_or_else(|| {
+            crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind).into_acp_error()
+        })?;
+
+        // Wire cancel: if the session turn_cancel fires, cancel the runtime.
+        let cancel_token = self.turn_cancel.borrow().clone();
+        let runtime_for_cancel = runtime.clone();
+        let env_for_cancel = envelope.clone();
+        let cancel_watch = tokio::spawn(async move {
+            cancel_token.cancelled().await;
+            let _ = runtime_for_cancel.cancel(&env_for_cancel).await;
+        });
+
+        let turn_result = runtime
+            .turn(
+                &envelope,
+                ExternalTurnRequest {
+                    prompt: prompt_text.to_owned(),
+                    selected_model: Some(selected_model.clone()),
+                    reasoning_effort: effort,
+                    token_budget: None,
+                },
+            )
+            .await;
+
+        cancel_watch.abort();
+
+        let outcome = match turn_result {
+            Ok(o) => o,
+            Err(e) => {
+                if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
+                    return Ok(crate::session::commands::PromptTurnOk {
+                        stop_reason: acp::StopReason::Cancelled,
+                        total_tokens: 0,
+                        turn_snapshot: None,
+                        completion_kind:
+                            crate::session::commands::PromptCompletionKind::Cancelled {
+                                category: None,
+                                context: None,
+                            },
+                        structured_output: None,
+                        usage: None,
+                        tool_overrides: None,
+                    });
+                }
+                return Err(e.into_acp_error());
+            }
+        };
+
+        // Map normalized events → ACP SessionUpdates (no second protocol).
+        for event in &outcome.events {
+            match event {
+                ExternalRuntimeTurnEvent::TextDelta { text } => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+                ExternalRuntimeTurnEvent::ToolCall { name, summary } => {
+                    // Display/audit only — never dispatch to Grok tool executor.
+                    let msg = match summary {
+                        Some(s) => format!("[Claude tool: {name} ({s})]"),
+                        None => format!("[Claude tool: {name}]"),
+                    };
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(msg)),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+                ExternalRuntimeTurnEvent::Status { message } => {
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(format!("[{message}]"))),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+                ExternalRuntimeTurnEvent::Error { message } => {
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(format!(
+                                "[error: {message}]"
+                            ))),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // Persist redacted envelope only (no raw NDJSON).
+        let envelope_to_store = match outcome.envelope.clone().validated() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    error = %e,
+                    "external envelope failed validation; keeping prior pointer only"
+                );
+                outcome.envelope.clone()
+            }
+        };
+        *self.external_runtime.borrow_mut() = Some(envelope_to_store.clone());
+        let model_id = acp::ModelId::new(selected_model.clone());
+        let agent_name = self.agent.borrow().definition().name.clone();
+        let _ = self.notifications.persistence_tx.send(
+            crate::session::persistence::PersistenceMsg::CurrentModel {
+                model_id,
+                agent_name: Some(agent_name),
+                reasoning_effort: None,
+                execution_backend: Some(backend),
+                external_runtime: Some(Some(envelope_to_store)),
+            },
+        );
+
+        let tokens = outcome
+            .usage
+            .as_ref()
+            .and_then(|u| {
+                u.total_tokens
+                    .or_else(|| match (u.input_tokens, u.output_tokens) {
+                        (Some(i), Some(o)) => Some(i.saturating_add(o)),
+                        (Some(i), None) => Some(i),
+                        (None, Some(o)) => Some(o),
+                        _ => None,
+                    })
+            })
+            .unwrap_or(0);
+
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            prompt_id = %prompt_id,
+            kind = %kind,
+            tokens,
+            "external agent turn completed"
+        );
+
+        ok_end_turn(tokens, None)
     }
 }
 
@@ -872,12 +1090,32 @@ impl SessionActor {
         self.dispatch_hook(
             xai_grok_hooks::event::HookEventName::UserPromptSubmit,
             xai_grok_hooks::event::HookPayload::UserPromptSubmit {
-                prompt: Some(prompt_text_for_hook),
+                prompt: Some(prompt_text_for_hook.clone()),
             },
             Some(prompt_id),
             None,
         )
         .await;
+        // External agent path: one process per Grok turn, no InferenceActor /
+        // Grok tool loop / compaction / memory / goals / workflow machinery.
+        if self.execution_backend.get().is_external() {
+            let prompt_for_external = {
+                // Prefer the hook text (post-parse); fall back to concatenated blocks.
+                if !prompt_text_for_hook.is_empty() {
+                    prompt_text_for_hook
+                } else {
+                    prompt_blocks.iter().fold(String::new(), |mut acc, b| {
+                        if let acp::ContentBlock::Text(t) = b {
+                            acc.push_str(&t.text);
+                        }
+                        acc
+                    })
+                }
+            };
+            return self
+                .run_external_agent_turn(prompt_id, &prompt_for_external)
+                .await;
+        }
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
         let turn_model_id = self.current_model_id().await;

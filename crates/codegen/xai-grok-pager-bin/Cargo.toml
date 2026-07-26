@@ -95,3 +95,9 @@ default-bazel = [
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 release-dist = ["xai-grok-pager/release-dist"]
+# Experimental Claude Agent CLI process runtime (PR6). Off by default; not
+# part of release-dist or default features.
+claude-cli-runtime = [
+    "xai-grok-pager/claude-cli-runtime",
+    "xai-grok-shell/claude-cli-runtime",
+]

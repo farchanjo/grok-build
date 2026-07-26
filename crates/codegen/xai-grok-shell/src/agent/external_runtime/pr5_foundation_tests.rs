@@ -274,6 +274,12 @@ fn catalog_visibility_hides_unselectable_claude_cli() {
     use crate::agent::config::ModelEntry;
     use indexmap::IndexMap;
 
+    // Force gates closed for this assertion (opt-in may be set by parallel tests).
+    let prior = std::env::var(super::gates::CLAUDE_CLI_ENV_OPT_IN).ok();
+    unsafe {
+        std::env::remove_var(super::gates::CLAUDE_CLI_ENV_OPT_IN);
+    }
+
     let mut catalog = IndexMap::new();
     let mut entry = ModelEntry::fallback("claude-cli-model", &Default::default());
     entry.info.execution_backend = ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
@@ -288,7 +294,8 @@ fn catalog_visibility_hides_unselectable_claude_cli() {
     native.info.user_selectable = true;
     catalog.insert("claude-sonnet-5".into(), native);
 
-    capability_matrix::apply_catalog_visibility(&mut catalog);
+    // Explicit probe-fail keeps Claude CLI hidden even if feature is compiled.
+    capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, Some(false));
 
     let cli = catalog.get("claude-cli-model").unwrap();
     assert!(
@@ -303,6 +310,13 @@ fn catalog_visibility_hides_unselectable_claude_cli() {
     let api = catalog.get("claude-sonnet-5").unwrap();
     assert!(!api.info.hidden);
     assert!(api.info.user_selectable);
+
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var(super::gates::CLAUDE_CLI_ENV_OPT_IN, v),
+            None => std::env::remove_var(super::gates::CLAUDE_CLI_ENV_OPT_IN),
+        }
+    }
 }
 
 #[test]
@@ -340,16 +354,28 @@ fn envelope_rejects_ndjson_shaped_blobs() {
 }
 
 #[test]
-fn capability_matrix_keeps_claude_cli_experimental_and_unselectable() {
+fn capability_matrix_keeps_claude_cli_experimental_and_gated() {
     use super::capability_matrix::{self, CLAUDE_CLI_MODEL_SELECTABLE};
-    assert!(!CLAUDE_CLI_MODEL_SELECTABLE);
+    // Without the compile feature, the static selectable flag is false.
+    // With the feature, the flag is true but runtime opt-in still gates
+    // is_selectable_now / claude_cli_selectable.
+    assert_eq!(
+        CLAUDE_CLI_MODEL_SELECTABLE,
+        cfg!(feature = "claude-cli-runtime")
+    );
     let d = capability_matrix::for_backend(ExecutionBackend::ExternalAgent(
         ExternalAgentKind::ClaudeCli,
     ))
     .unwrap();
     assert!(d.experimental);
-    assert!(!d.selectable);
+    assert_eq!(d.selectable, CLAUDE_CLI_MODEL_SELECTABLE);
     assert_eq!(d.provider_peer_id, Some("anthropic"));
+    assert!(d.label.contains("Experimental"));
+    // Default test process has no GROK_CLAUDE_CLI_RUNTIME opt-in → not selectable now.
+    if std::env::var(super::gates::CLAUDE_CLI_ENV_OPT_IN).is_err() {
+        assert!(!d.is_selectable_now());
+        assert!(!capability_matrix::claude_cli_selectable());
+    }
 
     let native = capability_matrix::for_backend(ExecutionBackend::NativeInference).unwrap();
     assert!(!native.experimental);
