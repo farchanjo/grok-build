@@ -113,7 +113,7 @@ Direct Anthropic traffic uses a Rust client in Grok Build:
 | Auth header | `x-api-key` (never Bearer for direct Anthropic) |
 | Version pin | `anthropic-version: 2023-06-01` |
 | Request size preflight | 32 MiB max (`MAX_REQUEST_BYTES`) |
-| Files beta | `files-api-2025-04-14` (only on Files methods) |
+| Files beta | `files-api-2025-04-14` (only on Files **client** methods; not product UI) |
 
 There is **no** dependency on the Claude desktop app or Claude Agent CLI for
 the API peer path.
@@ -144,11 +144,11 @@ Grok’s own compaction and tool loop continue to run locally.
 
 | Endpoint / area | Status |
 |-----------------|--------|
-| `POST /v1/messages` stream | Supported |
-| `POST /v1/messages` non-stream | Supported |
-| `GET /v1/models`, `GET /v1/models/{id}` | Supported |
-| `POST /v1/messages/count_tokens` | Supported |
-| Files (`POST/GET/DELETE /v1/files`, list) | Supported; explicit retention control |
+| `POST /v1/messages` stream | Supported (product agent path) |
+| `POST /v1/messages` non-stream | Supported (product agent path) |
+| `GET /v1/models`, `GET /v1/models/{id}` | Supported (catalog + cache) |
+| `POST /v1/messages/count_tokens` | Supported (client library) |
+| Files (`POST/GET/DELETE /v1/files`, list) | **Library only** — mock-tested client; product surface deferred |
 | Batches API | Deferred |
 | Admin API | Deferred |
 | Managed Agents | Deferred |
@@ -177,18 +177,26 @@ compaction paths strip or reconfigure reasoning for backends that need it.
 Redacted thinking content is never logged as plaintext secrets; treat it as
 model-internal opaque data.
 
-### Files API (explicit)
+### Files API (client library only; product surface deferred)
 
-Files methods:
+The repository-owned Anthropic **client library** implements Files methods and
+covers them with **mock HTTP tests**:
 
-- upload (caller supplies in-memory bytes; client does not walk your disk)
+- upload (caller supplies in-memory bytes; the client does not walk your disk)
 - list / retrieve metadata
-- **delete** (explicit)
+- delete by file id (library method — **not** a Grok slash command)
 
-Files methods add only the Files beta header. Grok does **not** imply that
-Anthropic retains uploads according to your Grok `/privacy` or xAI ZDR
-settings — those govern SpaceXAI-side retention only. Delete files you no
-longer need via the Files API or Anthropic account controls.
+There is **no** TUI flow, `grok` CLI subcommand, or agent auto-upload that
+exercises Files in ordinary product use. Product integration remains
+**deferred**.
+
+Files methods add only the Files beta header when those library methods run.
+Grok `/privacy` and xAI ZDR settings govern **SpaceXAI-side** retention only;
+they do **not** reconfigure Anthropic retention of API traffic or any Files
+objects created through the client. When a future product surface or external
+caller uses the library, **explicit delete** (library `DELETE /v1/files/{id}`)
+or Anthropic account controls are how objects are removed — not a Grok
+user-facing “delete file” command today.
 
 ### Billing, rate limits, payload size
 
@@ -359,8 +367,10 @@ it as a bug and rotate the credential.
 
 Grok `/privacy`, team ZDR, and telemetry toggles apply to **SpaceXAI / Grok**
 data paths. They do **not** reconfigure Anthropic’s retention of API traffic or
-Files uploads. Manage Anthropic-side data with Anthropic account settings and
-explicit Files deletion.
+of any Files objects created through the client library. Grok product flows
+do not auto-upload to Anthropic Files today. When the library (or a future
+product surface) creates a Files object, removal is via the **client delete
+API** or Anthropic account controls — not a Grok user slash command.
 
 ---
 

@@ -1,7 +1,7 @@
 [
   {
     "category": "features",
-    "description": "**Anthropic peer provider (API key)** is documented end-to-end: `/providers` + `grok provider set-key anthropic --from-env ANTHROPIC_API_KEY`, Models cache, model picker, repository-owned Messages client, Files retention wording, and custom Messages / OpenRouter separation.",
+    "description": "**Anthropic peer provider (API key)** is documented end-to-end: `/providers` + `grok provider set-key anthropic --from-env ANTHROPIC_API_KEY`, Models cache, model picker, repository-owned Messages client, Files as library-only (mock-tested; product surface deferred), and custom Messages / OpenRouter separation.",
     "breaking_change": false
   },
   {

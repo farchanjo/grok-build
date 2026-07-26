@@ -15,8 +15,9 @@ grok openai --provider openai ops --json
 grok openrouter ops
 ```
 
-Anthropic peer setup and endpoint status (Messages, Models, count_tokens,
-Files; Batches/Admin/Managed Agents deferred) are documented in
+Anthropic peer setup and endpoint status (Messages, Models, count_tokens;
+Files as **library-only** mock-tested client methods with product surface
+deferred; Batches/Admin/Managed Agents deferred) are documented in
 [anthropic.md](anthropic.md) and the user guide
 [25-anthropic-provider.md](../user-guide/25-anthropic-provider.md). Anthropic
 does not currently ship a separate OpenAPI inventory under

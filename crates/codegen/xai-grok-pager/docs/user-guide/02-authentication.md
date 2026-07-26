@@ -326,8 +326,9 @@ When ZDR is on, `/privacy` cannot change coding-data sharing.
 
 Grok privacy / ZDR settings govern **SpaceXAI-side** retention and sharing.
 They do **not** change Anthropic (or other third-party) retention of API
-traffic or Files uploads. Manage Anthropic-side data with Anthropic account
-controls and explicit Files deletion. See
+traffic or of any Anthropic Files objects created through the repository-owned
+client library. Ordinary Grok product flows do not auto-upload to Anthropic
+Files; that surface is library-only and product integration is deferred. See
 [Anthropic Provider](25-anthropic-provider.md#7-security-and-troubleshooting).
 
 See [Monitoring Usage](24-monitoring-usage.md#related-settings) and [Configuration](05-configuration.md#telemetry).

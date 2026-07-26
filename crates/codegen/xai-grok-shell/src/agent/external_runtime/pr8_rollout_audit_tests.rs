@@ -13,9 +13,17 @@ use crate::agent::execution_backend::{
 };
 use indexmap::IndexMap;
 
+const CLAUDE_CLI_FEATURE: &str = "claude-cli-runtime";
+
 /// Cargo manifests that forward or declare `claude-cli-runtime`.
 const FEATURE_MANIFESTS: &[&str] = &[
     "crates/codegen/xai-grok-shell/Cargo.toml",
+    "crates/codegen/xai-grok-pager/Cargo.toml",
+    "crates/codegen/xai-grok-pager-bin/Cargo.toml",
+];
+
+/// Composition-root manifests that must declare `release-dist` without the CLI feature.
+const RELEASE_DIST_MANIFESTS: &[&str] = &[
     "crates/codegen/xai-grok-pager/Cargo.toml",
     "crates/codegen/xai-grok-pager-bin/Cargo.toml",
 ];
@@ -33,44 +41,185 @@ fn read_manifest(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-/// Extract the `[features]` table body (best-effort, sufficient for gate audit).
-fn features_table(manifest: &str) -> &str {
-    let start = manifest
-        .find("[features]")
-        .expect("manifest must have [features]");
-    let rest = &manifest[start + "[features]".len()..];
-    let end = rest.find("\n[").unwrap_or(rest.len());
-    &rest[..end]
+/// Parse a Cargo.toml and return the exact `[features]` table (key-exact).
+fn features_table(manifest: &str) -> toml::map::Map<String, toml::Value> {
+    let root: toml::Value =
+        toml::from_str(manifest).unwrap_or_else(|e| panic!("parse Cargo.toml: {e}"));
+    let table = root
+        .as_table()
+        .unwrap_or_else(|| panic!("Cargo.toml root must be a table"));
+    let features = table
+        .get("features")
+        .unwrap_or_else(|| panic!("manifest must have [features]"));
+    features
+        .as_table()
+        .cloned()
+        .unwrap_or_else(|| panic!("[features] must be a table"))
+}
+
+/// Resolve feature assignment value to a flat list of dependency strings.
+///
+/// Cargo allows `feat = []`, `feat = ["a", "b"]`, or (rarely) `feat = "a"`.
+fn feature_deps(features: &toml::map::Map<String, toml::Value>, key: &str) -> Option<Vec<String>> {
+    let val = features.get(key)?;
+    Some(match val {
+        toml::Value::Array(items) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| panic!("feature {key:?} array entry must be a string: {v}"))
+            })
+            .collect(),
+        toml::Value::String(s) => vec![s.clone()],
+        other => panic!("feature {key:?} must be array or string, got {other}"),
+    })
+}
+
+fn feature_deps_contain(deps: &[String], needle: &str) -> bool {
+    deps.iter().any(|d| d == needle || d.contains(needle))
+}
+
+fn assert_feature_excludes(
+    features: &toml::map::Map<String, toml::Value>,
+    key: &str,
+    forbidden: &str,
+    rel: &str,
+) {
+    let deps = feature_deps(features, key)
+        .unwrap_or_else(|| panic!("{rel}: expected exact feature key `{key}` to be present"));
+    assert!(
+        !feature_deps_contain(&deps, forbidden),
+        "{rel}: feature `{key}` must not include `{forbidden}`; deps={deps:?}"
+    );
+}
+
+/// Shared audit used by the live-manifest test and the adversarial fixture test.
+fn audit_features_table(
+    features: &toml::map::Map<String, toml::Value>,
+    rel: &str,
+    require_release_dist: bool,
+) {
+    // Exact key `default` — must not confuse with `default-bazel`.
+    assert!(
+        features.contains_key("default"),
+        "{rel}: exact feature key `default` must be present"
+    );
+    assert_feature_excludes(features, "default", CLAUDE_CLI_FEATURE, rel);
+
+    // `default-bazel` may exist; it is a different key and is not `default`.
+    if let Some(deps) = feature_deps(features, "default-bazel") {
+        // Still fail closed if someone put the experimental feature here.
+        assert!(
+            !feature_deps_contain(&deps, CLAUDE_CLI_FEATURE),
+            "{rel}: default-bazel must not include {CLAUDE_CLI_FEATURE}; deps={deps:?}"
+        );
+    }
+
+    if require_release_dist {
+        assert!(
+            features.contains_key("release-dist"),
+            "{rel}: exact feature key `release-dist` must be present on composition manifests"
+        );
+        assert_feature_excludes(features, "release-dist", CLAUDE_CLI_FEATURE, rel);
+    }
+
+    // Standalone declaration or forwarding: key must exist as its own feature.
+    let decl = feature_deps(features, CLAUDE_CLI_FEATURE).unwrap_or_else(|| {
+        panic!("{rel}: expected standalone `{CLAUDE_CLI_FEATURE}` feature declaration/forwarding")
+    });
+    // Empty array (shell) or forwarding deps (pager / pager-bin) are both valid.
+    // The key existence is the audit surface; values must not smuggle into default.
+    let _ = decl;
 }
 
 #[test]
 fn claude_cli_runtime_absent_from_default_and_release_dist_features() {
     for rel in FEATURE_MANIFESTS {
         let text = read_manifest(rel);
-        let feats = features_table(&text);
-        if let Some(def_line) = feats
-            .lines()
-            .find(|l| l.trim_start().starts_with("default"))
-        {
-            assert!(
-                !def_line.contains("claude-cli-runtime"),
-                "{rel}: default features must not include claude-cli-runtime: {def_line}"
-            );
+        let features = features_table(&text);
+        let require_rd = RELEASE_DIST_MANIFESTS.contains(rel);
+        audit_features_table(&features, rel, require_rd);
+        if !require_rd {
+            // shell: release-dist is optional; if present it still must exclude.
+            if features.contains_key("release-dist") {
+                assert_feature_excludes(&features, "release-dist", CLAUDE_CLI_FEATURE, rel);
+            }
         }
-        if let Some(rd_line) = feats
-            .lines()
-            .find(|l| l.trim_start().starts_with("release-dist"))
-        {
-            assert!(
-                !rd_line.contains("claude-cli-runtime"),
-                "{rel}: release-dist must not include claude-cli-runtime: {rd_line}"
-            );
-        }
-        assert!(
-            text.contains("claude-cli-runtime"),
-            "{rel}: expected claude-cli-runtime feature declaration for audit surface"
-        );
     }
+}
+
+#[test]
+fn feature_table_parser_uses_exact_keys_not_prefix_match() {
+    // Adversarial: multiline default that sneaks claude-cli-runtime onto line 2
+    // must be detected. `default-bazel` containing the string "default" must not
+    // be confused with the exact key `default`.
+    let adversarial = r#"
+[package]
+name = "fixture"
+version = "0.0.0"
+
+[features]
+default = [
+    "jemalloc",
+    "claude-cli-runtime",
+]
+default-bazel = [
+    "jemalloc",
+]
+release-dist = [
+    "sandbox-enforce",
+]
+claude-cli-runtime = []
+"#;
+    let features = features_table(adversarial);
+    // Exact keys resolve independently.
+    let default_deps = feature_deps(&features, "default").unwrap();
+    assert!(
+        feature_deps_contain(&default_deps, CLAUDE_CLI_FEATURE),
+        "fixture default must include the forbidden feature so the audit can catch it"
+    );
+    let bazel_deps = feature_deps(&features, "default-bazel").unwrap();
+    assert!(
+        !feature_deps_contain(&bazel_deps, CLAUDE_CLI_FEATURE),
+        "default-bazel is a different key"
+    );
+    // Audit must fail (panic) on this fixture for `default`.
+    let result = std::panic::catch_unwind(|| {
+        audit_features_table(&features, "adversarial-fixture", true);
+    });
+    assert!(
+        result.is_err(),
+        "audit must reject multiline default that lists claude-cli-runtime"
+    );
+}
+
+#[test]
+fn feature_table_parser_accepts_clean_multiline_default() {
+    let clean = r#"
+[features]
+default = [
+    "jemalloc",
+    "sandbox-enforce",
+]
+default-bazel = [
+    "jemalloc",
+    "sandbox-enforce",
+    "test-support",
+]
+release-dist = ["xai-grok-pager/release-dist"]
+claude-cli-runtime = [
+    "xai-grok-pager/claude-cli-runtime",
+    "xai-grok-shell/claude-cli-runtime",
+]
+"#;
+    let features = features_table(clean);
+    audit_features_table(&features, "clean-fixture", true);
+    let decl = feature_deps(&features, CLAUDE_CLI_FEATURE).unwrap();
+    assert!(
+        feature_deps_contain(&decl, "xai-grok-shell/claude-cli-runtime"),
+        "forwarding declaration preserved: {decl:?}"
+    );
 }
 
 #[test]

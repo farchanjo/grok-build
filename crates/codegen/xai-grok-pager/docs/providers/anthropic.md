@@ -50,13 +50,22 @@ Full user guide: [Anthropic provider](../user-guide/25-anthropic-provider.md).
 
 | Area | Status |
 | --- | --- |
-| Messages stream / non-stream | Supported |
+| Messages stream / non-stream | Supported (product agent path) |
 | Models list / retrieve | Supported (catalog + cache) |
-| `count_tokens` | Supported |
-| Files API (`files-api-2025-04-14` beta) | Supported; **explicit** upload / list / delete |
+| `count_tokens` | Supported (client library) |
+| Files API (`files-api-2025-04-14` beta) | **Library only** — see below |
 | Batches | Deferred |
 | Admin API | Deferred |
 | Managed Agents | Deferred |
+
+### Files API scope (not a product command)
+
+Upload / list / retrieve / delete live on the **repository-owned Rust client**
+(`xai-grok-inference` Anthropic module) and are covered by **mock HTTP unit
+tests**. There is **no** TUI command, `grok` CLI surface, or agent auto-upload
+that calls Files in ordinary product use. A live product integration is
+**deferred**. Docs that mention delete describe the **client library API**
+(callers can delete by file id), not a user-facing Grok slash command.
 
 ## Models and picker
 

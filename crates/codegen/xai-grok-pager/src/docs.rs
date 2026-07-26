@@ -361,6 +361,17 @@ mod tests {
             !anth.content.contains("sk-ant-"),
             "user guide must not embed Anthropic literal key samples"
         );
+        assert!(
+            anth.content.contains("Library only")
+                || anth.content.contains("library only")
+                || anth.content.contains("client library only"),
+            "must qualify Files as client-library-only / product surface deferred"
+        );
+        assert!(
+            anth.content.contains("product surface deferred")
+                || anth.content.contains("Product integration remains"),
+            "must state Files product surface is deferred"
+        );
         let mig = USER_GUIDE
             .iter()
             .find(|d| d.filename == "26-anthropic-migration.md")
@@ -374,26 +385,50 @@ mod tests {
 
     #[test]
     fn user_guide_links_to_existing_files() {
-        // Lightweight relative-link check for managed NN-*.md files.
+        // Relative-link check for:
+        // - same-directory managed NN-*.md
+        // - `../providers/*.md` under the pager docs root
+        // Ignores http(s), bare anchors, and other out-of-tree `../` paths.
         let names: std::collections::HashSet<&str> =
             USER_GUIDE.iter().map(|d| d.filename).collect();
+        let docs_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let user_guide_dir = docs_root.join("user-guide");
+        let providers_dir = docs_root.join("providers");
+        let mut checked_provider_links = 0usize;
         for doc in USER_GUIDE {
             for cap in doc.content.split("](") {
                 let Some(rest) = cap.split(')').next() else {
                     continue;
                 };
-                if rest.starts_with("http") || rest.starts_with('#') || rest.starts_with("../") {
+                let target = rest.split('#').next().unwrap_or(rest).trim();
+                if target.is_empty()
+                    || target.starts_with("http://")
+                    || target.starts_with("https://")
+                    || target.starts_with('#')
+                {
                     continue;
                 }
-                if rest.ends_with(".md") && !rest.contains('/') {
-                    // Same-directory user-guide link.
-                    let file = rest.split('#').next().unwrap_or(rest);
+                if let Some(name) = target.strip_prefix("../providers/") {
+                    if name.ends_with(".md") && !name.contains("..") && !name.contains('/') {
+                        let path = providers_dir.join(name);
+                        assert!(
+                            path.is_file(),
+                            "broken providers link {:?} in {} (expected {:?})",
+                            rest,
+                            doc.filename,
+                            path
+                        );
+                        checked_provider_links += 1;
+                    }
+                    continue;
+                }
+                if target.starts_with("../") || target.starts_with('/') {
+                    // Out-of-guide paths are not part of this audit.
+                    continue;
+                }
+                if target.ends_with(".md") && !target.contains('/') {
                     assert!(
-                        names.contains(file)
-                            || std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                                .join("docs/user-guide")
-                                .join(file)
-                                .exists(),
+                        names.contains(target) || user_guide_dir.join(target).is_file(),
                         "broken relative link {:?} in {}",
                         rest,
                         doc.filename
@@ -401,6 +436,23 @@ mod tests {
                 }
             }
         }
+        // New Anthropic guides must exercise the providers path check.
+        assert!(
+            checked_provider_links > 0,
+            "expected at least one ../providers/*.md link in USER_GUIDE (Anthropic docs)"
+        );
+        let anth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "25-anthropic-provider.md")
+            .unwrap();
+        assert!(
+            anth.content.contains("../providers/anthropic.md"),
+            "25-anthropic-provider.md should link to docs/providers/anthropic.md"
+        );
+        assert!(
+            providers_dir.join("anthropic.md").is_file(),
+            "docs/providers/anthropic.md must exist on disk"
+        );
     }
 
     #[test]
