@@ -22,8 +22,8 @@ pub use discovery::{
     discover_claude_executable, probe_claude_version,
 };
 pub use gates::{
-    CLAUDE_CLI_CONFIG_KEY, CLAUDE_CLI_ENV_OPT_IN, claude_cli_both_gates_open,
-    claude_cli_feature_compiled, claude_cli_runtime_opt_in, parse_runtime_opt_in_value,
+    CLAUDE_CLI_ENV_OPT_IN, claude_cli_both_gates_open, claude_cli_feature_compiled,
+    claude_cli_runtime_opt_in, parse_runtime_opt_in_value,
 };
 pub use runtime::{ClaudeCliRuntime, ClaudeCliRuntimeFactory};
 

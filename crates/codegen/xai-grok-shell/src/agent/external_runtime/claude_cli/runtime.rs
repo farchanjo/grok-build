@@ -14,18 +14,18 @@ use super::gates;
 use super::process::{self, ProcessLimits, TurnProcessError};
 use super::protocol::{self, ProtocolError};
 use crate::agent::execution_backend::ExternalAgentKind;
+use crate::agent::external_runtime::probe_cache;
 use crate::agent::external_runtime::{
-    ExternalAgentRuntime, ExternalResultMetadata, ExternalRuntimeCapabilities,
-    ExternalRuntimeEnvelope, ExternalRuntimeError, ExternalRuntimeErrorKind,
-    ExternalRuntimeFactory, ExternalRuntimeStatus, ExternalRuntimeTurnEvent, ExternalStartRequest,
-    ExternalTurnOutcome, ExternalTurnRequest, ExternalUsageMetadata,
+    ExternalAgentRuntime, ExternalRuntimeCapabilities, ExternalRuntimeEnvelope,
+    ExternalRuntimeError, ExternalRuntimeErrorKind, ExternalRuntimeFactory, ExternalRuntimeStatus,
+    ExternalRuntimeTurnEvent, ExternalStartRequest, ExternalTurnOutcome, ExternalTurnRequest,
 };
 
 /// Live Claude CLI runtime. Requires feature + runtime opt-in + successful probe.
 pub struct ClaudeCliRuntime {
     configured_path: Option<PathBuf>,
     limits: ProcessLimits,
-    /// Last successful discovery (path + version + caps).
+    /// Last successful discovery (path + version + caps + file identity).
     discovery: Mutex<Option<ClaudeCliDiscovery>>,
     /// Cancel token for the in-flight turn (if any).
     inflight_cancel: Mutex<Option<CancellationToken>>,
@@ -68,25 +68,53 @@ impl ClaudeCliRuntime {
         Ok(())
     }
 
+    /// Discover/probe, revalidate identity, and update the process-wide probe cache.
     async fn ensure_discovery(&self) -> Result<ClaudeCliDiscovery, ExternalRuntimeError> {
         Self::ensure_gates()?;
         {
             let guard = self.discovery.lock().await;
             if let Some(d) = guard.as_ref() {
-                return Ok(d.clone());
+                // Revalidate cached identity before reuse.
+                match discovery::revalidate_executable(&d.executable, d) {
+                    Ok(_) => {
+                        probe_cache::record_probe_ok(d.version.to_string());
+                        return Ok(d.clone());
+                    }
+                    Err(e) => {
+                        // Fall through to re-probe after clearing stale cache.
+                        let _ = e;
+                    }
+                }
             }
         }
+        // Clear local cache if revalidation failed.
+        *self.discovery.lock().await = None;
+
         let path_ref = self.configured_path.as_deref();
-        let discovered = discovery::discover_and_probe(path_ref, None)
-            .await
-            .map_err(map_discovery_error)?;
-        *self.discovery.lock().await = Some(discovered.clone());
-        Ok(discovered)
+        match discovery::discover_and_probe(path_ref, None).await {
+            Ok(discovered) => {
+                // Revalidate immediately before returning (defense in depth).
+                if let Err(e) =
+                    discovery::revalidate_executable(&discovered.executable, &discovered)
+                {
+                    probe_cache::record_probe_failed(e.to_string());
+                    return Err(map_discovery_error(e));
+                }
+                probe_cache::record_probe_ok(discovered.version.to_string());
+                *self.discovery.lock().await = Some(discovered.clone());
+                Ok(discovered)
+            }
+            Err(e) => {
+                probe_cache::record_probe_failed(e.to_string());
+                Err(map_discovery_error(e))
+            }
+        }
     }
 
     /// Invalidate cached discovery (e.g. after binary path change).
     pub async fn clear_discovery_cache(&self) {
         *self.discovery.lock().await = None;
+        probe_cache::clear_probe_cache();
     }
 }
 
@@ -139,6 +167,14 @@ fn map_protocol_error(e: ProtocolError) -> ExternalRuntimeError {
     }
 }
 
+fn cancelled_error(msg: &str) -> ExternalRuntimeError {
+    ExternalRuntimeError {
+        kind: ExternalRuntimeErrorKind::Cancelled,
+        message: msg.into(),
+        agent_kind: Some(ExternalAgentKind::ClaudeCli),
+    }
+}
+
 #[async_trait]
 impl ExternalAgentRuntime for ClaudeCliRuntime {
     fn kind(&self) -> ExternalAgentKind {
@@ -164,10 +200,10 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         env.capabilities = d.capabilities.clone();
         env.selected_model = request.selected_model;
         env.reasoning_effort = request.reasoning_effort;
+        // token_budget is a host token count — never mapped to --max-budget-usd.
         env.token_budget = request.token_budget;
         env.cwd = Some(request.cwd);
         env.worktree_identity = request.worktree_identity;
-        // First turn will allocate/pass --session-id; pointer filled after turn.
         env.session_pointer = None;
         env.validated().map_err(|e| ExternalRuntimeError {
             kind: ExternalRuntimeErrorKind::InvalidRequest,
@@ -210,6 +246,8 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         request: ExternalTurnRequest,
     ) -> Result<ExternalTurnOutcome, ExternalRuntimeError> {
         let d = self.ensure_discovery().await?;
+        // Revalidate immediately before spawn.
+        discovery::revalidate_executable(&d.executable, &d).map_err(map_discovery_error)?;
 
         let cancel = CancellationToken::new();
         {
@@ -225,20 +263,13 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             .as_ref()
             .filter(|s| !s.is_empty())
             .cloned();
-        // First turn: generate a UUID session id for --session-id when no resume.
         let session_id = if resume.is_none() {
             Some(uuid::Uuid::new_v4().to_string())
         } else {
             None
         };
 
-        let max_budget_usd = request.token_budget.map(|t| {
-            // Rough USD estimate is not available; pass budget as-is only if
-            // callers encoded USD cents? Spec: token_budget maps to
-            // --max-budget-usd when set as whole dollars in u64.
-            t as f64
-        });
-
+        // MVP: do not pass --max-budget-usd. token_budget is host tokens, not USD.
         let argv = ClaudeCliTurnArgv {
             executable: d.executable.clone(),
             prompt: request.prompt.clone(),
@@ -250,7 +281,7 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
                 .reasoning_effort
                 .clone()
                 .or_else(|| envelope.reasoning_effort.clone()),
-            max_budget_usd,
+            max_budget_usd: None,
             session_id: session_id.clone(),
             resume_session: resume.clone(),
             cwd: envelope.cwd.as_ref().map(PathBuf::from),
@@ -263,40 +294,17 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         let outcome = match outcome {
             Ok(o) => o,
             Err(TurnProcessError::Cancelled) => {
-                return Err(ExternalRuntimeError {
-                    kind: ExternalRuntimeErrorKind::Cancelled,
-                    message: "Claude Agent CLI turn was cancelled".into(),
-                    agent_kind: Some(ExternalAgentKind::ClaudeCli),
-                });
+                return Err(cancelled_error("Claude Agent CLI turn was cancelled"));
             }
             Err(e) => return Err(map_process_error(e)),
         };
 
-        if outcome.cancelled {
-            let partial = protocol::parse_turn_lines_allow_incomplete(&outcome.lines);
-            let mut env = envelope.clone();
-            if let Some(sid) = partial.session_id.or(session_id) {
-                env.session_pointer = Some(sid);
-            }
-            env.observed_version = Some(d.version.to_string());
-            return Ok(ExternalTurnOutcome {
-                events: partial.events,
-                envelope: env,
-                result: Some(ExternalResultMetadata {
-                    status: "cancelled".into(),
-                    stop_reason: Some("cancelled".into()),
-                }),
-                usage: partial.usage,
-            });
-        }
-
-        // Exit 143 without explicit cancel flag still maps to Cancelled.
-        if outcome.exit_code == Some(143) || outcome.exit_signal == Some(15) {
-            return Err(ExternalRuntimeError {
-                kind: ExternalRuntimeErrorKind::Cancelled,
-                message: "Claude Agent CLI exited with SIGTERM (143)".into(),
-                agent_kind: Some(ExternalAgentKind::ClaudeCli),
-            });
+        // Single terminal for cancellation: always ExternalRuntimeErrorKind::Cancelled.
+        // Never Ok(EndTurn) / Completed.
+        if outcome.cancelled || outcome.exit_code == Some(143) || outcome.exit_signal == Some(15) {
+            return Err(cancelled_error(
+                "Claude Agent CLI turn was cancelled (SIGTERM/143)",
+            ));
         }
 
         let parsed = protocol::parse_turn_lines(&outcome.lines).map_err(map_protocol_error)?;
@@ -325,29 +333,25 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             agent_kind: Some(ExternalAgentKind::ClaudeCli),
         })?;
 
-        // Non-zero exit without cancel and with error result → transport/other.
         if let Some(code) = outcome.exit_code {
-            if code != 0 {
-                if parsed
+            if code != 0
+                && parsed
                     .result
                     .as_ref()
                     .is_some_and(|r| r.status == "error" || r.status == "error_during_execution")
-                {
-                    return Err(ExternalRuntimeError {
-                        kind: ExternalRuntimeErrorKind::Other,
-                        message: parsed
-                            .events
-                            .iter()
-                            .find_map(|e| match e {
-                                ExternalRuntimeTurnEvent::Error { message } => {
-                                    Some(message.clone())
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or_else(|| format!("Claude CLI exited with status {code}")),
-                        agent_kind: Some(ExternalAgentKind::ClaudeCli),
-                    });
-                }
+            {
+                return Err(ExternalRuntimeError {
+                    kind: ExternalRuntimeErrorKind::Other,
+                    message: parsed
+                        .events
+                        .iter()
+                        .find_map(|e| match e {
+                            ExternalRuntimeTurnEvent::Error { message } => Some(message.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| format!("Claude CLI exited with status {code}")),
+                    agent_kind: Some(ExternalAgentKind::ClaudeCli),
+                });
             }
         }
 
@@ -379,14 +383,14 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         Ok(())
     }
 
-    fn status(&self, envelope: Option<&ExternalRuntimeEnvelope>) -> ExternalRuntimeStatus {
+    fn status(&self, _envelope: Option<&ExternalRuntimeEnvelope>) -> ExternalRuntimeStatus {
         if !gates::claude_cli_both_gates_open() {
             return ExternalRuntimeStatus::Unavailable;
         }
-        if envelope.is_some() {
-            ExternalRuntimeStatus::Idle
-        } else {
-            ExternalRuntimeStatus::Idle
+        match probe_cache::probe_cache_state() {
+            probe_cache::ClaudeCliProbeCacheState::NotProbed => ExternalRuntimeStatus::Unavailable,
+            probe_cache::ClaudeCliProbeCacheState::Failed { .. } => ExternalRuntimeStatus::Faulted,
+            probe_cache::ClaudeCliProbeCacheState::Ok { .. } => ExternalRuntimeStatus::Idle,
         }
     }
 }
@@ -429,6 +433,10 @@ pub async fn auth_status_for_ui(
     ClaudeCliRuntime::ensure_gates()?;
     let executable =
         discovery::discover_claude_executable(configured_path).map_err(map_discovery_error)?;
+    // Revalidate executable identity immediately before auth probe.
+    let meta_path = executable.clone();
+    // Lightweight identity check via validate only (no prior discovery).
+    discovery::validate_executable_path(&meta_path).map_err(map_discovery_error)?;
     auth::query_auth_status(&executable)
         .await
         .map_err(|e| ExternalRuntimeError {

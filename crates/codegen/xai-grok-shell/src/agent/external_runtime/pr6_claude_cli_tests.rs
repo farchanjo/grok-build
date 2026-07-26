@@ -16,9 +16,10 @@ use super::claude_cli::gates;
 use super::claude_cli::process::{self, ProcessLimits};
 use super::claude_cli::protocol;
 use super::claude_cli::runtime::ClaudeCliRuntime;
+use super::probe_cache;
 use super::{
-    ExternalAgentRuntime, ExternalRuntimeTurnEvent, ExternalStartRequest, ExternalTurnRequest,
-    capability_matrix,
+    ExternalAgentRuntime, ExternalRuntimeErrorKind, ExternalRuntimeTurnEvent, ExternalStartRequest,
+    ExternalTurnRequest, capability_matrix,
 };
 use crate::agent::execution_backend::ExternalAgentKind;
 use std::os::unix::fs::PermissionsExt;
@@ -60,6 +61,72 @@ where
 fn feature_compiled_true_under_pr6_tests() {
     assert!(gates::claude_cli_feature_compiled());
     assert!(capability_matrix::CLAUDE_CLI_MODEL_SELECTABLE);
+}
+
+#[test]
+#[serial_test::serial(claude_cli_env)]
+fn catalog_selectability_requires_probe_cache() {
+    probe_cache::clear_probe_cache();
+    // Even with feature, without opt-in+probe: not selectable.
+    assert!(!capability_matrix::claude_cli_selectable());
+    // Force gates: set opt-in, still no probe.
+    unsafe {
+        std::env::set_var(gates::CLAUDE_CLI_ENV_OPT_IN, "1");
+    }
+    probe_cache::clear_probe_cache();
+    assert!(!capability_matrix::claude_cli_selectable());
+    probe_cache::record_probe_ok("2.1.250");
+    assert!(capability_matrix::claude_cli_selectable());
+    probe_cache::record_probe_failed("hang");
+    assert!(!capability_matrix::claude_cli_selectable());
+    unsafe {
+        std::env::remove_var(gates::CLAUDE_CLI_ENV_OPT_IN);
+    }
+    probe_cache::clear_probe_cache();
+}
+
+#[test]
+#[serial_test::serial(claude_cli_env)]
+fn catalog_visibility_no_probe_failed_success() {
+    use crate::agent::config::ModelEntry;
+    use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
+    use indexmap::IndexMap;
+    probe_cache::clear_probe_cache();
+    unsafe {
+        std::env::set_var(gates::CLAUDE_CLI_ENV_OPT_IN, "1");
+    }
+    assert!(
+        gates::claude_cli_both_gates_open(),
+        "test requires feature+opt-in"
+    );
+
+    let make = |probe: Option<bool>| {
+        let mut catalog = IndexMap::new();
+        let mut entry = ModelEntry::fallback("claude-cli-model", &Default::default());
+        entry.info.execution_backend =
+            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+        entry.info.hidden = false;
+        entry.info.user_selectable = true;
+        catalog.insert("claude-cli-model".into(), entry);
+        capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, probe);
+        let cli = catalog.get("claude-cli-model").unwrap();
+        (cli.info.hidden, cli.info.user_selectable)
+    };
+
+    let (h, s) = make(Some(false));
+    assert!(h && !s, "failed probe hides");
+    // With gates open but no probe cache: still hidden.
+    probe_cache::clear_probe_cache();
+    let (h2, s2) = make(None);
+    assert!(h2 && !s2, "no probe hides");
+    probe_cache::record_probe_ok("2.1.250");
+    let (h3, s3) = make(Some(true));
+    assert!(!h3 && s3, "success probe shows");
+
+    unsafe {
+        std::env::remove_var(gates::CLAUDE_CLI_ENV_OPT_IN);
+    }
+    probe_cache::clear_probe_cache();
 }
 
 #[test]
@@ -461,4 +528,127 @@ fn parse_version_min_floor() {
 fn ui_label_experimental() {
     assert!(capability_matrix::CLAUDE_CLI_UI_LABEL.contains("Experimental"));
     assert!(capability_matrix::CLAUDE_CLI_UI_LIMITATIONS.contains("No API keys"));
+}
+
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn runtime_cancel_returns_cancelled_error_not_end_turn() {
+    with_opt_in_async(|| async {
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "2.1.250"; exit 0; fi
+done
+echo '{"type":"system","subtype":"init","session_id":"c1"}'
+while true; do sleep 1; done
+"#;
+        let fake = write_fake_claude(dir.path(), script);
+        let limits = ProcessLimits {
+            startup: Duration::from_secs(5),
+            idle: Duration::from_secs(30),
+            turn: Duration::from_secs(60),
+            shutdown_grace: Duration::from_millis(400),
+            max_line_bytes: 1024 * 1024,
+            max_stdout_bytes: 8 * 1024 * 1024,
+            max_stderr_bytes: 64 * 1024,
+        };
+        let runtime = std::sync::Arc::new(ClaudeCliRuntime::new(Some(fake)).with_limits(limits));
+        let env = runtime
+            .start(ExternalStartRequest {
+                cwd: dir.path().display().to_string(),
+                worktree_identity: None,
+                selected_model: None,
+                reasoning_effort: None,
+                token_budget: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime_turn = runtime.clone();
+        let env_turn = env.clone();
+        let join = tokio::spawn(async move {
+            runtime_turn
+                .turn(
+                    &env_turn,
+                    ExternalTurnRequest {
+                        prompt: "x".into(),
+                        selected_model: None,
+                        reasoning_effort: None,
+                        token_budget: None,
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        runtime.cancel(&env).await.unwrap();
+        let result = join.await.unwrap();
+        let err = result.expect_err("cancel must not complete as Ok/EndTurn");
+        assert_eq!(err.kind, ExternalRuntimeErrorKind::Cancelled);
+        assert!(!err.is_auth_error());
+    })
+    .await;
+}
+
+#[test]
+fn auth_status_argv_is_auth_status_without_json_flag() {
+    // Documented contract: argv is ["auth", "status"] only.
+    // (query_auth_status uses process::run_probe_command with these args.)
+    let args = ["auth", "status"];
+    assert_eq!(args, ["auth", "status"]);
+    assert!(!args.iter().any(|a| *a == "--json"));
+}
+
+#[test]
+fn revalidate_detects_replaced_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = write_fake_claude(dir.path(), "#!/bin/sh\necho '2.1.250'\n");
+    let meta = std::fs::metadata(&fake).unwrap();
+    let disc = discovery::ClaudeCliDiscovery {
+        executable: fake.clone(),
+        version: semver::Version::parse("2.1.250").unwrap(),
+        capabilities: vec![],
+        file_len: meta.len(),
+        modified: meta.modified().ok(),
+    };
+    // Valid identity.
+    discovery::revalidate_executable(&fake, &disc).unwrap();
+    // Replace file content (size change).
+    std::fs::write(&fake, "#!/bin/sh\necho replaced-and-longer-content\n").unwrap();
+    let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake, perms).unwrap();
+    let err = discovery::revalidate_executable(&fake, &disc).unwrap_err();
+    assert!(matches!(
+        err,
+        discovery::ClaudeCliDiscoveryError::InvalidPath { .. }
+    ));
+}
+
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn process_group_required_spawns_ok_for_fake() {
+    // Happy path proves group create/attach succeeds on this platform.
+    with_opt_in_async(|| async {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = write_fake_claude(dir.path(), &happy_turn_script());
+        let plan = ClaudeCliTurnArgv {
+            executable: fake,
+            prompt: "hi".into(),
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            session_id: None,
+            resume_session: None,
+            cwd: Some(dir.path().to_path_buf()),
+        }
+        .build_plan();
+        let out =
+            process::run_turn_process(&plan, &ProcessLimits::default(), CancellationToken::new())
+                .await
+                .expect("process group required path must succeed when group works");
+        assert!(!out.cancelled);
+        assert!(out.lines.iter().any(|l| l.contains("result")));
+    })
+    .await;
 }

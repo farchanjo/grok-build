@@ -623,6 +623,27 @@ impl SessionActor {
                     span.record("command_source", "builtin");
                 }
                 match action {
+                    BuiltinAction::GoalSet { .. }
+                    | BuiltinAction::GoalResume
+                    | BuiltinAction::GoalStatus
+                    | BuiltinAction::GoalPause
+                    | BuiltinAction::GoalClear
+                    | BuiltinAction::DeepResearch { .. }
+                    | BuiltinAction::WorkflowLaunch { .. }
+                    | BuiltinAction::WorkflowManage { .. }
+                        if self.execution_backend.get().is_external() =>
+                    {
+                        // Reject before any goal/workflow setup or mutation.
+                        xai_grok_telemetry::session_ctx::log_event(slash_used);
+                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        let msg = format!(
+                            "{} is not supported on Claude Agent (CLI, Experimental) sessions. \
+                             Start /new with a native model.",
+                            action.command_name()
+                        );
+                        self.send_host_turn_slash_command_output(&msg).await;
+                        return ok_end_turn(0, None);
+                    }
                     BuiltinAction::GoalSet {
                         objective,
                         token_budget,

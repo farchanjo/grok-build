@@ -35,6 +35,10 @@ pub struct ParsedTurnStream {
     pub saw_final_result: bool,
     pub unknown_events: Vec<String>,
     pub errors: Vec<String>,
+    /// `true` when at least one `stream_event` text_delta was accepted.
+    /// When set, full assistant text blocks and result text are **not**
+    /// re-emitted (dedupe against `--include-partial-messages`).
+    pub saw_stream_text: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +230,11 @@ fn ingest_assistant(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), 
             let bty = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match bty {
                 "text" => {
+                    // When stream partials already delivered the text, skip the
+                    // full assistant text block to avoid duplicate transcript.
+                    if parsed.saw_stream_text {
+                        continue;
+                    }
                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                         let text = annotate_subagent(text, parent);
                         if !text.is_empty() {
@@ -263,10 +272,12 @@ fn ingest_assistant(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), 
             }
         }
     } else if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-        let text = annotate_subagent(text, parent);
-        parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
-            text: bound_text(&text, MAX_TEXT_EVENT_CHARS),
-        });
+        if !parsed.saw_stream_text {
+            let text = annotate_subagent(text, parent);
+            parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
+                text: bound_text(&text, MAX_TEXT_EVENT_CHARS),
+            });
+        }
     }
     Ok(())
 }
@@ -303,7 +314,8 @@ fn ingest_user(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), Strin
 }
 
 fn ingest_stream_event(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), String> {
-    // stream_event.event.delta.text for text_delta
+    // stream_event.event.delta.text for text_delta — authoritative channel when
+    // --include-partial-messages is enabled.
     let event = value.get("event").unwrap_or(value);
     let delta = event.get("delta");
     if let Some(delta) = delta {
@@ -311,6 +323,7 @@ fn ingest_stream_event(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(
         if dty == "text_delta" || delta.get("text").is_some() {
             if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
                 if !text.is_empty() {
+                    parsed.saw_stream_text = true;
                     parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
                         text: bound_text(text, MAX_TEXT_EVENT_CHARS),
                     });
@@ -350,13 +363,13 @@ fn ingest_result(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), Str
     }
     if let Some(text) = value.get("result").and_then(|v| v.as_str()) {
         parsed.result_text = Some(bound_text(text, MAX_TEXT_EVENT_CHARS));
-        // If we never streamed text, emit final result text once.
-        if !parsed
+        // Emit final result text only when no stream partials and no assistant
+        // text deltas were already recorded (no-partial streams).
+        let already_has_text = parsed
             .events
             .iter()
-            .any(|e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { .. }))
-            && !text.is_empty()
-        {
+            .any(|e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { .. }));
+        if !parsed.saw_stream_text && !already_has_text && !text.is_empty() {
             parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
                 text: bound_text(text, MAX_TEXT_EVENT_CHARS),
             });
@@ -546,6 +559,63 @@ mod tests {
             p.events
                 .iter()
                 .any(|e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { text } if text == "Hi"))
+        );
+    }
+
+    #[test]
+    fn partial_plus_assistant_plus_result_emits_single_logical_transcript() {
+        let ls = lines(&[
+            r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Hel"}}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"lo"}}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"},{"type":"tool_use","id":"t1","name":"Read"}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"Hello","session_id":"s1"}"#,
+        ]);
+        let p = parse_turn_lines(&ls).unwrap();
+        assert!(p.saw_stream_text);
+        let texts: Vec<&str> = p
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                ExternalRuntimeTurnEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Stream partials only — no duplicate full assistant/result text.
+        assert_eq!(texts, vec!["Hel", "lo"]);
+        // Tools from assistant still recorded.
+        assert!(p.events.iter().any(
+            |e| matches!(e, ExternalRuntimeTurnEvent::ToolCall { name, .. } if name == "Read")
+        ));
+    }
+
+    #[test]
+    fn no_partials_uses_assistant_or_result_text() {
+        let ls = lines(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Only full"}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"Only full"}"#,
+        ]);
+        let p = parse_turn_lines(&ls).unwrap();
+        assert!(!p.saw_stream_text);
+        let texts: Vec<&str> = p
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                ExternalRuntimeTurnEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Assistant text once; result does not re-emit because text already present.
+        assert_eq!(texts, vec!["Only full"]);
+    }
+
+    #[test]
+    fn result_only_stream_emits_result_text() {
+        let ls = lines(&[r#"{"type":"result","subtype":"success","result":"solo"}"#]);
+        let p = parse_turn_lines(&ls).unwrap();
+        assert!(
+            p.events.iter().any(
+                |e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { text } if text == "solo")
+            )
         );
     }
 }

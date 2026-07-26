@@ -1,14 +1,11 @@
 //! Always-compiled build/runtime gates for Claude Agent CLI.
 //!
 //! The full process runtime lives behind `feature = "claude-cli-runtime"`.
-//! These helpers are available in every build so capability matrix and
-//! fail-closed parsers stay consistent.
+//! Runtime opt-in for MVP is **environment-only** (`GROK_CLAUDE_CLI_RUNTIME`).
+//! There is no config-file key in this MVP.
 
 /// Environment variable that enables the experimental Claude CLI runtime.
 pub const CLAUDE_CLI_ENV_OPT_IN: &str = "GROK_CLAUDE_CLI_RUNTIME";
-
-/// Optional development config key (documentation + callers).
-pub const CLAUDE_CLI_CONFIG_KEY: &str = "experimental.claude_cli_runtime";
 
 /// `true` when this build was compiled with `claude-cli-runtime`.
 #[inline]
@@ -27,7 +24,7 @@ pub fn parse_runtime_opt_in_value(raw: &str) -> bool {
     )
 }
 
-/// Runtime opt-in from environment only.
+/// Runtime opt-in from environment only (MVP).
 pub fn claude_cli_runtime_opt_in() -> bool {
     match std::env::var(CLAUDE_CLI_ENV_OPT_IN) {
         Ok(v) => parse_runtime_opt_in_value(&v),
@@ -35,22 +32,11 @@ pub fn claude_cli_runtime_opt_in() -> bool {
     }
 }
 
-/// Runtime opt-in combining env and an already-parsed config flag.
-pub fn claude_cli_runtime_opt_in_from(config_flag: Option<bool>) -> bool {
-    if claude_cli_runtime_opt_in() {
-        return true;
-    }
-    matches!(config_flag, Some(true))
-}
-
-/// Both gates open (feature compiled **and** runtime opt-in).
+/// Both gates open (feature compiled **and** runtime env opt-in).
+///
+/// Does **not** include binary probe — see [`super::probe_cache`].
 pub fn claude_cli_both_gates_open() -> bool {
     claude_cli_feature_compiled() && claude_cli_runtime_opt_in()
-}
-
-/// Same with an explicit config flag.
-pub fn claude_cli_both_gates_open_from(config_flag: Option<bool>) -> bool {
-    claude_cli_feature_compiled() && claude_cli_runtime_opt_in_from(config_flag)
 }
 
 #[cfg(test)]
@@ -73,15 +59,12 @@ mod tests {
     }
 
     #[test]
-    fn default_runtime_opt_in_is_off_without_env() {
-        // Do not assert global env absence (other tests may set it); assert parser.
+    fn default_runtime_opt_in_parser_is_fail_closed() {
         assert!(!parse_runtime_opt_in_value(""));
-        assert!(!claude_cli_runtime_opt_in_from(None));
-        assert!(!claude_cli_runtime_opt_in_from(Some(false)));
-        assert!(claude_cli_runtime_opt_in_from(Some(true)) || !claude_cli_feature_compiled());
-        // When feature is off, both_gates stays false even with config true.
-        if !claude_cli_feature_compiled() {
-            assert!(!claude_cli_both_gates_open_from(Some(true)));
-        }
+        assert!(!parse_runtime_opt_in_value("false"));
+        assert_eq!(
+            claude_cli_feature_compiled(),
+            cfg!(feature = "claude-cli-runtime")
+        );
     }
 }

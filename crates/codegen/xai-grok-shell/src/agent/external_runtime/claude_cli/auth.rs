@@ -1,4 +1,4 @@
-//! Subscription auth status via official `claude auth status --json`.
+//! Subscription auth status via official `claude auth status` (JSON by default).
 //!
 //! Only when gates are enabled. Bounded parse. Never logs/persists raw auth
 //! output or tokens. Does not implement token extraction or read credential
@@ -45,7 +45,7 @@ impl std::fmt::Display for ClaudeCliAuthError {
 
 impl std::error::Error for ClaudeCliAuthError {}
 
-/// Run `claude auth status --json` and return a redacted status.
+/// Run `claude auth status` (JSON default; no unsupported `--json` flag).
 ///
 /// Exit code 0 ⇒ logged in; 1 ⇒ not logged in (still a successful probe).
 /// Never returns raw stdout to callers beyond redacted fields.
@@ -54,16 +54,16 @@ pub async fn query_auth_status(
 ) -> Result<ClaudeCliAuthStatus, ClaudeCliAuthError> {
     let result = process::run_probe_command(
         executable,
-        &["auth", "status", "--json"],
+        &["auth", "status"],
         AUTH_STATUS_TIMEOUT,
         AUTH_STATUS_OUTPUT_CAP,
     )
     .await
     .map_err(|e| match e {
         process::ProbeError::Timeout => ClaudeCliAuthError::Timeout,
-        process::ProbeError::Spawn(m) | process::ProbeError::Io(m) => {
-            ClaudeCliAuthError::ProbeFailed { detail: m }
-        }
+        process::ProbeError::Spawn(m)
+        | process::ProbeError::Io(m)
+        | process::ProbeError::ProcessGroup(m) => ClaudeCliAuthError::ProbeFailed { detail: m },
     })?;
 
     parse_auth_status_output(&result)

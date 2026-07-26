@@ -7,7 +7,7 @@
 //! >= 2.1.217). Required capability checks win over version when present.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::process::{self, ProbeCommandResult};
 
@@ -29,6 +29,10 @@ pub struct ClaudeCliDiscovery {
     pub executable: PathBuf,
     pub version: semver::Version,
     pub capabilities: Vec<String>,
+    /// File length at discovery time (replacement detection).
+    pub file_len: u64,
+    /// mtime at discovery time when available.
+    pub modified: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,12 +323,12 @@ pub async fn probe_claude_version(executable: &Path, timeout: Duration) -> Claud
             process::ProbeError::Timeout => ClaudeCliDiscoveryError::ProbeTimeout {
                 path: executable.display().to_string(),
             },
-            process::ProbeError::Spawn(msg) | process::ProbeError::Io(msg) => {
-                ClaudeCliDiscoveryError::ProbeFailed {
-                    path: executable.display().to_string(),
-                    detail: msg,
-                }
-            }
+            process::ProbeError::Spawn(msg)
+            | process::ProbeError::Io(msg)
+            | process::ProbeError::ProcessGroup(msg) => ClaudeCliDiscoveryError::ProbeFailed {
+                path: executable.display().to_string(),
+                detail: msg,
+            },
         })?;
 
     let ProbeCommandResult {
@@ -365,11 +369,53 @@ pub async fn probe_claude_version(executable: &Path, timeout: Duration) -> Claud
         });
     }
 
+    let (file_len, modified) = file_identity(executable)?;
     Ok(ClaudeCliDiscovery {
         executable: executable.to_path_buf(),
         version,
         capabilities: Vec::new(),
+        file_len,
+        modified,
     })
+}
+
+/// Snapshot file identity for replacement detection.
+pub fn file_identity(path: &Path) -> Result<(u64, Option<SystemTime>), ClaudeCliDiscoveryError> {
+    let meta = std::fs::metadata(path).map_err(|e| ClaudeCliDiscoveryError::InvalidPath {
+        path: path.display().to_string(),
+        detail: format!("metadata: {e}"),
+    })?;
+    Ok((meta.len(), meta.modified().ok()))
+}
+
+/// Re-validate that `path` is still a regular executable and matches the
+/// identity recorded at discovery (len + mtime). Fails closed on replacement
+/// or permission loss.
+pub fn revalidate_executable(
+    path: &Path,
+    expected: &ClaudeCliDiscovery,
+) -> Result<PathBuf, ClaudeCliDiscoveryError> {
+    let canonical = validate_executable_path(path)?;
+    if canonical != expected.executable {
+        return Err(ClaudeCliDiscoveryError::InvalidPath {
+            path: path.display().to_string(),
+            detail: "canonical path changed since discovery".into(),
+        });
+    }
+    let (len, modified) = file_identity(&canonical)?;
+    if len != expected.file_len {
+        return Err(ClaudeCliDiscoveryError::InvalidPath {
+            path: canonical.display().to_string(),
+            detail: "executable was replaced (size changed)".into(),
+        });
+    }
+    if expected.modified.is_some() && modified != expected.modified {
+        return Err(ClaudeCliDiscoveryError::InvalidPath {
+            path: canonical.display().to_string(),
+            detail: "executable was replaced (mtime changed)".into(),
+        });
+    }
+    Ok(canonical)
 }
 
 /// Full discovery: path resolve + version probe + required capability check.

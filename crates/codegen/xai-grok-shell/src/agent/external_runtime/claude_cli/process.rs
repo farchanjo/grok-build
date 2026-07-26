@@ -62,6 +62,8 @@ pub enum ProbeError {
     Timeout,
     Spawn(String),
     Io(String),
+    /// Process-group create/attach failed; child was terminated.
+    ProcessGroup(String),
 }
 
 #[derive(Debug, Clone)]
@@ -89,10 +91,21 @@ pub async fn run_probe_command(
     new_process_group(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| ProbeError::Spawn(e.to_string()))?;
-    let mut group = ProcessGroup::new().ok();
-    if let Some(g) = group.as_mut() {
-        let _ = g.attach(&child);
-    }
+    let group = match ProcessGroup::new() {
+        Ok(mut g) => {
+            if let Err(e) = g.attach(&child) {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(ProbeError::ProcessGroup(format!("attach: {e}")));
+            }
+            g
+        }
+        Err(e) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(ProbeError::ProcessGroup(format!("create: {e}")));
+        }
+    };
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -143,10 +156,8 @@ pub async fn run_probe_command(
 
     match tokio::time::timeout(timeout, collect).await {
         Ok((out, err, status)) => {
-            // Reap group after leader wait.
-            if let Some(g) = group.take() {
-                drop(g);
-            }
+            // Reap group after leader wait (drop without killpg on reusable pid).
+            drop(group);
             let status = status.map_err(|e| ProbeError::Io(e.to_string()))?;
             Ok(ProbeCommandResult {
                 stdout: String::from_utf8_lossy(&out).into_owned(),
@@ -156,7 +167,7 @@ pub async fn run_probe_command(
             })
         }
         Err(_) => {
-            terminate_child_tree(&mut child, group, Duration::from_millis(500)).await;
+            terminate_child_tree(&mut child, Some(group), Duration::from_millis(500)).await;
             Err(ProbeError::Timeout)
         }
     }
@@ -237,17 +248,32 @@ pub async fn run_turn_process(
         .spawn()
         .map_err(|e| TurnProcessError::Spawn(e.to_string()))?;
 
-    let mut group = ProcessGroup::new().ok();
-    if let Some(g) = group.as_mut() {
-        let _ = g.attach(&child);
-    }
+    let group = match ProcessGroup::new() {
+        Ok(mut g) => {
+            if let Err(e) = g.attach(&child) {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(TurnProcessError::Spawn(format!(
+                    "process group attach failed: {e}"
+                )));
+            }
+            g
+        }
+        Err(e) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(TurnProcessError::Spawn(format!(
+                "process group create failed: {e}"
+            )));
+        }
+    };
 
     // Write prompt and close stdin so -p mode can finish.
     if let Some(mut stdin) = child.stdin.take() {
         if plan.write_stream_json_prompt {
             let line = stream_json_user_prompt_line(&plan.prompt);
             if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+                terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
                 return Err(TurnProcessError::Io(format!("stdin write: {e}")));
             }
         }
@@ -297,7 +323,7 @@ pub async fn run_turn_process(
 
     loop {
         if cancel.is_cancelled() {
-            terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+            terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
             let _ = stderr_task.await;
             return Ok(TurnProcessOutcome {
                 lines,
@@ -310,12 +336,12 @@ pub async fn run_turn_process(
 
         let now = tokio::time::Instant::now();
         if now >= turn_deadline {
-            terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+            terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
             let _ = stderr_task.await;
             return Err(TurnProcessError::TurnTimeout);
         }
         if !saw_first_line && now >= startup_deadline {
-            terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+            terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
             let _ = stderr_task.await;
             return Err(TurnProcessError::StartupTimeout);
         }
@@ -330,7 +356,7 @@ pub async fn run_turn_process(
         let read_result = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+                terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
                 let err = stderr_task.await.unwrap_or_default();
                 return Ok(TurnProcessOutcome {
                     lines,
@@ -356,7 +382,7 @@ pub async fn run_turn_process(
                 saw_first_line = true;
                 total_stdout = total_stdout.saturating_add(line_buf.len());
                 if total_stdout > limits.max_stdout_bytes {
-                    terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+                    terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
                     let _ = stderr_task.await;
                     return Err(TurnProcessError::OutputTooLarge {
                         bytes: total_stdout,
@@ -375,7 +401,7 @@ pub async fn run_turn_process(
                 let line = match String::from_utf8(line_buf) {
                     Ok(s) => s,
                     Err(_) => {
-                        terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+                        terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
                         let _ = stderr_task.await;
                         return Err(TurnProcessError::InvalidUtf8);
                     }
@@ -383,7 +409,7 @@ pub async fn run_turn_process(
                 lines.push(line);
             }
             Err(e) => {
-                terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+                terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
                 let _ = stderr_task.await;
                 return Err(e);
             }
@@ -397,7 +423,7 @@ pub async fn run_turn_process(
             return Err(TurnProcessError::Io(e.to_string()));
         }
         Err(_) => {
-            terminate_child_tree(&mut child, group, limits.shutdown_grace).await;
+            terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
             let err = stderr_task.await.unwrap_or_default();
             return Ok(TurnProcessOutcome {
                 lines,

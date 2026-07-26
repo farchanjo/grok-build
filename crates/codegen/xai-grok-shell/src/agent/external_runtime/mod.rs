@@ -10,6 +10,7 @@
 
 mod envelope;
 pub mod gates;
+pub mod probe_cache;
 mod registry;
 mod stub;
 mod types;
@@ -119,22 +120,19 @@ Experimental subscription-backed Claude Agent CLI. One process per Grok turn; \
 Claude owns auth and tools. No Grok tool loop, compaction, memory, goals, or \
 workflow. No API keys. Persistent input / permission bridge / MCP deferred to a later PR.";
 
-    /// Static compile-time hint (not the full selectability check).
-    ///
-    /// Prefer [`claude_cli_selectable`] which also considers runtime opt-in.
-    /// Kept for PR5 tests that assert the experimental / default-off posture.
+    /// Static compile-time hint only (feature present). Not sufficient for
+    /// catalog selectability — see [`claude_cli_selectable`].
     pub const CLAUDE_CLI_MODEL_SELECTABLE: bool = cfg!(feature = "claude-cli-runtime");
 
-    /// Gates open (feature + runtime opt-in). Probe is separate.
+    /// Gates open (feature + runtime env opt-in). Probe is separate.
     pub fn claude_cli_gates_open() -> bool {
         gates::claude_cli_both_gates_open()
     }
 
-    /// Full selectability: both gates open. Probe success is applied by
-    /// [`apply_catalog_visibility`] when a recent probe cache is provided, or
-    /// by session preflight before a turn.
+    /// Full production selectability: build gate + runtime opt-in + successful
+    /// compatible binary probe (cached). Until probe succeeds, stays false.
     pub fn claude_cli_selectable() -> bool {
-        gates::claude_cli_both_gates_open()
+        crate::agent::external_runtime::probe_cache::claude_cli_catalog_selectable()
     }
 
     /// UI-facing capability row for an execution backend.
@@ -146,19 +144,18 @@ workflow. No API keys. Persistent input / permission bridge / MCP deferred to a 
         /// Longer description for experimental badges / help text.
         pub description: &'static str,
         pub experimental: bool,
-        /// Whether the picker may offer a model that selects this backend.
-        /// Dynamic for Claude CLI — see [`Self::is_selectable_now`].
+        /// Static capability flag. For Claude CLI, use [`Self::is_selectable_now`].
         pub selectable: bool,
         /// Catalog peer id (`anthropic`, `xai`, …) for grouping.
         pub provider_peer_id: Option<&'static str>,
     }
 
     impl ExecutionCapabilityDescriptor {
-        /// Effective selectability (static flag ∧ live gates for Claude CLI).
+        /// Effective selectability (gates + probe cache for Claude CLI).
         pub fn is_selectable_now(&self) -> bool {
             match self.backend {
                 ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli) => {
-                    self.selectable && claude_cli_selectable()
+                    claude_cli_selectable()
                 }
                 _ => self.selectable,
             }
@@ -204,17 +201,19 @@ workflow. No API keys. Persistent input / permission bridge / MCP deferred to a 
             .filter(|d| d.experimental && d.provider_peer_id == Some("anthropic"))
     }
 
-    /// Force `hidden` + `!user_selectable` on catalog entries whose execution
-    /// backend is not selectable under current gates. When
-    /// `claude_cli_probe_ok` is `Some(false)`, Claude CLI stays hidden even if
-    /// gates are open. `None` means "gates only" (probe not yet run).
+    /// Apply catalog visibility from the live probe cache (non-blocking).
+    ///
+    /// Claude CLI entries stay hidden / non-selectable until gates open **and**
+    /// a successful probe is recorded in [`super::probe_cache`].
     pub fn apply_catalog_visibility(
         catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
     ) {
-        apply_catalog_visibility_with_probe(catalog, None);
+        let probe_ok = crate::agent::external_runtime::probe_cache::probe_cache_ok();
+        apply_catalog_visibility_with_probe(catalog, Some(probe_ok));
     }
 
-    /// Like [`apply_catalog_visibility`] with an optional recent probe result.
+    /// Like [`apply_catalog_visibility`] with an explicit probe override
+    /// (`Some(true/false)`). Use `Some(false)` in tests to force hide.
     pub fn apply_catalog_visibility_with_probe(
         catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
         claude_cli_probe_ok: Option<bool>,
@@ -225,12 +224,11 @@ workflow. No API keys. Persistent input / permission bridge / MCP deferred to a 
             }
             let selectable = match entry.info.execution_backend {
                 ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli) => {
-                    let gates = claude_cli_selectable();
-                    match claude_cli_probe_ok {
-                        Some(true) => gates,
-                        Some(false) => false,
-                        None => gates,
-                    }
+                    let gates = claude_cli_gates_open();
+                    let probe = claude_cli_probe_ok.unwrap_or_else(
+                        crate::agent::external_runtime::probe_cache::probe_cache_ok,
+                    );
+                    gates && probe
                 }
                 _ => for_backend(entry.info.execution_backend)
                     .map(|d| d.is_selectable_now())
@@ -240,7 +238,6 @@ workflow. No API keys. Persistent input / permission bridge / MCP deferred to a 
                 entry.info.hidden = true;
                 entry.info.user_selectable = false;
             } else {
-                // Gates+probe allow selection: unhide if it was only hidden by us.
                 entry.info.hidden = false;
                 entry.info.user_selectable = true;
             }

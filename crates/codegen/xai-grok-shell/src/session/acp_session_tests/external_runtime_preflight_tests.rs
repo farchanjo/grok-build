@@ -1,5 +1,6 @@
 //! External-runtime preflight: unavailable backends must not mutate turn_count
 //! or durable user history, and the session remains switchable to native.
+//! Also: goal/workflow slash rejection on external backends before mutation.
 
 use super::support::*;
 use super::*;
@@ -100,6 +101,53 @@ async fn preflight_external_probe_is_unavailable_before_any_mutation() {
                 .expect_err("stub unavailable");
             assert_eq!(err.code(), EXTERNAL_RUNTIME_UNAVAILABLE);
             assert!(!err.is_auth_error());
+        })
+        .await;
+}
+
+/// `/goal` on an external session must fail before goal tracker mutation.
+/// Default-feature builds use the unavailable stub (preflight fails first);
+/// the goal tracker must remain empty either way.
+#[tokio::test(flavor = "current_thread")]
+async fn external_session_goal_slash_does_not_mutate_goal_state() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+            actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                ExternalAgentKind::ClaudeCli,
+            ));
+            assert!(
+                actor.goal_tracker.lock().status().is_none(),
+                "goal starts empty"
+            );
+
+            let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "/goal ship the feature".to_string(),
+            ))];
+            let _ = actor
+                .handle_prompt(
+                    "ext-goal-reject",
+                    prompt_blocks,
+                    PromptMode::Agent,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+
+            assert!(
+                actor.goal_tracker.lock().status().is_none(),
+                "goal tracker must not be mutated on external session /goal"
+            );
         })
         .await;
 }
