@@ -9,7 +9,7 @@
 //! JSON object so history can be re-serialized field-faithfully. Unknown
 //! blocks and events are never promoted into executable Grok tool calls.
 
-use serde::de::{self, Deserializer};
+use serde::Deserializer;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
@@ -191,6 +191,15 @@ pub enum ContentBlock {
         input: serde_json::Value,
         cache_control: Option<CacheControl>,
     },
+    /// MCP connector tool use (`type: "mcp_tool_use"`). Use-like (id/name/input
+    /// plus `server_name`), not result-like. Never becomes a Grok client tool.
+    McpToolUse {
+        id: String,
+        name: String,
+        server_name: String,
+        input: serde_json::Value,
+        cache_control: Option<CacheControl>,
+    },
     /// Server-tool result / error / related result shapes.
     ///
     /// `type_name` is the wire discriminant (e.g. `web_search_tool_result`).
@@ -217,6 +226,9 @@ pub enum ContentBlock {
 }
 
 /// Server-tool result wire type names recognized for typed preservation.
+///
+/// Note: `mcp_tool_use` is **not** listed here — it is use-like and handled
+/// by [`ContentBlock::McpToolUse`].
 const SERVER_TOOL_RESULT_TYPES: &[&str] = &[
     "web_search_tool_result",
     "web_fetch_tool_result",
@@ -226,7 +238,6 @@ const SERVER_TOOL_RESULT_TYPES: &[&str] = &[
     "tool_search_tool_result",
     "tool_search_tool_search_result",
     "mcp_tool_result",
-    "mcp_tool_use",
 ];
 
 impl ContentBlock {
@@ -242,14 +253,15 @@ impl ContentBlock {
             Self::RedactedThinking { .. } => "redacted_thinking",
             Self::SearchResult { .. } => "search_result",
             Self::ServerToolUse { .. } => "server_tool_use",
+            Self::McpToolUse { .. } => "mcp_tool_use",
             Self::ServerToolResult { type_name, .. } => type_name.as_str(),
             Self::Compaction { .. } => "compaction",
             Self::Unknown { type_name, .. } => type_name.as_str(),
         }
     }
 
-    /// True for client-executable `tool_use` only. Server tools and unknown
-    /// blocks are never executable Grok tool calls.
+    /// True for client-executable `tool_use` only. Server tools, MCP tools,
+    /// and unknown blocks are never executable Grok tool calls.
     pub fn is_client_tool_use(&self) -> bool {
         matches!(self, Self::ToolUse { .. })
     }
@@ -401,6 +413,19 @@ impl Serialize for ContentBlock {
                         map.insert("input".into(), input.clone());
                         insert_opt_json(&mut map, "cache_control", cache_control)?;
                     }
+                    Self::McpToolUse {
+                        id,
+                        name,
+                        server_name,
+                        input,
+                        cache_control,
+                    } => {
+                        map.insert("id".into(), JsonValue::String(id.clone()));
+                        map.insert("name".into(), JsonValue::String(name.clone()));
+                        map.insert("server_name".into(), JsonValue::String(server_name.clone()));
+                        map.insert("input".into(), input.clone());
+                        insert_opt_json(&mut map, "cache_control", cache_control)?;
+                    }
                     Self::Compaction { content } => {
                         insert_opt_json(&mut map, "content", content)?;
                     }
@@ -426,11 +451,29 @@ fn insert_opt_json<T: Serialize, E: serde::ser::Error>(
 impl<'de> Deserialize<'de> for ContentBlock {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = JsonValue::deserialize(deserializer)?;
+        Ok(Self::from_json_value(value))
+    }
+}
+
+impl ContentBlock {
+    /// Parse a content block from a JSON object.
+    ///
+    /// Known discriminants that fail shape validation fall back to
+    /// [`ContentBlock::Unknown`] so additive server changes cannot abort a
+    /// stream mid-turn. Completely unknown discriminants also become
+    /// `Unknown`.
+    pub fn from_json_value(value: JsonValue) -> Self {
         let type_name = value
             .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
+        // Helper: on typed-shape failure keep the raw object as Unknown.
+        let unknown = |type_name: String, value: JsonValue| Self::Unknown {
+            type_name,
+            raw: value,
+        };
 
         match type_name.as_str() {
             "text" => {
@@ -442,12 +485,14 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     citations: Option<Vec<JsonValue>>,
                 }
-                let t: TextDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::Text {
-                    text: t.text,
-                    cache_control: t.cache_control,
-                    citations: t.citations,
-                })
+                match serde_json::from_value::<TextDe>(value.clone()) {
+                    Ok(t) => Self::Text {
+                        text: t.text,
+                        cache_control: t.cache_control,
+                        citations: t.citations,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "image" => {
                 #[derive(Deserialize)]
@@ -456,11 +501,13 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     cache_control: Option<CacheControl>,
                 }
-                let t: ImageDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::Image {
-                    source: t.source,
-                    cache_control: t.cache_control,
-                })
+                match serde_json::from_value::<ImageDe>(value.clone()) {
+                    Ok(t) => Self::Image {
+                        source: t.source,
+                        cache_control: t.cache_control,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "document" => {
                 #[derive(Deserialize)]
@@ -475,14 +522,16 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     cache_control: Option<CacheControl>,
                 }
-                let t: DocumentDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::Document {
-                    source: t.source,
-                    title: t.title,
-                    context: t.context,
-                    citations: t.citations,
-                    cache_control: t.cache_control,
-                })
+                match serde_json::from_value::<DocumentDe>(value.clone()) {
+                    Ok(t) => Self::Document {
+                        source: t.source,
+                        title: t.title,
+                        context: t.context,
+                        citations: t.citations,
+                        cache_control: t.cache_control,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "tool_use" => {
                 #[derive(Deserialize)]
@@ -494,13 +543,15 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     cache_control: Option<CacheControl>,
                 }
-                let t: ToolUseDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::ToolUse {
-                    id: t.id,
-                    name: t.name,
-                    input: t.input,
-                    cache_control: t.cache_control,
-                })
+                match serde_json::from_value::<ToolUseDe>(value.clone()) {
+                    Ok(t) => Self::ToolUse {
+                        id: t.id,
+                        name: t.name,
+                        input: t.input,
+                        cache_control: t.cache_control,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "tool_result" => {
                 #[derive(Deserialize)]
@@ -513,13 +564,15 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     cache_control: Option<CacheControl>,
                 }
-                let t: ToolResultDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::ToolResult {
-                    tool_use_id: t.tool_use_id,
-                    content: t.content,
-                    is_error: t.is_error,
-                    cache_control: t.cache_control,
-                })
+                match serde_json::from_value::<ToolResultDe>(value.clone()) {
+                    Ok(t) => Self::ToolResult {
+                        tool_use_id: t.tool_use_id,
+                        content: t.content,
+                        is_error: t.is_error,
+                        cache_control: t.cache_control,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "thinking" => {
                 #[derive(Deserialize)]
@@ -529,19 +582,23 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     signature: String,
                 }
-                let t: ThinkingDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::Thinking {
-                    thinking: t.thinking,
-                    signature: t.signature,
-                })
+                match serde_json::from_value::<ThinkingDe>(value.clone()) {
+                    Ok(t) => Self::Thinking {
+                        thinking: t.thinking,
+                        signature: t.signature,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "redacted_thinking" => {
                 #[derive(Deserialize)]
                 struct RedactedDe {
                     data: String,
                 }
-                let t: RedactedDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::RedactedThinking { data: t.data })
+                match serde_json::from_value::<RedactedDe>(value.clone()) {
+                    Ok(t) => Self::RedactedThinking { data: t.data },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "search_result" => {
                 #[derive(Deserialize)]
@@ -555,14 +612,16 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     cache_control: Option<CacheControl>,
                 }
-                let t: SearchDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::SearchResult {
-                    source: t.source,
-                    title: t.title,
-                    content: t.content,
-                    citations: t.citations,
-                    cache_control: t.cache_control,
-                })
+                match serde_json::from_value::<SearchDe>(value.clone()) {
+                    Ok(t) => Self::SearchResult {
+                        source: t.source,
+                        title: t.title,
+                        content: t.content,
+                        citations: t.citations,
+                        cache_control: t.cache_control,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "server_tool_use" => {
                 #[derive(Deserialize)]
@@ -574,14 +633,37 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     cache_control: Option<CacheControl>,
                 }
-                let t: ServerToolUseDe =
-                    serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::ServerToolUse {
-                    id: t.id,
-                    name: t.name,
-                    input: t.input,
-                    cache_control: t.cache_control,
-                })
+                match serde_json::from_value::<ServerToolUseDe>(value.clone()) {
+                    Ok(t) => Self::ServerToolUse {
+                        id: t.id,
+                        name: t.name,
+                        input: t.input,
+                        cache_control: t.cache_control,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
+            }
+            "mcp_tool_use" => {
+                #[derive(Deserialize)]
+                struct McpToolUseDe {
+                    id: String,
+                    name: String,
+                    server_name: String,
+                    #[serde(default)]
+                    input: serde_json::Value,
+                    #[serde(default)]
+                    cache_control: Option<CacheControl>,
+                }
+                match serde_json::from_value::<McpToolUseDe>(value.clone()) {
+                    Ok(t) => Self::McpToolUse {
+                        id: t.id,
+                        name: t.name,
+                        server_name: t.server_name,
+                        input: t.input,
+                        cache_control: t.cache_control,
+                    },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             "compaction" => {
                 #[derive(Deserialize)]
@@ -589,17 +671,19 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     #[serde(default)]
                     content: Option<String>,
                 }
-                let t: CompactionDe = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::Compaction { content: t.content })
+                match serde_json::from_value::<CompactionDe>(value.clone()) {
+                    Ok(t) => Self::Compaction { content: t.content },
+                    Err(_) => unknown(type_name, value),
+                }
             }
             other if SERVER_TOOL_RESULT_TYPES.contains(&other) => {
                 let mut obj = match value {
                     JsonValue::Object(m) => m,
-                    other => {
-                        return Ok(Self::Unknown {
-                            type_name: type_name.clone(),
-                            raw: other,
-                        });
+                    other_val => {
+                        return Self::Unknown {
+                            type_name,
+                            raw: other_val,
+                        };
                     }
                 };
                 let tool_use_id = obj
@@ -611,18 +695,18 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     .remove("cache_control")
                     .and_then(|v| serde_json::from_value(v).ok());
                 obj.remove("type");
-                Ok(Self::ServerToolResult {
+                Self::ServerToolResult {
                     type_name,
                     tool_use_id,
                     content,
                     cache_control,
                     extra: obj,
-                })
+                }
             }
-            other => Ok(Self::Unknown {
+            other => Self::Unknown {
                 type_name: other.to_string(),
                 raw: value,
-            }),
+            },
         }
     }
 }
@@ -955,14 +1039,24 @@ impl<'de> Deserialize<'de> for MessageStreamEvent {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
+        // Known event types that fail shape validation fall back to Unknown
+        // so additive server changes cannot abort an already-streaming turn.
+        let unknown = |type_name: String, value: JsonValue| Self::Unknown {
+            type_name,
+            raw: value,
+        };
+
         match type_name.as_str() {
             "message_start" => {
                 #[derive(Deserialize)]
                 struct De {
                     message: MessagesResponse,
                 }
-                let d: De = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::MessageStart { message: d.message })
+                match serde_json::from_value::<De>(value.clone()) {
+                    Ok(d) => Ok(Self::MessageStart { message: d.message }),
+                    Err(_) => Ok(unknown(type_name, value)),
+                }
             }
             "message_delta" => {
                 #[derive(Deserialize)]
@@ -971,11 +1065,13 @@ impl<'de> Deserialize<'de> for MessageStreamEvent {
                     #[serde(default)]
                     usage: MessageDeltaUsage,
                 }
-                let d: De = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::MessageDelta {
-                    delta: d.delta,
-                    usage: d.usage,
-                })
+                match serde_json::from_value::<De>(value.clone()) {
+                    Ok(d) => Ok(Self::MessageDelta {
+                        delta: d.delta,
+                        usage: d.usage,
+                    }),
+                    Err(_) => Ok(unknown(type_name, value)),
+                }
             }
             "message_stop" => Ok(Self::MessageStop),
             "content_block_start" => {
@@ -984,11 +1080,13 @@ impl<'de> Deserialize<'de> for MessageStreamEvent {
                     index: u32,
                     content_block: ContentBlock,
                 }
-                let d: De = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::ContentBlockStart {
-                    index: d.index,
-                    content_block: d.content_block,
-                })
+                match serde_json::from_value::<De>(value.clone()) {
+                    Ok(d) => Ok(Self::ContentBlockStart {
+                        index: d.index,
+                        content_block: d.content_block,
+                    }),
+                    Err(_) => Ok(unknown(type_name, value)),
+                }
             }
             "content_block_delta" => {
                 #[derive(Deserialize)]
@@ -996,19 +1094,23 @@ impl<'de> Deserialize<'de> for MessageStreamEvent {
                     index: u32,
                     delta: StreamDelta,
                 }
-                let d: De = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::ContentBlockDelta {
-                    index: d.index,
-                    delta: d.delta,
-                })
+                match serde_json::from_value::<De>(value.clone()) {
+                    Ok(d) => Ok(Self::ContentBlockDelta {
+                        index: d.index,
+                        delta: d.delta,
+                    }),
+                    Err(_) => Ok(unknown(type_name, value)),
+                }
             }
             "content_block_stop" => {
                 #[derive(Deserialize)]
                 struct De {
                     index: u32,
                 }
-                let d: De = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::ContentBlockStop { index: d.index })
+                match serde_json::from_value::<De>(value.clone()) {
+                    Ok(d) => Ok(Self::ContentBlockStop { index: d.index }),
+                    Err(_) => Ok(unknown(type_name, value)),
+                }
             }
             "ping" => Ok(Self::Ping),
             "error" => {
@@ -1016,8 +1118,10 @@ impl<'de> Deserialize<'de> for MessageStreamEvent {
                 struct De {
                     error: StreamError,
                 }
-                let d: De = serde_json::from_value(value).map_err(de::Error::custom)?;
-                Ok(Self::Error { error: d.error })
+                match serde_json::from_value::<De>(value.clone()) {
+                    Ok(d) => Ok(Self::Error { error: d.error }),
+                    Err(_) => Ok(unknown(type_name, value)),
+                }
             }
             other => Ok(Self::Unknown {
                 type_name: other.to_string(),
@@ -1082,6 +1186,11 @@ pub enum StreamDelta {
     SignatureDelta {
         signature: String,
     },
+    /// A single citation to append to the current text block's `citations`
+    /// list. Wire shape: `{"type":"citations_delta","citation":{...}}`.
+    CitationsDelta {
+        citation: JsonValue,
+    },
     /// Unknown delta type: preserve discriminant + raw object.
     Unknown {
         type_name: String,
@@ -1111,6 +1220,10 @@ impl Serialize for StreamDelta {
                     Self::SignatureDelta { signature } => {
                         map.serialize_entry("type", "signature_delta")?;
                         map.serialize_entry("signature", signature)?;
+                    }
+                    Self::CitationsDelta { citation } => {
+                        map.serialize_entry("type", "citations_delta")?;
+                        map.serialize_entry("citation", citation)?;
                     }
                     Self::Unknown { .. } => unreachable!(),
                 }
@@ -1160,6 +1273,10 @@ impl<'de> Deserialize<'de> for StreamDelta {
                     .unwrap_or("")
                     .to_string();
                 Ok(Self::SignatureDelta { signature })
+            }
+            "citations_delta" => {
+                let citation = value.get("citation").cloned().unwrap_or(JsonValue::Null);
+                Ok(Self::CitationsDelta { citation })
             }
             other => Ok(Self::Unknown {
                 type_name: other.to_string(),
@@ -1425,6 +1542,70 @@ mod tests {
         assert_eq!(out["tool_use_id"], "srv_1");
     }
 
+    /// Real-shaped `mcp_tool_use` is use-like (id/name/input/server_name), not
+    /// result-like, field-faithful on round-trip, and never a Grok client tool.
+    #[test]
+    fn mcp_tool_use_round_trips_and_is_never_client_tool() {
+        let raw = serde_json::json!({
+            "type": "mcp_tool_use",
+            "id": "mcptoolu_014Q35RayjACSWkSj4X2yov1",
+            "name": "echo",
+            "server_name": "example-mcp",
+            "input": { "param1": "value1", "param2": "value2" }
+        });
+        let block: ContentBlock = serde_json::from_value(raw.clone()).unwrap();
+        match &block {
+            ContentBlock::McpToolUse {
+                id,
+                name,
+                server_name,
+                input,
+                cache_control,
+            } => {
+                assert_eq!(id, "mcptoolu_014Q35RayjACSWkSj4X2yov1");
+                assert_eq!(name, "echo");
+                assert_eq!(server_name, "example-mcp");
+                assert_eq!(input["param1"], "value1");
+                assert!(cache_control.is_none());
+            }
+            other => panic!("expected McpToolUse, got {other:?}"),
+        }
+        assert!(!block.is_client_tool_use());
+        assert_eq!(block.type_name(), "mcp_tool_use");
+        let out = serde_json::to_value(&block).unwrap();
+        assert_eq!(out, raw);
+    }
+
+    /// Known discriminant with an unparseable shape falls back to Unknown
+    /// rather than failing the full deserialize (forward-compat).
+    #[test]
+    fn known_discriminant_shape_drift_preserves_as_unknown() {
+        // `text` requires a string `text` field; a number fails typed parse.
+        let raw = serde_json::json!({"type":"text","text":123,"extra":true});
+        let block: ContentBlock = serde_json::from_value(raw.clone()).unwrap();
+        match &block {
+            ContentBlock::Unknown { type_name, raw: r } => {
+                assert_eq!(type_name, "text");
+                assert_eq!(r, &raw);
+            }
+            other => panic!("expected Unknown fallback, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&block).unwrap(), raw);
+        assert!(!block.is_client_tool_use());
+
+        // Malformed mcp_tool_use (missing server_name) also falls back.
+        let mcp_raw = serde_json::json!({"type":"mcp_tool_use","id":"x","name":"y"});
+        let mcp: ContentBlock = serde_json::from_value(mcp_raw.clone()).unwrap();
+        match &mcp {
+            ContentBlock::Unknown { type_name, raw } => {
+                assert_eq!(type_name, "mcp_tool_use");
+                assert_eq!(raw, &mcp_raw);
+            }
+            other => panic!("expected Unknown mcp_tool_use fallback, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&mcp).unwrap(), mcp_raw);
+    }
+
     #[test]
     fn stream_event_and_delta_unknown_round_trip() {
         let event_raw = serde_json::json!({
@@ -1441,14 +1622,37 @@ mod tests {
         }
         assert_eq!(serde_json::to_value(&event).unwrap(), event_raw);
 
-        let delta_raw = serde_json::json!({"type":"citations_delta","citation":{"x":1}});
+        let delta_raw = serde_json::json!({"type":"future_delta","payload":1});
         let delta: StreamDelta = serde_json::from_value(delta_raw.clone()).unwrap();
         match &delta {
             StreamDelta::Unknown { type_name, raw } => {
-                assert_eq!(type_name, "citations_delta");
+                assert_eq!(type_name, "future_delta");
                 assert_eq!(raw, &delta_raw);
             }
             other => panic!("expected Unknown delta, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&delta).unwrap(), delta_raw);
+    }
+
+    #[test]
+    fn citations_delta_round_trips() {
+        let delta_raw = serde_json::json!({
+            "type": "citations_delta",
+            "citation": {
+                "type": "char_location",
+                "cited_text": "hello",
+                "document_index": 0,
+                "start_char_index": 0,
+                "end_char_index": 5
+            }
+        });
+        let delta: StreamDelta = serde_json::from_value(delta_raw.clone()).unwrap();
+        match &delta {
+            StreamDelta::CitationsDelta { citation } => {
+                assert_eq!(citation["type"], "char_location");
+                assert_eq!(citation["cited_text"], "hello");
+            }
+            other => panic!("expected CitationsDelta, got {other:?}"),
         }
         assert_eq!(serde_json::to_value(&delta).unwrap(), delta_raw);
     }

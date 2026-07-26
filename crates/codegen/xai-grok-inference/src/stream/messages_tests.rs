@@ -784,6 +784,60 @@ async fn multiple_thinking_blocks_all_preserved_with_ordered_payload() {
     }
 }
 
+/// Streamed `citations_delta` events must accumulate onto the text block in
+/// the durable Messages payload (equivalent to non-streamed citations[]).
+#[tokio::test]
+async fn citations_delta_accumulates_on_text_block_payload() {
+    let citation = serde_json::json!({
+        "type": "char_location",
+        "cited_text": "hello",
+        "document_index": 0,
+        "start_char_index": 0,
+        "end_char_index": 5
+    });
+    let events: Vec<Result<MessageStreamEvent, InferenceError>> = vec![
+        Ok(message_start()),
+        Ok(text_block_start(0)),
+        Ok(text_delta(0, "According to...")),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: StreamDelta::CitationsDelta {
+                citation: citation.clone(),
+            },
+        }),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::EndTurn)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        InferenceEvent::Completed { response, .. } => {
+            let a = response.assistant().expect("assistant");
+            assert_eq!(a.content.as_ref(), "According to...");
+            let payload = a
+                .provider_payload
+                .as_ref()
+                .and_then(|p| p.messages.as_ref())
+                .expect("messages payload");
+            assert_eq!(payload.content.len(), 1);
+            match &payload.content[0] {
+                ContentBlock::Text {
+                    text, citations, ..
+                } => {
+                    assert_eq!(text, "According to...");
+                    let cites = citations.as_ref().expect("citations present");
+                    assert_eq!(cites.len(), 1);
+                    assert_eq!(cites[0], citation);
+                }
+                other => panic!("expected Text block, got {other:?}"),
+            }
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
 /// Server tool use / unknown blocks must never become client tool calls.
 #[tokio::test]
 async fn server_tool_and_unknown_blocks_never_become_tool_calls() {

@@ -219,6 +219,9 @@ fn truncate_item_to_tokens(item: ConversationItem, max_tokens: u64) -> Conversat
         ConversationItem::Assistant(mut a) => {
             if let Some(s) = truncate_text_to_bytes(&a.content, max_bytes) {
                 a.content = s;
+                // Truncation mutates assistant text, so any durable Messages
+                // signed payload is no longer valid for exact replay.
+                a.clear_provider_payload();
             }
             ConversationItem::Assistant(a)
         }
@@ -3716,6 +3719,56 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             other => panic!("expected truncated trailing assistant, got {other:?}"),
         }
     }
+
+    /// Truncating assistant content must clear any durable Messages provider
+    /// payload so later requests do not replay a stale signed block array.
+    #[test]
+    fn fit_truncation_clears_assistant_messages_provider_payload() {
+        use xai_grok_inference_types::messages::ContentBlock;
+        use xai_grok_inference_types::{
+            AssistantItem, AssistantProviderPayload, MessagesAssistantPayload,
+        };
+
+        let huge = "q".repeat(40_000);
+        let assistant = AssistantItem {
+            content: huge.clone().into(),
+            tool_calls: vec![],
+            model_id: Some("m".into()),
+            model_fingerprint: None,
+            reasoning_effort: None,
+            reasoning_details: Vec::new(),
+            provider_payload: Some(AssistantProviderPayload {
+                messages: Some(MessagesAssistantPayload {
+                    content: vec![ContentBlock::Text {
+                        text: huge.clone(),
+                        cache_control: None,
+                        citations: None,
+                    }],
+                    replayable: true,
+                }),
+            }),
+        };
+        assert!(assistant.replayable_messages_content().is_some());
+
+        let conv = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("old"),
+            ConversationItem::Assistant(assistant),
+        ];
+        let out = fit_conversation_to_budget(conv, 100);
+        match out.last().expect("tail kept") {
+            ConversationItem::Assistant(a) => {
+                assert!(a.content.contains("truncated"));
+                assert!(
+                    a.provider_payload.is_none(),
+                    "truncation must clear the Messages provider payload"
+                );
+                assert!(a.replayable_messages_content().is_none());
+            }
+            other => panic!("expected truncated assistant, got {other:?}"),
+        }
+    }
+
     /// Incompactable-state regression: `fit` must charge images (765 each), so an image-heavy old turn is trimmed.
     #[test]
     fn fit_counts_user_images_against_budget() {

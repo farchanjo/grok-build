@@ -367,6 +367,22 @@ pub fn stream_messages<'a>(
                                     };
                                 }
                             }
+                            StreamDelta::CitationsDelta { citation } => {
+                                // Append to the current text block's citations
+                                // so streamed replay matches non-streamed text
+                                // blocks that already carry citations[].
+                                if state.block_type == BlockType::Text {
+                                    state
+                                        .citations
+                                        .get_or_insert_with(Vec::new)
+                                        .push(citation);
+                                } else {
+                                    tracing::debug!(
+                                        block_type = ?state.block_type,
+                                        "citations_delta on non-text block ignored for projection"
+                                    );
+                                }
+                            }
                             StreamDelta::Unknown { type_name, raw } => {
                                 tracing::debug!(
                                     type_name = %type_name,

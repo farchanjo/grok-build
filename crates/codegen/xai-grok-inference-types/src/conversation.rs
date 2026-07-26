@@ -2877,14 +2877,21 @@ pub fn transform_conversation_cwd(
     source_cwd: &str,
     target_cwd: &str,
 ) {
+    // When a reasoning sibling is rewritten, the following assistant's
+    // Messages provider payload (which embeds signed thinking) must be
+    // cleared so `build_messages_request` synthesizes from projections.
+    let mut clear_next_assistant_payload = false;
+
     for item in items.iter_mut() {
         match item {
             ConversationItem::System(s) => {
+                clear_next_assistant_payload = false;
                 if s.content.contains(source_cwd) {
                     s.content = Arc::<str>::from(s.content.replace(source_cwd, target_cwd));
                 }
             }
             ConversationItem::User(u) => {
+                clear_next_assistant_payload = false;
                 for part in u.content.iter_mut() {
                     if let ContentPart::Text { text } = part
                         && text.contains(source_cwd)
@@ -2894,8 +2901,10 @@ pub fn transform_conversation_cwd(
                 }
             }
             ConversationItem::Assistant(a) => {
+                let mut mutated = false;
                 if a.content.contains(source_cwd) {
                     a.content = Arc::<str>::from(a.content.replace(source_cwd, target_cwd));
+                    mutated = true;
                 }
                 // Tool call arguments contain file paths that must also be rewritten.
                 // The arguments field is a JSON-encoded string; source_cwd appears as
@@ -2908,24 +2917,38 @@ pub fn transform_conversation_cwd(
                     if tc.arguments.contains(source_cwd) {
                         tc.arguments =
                             Arc::<str>::from(tc.arguments.replace(source_cwd, target_cwd));
+                        mutated = true;
                     }
                 }
+                // Any mutation of assistant projections OR a rewritten preceding
+                // reasoning sibling invalidates the durable Messages payload.
+                if mutated || clear_next_assistant_payload {
+                    a.clear_provider_payload();
+                }
+                clear_next_assistant_payload = false;
             }
             ConversationItem::ToolResult(t) => {
+                clear_next_assistant_payload = false;
                 if t.content.contains(source_cwd) {
                     t.content = Arc::<str>::from(t.content.replace(source_cwd, target_cwd));
                 }
             }
             // Backend tool calls don't contain workspace paths — no-op.
-            ConversationItem::BackendToolCall(_) => {}
+            ConversationItem::BackendToolCall(_) => {
+                clear_next_assistant_payload = false;
+            }
             // Reasoning items rarely reference CWD paths, but they can —
             // patch both summary parts and content blocks defensively.
+            // Mutations here mark the next assistant (same turn) so its
+            // signed Messages payload cannot be replayed stale.
             ConversationItem::Reasoning(r) => {
+                let mut mutated = false;
                 for sp in r.summary.iter_mut() {
                     match sp {
                         rs::SummaryPart::SummaryText(t) => {
                             if t.text.contains(source_cwd) {
                                 t.text = t.text.replace(source_cwd, target_cwd);
+                                mutated = true;
                             }
                         }
                     }
@@ -2934,8 +2957,12 @@ pub fn transform_conversation_cwd(
                     for c in content.iter_mut() {
                         if c.text.contains(source_cwd) {
                             c.text = c.text.replace(source_cwd, target_cwd);
+                            mutated = true;
                         }
                     }
+                }
+                if mutated {
+                    clear_next_assistant_payload = true;
                 }
             }
         }
@@ -5670,7 +5697,8 @@ mod tests {
         }
     }
 
-    /// Non-replayable / cleared payloads fall back to projection synthesis.
+    /// Non-replayable payloads fall back to projection synthesis while the
+    /// payload itself remains present (only `replayable = false`).
     #[test]
     fn messages_request_ignores_non_replayable_payload() {
         use crate::messages::{ContentBlock, MessageContent};
@@ -5680,7 +5708,7 @@ mod tests {
             cache_control: None,
             citations: None,
         }];
-        let mut assistant = AssistantItem {
+        let assistant = AssistantItem {
             content: "from projection".into(),
             tool_calls: Vec::new(),
             model_id: None,
@@ -5689,11 +5717,17 @@ mod tests {
             reasoning_details: Vec::new(),
             provider_payload: None,
         }
-        .with_messages_payload(payload_only, false);
+        .with_messages_payload(payload_only, /* replayable */ false);
 
-        // Explicit clear path also disables replay.
-        assistant.clear_provider_payload();
-        assistant.content = "from projection".into();
+        // Payload is still attached but not replayable.
+        assert!(
+            assistant.provider_payload.is_some(),
+            "payload must remain present when only replayable=false"
+        );
+        assert!(
+            assistant.replayable_messages_content().is_none(),
+            "replayable_messages_content must ignore replayable=false"
+        );
 
         let msg = build_messages_request(&ConversationRequest::from_items(vec![
             ConversationItem::user("hi"),
@@ -6832,6 +6866,178 @@ mod tests {
         assert_eq!(
             items[0].text_content(),
             "I found the file at /new/path/src/lib.rs"
+        );
+    }
+
+    /// CWD rewriting of assistant text/tool args clears the Messages payload
+    /// so `build_messages_request` uses rewritten projections, not a stale
+    /// signed content array that still embeds the source paths.
+    #[test]
+    fn transform_cwd_clears_messages_payload_after_assistant_mutation() {
+        use crate::messages::{ContentBlock, MessageContent};
+
+        let source = "/old/path";
+        let target = "/new/path";
+        let stale_payload = vec![
+            ContentBlock::Thinking {
+                thinking: format!("look at {source}/a.rs"),
+                signature: "sig".into(),
+            },
+            ContentBlock::Text {
+                text: format!("I'll edit {source}/a.rs"),
+                cache_control: None,
+                citations: None,
+            },
+            ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"target_file": format!("{source}/a.rs")}),
+                cache_control: None,
+            },
+        ];
+
+        let mut items = vec![
+            ConversationItem::user("edit it"),
+            ConversationItem::Assistant(
+                AssistantItem {
+                    content: format!("I'll edit {source}/a.rs").into(),
+                    tool_calls: vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                        arguments: format!(r#"{{"target_file":"{source}/a.rs"}}"#).into(),
+                    }],
+                    model_id: Some("m".into()),
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                    reasoning_details: Vec::new(),
+                    provider_payload: None,
+                }
+                .with_messages_payload(stale_payload, true),
+            ),
+        ];
+
+        match &items[1] {
+            ConversationItem::Assistant(a) => {
+                assert!(a.replayable_messages_content().is_some());
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        transform_conversation_cwd(&mut items, source, target);
+
+        match &items[1] {
+            ConversationItem::Assistant(a) => {
+                assert!(
+                    a.provider_payload.is_none(),
+                    "payload must be cleared after CWD rewrite of assistant projections"
+                );
+                assert!(a.content.contains(target));
+                assert!(a.tool_calls[0].arguments.contains(target));
+                assert!(!a.content.contains(source));
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        let msg = build_messages_request(&ConversationRequest::from_items(items));
+        // user + assistant synthesized from projections (not stale payload).
+        match &msg.messages[1].content {
+            MessageContent::Blocks(blocks) => {
+                let json = serde_json::to_value(blocks).unwrap();
+                let s = json.to_string();
+                assert!(
+                    s.contains(target),
+                    "rewritten path must appear in synthesized request: {s}"
+                );
+                assert!(
+                    !s.contains(source),
+                    "source path must not leak from stale payload: {s}"
+                );
+                // No thinking block: reasoning was not a sibling, and payload
+                // was cleared rather than replayed.
+                assert!(
+                    !blocks
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Thinking { .. })),
+                    "stale thinking from payload must not be replayed"
+                );
+            }
+            other => panic!("expected blocks, got {other:?}"),
+        }
+    }
+
+    /// Rewriting a preceding reasoning sibling also clears the following
+    /// assistant's Messages payload (same turn association).
+    #[test]
+    fn transform_cwd_clears_payload_when_preceding_reasoning_mutated() {
+        use crate::messages::ContentBlock;
+
+        let source = "/old/path";
+        let target = "/new/path";
+        let mut reasoning = synthesized_reasoning_item(format!("think about {source}/x.rs"));
+        // Keep encrypted signature so the arm still has content.
+        reasoning.encrypted_content = Some("sig".into());
+
+        let mut items = vec![
+            ConversationItem::user("hi"),
+            ConversationItem::Reasoning(reasoning),
+            ConversationItem::Assistant(
+                AssistantItem {
+                    content: "done".into(),
+                    tool_calls: Vec::new(),
+                    model_id: None,
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                    reasoning_details: Vec::new(),
+                    provider_payload: None,
+                }
+                .with_messages_payload(
+                    vec![
+                        ContentBlock::Thinking {
+                            thinking: format!("think about {source}/x.rs"),
+                            signature: "sig".into(),
+                        },
+                        ContentBlock::Text {
+                            text: "done".into(),
+                            cache_control: None,
+                            citations: None,
+                        },
+                    ],
+                    true,
+                ),
+            ),
+        ];
+
+        transform_conversation_cwd(&mut items, source, target);
+
+        // Reasoning summary rewritten.
+        let ConversationItem::Reasoning(r) = &items[1] else {
+            panic!("expected reasoning");
+        };
+        let rs::SummaryPart::SummaryText(t) = &r.summary[0];
+        assert!(t.text.contains(target));
+        assert!(!t.text.contains(source));
+
+        match &items[2] {
+            ConversationItem::Assistant(a) => {
+                assert!(
+                    a.provider_payload.is_none(),
+                    "assistant payload cleared after preceding reasoning CWD rewrite"
+                );
+                // Assistant text itself did not need a path rewrite.
+                assert_eq!(a.content.as_ref(), "done");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        let msg = build_messages_request(&ConversationRequest::from_items(items));
+        let json = serde_json::to_value(&msg.messages).unwrap().to_string();
+        assert!(
+            json.contains(target),
+            "rewritten reasoning must be used: {json}"
+        );
+        assert!(
+            !json.contains(source),
+            "source path must not come from stale payload: {json}"
         );
     }
 
