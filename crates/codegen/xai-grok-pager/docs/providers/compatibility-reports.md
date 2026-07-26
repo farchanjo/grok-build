@@ -15,6 +15,15 @@ grok openai --provider openai ops --json
 grok openrouter ops
 ```
 
+Anthropic peer setup and endpoint status (Messages, Models, count_tokens,
+Files; Batches/Admin/Managed Agents deferred) are documented in
+[anthropic.md](anthropic.md) and the user guide
+[25-anthropic-provider.md](../user-guide/25-anthropic-provider.md). Anthropic
+does not currently ship a separate OpenAPI inventory under
+`baselines/anthropic/`; pin checks live in the repository-owned client tests
+(`xai-grok-inference` Anthropic module, version `2023-06-01`, Files beta
+`files-api-2025-04-14`).
+
 Terminology: **client completeness** (Grok implements the endpoint) is
 distinct from a **configured provider's** Supported/Unsupported/Unknown
 capability. `solaris` is development-only.

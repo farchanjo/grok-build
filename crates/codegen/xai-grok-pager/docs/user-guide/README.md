@@ -52,3 +52,20 @@ Automate, script, and integrate Grok Build with other systems.
 | 22 | [Permissions and Safety Controls](22-permissions-and-safety.md) | `dontAsk` mode, auto-approved tools, the safe-bash list, and restrictive PreToolUse hooks (such as git/gh-only) |
 | 23 | [Agent Dashboard](23-dashboard.md) | Central overview of local sessions and forks |
 | 24 | [Monitoring Usage (External OpenTelemetry)](24-monitoring-usage.md) | Customer OTEL export |
+| 25 | [Anthropic Provider](25-anthropic-provider.md) | Anthropic API peer, native client, Files, experimental Claude Agent CLI |
+| 26 | [Migrating to Anthropic Peer](26-anthropic-migration.md) | Non-destructive migration from custom Messages / env keys |
+
+---
+
+## Provider reference pages
+
+Short provider-specific pages (also under `docs/providers/`):
+
+| Document | Description |
+|----------|-------------|
+| [Anthropic](../providers/anthropic.md) | Peer setup, endpoints, gates |
+| [OpenRouter](../providers/openrouter.md) | OpenRouter-native ops |
+| [OpenAI Platform](../providers/openai-platform.md) | Platform client inventory |
+| [Z.ai](../providers/zai.md) | Z.ai Model API |
+| [Local gateways](../providers/local-gateways.md) | Local OpenAI-compatible gateways |
+| [Compatibility reports](../providers/compatibility-reports.md) | Baseline inventories |

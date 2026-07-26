@@ -301,6 +301,9 @@ mod pr6_claude_cli_tests;
 mod pr7_claude_cli_tests;
 
 #[cfg(test)]
+mod pr8_rollout_audit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};

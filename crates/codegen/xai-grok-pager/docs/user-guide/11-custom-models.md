@@ -167,14 +167,13 @@ This is a small, fixed set of environment-wide knobs. Settings that identify a s
 You can override specific fields of built-in models without redefining everything. Only specify the fields you want to change:
 
 ```toml
-# Override only the API key for a default model
+# Prefer env_key or /providers vault over literal secrets
 [model.grok-build]
-api_key = "my-api-key"
+env_key = "XAI_API_KEY"
 
-# Override temperature and add a custom API key
+# Override temperature only
 [model.grok-build]
 temperature = 0.5
-api_key = "sk-custom"
 ```
 
 When you override a built-in model, Grok starts with the default configuration (including the correct `base_url`), then applies only the fields you specify. Unspecified fields inherit from the default.
@@ -262,6 +261,12 @@ max_completion_tokens = 128000
 First-class product Anthropic (`kind = "anthropic"`, id `grok_build_anthropic`)
 is installed automatically when you connect via `/providers` or
 `grok provider set-key anthropic`; you do not need to hand-write it.
+
+Full architecture, Files retention, experimental Claude Agent CLI gates, and
+troubleshooting: [Anthropic Provider](25-anthropic-provider.md). Non-destructive
+migration from older custom Messages configs:
+[Migrating to Anthropic Peer](26-anthropic-migration.md). Short reference:
+[docs/providers/anthropic.md](../providers/anthropic.md).
 
 ### xAI, OpenAI API, OpenRouter, and Anthropic
 
@@ -793,9 +798,9 @@ grok
 [endpoints]
 models_base_url = "https://api.acme.com/v1"
 
-# Override only the API key for a specific model
+# Prefer env for model-specific keys (never commit literals)
 [model.grok-build]
-api_key = "my-api-key"
+env_key = "XAI_API_KEY"
 ```
 
 When you use `[endpoints]` with partial model overrides, Grok inherits the `base_url` from the endpoints config, so you do not need to specify it in each `[model.*]` section.

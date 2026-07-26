@@ -156,6 +156,26 @@ pub static USER_GUIDE: &[Doc] = &[
         "Permissions and Safety",
         "Tool approval, sandbox, security"
     ),
+    guide!(
+        "23-dashboard.md",
+        "Agent Dashboard",
+        "Central overview of local sessions and forks"
+    ),
+    guide!(
+        "24-monitoring-usage.md",
+        "Monitoring Usage (External OpenTelemetry)",
+        "Customer OTEL export"
+    ),
+    guide!(
+        "25-anthropic-provider.md",
+        "Anthropic Provider",
+        "Anthropic API peer, native client, Files, experimental Claude CLI"
+    ),
+    guide!(
+        "26-anthropic-migration.md",
+        "Migrating to Anthropic Peer",
+        "Non-destructive migration from custom Messages and env keys"
+    ),
 ];
 
 /// Non-user-guide reference docs. Separate from USER_GUIDE because they
@@ -322,6 +342,65 @@ mod tests {
     fn list_howto_titles_returns_all() {
         let titles = list_howto_titles();
         assert_eq!(titles.len(), USER_GUIDE.len() + REFERENCE_DOCS.len());
+    }
+
+    #[test]
+    fn anthropic_user_guide_registered_and_safe() {
+        let anth = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "25-anthropic-provider.md")
+            .expect("25-anthropic-provider.md must be in USER_GUIDE");
+        assert!(anth.content.contains("ANTHROPIC_API_KEY"));
+        assert!(anth.content.contains("GROK_CLAUDE_CLI_RUNTIME"));
+        assert!(anth.content.contains("claude-cli-runtime"));
+        assert!(
+            anth.content.contains("never the global default"),
+            "must document Anthropic is never the global default"
+        );
+        assert!(
+            !anth.content.contains("sk-ant-"),
+            "user guide must not embed Anthropic literal key samples"
+        );
+        let mig = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "26-anthropic-migration.md")
+            .expect("26-anthropic-migration.md must be in USER_GUIDE");
+        assert!(
+            mig.content.contains("No destructive migration"),
+            "migration guide must state no destructive migration"
+        );
+        assert!(!mig.content.contains("sk-ant-"));
+    }
+
+    #[test]
+    fn user_guide_links_to_existing_files() {
+        // Lightweight relative-link check for managed NN-*.md files.
+        let names: std::collections::HashSet<&str> =
+            USER_GUIDE.iter().map(|d| d.filename).collect();
+        for doc in USER_GUIDE {
+            for cap in doc.content.split("](") {
+                let Some(rest) = cap.split(')').next() else {
+                    continue;
+                };
+                if rest.starts_with("http") || rest.starts_with('#') || rest.starts_with("../") {
+                    continue;
+                }
+                if rest.ends_with(".md") && !rest.contains('/') {
+                    // Same-directory user-guide link.
+                    let file = rest.split('#').next().unwrap_or(rest);
+                    assert!(
+                        names.contains(file)
+                            || std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("docs/user-guide")
+                                .join(file)
+                                .exists(),
+                        "broken relative link {:?} in {}",
+                        rest,
+                        doc.filename
+                    );
+                }
+            }
+        }
     }
 
     #[test]

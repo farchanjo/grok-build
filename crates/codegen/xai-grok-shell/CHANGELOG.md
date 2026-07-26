@@ -1,5 +1,17 @@
 # Changelog
 
+# 0.2.111 — 2026-07-26
+
+## Features
+
+- **Anthropic peer provider (API key)** is documented end-to-end: `/providers` + `grok provider set-key anthropic --from-env ANTHROPIC_API_KEY`, Models cache, model picker, repository-owned Messages client (not the Claude binary), Files retention wording, and custom Messages / OpenRouter separation. See `docs/user-guide/25-anthropic-provider.md` and `docs/providers/anthropic.md`.
+- **Migration guide** for existing custom Messages configs (non-destructive; no automatic secret migration): `docs/user-guide/26-anthropic-migration.md`.
+- **Claude Agent CLI** remains **experimental and gated**: compile feature `claude-cli-runtime` is off in default and `release-dist`; runtime requires `GROK_CLAUDE_CLI_RUNTIME` plus a successful official binary probe. Ordinary release builds do not show or select the subscription CLI card. Release enablement pending authorization.
+
+## Security
+
+- Docs and examples no longer encourage Anthropic literal keys in TOML/`extra_headers`. Rollout audit tests lock feature gates, catalog hide/select rules, envelope redaction, and OpenRouter privacy defaults coexistence.
+
 # 0.2.110 — 2026-07-21
 
 ## Features
