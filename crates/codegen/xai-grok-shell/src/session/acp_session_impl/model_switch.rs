@@ -65,6 +65,8 @@ impl SessionActor {
                 context_window: new_context_window,
                 reasoning_effort: inference_config.reasoning_effort,
                 stream_tool_calls: Some(inference_config.stream_tool_calls),
+                supports_native_schema: inference_config.supports_native_schema,
+                supports_strict_tools: inference_config.supports_strict_tools,
             },
         );
         let existing = self.chat_state_handle.get_credentials().await;

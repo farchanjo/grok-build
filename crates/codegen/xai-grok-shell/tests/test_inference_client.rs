@@ -264,6 +264,7 @@ async fn test_chat_completions_streaming_tool_calls() {
             name: "read_file".to_string(),
             description: Some("Read a file".to_string()),
             parameters: json!({"type": "object"}),
+            strict: None,
         }]);
 
     let (mut stream, _metadata) = client.conversation_stream(request).await.unwrap();
@@ -748,6 +749,7 @@ async fn test_responses_api_streaming_tool_call() {
             name: "bash".to_string(),
             description: Some("Run a command".to_string()),
             parameters: json!({"type": "object"}),
+            strict: None,
         }]);
 
     let (mut stream, _metadata, _) = client.conversation_stream_responses(request).await.unwrap();
@@ -1125,11 +1127,13 @@ async fn test_request_includes_tools() {
                 name: "read_file".to_string(),
                 description: Some("Read a file".to_string()),
                 parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+                strict: None,
             },
             ToolSpec {
                 name: "bash".to_string(),
                 description: Some("Run a command".to_string()),
                 parameters: json!({"type": "object"}),
+                strict: None,
             },
         ])
         .with_tool_choice(ConversationToolChoice::Auto);

@@ -1084,11 +1084,35 @@ pub enum ApiBackend {
 }
 
 impl ApiBackend {
-    /// Whether the backend enforces a response JSON schema natively alongside
-    /// tool calls. The Messages API does not (a schema there blocks tool use),
-    /// so structured output there goes through the StructuredOutput tool.
+    /// Backend-only native schema support (no provider/model capability).
+    ///
+    /// - Chat Completions and Responses: always true (schema coexists with tools).
+    /// - Messages: always false here. Direct Anthropic models may still use
+    ///   native `output_config.format` when the resolved model capability
+    ///   enables it — see [`resolve_supports_native_schema`]. Custom Messages
+    ///   backends keep the StructuredOutput-tool fallback unless that flag is
+    ///   set explicitly.
     pub fn supports_native_schema(&self) -> bool {
         matches!(self, Self::ChatCompletions | Self::Responses)
+    }
+}
+
+/// Resolve whether sampling may emit a native response JSON schema (and keep
+/// tools) for this backend + durable model capability.
+///
+/// `model_capability`:
+/// - `Some(true)` — opt in (direct Anthropic with structured outputs, or an
+///   explicit config flag on a custom Messages endpoint)
+/// - `Some(false)` — force the StructuredOutput-tool fallback even if the
+///   backend would otherwise support native schema
+/// - `None` — fall back to [`ApiBackend::supports_native_schema`]
+pub fn resolve_supports_native_schema(
+    backend: &ApiBackend,
+    model_capability: Option<bool>,
+) -> bool {
+    match model_capability {
+        Some(explicit) => explicit,
+        None => backend.supports_native_schema(),
     }
 }
 
@@ -1115,6 +1139,24 @@ pub struct InferenceSettings {
     /// API request body so the upstream emits per-chunk argument deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
+    /// Durable model capability: native response JSON schema may be used
+    /// alongside tools. `None` means "derive from [`ApiBackend`] alone"
+    /// (Messages stays on StructuredOutput-tool fallback). Direct Anthropic
+    /// curated/capable models set `Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_schema: Option<bool>,
+    /// When `Some(true)`, Messages tool definitions may carry `strict: true`
+    /// (subject to Anthropic's 20-strict-tool limit). Default/`None`/`false`
+    /// never mark Grok tools strict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
+}
+
+impl InferenceSettings {
+    /// Effective native-schema capability for this sampling config.
+    pub fn effective_supports_native_schema(&self) -> bool {
+        resolve_supports_native_schema(&self.api_backend, self.supports_native_schema)
+    }
 }
 
 // ============ Responses API wrapper ============
@@ -1642,5 +1684,58 @@ mod tests {
         assert!(u.cost_details.is_none());
         assert!(u.is_byok.is_none());
         assert!(u.cost_in_usd_ticks.is_none());
+    }
+
+    #[test]
+    fn api_backend_messages_does_not_claim_native_schema_globally() {
+        assert!(ApiBackend::ChatCompletions.supports_native_schema());
+        assert!(ApiBackend::Responses.supports_native_schema());
+        assert!(
+            !ApiBackend::Messages.supports_native_schema(),
+            "Messages must not flip native schema globally"
+        );
+    }
+
+    #[test]
+    fn resolve_supports_native_schema_respects_model_capability() {
+        // Direct Anthropic capable model.
+        assert!(resolve_supports_native_schema(
+            &ApiBackend::Messages,
+            Some(true)
+        ));
+        // Custom Messages without capability.
+        assert!(!resolve_supports_native_schema(&ApiBackend::Messages, None));
+        // Explicit opt-out even on ChatCompletions.
+        assert!(!resolve_supports_native_schema(
+            &ApiBackend::ChatCompletions,
+            Some(false)
+        ));
+        // Explicit opt-in on custom Messages.
+        assert!(resolve_supports_native_schema(
+            &ApiBackend::Messages,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn inference_settings_effective_native_schema() {
+        use std::num::NonZeroU64;
+        let mut s = InferenceSettings {
+            base_url: "https://api.anthropic.com/v1".into(),
+            model: "claude-sonnet-5".into(),
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            api_backend: ApiBackend::Messages,
+            extra_headers: Default::default(),
+            context_window: NonZeroU64::new(200_000).unwrap(),
+            reasoning_effort: None,
+            stream_tool_calls: None,
+            supports_native_schema: None,
+            supports_strict_tools: None,
+        };
+        assert!(!s.effective_supports_native_schema());
+        s.supports_native_schema = Some(true);
+        assert!(s.effective_supports_native_schema());
     }
 }

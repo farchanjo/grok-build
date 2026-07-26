@@ -2,8 +2,10 @@
 //! sampling loop).
 use super::*;
 /// Synthetic tool the model calls to return its schema-constrained final answer
-/// on backends that can't constrain output natively (Messages API). Intercepted
-/// in the loop, never executed as a real tool.
+/// on backends that cannot constrain output natively (custom Messages, or
+/// Messages without model-level native-schema capability). Direct Anthropic
+/// capable models use `output_config.format` instead and leave this unused.
+/// Intercepted in the loop, never executed as a real tool.
 const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
@@ -1905,9 +1907,14 @@ impl SessionActor {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
         });
         let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
+        // Provider/model-aware: ChatCompletions/Responses always native;
+        // Messages uses native output_config.format only when the durable
+        // model capability (supports_native_schema) opts in — direct Anthropic
+        // curated/capable models. Custom Messages keeps StructuredOutput-tool
+        // fallback unless explicitly capable.
         let native_backend = if json_schema.is_some() {
             match self.chat_state_handle.get_inference_settings().await {
-                Some(c) => c.api_backend.supports_native_schema(),
+                Some(c) => c.effective_supports_native_schema(),
                 None => {
                     tracing::warn!(
                         "structured output: no sampling config; using StructuredOutput tool"
@@ -2029,6 +2036,7 @@ impl SessionActor {
                             .to_string(),
                     ),
                     parameters: schema,
+                    strict: None,
                 });
             }
             let build_req_start = std::time::Instant::now();
@@ -2421,11 +2429,21 @@ impl SessionActor {
                     );
                     continue;
                 }
+                // Refusal / max_tokens must never be treated as valid schema
+                // output even when partial text happens to parse.
                 let structured_output = match (
                     structured_output_validator.as_ref(),
                     final_answer_text.as_ref(),
+                    turn_refused,
+                    stop_reason,
                 ) {
-                    (Some(validator), Some(text)) => {
+                    (Some(_), _, true, _) => Some(Err(
+                        "model refused to produce structured output (content filter)".to_string(),
+                    )),
+                    (Some(_), _, _, Some(xai_grok_inference_types::StopReason::Length)) => Some(
+                        Err("model hit max_tokens before completing structured output".to_string()),
+                    ),
+                    (Some(validator), Some(text), false, _) => {
                         Some(validate_structured_output(validator, text))
                     }
                     _ => None,

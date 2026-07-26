@@ -402,6 +402,18 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub supports_backend_search: bool,
 
+    /// Durable model capability: native response JSON schema may be used
+    /// alongside tools. Propagated into chat-state `InferenceSettings` so the
+    /// agent loop can choose `output_config.format` vs StructuredOutput-tool.
+    /// `None` falls back to backend-only behavior (Messages = tool fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_schema: Option<bool>,
+
+    /// When `Some(true)`, Messages tool definitions may carry `strict: true`
+    /// (capped at 20). Default/`None` never marks Grok tools strict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
+
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default)]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -471,6 +483,8 @@ impl std::fmt::Debug for InferenceConfig {
                 &self.bearer_resolver.as_ref().map(|_| "<set>"),
             )
             .field("supports_backend_search", &self.supports_backend_search)
+            .field("supports_native_schema", &self.supports_native_schema)
+            .field("supports_strict_tools", &self.supports_strict_tools)
             .field("compactions_remaining", &self.compactions_remaining)
             .field("compaction_at_tokens", &self.compaction_at_tokens)
             .field("doom_loop_recovery", &self.doom_loop_recovery)
@@ -518,6 +532,8 @@ impl Default for InferenceConfig {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,

@@ -328,6 +328,11 @@ pub struct ToolResultItem {
     /// separate follow-up user message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ContentPart>,
+    /// When `Some(true)`, the Messages wire shape sets `tool_result.is_error`.
+    /// Omitted (`None`/`false`) for successful results so existing wire shapes
+    /// stay unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
 }
 
 /// A server-side tool call from the backend agentic sampler.
@@ -529,6 +534,12 @@ pub struct ToolSpec {
     pub description: Option<String>,
     /// JSON Schema for the parameters
     pub parameters: serde_json::Value,
+    /// Anthropic Messages `strict` tool mode. Only set when the model
+    /// capability/policy explicitly enables strict tools — never defaulted
+    /// for the full Grok tool surface (Anthropic caps at 20 strict tools and
+    /// rejects complex schemas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,9 +596,14 @@ impl From<ToolDefinition> for ToolSpec {
             name: td.function.name,
             description: td.function.description,
             parameters: td.function.parameters,
+            // Grok tools are never strict by default.
+            strict: None,
         }
     }
 }
+
+/// Anthropic Messages API hard limit on tools with `strict: true`.
+pub const ANTHROPIC_MAX_STRICT_TOOLS: usize = 20;
 
 // ============================================================================
 // Conversation Request
@@ -630,6 +646,10 @@ pub struct ConversationRequest {
     pub json_schema: Option<serde_json::Value>,
     /// Sticky routing key for prompt-cache reuse; overrides `x_grok_conv_id` for routing.
     pub prompt_cache_key: Option<String>,
+    /// When `Some(false)`, request that the model not call tools in parallel.
+    /// Mapped to Chat Completions `parallel_tool_calls` and Messages
+    /// `tool_choice.disable_parallel_tool_use`. `None` leaves provider default.
+    pub parallel_tool_calls: Option<bool>,
 }
 
 impl ConversationRequest {
@@ -1252,6 +1272,18 @@ impl ConversationItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
             images: Vec::new(),
+            is_error: None,
+        })
+    }
+
+    /// Create a tool result that signals failure on the Messages wire
+    /// (`tool_result.is_error = true`).
+    pub fn tool_result_error(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::ToolResult(ToolResultItem {
+            tool_call_id: tool_call_id.into(),
+            content: Arc::<str>::from(content.into()),
+            images: Vec::new(),
+            is_error: Some(true),
         })
     }
 
@@ -1268,6 +1300,22 @@ impl ConversationItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
             images,
+            is_error: None,
+        })
+    }
+
+    /// Create a tool result with inline images and an explicit error flag.
+    pub fn tool_result_with_images_and_error(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        images: Vec<ContentPart>,
+        is_error: bool,
+    ) -> Self {
+        Self::ToolResult(ToolResultItem {
+            tool_call_id: tool_call_id.into(),
+            content: Arc::<str>::from(content.into()),
+            images,
+            is_error: is_error.then_some(true),
         })
     }
 
@@ -1801,6 +1849,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                     tool_call_id: msg.tool_call_id.unwrap_or_default(),
                     content: Arc::<str>::from(content),
                     images: Vec::new(),
+                    is_error: None,
                 })
             }
         }
@@ -2349,7 +2398,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             max_tool_calls: None,
             metadata: None,
             model: req.model.clone(),
-            parallel_tool_calls: None,
+            parallel_tool_calls: req.parallel_tool_calls,
             previous_response_id: None,
             prompt: None,
             prompt_cache_key: req.prompt_cache_key.clone(),
@@ -3419,10 +3468,13 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     }
                     ToolResultContent::Blocks(blocks)
                 };
+                // Only emit is_error when true so successful results keep the
+                // historical wire shape (field absent).
+                let is_error = t.is_error.filter(|e| *e);
                 pending_tool_results.push(ContentBlock::ToolResult {
                     tool_use_id: sanitize_tool_call_id(&t.tool_call_id),
                     content,
-                    is_error: None,
+                    is_error,
                     cache_control: None,
                 });
             }
@@ -3483,34 +3535,54 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         Some(SystemParam::Blocks(system_blocks))
     };
 
-    // Build tools
+    // Build tools. `strict` is honored only when the ToolSpec opts in, and is
+    // capped at Anthropic's documented limit so a large Grok tool surface can
+    // never mark every tool strict by accident.
     let tools: Option<Vec<ToolParam>> = if req.tools.is_empty() {
         None
     } else {
+        let mut strict_used = 0usize;
         Some(
             req.tools
                 .iter()
-                .map(|t| ToolParam {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    input_schema: t.parameters.clone(),
-                    // Not opted in by the agent loop; omit so wire shape is
-                    // unchanged for existing tools.
-                    strict: None,
+                .map(|t| {
+                    let strict =
+                        if t.strict == Some(true) && strict_used < ANTHROPIC_MAX_STRICT_TOOLS {
+                            strict_used += 1;
+                            Some(true)
+                        } else {
+                            None
+                        };
+                    ToolParam {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        input_schema: t.parameters.clone(),
+                        strict,
+                    }
                 })
                 .collect(),
         )
     };
 
-    // Build tool_choice
+    // Parallel-tool policy: when the request explicitly disables parallel
+    // tools, set disable_parallel_tool_use on the tool_choice variants that
+    // support it. Absent policy leaves the field unset (provider default).
+    let disable_parallel = req.parallel_tool_calls.map(|enabled| !enabled);
     let tool_choice: Option<ToolChoiceParam> = req.tool_choice.as_ref().map(|tc| match tc {
-        ConversationToolChoice::Auto => ToolChoiceParam::auto(),
-        ConversationToolChoice::Required => ToolChoiceParam::any(),
+        ConversationToolChoice::Auto => ToolChoiceParam::Auto {
+            disable_parallel_tool_use: disable_parallel,
+        },
+        ConversationToolChoice::Required => ToolChoiceParam::Any {
+            disable_parallel_tool_use: disable_parallel,
+        },
         ConversationToolChoice::Function(name) => ToolChoiceParam::Tool {
             name: name.clone(),
-            disable_parallel_tool_use: None,
+            disable_parallel_tool_use: disable_parallel,
         },
-        ConversationToolChoice::None => ToolChoiceParam::auto(), // default
+        // "None" is not a first-class Messages tool_choice; fall back to auto.
+        ConversationToolChoice::None => ToolChoiceParam::Auto {
+            disable_parallel_tool_use: disable_parallel,
+        },
     });
 
     let effort = req
@@ -3518,11 +3590,12 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         .and_then(|e| e.to_messages_api())
         .map(|s| s.to_string());
 
-    // Faithful native mapping for callers that opt into Anthropic structured
-    // output without tools. The grok-shell agent does NOT use this path — a
-    // wire schema here suppresses tool calls, so it routes Messages-backend
-    // structured output through the StructuredOutput tool instead (see
-    // `ApiBackend::supports_native_schema`).
+    // Native `output_config.format` mapping. Direct Anthropic models that
+    // advertise structured outputs (via model capability) emit this alongside
+    // tools so the agent may tool_use first and still produce schema-
+    // constrained final JSON. Custom Messages backends without that capability
+    // keep the StructuredOutput-tool fallback in the shell agent loop and
+    // typically leave json_schema unset on this request.
     let format = req
         .json_schema
         .as_ref()
@@ -3543,6 +3616,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         None
     };
 
+    // Server tools, Anthropic MCP connector, and server-side compaction are
+    // intentionally absent from MessagesRequest — they must never appear on
+    // the default Grok agent path.
     MessagesRequest {
         model: req.model.clone().unwrap_or_default(),
         messages,
@@ -3929,11 +4005,13 @@ mod tests {
                     name: "web_search".to_string(),
                     description: Some("local web search".to_string()),
                     parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
                 },
                 ToolSpec {
                     name: "read_file".to_string(),
                     description: None,
                     parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
                 },
             ]);
         req.hosted_tools = vec![HostedTool::WebSearch { options: None }];
@@ -3970,6 +4048,7 @@ mod tests {
                 name: "x_search".to_string(),
                 description: None,
                 parameters: serde_json::json!({"type": "object"}),
+                strict: None,
             }]);
         req.hosted_tools = vec![HostedTool::XSearch { options: None }];
 
@@ -4141,6 +4220,7 @@ mod tests {
                     name: "web_search".to_string(),
                     description: None,
                     parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
                 },
             ]);
 
@@ -4213,6 +4293,191 @@ mod tests {
             msgs.thinking.is_some(),
             "thinking set when effort is present"
         );
+    }
+
+    /// Native schema coexists with client tools on the Messages wire so the
+    /// agent can tool_use first and still produce schema-constrained final JSON.
+    #[test]
+    fn messages_native_schema_coexists_with_tools() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        });
+        let req = ConversationRequest::from_items(vec![ConversationItem::user("use tools")])
+            .with_tools(vec![ToolSpec {
+                name: "bash".into(),
+                description: Some("run".into()),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+            }])
+            .with_json_schema(schema.clone());
+        let msgs = build_messages_request(&req);
+        let tools = msgs.tools.as_ref().expect("tools present");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "bash");
+        assert!(
+            tools[0].strict.is_none(),
+            "Grok tools never strict by default"
+        );
+        let fmt = msgs
+            .output_config
+            .as_ref()
+            .and_then(|oc| oc.format.as_ref())
+            .expect("output_config.format present with tools");
+        let crate::messages::OutputFormat::JsonSchema { schema: s } = fmt;
+        assert_eq!(s, &schema);
+        // Server tools / MCP connector / server compaction must stay absent.
+        let wire = serde_json::to_value(&msgs).unwrap();
+        assert!(wire.get("mcp_servers").is_none());
+        assert!(wire.get("container").is_none());
+        assert!(wire.get("context_management").is_none());
+        assert!(
+            wire.as_object()
+                .unwrap()
+                .keys()
+                .all(|k| k != "server_tools" && k != "mcp" && k != "compaction")
+        );
+    }
+
+    #[test]
+    fn messages_tool_result_is_error_maps_when_true_only() {
+        let mut req = ConversationRequest::from_items(vec![
+            ConversationItem::user("hi"),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: Arc::<str>::from("call_1"),
+                name: "bash".into(),
+                arguments: Arc::<str>::from("{}"),
+            }]),
+            ConversationItem::tool_result_error("call_1", "boom"),
+        ]);
+        // Ensure pairing has no free text in the tool-result user turn.
+        let msgs = build_messages_request(&req);
+        let user_tool = msgs
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::messages::MessageRole::User))
+            .expect("user turn with tool results");
+        let crate::messages::MessageContent::Blocks(blocks) = &user_tool.content else {
+            panic!("expected blocks");
+        };
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            crate::messages::ContentBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            } => {}
+            other => panic!("expected is_error true, got {other:?}"),
+        }
+
+        // Success path omits is_error.
+        req.items.pop();
+        req.items
+            .push(ConversationItem::tool_result("call_1", "ok"));
+        let msgs = build_messages_request(&req);
+        let wire = serde_json::to_value(&msgs).unwrap();
+        let content = wire["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user" && m["content"].is_array())
+            .unwrap();
+        assert!(
+            content["content"][0].get("is_error").is_none(),
+            "success must omit is_error; got {content:#}"
+        );
+    }
+
+    #[test]
+    fn messages_strict_tools_capped_and_off_by_default() {
+        let mut tools: Vec<ToolSpec> = (0..25)
+            .map(|i| ToolSpec {
+                name: format!("t{i}"),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: Some(true),
+            })
+            .collect();
+        // One non-strict in the middle must stay non-strict.
+        tools[5].strict = None;
+        let req =
+            ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_tools(tools);
+        let msgs = build_messages_request(&req);
+        let wire_tools = msgs.tools.expect("tools");
+        let strict_count = wire_tools.iter().filter(|t| t.strict == Some(true)).count();
+        assert_eq!(
+            strict_count, ANTHROPIC_MAX_STRICT_TOOLS,
+            "must cap at Anthropic max"
+        );
+        assert!(wire_tools[5].strict.is_none());
+    }
+
+    #[test]
+    fn messages_disable_parallel_tool_use_from_request_policy() {
+        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+            .with_tools(vec![ToolSpec {
+                name: "bash".into(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+            }]);
+        req.tool_choice = Some(ConversationToolChoice::Auto);
+        req.parallel_tool_calls = Some(false);
+        let msgs = build_messages_request(&req);
+        match msgs.tool_choice {
+            Some(crate::messages::ToolChoiceParam::Auto {
+                disable_parallel_tool_use: Some(true),
+            }) => {}
+            other => panic!("expected disable_parallel true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn messages_tool_result_images_preserve_block_shape() {
+        let item = ConversationItem::tool_result_with_images(
+            "call_img",
+            "Read image file: x.png",
+            vec![ContentPart::Image {
+                url: "data:image/png;base64,AAAA".into(),
+            }],
+        );
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("hi"),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: Arc::<str>::from("call_img"),
+                name: "read_file".into(),
+                arguments: Arc::<str>::from("{}"),
+            }]),
+            item,
+        ]);
+        let msgs = build_messages_request(&req);
+        let user = msgs.messages.last().expect("tool result user turn");
+        let crate::messages::MessageContent::Blocks(blocks) = &user.content else {
+            panic!("blocks");
+        };
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, crate::messages::ContentBlock::ToolResult { .. })),
+            "tool_result block present"
+        );
+        match &blocks[0] {
+            crate::messages::ContentBlock::ToolResult {
+                content: crate::messages::ToolResultContent::Blocks(inner),
+                is_error: None,
+                ..
+            } => {
+                assert!(
+                    inner
+                        .iter()
+                        .any(|b| matches!(b, crate::messages::ContentBlock::Image { .. })),
+                    "image preserved inside tool_result"
+                );
+            }
+            other => panic!("expected tool_result blocks, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5265,6 +5530,7 @@ mod tests {
                     },
                     "required": ["path"]
                 }),
+                strict: None,
             },
             ToolSpec {
                 name: "bash".to_string(),
@@ -5276,6 +5542,7 @@ mod tests {
                     },
                     "required": ["command"]
                 }),
+                strict: None,
             },
         ];
 
@@ -5301,6 +5568,7 @@ mod tests {
                     "query": {"type": "string"}
                 }
             }),
+            strict: None,
         }];
 
         let req =
@@ -5325,6 +5593,7 @@ mod tests {
             name: "my_tool".to_string(),
             description: Some("Does something".to_string()),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
         };
 
         let def = ToolDefinition::function(
@@ -5346,6 +5615,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: Some("A test tool".to_string()),
             parameters: serde_json::json!({}),
+            strict: None,
         }
     }
 

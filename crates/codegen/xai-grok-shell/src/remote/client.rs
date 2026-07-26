@@ -940,6 +940,8 @@ pub fn parse_remote_model_value(
                 }
             })
             .unwrap_or_default(),
+        supports_native_schema: None,
+        supports_strict_tools: None,
     })
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {

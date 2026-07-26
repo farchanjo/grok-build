@@ -179,6 +179,14 @@ pub struct ProviderModelPreset {
     pub reasoning_efforts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<String>,
+    /// Native structured outputs (`output_config.format`) alongside tools.
+    /// Curated direct Anthropic agent models default true; experimental
+    /// catalog discoveries inherit Anthropic Models API `structured_outputs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_schema: Option<bool>,
+    /// Opt-in Anthropic strict tool definitions (never default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
 }
 
 /// Source of an OpenRouter model catalog. A cache is only used after an
@@ -366,6 +374,8 @@ impl ProviderManager {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             ProviderModelPreset {
                 id: "openai-gpt-5.6-terra".to_owned(),
@@ -381,6 +391,8 @@ impl ProviderManager {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             ProviderModelPreset {
                 id: "openai-gpt-5.6-luna".to_owned(),
@@ -396,6 +408,8 @@ impl ProviderManager {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             ProviderModelPreset {
                 id: "openrouter-openai-gpt-5.6-sol".to_owned(),
@@ -411,6 +425,8 @@ impl ProviderManager {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             ProviderModelPreset {
                 id: "openrouter-openai-gpt-5.6-terra".to_owned(),
@@ -426,6 +442,8 @@ impl ProviderManager {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             // Curated direct Anthropic agent-capable presets (API aliases as of
             // 2026-07). Visible only when an Anthropic key is configured.
@@ -452,6 +470,8 @@ impl ProviderManager {
                     "xhigh".to_owned(),
                 ],
                 default_reasoning_effort: Some("high".to_owned()),
+                supports_native_schema: Some(true),
+                supports_strict_tools: None,
             },
             ProviderModelPreset {
                 id: "anthropic-claude-opus-5".to_owned(),
@@ -475,6 +495,8 @@ impl ProviderManager {
                     "xhigh".to_owned(),
                 ],
                 default_reasoning_effort: Some("high".to_owned()),
+                supports_native_schema: Some(true),
+                supports_strict_tools: None,
             },
             ProviderModelPreset {
                 id: "anthropic-claude-haiku-4-5".to_owned(),
@@ -492,6 +514,8 @@ impl ProviderManager {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: Some(true),
+                supports_strict_tools: None,
             },
         ]
     }
@@ -685,6 +709,8 @@ impl ProviderManager {
                     ),
                     hidden: None,
                     supports_tools: Some(preset.supports_tools),
+                    supports_native_schema: preset.supports_native_schema,
+                    supports_strict_tools: preset.supports_strict_tools,
                     ..Default::default()
                 });
         }
@@ -1484,6 +1510,8 @@ fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
                 "xhigh".to_owned(),
             ],
             default_reasoning_effort: Some("medium".to_owned()),
+            supports_native_schema: None,
+            supports_strict_tools: None,
         })
         .collect()
 }
@@ -1632,6 +1660,8 @@ fn parse_openai_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             })
         })
         .collect::<Vec<_>>();
@@ -1778,6 +1808,8 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
                 supports_reasoning_effort,
                 reasoning_efforts,
                 default_reasoning_effort,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             })
         })
         .collect::<Vec<_>>();
@@ -2264,9 +2296,10 @@ fn merge_anthropic_catalog(
         })
         .map(|info| {
             let id = info.id.trim().to_owned();
-            // Unknown models: never assume tool/subagent capability. Native
-            // structured-output metadata is retained only for future PR4.
-            let _structured = info
+            // Unknown models: never assume tool/subagent capability. Map
+            // structured_outputs so a capable experimental model can still
+            // opt into native schema once the user enables tools explicitly.
+            let structured = info
                 .capabilities
                 .as_ref()
                 .and_then(|c| c.structured_outputs.as_ref())
@@ -2287,6 +2320,8 @@ fn merge_anthropic_catalog(
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: structured.then_some(true),
+                supports_strict_tools: None,
             }
         })
         .collect();
@@ -2815,6 +2850,8 @@ mod tests {
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             }],
             fetched_at: current_epoch_secs(),
         };
@@ -2835,6 +2872,8 @@ mod tests {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                supports_native_schema: Some(true),
+                supports_strict_tools: None,
             }],
             fetched_at: current_epoch_secs(),
         };

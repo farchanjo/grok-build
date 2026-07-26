@@ -29,6 +29,8 @@ fn test_config_with_window(context_window: u64) -> InferenceSettings {
             .expect("test context_window must be non-zero"),
         reasoning_effort: None,
         stream_tool_calls: None,
+        supports_native_schema: None,
+        supports_strict_tools: None,
     }
 }
 
@@ -1173,6 +1175,8 @@ async fn update_inference_settings_is_queryable() {
         context_window: NonZeroU64::new(200_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        supports_native_schema: None,
+        supports_strict_tools: None,
     };
     h.handle.update_inference_settings(new_config.clone());
 
@@ -1533,6 +1537,7 @@ async fn build_request_with_tool_definitions() {
         name: "read_file".to_string(),
         description: Some("Read a file".to_string()),
         parameters: serde_json::json!({"type": "object"}),
+        strict: None,
     }];
 
     let request = h
@@ -1558,6 +1563,8 @@ async fn build_request_uses_inference_settings() {
         context_window: NonZeroU64::new(128_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        supports_native_schema: None,
+        supports_strict_tools: None,
     };
     let h = TestHarness::with_config(vec![ConversationItem::user("hi")], config);
 
@@ -3705,6 +3712,8 @@ async fn inference_settings_survives_compaction_replacement() {
         context_window: NonZeroU64::new(500_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        supports_native_schema: None,
+        supports_strict_tools: None,
     };
 
     let h = TestHarness::with_config(
@@ -3790,6 +3799,8 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
         context_window: NonZeroU64::new(500_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        supports_native_schema: None,
+        supports_strict_tools: None,
     };
 
     let h = TestHarness::with_config(
@@ -3882,6 +3893,8 @@ async fn context_window_downgrade_triggers_auto_compact() {
         context_window: NonZeroU64::new(500_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        supports_native_schema: None,
+        supports_strict_tools: None,
     };
 
     let h = TestHarness::with_config(vec![], config);
@@ -4186,6 +4199,7 @@ async fn prefix_stable_after_tool_schema_change() {
         name: "read_file".to_string(),
         description: Some("Read a file".to_string()),
         parameters: serde_json::json!({"type": "object"}),
+        strict: None,
     }];
 
     let req1 = h
@@ -4204,11 +4218,13 @@ async fn prefix_stable_after_tool_schema_change() {
             name: "read_file".to_string(),
             description: Some("Read a file".to_string()),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
         },
         ToolSpec {
             name: "edit_file".to_string(),
             description: Some("Edit a file".to_string()),
             parameters: serde_json::json!({"type": "object"}),
+            strict: None,
         },
     ];
 

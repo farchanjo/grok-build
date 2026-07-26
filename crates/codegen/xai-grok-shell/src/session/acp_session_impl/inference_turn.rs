@@ -521,6 +521,8 @@ impl SessionActor {
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
@@ -663,6 +665,14 @@ impl SessionActor {
                 None
             },
             supports_backend_search: self.supports_backend_search.get(),
+            supports_native_schema: match resolved_entry {
+                Some(e) => e.info().supports_native_schema,
+                None => cfg.supports_native_schema,
+            },
+            supports_strict_tools: match resolved_entry {
+                Some(e) => e.info().supports_strict_tools,
+                None => cfg.supports_strict_tools,
+            },
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,

@@ -1667,6 +1667,8 @@ mod reasoning_compaction_regression_tests {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -1776,6 +1778,7 @@ mod reasoning_compaction_regression_tests {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
@@ -1922,6 +1925,7 @@ mod reasoning_compaction_regression_tests {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }];
         let hosted = vec![HostedTool::WebSearch { options: None }];
         let client = Client::new(config.clone()).unwrap();

@@ -1088,6 +1088,8 @@ async fn read_parent_inference_config(
                     doom_loop_recovery: ctx.inference_config.doom_loop_recovery,
                     header_injector: ctx.inference_config.header_injector.clone(),
                     provider_identity: ctx.inference_config.provider_identity,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                 }
             };
 

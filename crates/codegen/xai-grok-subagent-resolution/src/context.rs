@@ -411,7 +411,8 @@ mod tests {
             tool_call_id: "tc-1".to_string(),
             content: content.into(),
             images: Vec::new(),
-        })
+        is_error: None,
+})
     }
 
     fn system_item(text: &str) -> ConversationItem {

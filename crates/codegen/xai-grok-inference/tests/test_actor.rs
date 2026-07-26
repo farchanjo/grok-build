@@ -102,6 +102,8 @@ fn test_config(base_url: String, model: &str) -> InferenceConfig {
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: false,
+        supports_native_schema: None,
+        supports_strict_tools: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         doom_loop_recovery: None,
@@ -662,34 +664,34 @@ async fn messages_empty_refusal_completes_without_retry() {
     assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one request");
 }
 
-/// A mid-stream event that fails serde (after a valid `message_start`) is a
-/// deterministic response-parse failure: Fatal on the first attempt, surfaced
-/// as a non-retryable Serialization error — never a retry storm.
+/// A mid-stream event that fails top-level serde (after a valid
+/// `message_start`) is a deterministic response-parse failure: Fatal on the
+/// first attempt, surfaced as a non-retryable Serialization error — never a
+/// retry storm. Shape-invalid but typed-known events fall back to
+/// `MessageStreamEvent::Unknown` (wire-fidelity policy); this test uses
+/// non-object JSON so the event cannot be recovered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn messages_unparseable_event_is_fatal_without_retry() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
-    let app =
-        Router::new().route(
-            "/v1/messages",
-            post(move || {
-                let counter = Arc::clone(&counter_handler);
-                async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    let mut events =
-                        sse::messages_api_events("hello", "messages-compatible-model", "end_turn");
-                    // Replace the tail with a `message_delta` missing the
-                    // required `delta` field — fails MessageStreamEvent serde.
-                    events.truncate(4);
-                    events.push(Event::default().data(
-                        json!({"type":"message_delta","usage":{"output_tokens":1}}).to_string(),
-                    ));
-                    Sse::new(stream::iter(
-                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
-                    ))
-                }
-            }),
-        );
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut events =
+                    sse::messages_api_events("hello", "messages-compatible-model", "end_turn");
+                // Replace the tail with non-object JSON so MessageStreamEvent
+                // serde fails entirely (not Unknown fallback).
+                events.truncate(4);
+                events.push(Event::default().data("not-json-at-all"));
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
     let server = MockServer::spawn(app).await;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let handle = InferenceActor::spawn(
@@ -1134,6 +1136,7 @@ fn tool_round_request(items: Vec<ConversationItem>) -> ConversationRequest {
                 "type": "object",
                 "properties": { "command": { "type": "string" } }
             }),
+            strict: None,
         }],
         tool_choice: Some(ConversationToolChoice::Auto),
         reasoning_effort: Some(ReasoningEffort::Medium),

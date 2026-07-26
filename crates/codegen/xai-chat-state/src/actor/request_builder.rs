@@ -145,6 +145,7 @@ impl ChatStateActor {
             prompt_cache_key: None,
             reasoning_effort: self.state.inference_settings.reasoning_effort,
             json_schema: None,
+            parallel_tool_calls: None,
         }
     }
 }
