@@ -13,8 +13,16 @@ use crate::agent::external_runtime::{
     ExternalRuntimeEnvelope, ExternalRuntimeError, ExternalRuntimeErrorKind,
 };
 
-/// Capability that must remain present after resume when it was observed.
-pub const REQUIRED_ON_RESUME_IF_SEEN: &[&str] = &[];
+/// Capability that must remain present after resume when it was observed
+/// on the envelope (fail closed if live probe lost it).
+pub const REQUIRED_ON_RESUME_IF_SEEN: &[&str] = &[
+    "streaming_input",
+    "streaming_input_v1",
+    "persistent_input_v1",
+    "session_resume",
+    "resume_v1",
+    "interrupt_receipt_v1",
+];
 
 /// Capabilities required for persistent multi-turn stdin streaming.
 /// Only enable persistent input when probe/init explicitly advertises one.
@@ -28,7 +36,21 @@ pub const PERSISTENT_INPUT_CAPABILITIES: &[&str] = &[
 pub const INTERRUPT_CAPABILITIES: &[&str] = &["interrupt_receipt_v1"];
 
 /// Capability that allows one-shot `--resume` after child death.
+/// When the capability list is non-empty, at least one of these (or an
+/// empty-list baseline for older CLIs that never advertise caps) is required.
 pub const RESUME_CAPABILITIES: &[&str] = &["session_resume", "resume_v1"];
+
+/// Baseline capability tokens that establish a known capability matrix.
+/// If the probe reports a non-empty list that includes none of the baseline
+/// tokens and none of the resume tokens, oneshot resume fails closed.
+pub const BASELINE_CAPABILITY_MARKERS: &[&str] = &[
+    "interrupt_receipt_v1",
+    "streaming_input",
+    "streaming_input_v1",
+    "persistent_input_v1",
+    "session_resume",
+    "resume_v1",
+];
 
 /// Why a resume was rejected (actionable for the user / UI).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,14 +242,12 @@ pub fn validate_resume(
     }
 
     // Required capabilities from envelope that must still be present on live
-    // when the envelope listed them and we treat them as required-on-resume.
+    // when the envelope listed them. Fail closed on loss (not additive-only).
     for req in REQUIRED_ON_RESUME_IF_SEEN {
-        if envelope.capabilities.iter().any(|c| c == req)
-            && !live.capabilities.iter().any(|c| c == req)
-            && !envelope.capabilities.is_empty()
-        {
-            // Only enforce when live reported a capabilities list.
-            if !live.capabilities.is_empty() {
+        if envelope.capabilities.iter().any(|c| c == *req) {
+            // Prefer live caps when reported; otherwise re-check envelope set
+            // against live empty → treat as missing when live advertised any.
+            if !live.capabilities.is_empty() && !live.capabilities.iter().any(|c| c == *req) {
                 return Err(ResumeHardeningError::MissingRequiredCapability {
                     capability: (*req).to_owned(),
                     version: live.version.to_string(),
@@ -237,6 +257,19 @@ pub fn validate_resume(
     }
 
     Ok(())
+}
+
+/// Validate that persistent mode may be selected given advertised capabilities.
+/// Missing required streaming-input capability fails closed.
+pub fn require_persistent_capability(capabilities: &[String]) -> Result<(), ResumeHardeningError> {
+    if supports_persistent_input(capabilities) {
+        Ok(())
+    } else {
+        Err(ResumeHardeningError::MissingRequiredCapability {
+            capability: "streaming_input_v1".into(),
+            version: "unknown".into(),
+        })
+    }
 }
 
 /// Whether envelope capabilities advertise persistent multi-turn stdin.
@@ -258,18 +291,30 @@ pub fn supports_interrupt(capabilities: &[String]) -> bool {
 }
 
 /// Whether one-shot `--resume` after child death is allowed by capability matrix.
+///
+/// - Empty capability list (older CLI / no advertisement): allow (official
+///   `--resume` by session id has long been available without a capability token).
+/// - Non-empty list: require an explicit resume token **or** a known baseline
+///   marker (e.g. `interrupt_receipt_v1`) so we know the matrix is from a
+///   compatible binary. Unknown-only matrices fail closed.
 pub fn supports_oneshot_resume(capabilities: &[String]) -> bool {
-    // Default: session_pointer alone is enough for official --resume (PR6).
-    // If capabilities explicitly list a resume capability set, require it;
-    // if capabilities are empty / unknown, allow --resume when pointer exists
-    // (official CLI has always supported --resume by session id).
     if capabilities.is_empty() {
         return true;
     }
-    // If any resume-related token is present, OK. If capabilities exist but
-    // only list unrelated tokens, still allow (additive forward-compat) unless
-    // a future hard-require flag is set.
-    true
+    let has_resume = capabilities.iter().any(|c| {
+        RESUME_CAPABILITIES
+            .iter()
+            .any(|req| c == req || c.eq_ignore_ascii_case(req))
+    });
+    if has_resume {
+        return true;
+    }
+    // Compatible baseline without explicit resume token (still allows --resume).
+    capabilities.iter().any(|c| {
+        BASELINE_CAPABILITY_MARKERS
+            .iter()
+            .any(|req| c == req || c.eq_ignore_ascii_case(req))
+    })
 }
 
 fn models_compatible(a: &str, b: &str) -> bool {
@@ -419,5 +464,36 @@ mod tests {
         let err =
             validate_resume(&e, &disc("2.1.250", &[]), None, Some("low"), None, None).unwrap_err();
         assert!(matches!(err, ResumeHardeningError::EffortMismatch { .. }));
+    }
+
+    #[test]
+    fn missing_required_capability_on_resume_fails_closed() {
+        let mut e = env_with(Some("s1"), None, None, None, Some("2.1.250"));
+        e.capabilities = vec!["streaming_input_v1".into(), "interrupt_receipt_v1".into()];
+        let live = disc("2.1.250", &["interrupt_receipt_v1"]);
+        let err = validate_resume(&e, &live, None, None, None, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ResumeHardeningError::MissingRequiredCapability { capability, .. }
+                if capability == "streaming_input_v1"
+        ));
+    }
+
+    #[test]
+    fn oneshot_resume_empty_caps_allowed() {
+        assert!(supports_oneshot_resume(&[]));
+    }
+
+    #[test]
+    fn oneshot_resume_requires_baseline_when_caps_advertised() {
+        assert!(supports_oneshot_resume(&["interrupt_receipt_v1".into()]));
+        assert!(supports_oneshot_resume(&["session_resume".into()]));
+        assert!(!supports_oneshot_resume(&["totally_unknown_cap".into()]));
+    }
+
+    #[test]
+    fn require_persistent_capability_fails_closed() {
+        assert!(require_persistent_capability(&[]).is_err());
+        assert!(require_persistent_capability(&["streaming_input_v1".into()]).is_ok());
     }
 }

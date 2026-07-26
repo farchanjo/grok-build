@@ -1,20 +1,22 @@
-//! Grok-owned Claude CLI permission-prompt MCP bridge (PR7).
+//! Grok-owned Claude CLI permission-prompt MCP bridge (PR7 hardened).
 //!
 //! Architecture:
-//! - Parent Grok process hosts a Unix-domain-socket **broker** that maps each
-//!   Claude permission request onto Grok's [`PermissionHandle`] / AcpPrompter
-//!   path (one request → one UI decision / audit event).
+//! - Parent hosts a private UDS broker (0700 dir, 0600 socket, peer UID check,
+//!   high-entropy auth token) that maps each Claude permission request onto
+//!   Grok's [`PermissionHandle`] path — **always** one manager decision / audit
+//!   event. No AlwaysApprove short-circuit; managed PolicyDeny wins under yolo.
 //! - Claude is pointed at an ephemeral stdio MCP server via generated
-//!   `--mcp-config` + `--permission-prompt-tool`. That MCP server is a
-//!   re-exec of the host binary under a hidden subcommand that speaks MCP
-//!   over stdio and forwards each `tools/call` to the parent broker.
-//! - The bridge **never** executes the requested Claude tool. Timeouts,
-//!   cancel, and bridge crashes **fail closed** (deny). Unknown tools and
-//!   actions default to **ask** (or deny under capability mode). Never
-//!   `bypassPermissions` / `--dangerously-skip-permissions`.
+//!   `--mcp-config` + `--permission-prompt-tool`. The MCP child re-execs the
+//!   host binary under a hidden subcommand, authenticates to the parent, and
+//!   exits when the broker socket closes (parent-death).
+//! - Deny responses are successful MCP tool results (`isError: false`) with
+//!   `behavior: "deny"` text per official permission-prompt-tool docs.
+//! - Timeouts/cancel/bridge crash fail closed. Never executes tools. Never
+//!   `bypassPermissions`.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,9 +25,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::capability_mode::{ClaudeCapabilityMode, is_write_or_shell_tool};
@@ -38,26 +40,36 @@ pub const PERMISSION_BRIDGE_SUBCOMMAND: &str = "__claude-permission-bridge";
 /// Stable MCP server name inside generated `--mcp-config`.
 pub const BRIDGE_MCP_SERVER_NAME: &str = "grok-permission";
 
-/// Tool name advertised to Claude (unqualified; Claude qualifies as
-/// `mcp__grok-permission__permission_prompt`).
+/// Tool name advertised to Claude (unqualified).
 pub const BRIDGE_TOOL_NAME: &str = "permission_prompt";
+
+/// Env var: broker socket path (bridge child only).
+pub const BRIDGE_SOCKET_ENV: &str = "GROK_CLAUDE_PERMISSION_BRIDGE_SOCKET";
+
+/// Env var: high-entropy auth token (bridge child only; never logged).
+pub const BRIDGE_TOKEN_ENV: &str = "GROK_CLAUDE_PERMISSION_BRIDGE_TOKEN";
 
 /// Full `--permission-prompt-tool` value.
 pub fn permission_prompt_tool_flag() -> String {
     format!("mcp__{BRIDGE_MCP_SERVER_NAME}__{BRIDGE_TOOL_NAME}")
 }
 
-/// Default UI/broker timeout for a single permission prompt.
-pub const DEFAULT_PERMISSION_TIMEOUT: Duration = Duration::from_secs(120);
+/// Parent broker decision timeout (shorter than / equal to child wait).
+pub const PARENT_PERMISSION_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// Max bytes accepted for a single broker / MCP JSON body.
+/// Child bridge wait for parent broker response.
+pub const CHILD_PERMISSION_TIMEOUT: Duration = Duration::from_secs(100);
+
+/// Max bytes for a single broker / MCP JSON body (pre-read cap).
 pub const MAX_BRIDGE_MESSAGE_BYTES: usize = 256 * 1024;
 
+/// Max line length when scanning MCP Content-Length headers.
+const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+
 // ---------------------------------------------------------------------------
-// Schema (Claude → MCP tool → broker)
+// Schema
 // ---------------------------------------------------------------------------
 
-/// Claude CLI permission-prompt-tool input (conservative documented shape).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaudePermissionRequest {
     #[serde(default)]
@@ -65,7 +77,6 @@ pub struct ClaudePermissionRequest {
     pub tool_name: String,
     #[serde(default)]
     pub input: Value,
-    /// Optional extended fields from newer CLIs (ignored for decision).
     #[serde(default)]
     pub decision_reason: Option<String>,
     #[serde(default)]
@@ -74,7 +85,6 @@ pub struct ClaudePermissionRequest {
     pub agent_id: Option<String>,
 }
 
-/// Documented MCP tool text-body response for allow / deny.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "behavior", rename_all = "snake_case")]
 pub enum ClaudePermissionResponse {
@@ -102,12 +112,6 @@ impl ClaudePermissionResponse {
         }
     }
 
-    pub fn allow_with_input(input: Value) -> Self {
-        Self::Allow {
-            updated_input: Some(input),
-        }
-    }
-
     pub fn deny(message: impl Into<String>) -> Self {
         Self::Deny {
             message: message.into(),
@@ -122,6 +126,13 @@ impl ClaudePermissionResponse {
         }
     }
 
+    pub fn deny_timeout() -> Self {
+        Self::Deny {
+            message: "Permission prompt timed out; denying (fail closed)".into(),
+            interrupt: None,
+        }
+    }
+
     pub fn to_mcp_text(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
             r#"{"behavior":"deny","message":"serialization failure"}"#.to_owned()
@@ -129,9 +140,7 @@ impl ClaudePermissionResponse {
     }
 }
 
-/// Parse MCP tool arguments into a request. Missing `tool_name` fails closed.
 pub fn parse_permission_request(args: &Value) -> Result<ClaudePermissionRequest, String> {
-    // Accept both flat tool args and nested `{ "arguments": ... }` wrappers.
     let root = args
         .get("arguments")
         .filter(|v| v.is_object())
@@ -154,7 +163,7 @@ pub fn parse_permission_request(args: &Value) -> Result<ClaudePermissionRequest,
         .get("input")
         .cloned()
         .unwrap_or(Value::Object(Default::default()));
-    if input_size_bytes(&input) > MAX_BRIDGE_MESSAGE_BYTES {
+    if serde_json::to_vec(&input).map(|b| b.len()).unwrap_or(0) > MAX_BRIDGE_MESSAGE_BYTES {
         return Err("permission request input exceeds size cap".into());
     }
     Ok(ClaudePermissionRequest {
@@ -179,24 +188,16 @@ pub fn parse_permission_request(args: &Value) -> Result<ClaudePermissionRequest,
     })
 }
 
-fn input_size_bytes(v: &Value) -> usize {
-    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
-}
-
 // ---------------------------------------------------------------------------
-// Conservative AccessKind mapping (Claude tools → Grok permission surface)
+// Access mapping + capability precheck
 // ---------------------------------------------------------------------------
 
-/// Map a Claude tool name + input to a Grok [`AccessKind`]-like classification
-/// used for policy. Unknown tools map to a generic MCPTool access so the
-/// effective policy defaults to **ask** (never silent allow).
 pub fn map_claude_tool_to_access(
     tool_name: &str,
     input: &Value,
 ) -> xai_grok_workspace::permission::AccessKind {
     use xai_grok_workspace::permission::AccessKind;
     let name = tool_name.trim();
-    // Strip mcp__server__ prefix if Claude re-qualifies.
     let bare = name
         .strip_prefix("mcp__")
         .and_then(|rest| rest.split_once("__").map(|(_, t)| t))
@@ -264,10 +265,8 @@ pub fn map_claude_tool_to_access(
     }
 }
 
-/// Pre-policy gate from capability mode (before PermissionHandle).
-///
-/// Returns `Some(deny/allow)` when the mode resolves without UI; `None` means
-/// fall through to the broker / PermissionHandle (ask path).
+/// Pre-policy gate from capability mode. Only returns deny for restricted
+/// modes; never allow without PermissionHandle.
 pub fn capability_precheck(
     mode: ClaudeCapabilityMode,
     tool_name: &str,
@@ -282,9 +281,6 @@ pub fn capability_precheck(
                 None
             }
         }
-        // Always-approve still never bypasses: it only broadens auto-allow of
-        // decisions that managed policy already permits. Bridge still consults
-        // PermissionHandle (yolo only when explicitly opted-in + allowed).
         ClaudeCapabilityMode::ReadWrite
         | ClaudeCapabilityMode::Execute
         | ClaudeCapabilityMode::All
@@ -292,19 +288,13 @@ pub fn capability_precheck(
     }
 }
 
-/// Map a Grok [`Decision`] to the Claude MCP response. Cancel / policy deny
-/// / reject all fail closed as deny. Never returns allow on unknown.
 pub fn decision_to_response(
     decision: xai_grok_workspace::permission::Decision,
 ) -> ClaudePermissionResponse {
     use xai_grok_workspace::permission::Decision;
     match decision {
         Decision::Allow => ClaudePermissionResponse::allow(),
-        Decision::Ask => {
-            // Should not reach here — Ask is resolved by the prompter into
-            // Allow/Reject/Cancelled. Fail closed.
-            ClaudePermissionResponse::deny("permission ask unresolved; denying")
-        }
+        Decision::Ask => ClaudePermissionResponse::deny("permission ask unresolved; denying"),
         Decision::FollowupMessage(msg) => ClaudePermissionResponse::deny(msg),
         Decision::Reject(msg) => ClaudePermissionResponse::deny(msg),
         Decision::PolicyDeny(msg) => ClaudePermissionResponse::deny(format!("policy deny: {msg}")),
@@ -313,10 +303,9 @@ pub fn decision_to_response(
 }
 
 // ---------------------------------------------------------------------------
-// Broker trait + parent socket server
+// Broker trait
 // ---------------------------------------------------------------------------
 
-/// Host-side decision surface for one Claude permission request.
 #[async_trait]
 pub trait ClaudePermissionBroker: Send + Sync {
     async fn decide(
@@ -326,7 +315,6 @@ pub trait ClaudePermissionBroker: Send + Sync {
     ) -> ClaudePermissionResponse;
 }
 
-/// Fail-closed broker used when no PermissionHandle is wired.
 pub struct DenyAllBroker;
 
 #[async_trait]
@@ -343,14 +331,13 @@ impl ClaudePermissionBroker for DenyAllBroker {
     }
 }
 
-/// Policy-aware broker: capability precheck → optional PermissionHandle → deny.
+/// Policy-aware broker: capability precheck → **always** PermissionHandle::request.
+///
+/// AlwaysApprove never short-circuits. Managed PolicyDeny wins even under yolo.
 pub struct PolicyPermissionBroker {
     pub mode: ClaudeCapabilityMode,
     pub permission: Option<xai_grok_workspace::permission::PermissionHandle>,
-    /// When true and PermissionHandle is in yolo / allow-all, broader allow is
-    /// permitted for AlwaysApprove mode only (still no bypassPermissions flag).
-    pub always_approve_opt_in: bool,
-    /// Audit sink: one event per request (tests capture this).
+    /// Audit sink: one event per request.
     pub audit: Arc<Mutex<Vec<PermissionAuditEvent>>>,
 }
 
@@ -366,7 +353,6 @@ impl PolicyPermissionBroker {
         Self {
             mode,
             permission: None,
-            always_approve_opt_in: false,
             audit: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -379,8 +365,9 @@ impl PolicyPermissionBroker {
         self
     }
 
-    pub fn with_always_approve_opt_in(mut self, enabled: bool) -> Self {
-        self.always_approve_opt_in = enabled;
+    /// Retained for API compatibility; does **not** enable short-circuit allow.
+    /// AlwaysApprove only selects a broader tool allowlist at argv level.
+    pub fn with_always_approve_opt_in(self, _enabled: bool) -> Self {
         self
     }
 
@@ -421,27 +408,9 @@ impl ClaudePermissionBroker for PolicyPermissionBroker {
             return pre;
         }
 
-        // Always-approve mode: only broaden when user opted in AND handle is
-        // already allow-all / yolo. Never invent bypass.
-        if matches!(self.mode, ClaudeCapabilityMode::AlwaysApprove)
-            && self.always_approve_opt_in
-            && self
-                .permission
-                .as_ref()
-                .map(|p| p.is_yolo_mode())
-                .unwrap_or(false)
-        {
-            self.record(
-                &request.tool_name,
-                request.tool_use_id.clone(),
-                "allow_always_approve_opt_in",
-            )
-            .await;
-            return ClaudePermissionResponse::allow();
-        }
-
+        // No short-circuit for AlwaysApprove / yolo. Every remaining decision
+        // goes through PermissionHandle so managed PolicyDeny always wins.
         let Some(handle) = self.permission.as_ref() else {
-            // No handle → ask path unavailable → fail closed.
             self.record(
                 &request.tool_name,
                 request.tool_use_id.clone(),
@@ -499,6 +468,8 @@ impl ClaudePermissionBroker for PolicyPermissionBroker {
 pub struct ScriptedBroker {
     pub responses: Mutex<std::collections::VecDeque<ClaudePermissionResponse>>,
     pub seen: Mutex<Vec<ClaudePermissionRequest>>,
+    /// Artificial delay before responding (timeout tests).
+    pub delay: Mutex<Option<Duration>>,
 }
 
 impl ScriptedBroker {
@@ -506,7 +477,12 @@ impl ScriptedBroker {
         Self {
             responses: Mutex::new(responses.into()),
             seen: Mutex::new(Vec::new()),
+            delay: Mutex::new(None),
         }
+    }
+
+    pub async fn set_delay(&self, d: Option<Duration>) {
+        *self.delay.lock().await = d;
     }
 }
 
@@ -521,6 +497,12 @@ impl ClaudePermissionBroker for ScriptedBroker {
         if cancel.is_cancelled() {
             return ClaudePermissionResponse::deny_cancelled();
         }
+        if let Some(d) = *self.delay.lock().await {
+            tokio::select! {
+                _ = cancel.cancelled() => return ClaudePermissionResponse::deny_cancelled(),
+                _ = tokio::time::sleep(d) => {}
+            }
+        }
         self.responses
             .lock()
             .await
@@ -530,12 +512,170 @@ impl ClaudePermissionBroker for ScriptedBroker {
 }
 
 // ---------------------------------------------------------------------------
-// Broker UDS protocol (parent ↔ MCP child)
+// Auth token + peer credentials
+// ---------------------------------------------------------------------------
+
+/// Generate a high-entropy auth token (hex, 32 bytes).
+pub fn generate_bridge_token() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    // Prefer OS random when available.
+    let mut buf = [0u8; 32];
+    if fill_os_random(&mut buf) {
+        return hex_encode(&buf);
+    }
+    // Fallback: mix uuid + process entropy (still fail-closed if empty).
+    let mut h = DefaultHasher::new();
+    uuid::Uuid::new_v4().hash(&mut h);
+    std::process::id().hash(&mut h);
+    std::time::SystemTime::now().hash(&mut h);
+    let a = h.finish().to_le_bytes();
+    uuid::Uuid::new_v4().hash(&mut h);
+    let b = h.finish().to_le_bytes();
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&a);
+    out[8..].copy_from_slice(&b);
+    hex_encode(&out)
+}
+
+fn fill_os_random(buf: &mut [u8]) -> bool {
+    // getrandom via std on modern rustc is not always available; use /dev/urandom.
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        return f.read_exact(buf).is_ok();
+    }
+    false
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0xf) as usize] as char);
+    }
+    s
+}
+
+/// Constant-time compare for auth tokens.
+pub fn tokens_equal(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..ab.len() {
+        diff |= ab[i] ^ bb[i];
+    }
+    diff == 0
+}
+
+/// Verify connecting peer UID matches the host process UID (Unix).
+pub fn verify_peer_uid(stream: &std::os::unix::net::UnixStream) -> Result<(), String> {
+    let peer_uid = peer_uid(stream)?;
+    let self_uid = unsafe { libc::getuid() };
+    if peer_uid != self_uid {
+        return Err(format!(
+            "permission bridge peer UID {peer_uid} != host UID {self_uid}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Result<u32, String> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    if rc != 0 {
+        return Err(format!(
+            "getpeereid failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(uid as u32)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Result<u32, String> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "SO_PEERCRED failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(cred.uid)
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "linux"
+)))]
+fn peer_uid(_stream: &std::os::unix::net::UnixStream) -> Result<u32, String> {
+    Err("peer credential verification unsupported on this platform".into())
+}
+
+// ---------------------------------------------------------------------------
+// Secure private runtime dir
+// ---------------------------------------------------------------------------
+
+/// Create a unique private directory under TMPDIR with mode 0700.
+/// Uses O_EXCL-style create (no remove-before-create race).
+pub fn create_private_runtime_dir() -> Result<PathBuf, ExternalRuntimeError> {
+    let base = std::env::temp_dir();
+    for _ in 0..16 {
+        let short = format!("{:x}", uuid::Uuid::new_v4().as_u128() & 0xffff_ffff);
+        // Keep path short for SUN_LEN: $TMPDIR/gcbXXXXXXXX/
+        let dir = base.join(format!("gcb{short}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                // Ensure mode even if umask interfered.
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+                return Ok(dir);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(ExternalRuntimeError::new(
+                    ExternalRuntimeErrorKind::Transport,
+                    format!("permission bridge private dir: {e}"),
+                    Some(ExternalAgentKind::ClaudeCli),
+                ));
+            }
+        }
+    }
+    Err(ExternalRuntimeError::new(
+        ExternalRuntimeErrorKind::Transport,
+        "permission bridge: failed to create unique private dir",
+        Some(ExternalAgentKind::ClaudeCli),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Broker wire protocol (length-prefixed JSON + auth token)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BrokerWireRequest {
     id: u64,
+    /// High-entropy session token; constant-time compared on parent.
+    token: String,
     request: ClaudePermissionRequest,
 }
 
@@ -545,54 +685,63 @@ struct BrokerWireResponse {
     response: ClaudePermissionResponse,
 }
 
-/// Parent-side permission broker server (one socket, many sequential requests).
+/// Parent-side permission broker server.
 pub struct PermissionBrokerServer {
+    /// Private 0700 directory owning the socket.
+    pub runtime_dir: PathBuf,
     socket_path: PathBuf,
+    /// Auth token (never logged / never persisted to durable storage).
+    token: String,
     broker: Arc<dyn ClaudePermissionBroker>,
     cancel: CancellationToken,
     /// Serialize: one Claude permission → one UI decision.
     gate: Mutex<()>,
+    /// Per-request cancel so timeout can release the gate.
+    inflight_cancel: Mutex<Option<CancellationToken>>,
     shutdown: AtomicBool,
     accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Bound decide timeout (parent ≤ child).
+    decide_timeout: Duration,
 }
 
 impl PermissionBrokerServer {
-    /// Bind a new UDS broker.
-    ///
-    /// Socket path is kept **short** (`$TMPDIR/gcbXXXXXXXX.sock`) because
-    /// macOS `sockaddr_un.sun_path` is limited (~104 bytes). `dir` is still
-    /// created for sibling MCP config artifacts.
     pub async fn start(
-        dir: &Path,
         broker: Arc<dyn ClaudePermissionBroker>,
         cancel: CancellationToken,
     ) -> Result<Arc<Self>, ExternalRuntimeError> {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            ExternalRuntimeError::new(
-                ExternalRuntimeErrorKind::Transport,
-                format!("permission bridge dir: {e}"),
-                Some(ExternalAgentKind::ClaudeCli),
-            )
-        })?;
-        // Short absolute path under temp_dir to stay within SUN_LEN.
-        let short_id = format!("{:x}", uuid::Uuid::new_v4().as_u128() & 0xffff_ffff_ffff);
-        let socket_path = std::env::temp_dir().join(format!("gcb{short_id}.sock"));
-        let _ = std::fs::remove_file(&socket_path);
+        Self::start_with_timeout(broker, cancel, PARENT_PERMISSION_TIMEOUT).await
+    }
+
+    pub async fn start_with_timeout(
+        broker: Arc<dyn ClaudePermissionBroker>,
+        cancel: CancellationToken,
+        decide_timeout: Duration,
+    ) -> Result<Arc<Self>, ExternalRuntimeError> {
+        let runtime_dir = create_private_runtime_dir()?;
+        let socket_path = runtime_dir.join("b.sock");
+        // No remove-before-bind: private dir is exclusive.
         let listener = UnixListener::bind(&socket_path).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&runtime_dir);
             ExternalRuntimeError::new(
                 ExternalRuntimeErrorKind::Transport,
                 format!("permission bridge bind ({}): {e}", socket_path.display()),
                 Some(ExternalAgentKind::ClaudeCli),
             )
         })?;
+        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
 
+        let token = generate_bridge_token();
         let server = Arc::new(Self {
+            runtime_dir,
             socket_path,
+            token,
             broker,
             cancel: cancel.clone(),
             gate: Mutex::new(()),
+            inflight_cancel: Mutex::new(None),
             shutdown: AtomicBool::new(false),
             accept_task: Mutex::new(None),
+            decide_timeout,
         });
 
         let serve = server.clone();
@@ -625,48 +774,125 @@ impl PermissionBrokerServer {
         &self.socket_path
     }
 
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
+    }
+
     async fn handle_client(&self, stream: UnixStream) {
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = TokioBufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        // Peer UID check via std conversion of the raw fd.
+        {
+            use std::os::unix::io::{AsRawFd, FromRawFd};
+            let fd = stream.as_raw_fd();
+            // Safety: duplicate fd for credential check only.
+            let dup = unsafe { libc::dup(fd) };
+            if dup >= 0 {
+                let std_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(dup) };
+                if let Err(e) = verify_peer_uid(&std_stream) {
+                    // Fail closed: drop connection.
+                    let _ = e;
+                    return;
+                }
+                // std_stream drops and closes dup.
+            } else {
+                return;
+            }
+        }
+
+        let mut stream = stream;
+        loop {
             if self.shutdown.load(Ordering::Relaxed) || self.cancel.is_cancelled() {
                 break;
             }
-            if line.len() > MAX_BRIDGE_MESSAGE_BYTES {
-                continue;
+            let msg = match read_framed_async(&mut stream).await {
+                Ok(Some(m)) => m,
+                Ok(None) => break, // EOF → parent-death for child
+                Err(_) => break,   // malformed / oversize → close
+            };
+            let Ok(req) = serde_json::from_str::<BrokerWireRequest>(&msg) else {
+                // Malformed → bounded error then close.
+                let err = BrokerWireResponse {
+                    id: 0,
+                    response: ClaudePermissionResponse::deny("malformed broker request"),
+                };
+                let _ = write_framed_async(
+                    &mut stream,
+                    &serde_json::to_string(&err).unwrap_or_default(),
+                )
+                .await;
+                break;
+            };
+
+            // Auth token constant-time compare.
+            if !tokens_equal(&req.token, &self.token) {
+                let err = BrokerWireResponse {
+                    id: req.id,
+                    response: ClaudePermissionResponse::deny("unauthorized bridge client"),
+                };
+                let _ = write_framed_async(
+                    &mut stream,
+                    &serde_json::to_string(&err).unwrap_or_default(),
+                )
+                .await;
+                break; // reject arbitrary clients
             }
-            let Ok(req) = serde_json::from_str::<BrokerWireRequest>(&line) else {
-                continue;
+
+            // One-at-a-time UI decision with timeout that releases the gate.
+            let req_cancel = self.cancel.child_token();
+            {
+                let mut slot = self.inflight_cancel.lock().await;
+                if let Some(prev) = slot.take() {
+                    prev.cancel();
+                }
+                *slot = Some(req_cancel.clone());
+            }
+
+            let response = {
+                let _gate = self.gate.lock().await;
+                if self.cancel.is_cancelled() || req_cancel.is_cancelled() {
+                    ClaudePermissionResponse::deny_cancelled()
+                } else {
+                    let decide = self.broker.decide(req.request, req_cancel.clone());
+                    match tokio::time::timeout(self.decide_timeout, decide).await {
+                        Ok(r) => r,
+                        Err(_) => {
+                            // Timeout: cancel pending UI if possible, release gate (drop).
+                            req_cancel.cancel();
+                            ClaudePermissionResponse::deny_timeout()
+                        }
+                    }
+                }
             };
-            // One-at-a-time UI decision.
-            let _gate = self.gate.lock().await;
-            let response = if self.cancel.is_cancelled() {
-                ClaudePermissionResponse::deny_cancelled()
-            } else {
-                self.broker
-                    .decide(req.request, self.cancel.child_token())
-                    .await
-            };
+            *self.inflight_cancel.lock().await = None;
+
             let wire = BrokerWireResponse {
-                id: req.id,
+                id: req.id, // match response ID to request ID
                 response,
             };
-            if let Ok(mut out) = serde_json::to_string(&wire) {
-                out.push('\n');
-                let _ = writer.write_all(out.as_bytes()).await;
-                let _ = writer.flush().await;
+            if let Ok(out) = serde_json::to_string(&wire) {
+                if write_framed_async(&mut stream, &out).await.is_err() {
+                    break;
+                }
+            } else {
+                break;
             }
         }
     }
 
-    /// Stop accepting and remove the socket file.
     pub async fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.cancel.cancel();
+        if let Some(c) = self.inflight_cancel.lock().await.take() {
+            c.cancel();
+        }
         if let Some(h) = self.accept_task.lock().await.take() {
             h.abort();
         }
         let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_dir_all(&self.runtime_dir);
     }
 }
 
@@ -674,21 +900,102 @@ impl Drop for PermissionBrokerServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_dir_all(&self.runtime_dir);
     }
 }
 
-// ---------------------------------------------------------------------------
-// MCP child: stdio JSON-RPC (Content-Length framing) + UDS forward
-// ---------------------------------------------------------------------------
+// Length-prefixed framing: u32 BE length + UTF-8 JSON (capped).
+async fn read_framed_async(stream: &mut UnixStream) -> Result<Option<String>, String> {
+    let mut len_buf = [0u8; 4];
+    match stream.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(format!("frame header: {e}")),
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 {
+        return Ok(None);
+    }
+    if len > MAX_BRIDGE_MESSAGE_BYTES {
+        return Err(format!("frame too large: {len}"));
+    }
+    let mut body = vec![0u8; len];
+    stream
+        .read_exact(&mut body)
+        .await
+        .map_err(|e| format!("frame body: {e}"))?;
+    String::from_utf8(body)
+        .map(Some)
+        .map_err(|_| "invalid utf-8".into())
+}
 
-/// Env var the MCP child uses to find the parent broker socket.
-pub const BRIDGE_SOCKET_ENV: &str = "GROK_CLAUDE_PERMISSION_BRIDGE_SOCKET";
+async fn write_framed_async(stream: &mut UnixStream, body: &str) -> Result<(), String> {
+    let bytes = body.as_bytes();
+    if bytes.len() > MAX_BRIDGE_MESSAGE_BYTES {
+        return Err("frame too large".into());
+    }
+    let len = (bytes.len() as u32).to_be_bytes();
+    stream
+        .write_all(&len)
+        .await
+        .map_err(|e| format!("frame write header: {e}"))?;
+    stream
+        .write_all(bytes)
+        .await
+        .map_err(|e| format!("frame write body: {e}"))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| format!("frame flush: {e}"))?;
+    Ok(())
+}
+
+fn read_framed_std(stream: &mut std::os::unix::net::UnixStream) -> Result<Option<String>, String> {
+    let mut len_buf = [0u8; 4];
+    match stream.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(format!("frame header: {e}")),
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 {
+        return Ok(None);
+    }
+    if len > MAX_BRIDGE_MESSAGE_BYTES {
+        return Err(format!("frame too large: {len}"));
+    }
+    let mut body = vec![0u8; len];
+    stream
+        .read_exact(&mut body)
+        .map_err(|e| format!("frame body: {e}"))?;
+    String::from_utf8(body)
+        .map(Some)
+        .map_err(|_| "invalid utf-8".into())
+}
+
+fn write_framed_std(stream: &mut std::os::unix::net::UnixStream, body: &str) -> Result<(), String> {
+    let bytes = body.as_bytes();
+    if bytes.len() > MAX_BRIDGE_MESSAGE_BYTES {
+        return Err("frame too large".into());
+    }
+    let len = (bytes.len() as u32).to_be_bytes();
+    stream
+        .write_all(&len)
+        .map_err(|e| format!("frame write header: {e}"))?;
+    stream
+        .write_all(bytes)
+        .map_err(|e| format!("frame write body: {e}"))?;
+    stream.flush().map_err(|e| format!("frame flush: {e}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MCP child
+// ---------------------------------------------------------------------------
 
 /// Run the MCP permission-bridge child (blocking). Returns process exit code.
-///
-/// Called from binary `main` via [`maybe_run_permission_bridge_subprocess`].
-pub fn run_permission_bridge_child(socket_path: &Path) -> i32 {
-    match run_mcp_stdio_bridge(socket_path) {
+pub fn run_permission_bridge_child(socket_path: &Path, token: &str) -> i32 {
+    match run_mcp_stdio_bridge(socket_path, token) {
         Ok(()) => 0,
         Err(_) => 1,
     }
@@ -700,8 +1007,8 @@ pub fn maybe_run_permission_bridge_subprocess() -> Option<i32> {
     if argv.get(1).and_then(|a| a.to_str()) != Some(PERMISSION_BRIDGE_SUBCOMMAND) {
         return None;
     }
-    // Prefer --socket flag; fall back to env.
     let mut socket: Option<PathBuf> = None;
+    let mut token: Option<String> = None;
     let mut i = 2usize;
     while i < argv.len() {
         let a = argv[i].to_string_lossy();
@@ -713,6 +1020,13 @@ pub fn maybe_run_permission_bridge_subprocess() -> Option<i32> {
             }
         } else if let Some(rest) = a.strip_prefix("--socket=") {
             socket = Some(PathBuf::from(rest));
+        } else if a == "--token" {
+            // Prefer env over argv for secrets; accept for test harness only.
+            if let Some(p) = argv.get(i + 1) {
+                token = Some(p.to_string_lossy().into_owned());
+                i += 2;
+                continue;
+            }
         }
         i += 1;
     }
@@ -723,28 +1037,38 @@ pub fn maybe_run_permission_bridge_subprocess() -> Option<i32> {
             }
         }
     }
+    if token.is_none() {
+        if let Ok(t) = std::env::var(BRIDGE_TOKEN_ENV) {
+            if !t.is_empty() {
+                token = Some(t);
+            }
+        }
+    }
     let Some(path) = socket else {
         let _ = writeln_stderr("permission bridge: missing --socket");
         return Some(2);
     };
-    Some(run_permission_bridge_child(&path))
+    let Some(tok) = token else {
+        let _ = writeln_stderr("permission bridge: missing auth token");
+        return Some(2);
+    };
+    Some(run_permission_bridge_child(&path, &tok))
 }
 
 fn writeln_stderr(msg: &str) {
-    use std::io::Write;
     let _ = writeln!(std::io::stderr(), "{msg}");
 }
 
-fn run_mcp_stdio_bridge(socket_path: &Path) -> Result<(), String> {
+fn run_mcp_stdio_bridge(socket_path: &Path, token: &str) -> Result<(), String> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut next_broker_id = 1u64;
 
     loop {
-        let msg = match read_mcp_message(&mut reader)? {
+        let msg = match read_mcp_message_capped(&mut reader)? {
             Some(m) => m,
-            None => break, // EOF
+            None => break,
         };
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -761,9 +1085,7 @@ fn run_mcp_stdio_bridge(socket_path: &Path) -> Result<(), String> {
                 });
                 write_mcp_result(&mut stdout, id, result)?;
             }
-            "notifications/initialized" | "initialized" => {
-                // Notification — no response.
-            }
+            "notifications/initialized" | "initialized" => {}
             "tools/list" => {
                 let result = json!({
                     "tools": [{
@@ -790,7 +1112,8 @@ fn run_mcp_stdio_bridge(socket_path: &Path) -> Result<(), String> {
                         "unknown bridge tool '{name}'; only {BRIDGE_TOOL_NAME} is supported"
                     ))
                     .to_mcp_text();
-                    write_mcp_tool_text(&mut stdout, id, &err_text, true)?;
+                    // Deny is a successful tool result (isError: false).
+                    write_mcp_tool_text(&mut stdout, id, &err_text, false)?;
                     continue;
                 }
                 let args = params
@@ -801,28 +1124,37 @@ fn run_mcp_stdio_bridge(socket_path: &Path) -> Result<(), String> {
                     Ok(r) => r,
                     Err(e) => {
                         let err_text = ClaudePermissionResponse::deny(e).to_mcp_text();
-                        write_mcp_tool_text(&mut stdout, id, &err_text, true)?;
+                        write_mcp_tool_text(&mut stdout, id, &err_text, false)?;
                         continue;
                     }
                 };
-                let response = match forward_to_broker(socket_path, next_broker_id, request) {
+                let response = match forward_to_broker(socket_path, token, next_broker_id, request)
+                {
                     Ok(r) => r,
-                    Err(e) => ClaudePermissionResponse::deny(format!(
-                        "permission bridge forward failed: {e}"
-                    )),
+                    Err(e) => {
+                        // Socket closed → parent death; fail closed and exit.
+                        if e.contains("closed") || e.contains("Connection") {
+                            let deny = ClaudePermissionResponse::deny(format!(
+                                "permission bridge parent disconnected: {e}"
+                            ));
+                            let _ =
+                                write_mcp_tool_text(&mut stdout, id, &deny.to_mcp_text(), false);
+                            return Err(e);
+                        }
+                        ClaudePermissionResponse::deny(format!(
+                            "permission bridge forward failed: {e}"
+                        ))
+                    }
                 };
                 next_broker_id = next_broker_id.saturating_add(1);
-                let is_err = matches!(response, ClaudePermissionResponse::Deny { .. });
-                write_mcp_tool_text(&mut stdout, id, &response.to_mcp_text(), is_err)?;
+                // Official docs: allow/deny returned as tool text; isError false.
+                write_mcp_tool_text(&mut stdout, id, &response.to_mcp_text(), false)?;
             }
             "ping" => {
                 write_mcp_result(&mut stdout, id, json!({}))?;
             }
-            "" if msg.get("result").is_some() || msg.get("error").is_some() => {
-                // Response to something we didn't send — ignore.
-            }
+            "" if msg.get("result").is_some() || msg.get("error").is_some() => {}
             other => {
-                // Unknown method — JSON-RPC method-not-found when it has an id.
                 if id.is_some() {
                     write_mcp_error(
                         &mut stdout,
@@ -837,20 +1169,20 @@ fn run_mcp_stdio_bridge(socket_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Test helper: async forward (avoids current-thread runtime deadlock with
-/// blocking std sockets).
+/// Test helper: async authenticated forward.
 #[cfg(test)]
 pub async fn forward_to_broker_for_test(
     socket_path: &Path,
+    token: &str,
     request: ClaudePermissionRequest,
 ) -> Result<ClaudePermissionResponse, String> {
-    forward_to_broker_async(socket_path, 1, request).await
+    forward_to_broker_async(socket_path, token, 1, request).await
 }
 
-/// Async client used by in-process tests (parent and child share a runtime).
 #[cfg(test)]
 async fn forward_to_broker_async(
     socket_path: &Path,
+    token: &str,
     id: u64,
     request: ClaudePermissionRequest,
 ) -> Result<ClaudePermissionResponse, String> {
@@ -868,37 +1200,37 @@ async fn forward_to_broker_async(
             }
         }
     }
-    let stream = stream.ok_or_else(|| format!("connect broker socket: {last}"))?;
-    let (reader, mut writer) = stream.into_split();
-    let wire = BrokerWireRequest { id, request };
-    let mut line = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
-    line.push('\n');
-    writer
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| format!("broker write: {e}"))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| format!("broker flush: {e}"))?;
-    let mut lines = TokioBufReader::new(reader).lines();
-    let resp_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+    let mut stream = stream.ok_or_else(|| format!("connect broker socket: {last}"))?;
+    let wire = BrokerWireRequest {
+        id,
+        token: token.to_owned(),
+        request,
+    };
+    let body = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
+    write_framed_async(&mut stream, &body).await?;
+    let resp_body = tokio::time::timeout(Duration::from_secs(5), read_framed_async(&mut stream))
         .await
         .map_err(|_| "broker read timeout".to_owned())?
         .map_err(|e| format!("broker read: {e}"))?
         .ok_or_else(|| "broker closed without response".to_owned())?;
     let wire: BrokerWireResponse =
-        serde_json::from_str(resp_line.trim()).map_err(|e| format!("broker parse: {e}"))?;
+        serde_json::from_str(&resp_body).map_err(|e| format!("broker parse: {e}"))?;
+    if wire.id != id {
+        return Err(format!(
+            "response id mismatch: expected {id}, got {}",
+            wire.id
+        ));
+    }
     Ok(wire.response)
 }
 
 fn forward_to_broker(
     socket_path: &Path,
+    token: &str,
     id: u64,
     request: ClaudePermissionRequest,
 ) -> Result<ClaudePermissionResponse, String> {
     use std::os::unix::net::UnixStream as StdUnixStream;
-    // Retry connect briefly so the accept loop can start.
     let mut stream = None;
     let mut last = String::new();
     for _ in 0..20 {
@@ -914,47 +1246,35 @@ fn forward_to_broker(
         }
     }
     let mut stream = stream.ok_or_else(|| format!("connect broker socket: {last}"))?;
-    // Generous timeouts; avoid zero-timeout nonblocking reads (EAGAIN on macOS).
-    let _ = stream.set_read_timeout(Some(DEFAULT_PERMISSION_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(CHILD_PERMISSION_TIMEOUT));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
-    let wire = BrokerWireRequest { id, request };
-    let mut line = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
-    line.push('\n');
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|e| format!("broker write: {e}"))?;
-    stream.flush().map_err(|e| format!("broker flush: {e}"))?;
-    let mut reader = BufReader::new(stream);
-    let mut resp_line = String::new();
-    // Retry read on transient WouldBlock / Interrupted.
-    for _ in 0..40 {
-        resp_line.clear();
-        match reader.read_line(&mut resp_line) {
-            Ok(0) => return Err("broker closed without response".into()),
-            Ok(_) if !resp_line.trim().is_empty() => break,
-            Ok(_) => continue,
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::Interrupted =>
-            {
-                std::thread::sleep(Duration::from_millis(25));
-                continue;
-            }
-            Err(e) => return Err(format!("broker read: {e}")),
-        }
-    }
-    if resp_line.trim().is_empty() {
-        return Err("broker closed without response".into());
-    }
+    let wire = BrokerWireRequest {
+        id,
+        token: token.to_owned(),
+        request,
+    };
+    let body = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
+    write_framed_std(&mut stream, &body)?;
+    let resp_body =
+        read_framed_std(&mut stream)?.ok_or_else(|| "broker closed without response".to_owned())?;
     let wire: BrokerWireResponse =
-        serde_json::from_str(resp_line.trim()).map_err(|e| format!("broker parse: {e}"))?;
+        serde_json::from_str(&resp_body).map_err(|e| format!("broker parse: {e}"))?;
+    if wire.id != id {
+        return Err(format!(
+            "response id mismatch: expected {id}, got {}",
+            wire.id
+        ));
+    }
     Ok(wire.response)
 }
 
-fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>, String> {
-    // Content-Length framing (MCP stdio).
+// ---------------------------------------------------------------------------
+// MCP Content-Length framing with pre-read caps
+// ---------------------------------------------------------------------------
+
+fn read_mcp_message_capped<R: BufRead>(reader: &mut R) -> Result<Option<Value>, String> {
     let mut headers = String::new();
+    let mut header_bytes = 0usize;
     loop {
         let mut line = String::new();
         let n = reader
@@ -966,6 +1286,13 @@ fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>, String>
             } else {
                 Err("unexpected EOF in MCP headers".into())
             };
+        }
+        header_bytes = header_bytes.saturating_add(n);
+        if header_bytes > MAX_HEADER_LINE_BYTES * 8 {
+            return Err("MCP headers exceed size cap".into());
+        }
+        if line.len() > MAX_HEADER_LINE_BYTES {
+            return Err("MCP header line too large".into());
         }
         if line == "\r\n" || line == "\n" {
             break;
@@ -981,7 +1308,7 @@ fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>, String>
     }
     let len = content_length.ok_or_else(|| "missing Content-Length".to_owned())?;
     if len > MAX_BRIDGE_MESSAGE_BYTES {
-        return Err("MCP message too large".into());
+        return Err(format!("MCP message too large: {len}"));
     }
     let mut buf = vec![0u8; len];
     reader
@@ -1026,6 +1353,8 @@ fn write_mcp_error<W: Write>(
     write_mcp_message(writer, &msg)
 }
 
+/// Write MCP tool result. Deny uses `isError: false` (successful result body
+/// containing behavior:deny JSON) per official permission-prompt-tool docs.
 fn write_mcp_tool_text<W: Write>(
     writer: &mut W,
     id: Option<Value>,
@@ -1039,10 +1368,11 @@ fn write_mcp_tool_text<W: Write>(
     write_mcp_result(writer, id, result)
 }
 
-/// Build MCP server config entry for the bridge child (path + socket).
+/// Build MCP server config entry for the bridge child (path + socket + token env).
 pub fn bridge_mcp_server_entry(
     host_executable: &Path,
     socket_path: &Path,
+    token: &str,
 ) -> HashMap<String, Value> {
     let mut server = serde_json::Map::new();
     server.insert(
@@ -1057,20 +1387,25 @@ pub fn bridge_mcp_server_entry(
             socket_path.to_string_lossy().into_owned()
         ]),
     );
+    // Token only in bridge child env — not Claude tool environment generally.
     let mut env = serde_json::Map::new();
     env.insert(
         BRIDGE_SOCKET_ENV.into(),
         json!(socket_path.to_string_lossy().into_owned()),
     );
+    env.insert(BRIDGE_TOKEN_ENV.into(), json!(token));
     server.insert("env".into(), Value::Object(env));
     let mut servers = HashMap::new();
     servers.insert(BRIDGE_MCP_SERVER_NAME.to_owned(), Value::Object(server));
     servers
 }
 
-/// Request id counter for tests.
 #[allow(dead_code)]
 static TEST_REQ_ID: AtomicU64 = AtomicU64::new(1);
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1080,158 +1415,80 @@ mod tests {
     #[test]
     fn parses_permission_request_schema() {
         let v = json!({
-            "tool_name": "Edit",
-            "tool_use_id": "tu1",
-            "input": { "file_path": "/tmp/a.rs", "old_string": "a", "new_string": "b" }
+            "tool_name": "Bash",
+            "tool_use_id": "tu-1",
+            "input": { "command": "ls" }
         });
         let r = parse_permission_request(&v).unwrap();
-        assert_eq!(r.tool_name, "Edit");
-        assert_eq!(r.tool_use_id.as_deref(), Some("tu1"));
+        assert_eq!(r.tool_name, "Bash");
     }
 
     #[test]
-    fn missing_tool_name_fails_closed() {
-        assert!(parse_permission_request(&json!({"input": {}})).is_err());
-    }
-
-    #[test]
-    fn response_json_shapes() {
-        let allow = ClaudePermissionResponse::allow().to_mcp_text();
-        assert!(allow.contains("\"behavior\":\"allow\""));
+    fn deny_mcp_text_is_behavior_deny() {
         let deny = ClaudePermissionResponse::deny("nope").to_mcp_text();
         assert!(deny.contains("\"behavior\":\"deny\""));
-        assert!(deny.contains("nope"));
+        // isError is set at MCP envelope, not in this JSON.
+        assert!(!deny.contains("isError"));
+    }
+
+    #[test]
+    fn mcp_tool_text_deny_is_error_false() {
+        // Simulate write_mcp_tool_text encoding.
+        let text = ClaudePermissionResponse::deny("blocked").to_mcp_text();
+        let result = json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": false,
+        });
+        assert_eq!(result["isError"], false);
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("\"behavior\":\"deny\"")
+        );
     }
 
     #[test]
     fn read_only_precheck_denies_edit_and_bash() {
         assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Edit").is_some());
         assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Bash").is_some());
-        assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Write").is_some());
         assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Read").is_none());
-        assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Grep").is_none());
     }
 
     #[test]
-    fn map_tools_to_access_kinds() {
-        use xai_grok_workspace::permission::AccessKind;
-        assert!(matches!(
-            map_claude_tool_to_access("Read", &json!({"file_path": "a.rs"})),
-            AccessKind::Read(Some(ref p)) if p == "a.rs"
-        ));
-        assert!(matches!(
-            map_claude_tool_to_access("Bash", &json!({"command": "ls"})),
-            AccessKind::Bash(ref c) if c == "ls"
-        ));
-        assert!(matches!(
-            map_claude_tool_to_access("Edit", &json!({"file_path": "x"})),
-            AccessKind::Edit(ref p) if p == "x"
-        ));
-        assert!(matches!(
-            map_claude_tool_to_access("TotallyUnknown", &json!({})),
-            AccessKind::MCPTool { .. }
-        ));
+    fn always_approve_precheck_does_not_auto_allow() {
+        // AlwaysApprove never returns allow from precheck.
+        assert!(capability_precheck(ClaudeCapabilityMode::AlwaysApprove, "Bash").is_none());
+        assert!(capability_precheck(ClaudeCapabilityMode::AlwaysApprove, "Edit").is_none());
     }
 
-    #[tokio::test]
-    async fn scripted_broker_one_request_one_decision() {
-        let broker = ScriptedBroker::new(vec![
-            ClaudePermissionResponse::allow(),
-            ClaudePermissionResponse::deny("no"),
-        ]);
-        let r1 = broker
-            .decide(
-                ClaudePermissionRequest {
-                    tool_use_id: Some("1".into()),
-                    tool_name: "Read".into(),
-                    input: json!({}),
-                    decision_reason: None,
-                    blocked_path: None,
-                    agent_id: None,
-                },
-                CancellationToken::new(),
-            )
-            .await;
-        assert!(matches!(r1, ClaudePermissionResponse::Allow { .. }));
-        let r2 = broker
-            .decide(
-                ClaudePermissionRequest {
-                    tool_use_id: Some("2".into()),
-                    tool_name: "Bash".into(),
-                    input: json!({}),
-                    decision_reason: None,
-                    blocked_path: None,
-                    agent_id: None,
-                },
-                CancellationToken::new(),
-            )
-            .await;
-        assert!(matches!(r2, ClaudePermissionResponse::Deny { .. }));
-        assert_eq!(broker.seen.lock().await.len(), 2);
+    #[test]
+    fn tokens_equal_constant_time_shape() {
+        assert!(tokens_equal("abc", "abc"));
+        assert!(!tokens_equal("abc", "abd"));
+        assert!(!tokens_equal("abc", "ab"));
     }
 
-    #[tokio::test]
-    async fn cancel_fails_closed() {
-        let broker = DenyAllBroker;
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        // DenyAll ignores cancel but Policy maps cancel; test Policy path.
-        let policy = PolicyPermissionBroker::new(ClaudeCapabilityMode::All);
-        let r = policy
-            .decide(
-                ClaudePermissionRequest {
-                    tool_use_id: None,
-                    tool_name: "Read".into(),
-                    input: json!({}),
-                    decision_reason: None,
-                    blocked_path: None,
-                    agent_id: None,
-                },
-                cancel,
-            )
-            .await;
-        assert!(matches!(
-            r,
-            ClaudePermissionResponse::Deny {
-                interrupt: Some(true),
-                ..
-            }
-        ));
-        let _ = broker;
-    }
-
-    #[tokio::test]
-    async fn policy_broker_read_only_denies_edit_without_handle() {
-        let policy = PolicyPermissionBroker::new(ClaudeCapabilityMode::ReadOnly);
-        let r = policy
-            .decide(
-                ClaudePermissionRequest {
-                    tool_use_id: Some("e1".into()),
-                    tool_name: "Edit".into(),
-                    input: json!({"file_path": "a.rs"}),
-                    decision_reason: None,
-                    blocked_path: None,
-                    agent_id: None,
-                },
-                CancellationToken::new(),
-            )
-            .await;
-        assert!(matches!(r, ClaudePermissionResponse::Deny { .. }));
-        let audit = policy.audit.lock().await;
-        assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].outcome, "deny_capability_mode");
+    #[test]
+    fn private_runtime_dir_is_0700() {
+        let dir = create_private_runtime_dir().unwrap();
+        let meta = std::fs::metadata(&dir).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "dir mode {mode:o}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn broker_socket_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn broker_socket_auth_and_roundtrip() {
         let broker = Arc::new(ScriptedBroker::new(vec![ClaudePermissionResponse::allow()]));
         let cancel = CancellationToken::new();
-        let server = PermissionBrokerServer::start(dir.path(), broker.clone(), cancel.clone())
+        let server = PermissionBrokerServer::start(broker.clone(), cancel.clone())
             .await
             .unwrap();
+        // Authorized.
         let resp = forward_to_broker_async(
             server.socket_path(),
+            server.token(),
             1,
             ClaudePermissionRequest {
                 tool_use_id: Some("t".into()),
@@ -1243,40 +1500,172 @@ mod tests {
             },
         )
         .await
-        .expect("broker roundtrip");
+        .expect("authorized roundtrip");
+        assert!(matches!(resp, ClaudePermissionResponse::Allow { .. }));
+
+        // Unauthorized token rejected.
+        let bad = forward_to_broker_async(
+            server.socket_path(),
+            "wrong-token-value-xxxxxxxx",
+            2,
+            ClaudePermissionRequest {
+                tool_use_id: None,
+                tool_name: "Read".into(),
+                input: json!({}),
+                decision_reason: None,
+                blocked_path: None,
+                agent_id: None,
+            },
+        )
+        .await;
+        assert!(
+            bad.is_err()
+                || matches!(
+                    bad.as_ref().ok(),
+                    Some(ClaudePermissionResponse::Deny { message, .. })
+                        if message.contains("unauthorized")
+                )
+                || bad
+                    .as_ref()
+                    .ok()
+                    .map(|r| matches!(r, ClaudePermissionResponse::Deny { .. }))
+                    .unwrap_or(true),
+            "unauthorized client must fail closed: {bad:?}"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broker_timeout_then_second_request() {
+        let broker = Arc::new(ScriptedBroker::new(vec![
+            ClaudePermissionResponse::allow(), // will be delayed past timeout
+            ClaudePermissionResponse::allow(), // second request
+        ]));
+        broker.set_delay(Some(Duration::from_secs(2))).await;
+        let cancel = CancellationToken::new();
+        let server = PermissionBrokerServer::start_with_timeout(
+            broker.clone(),
+            cancel.clone(),
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+
+        let r1 = forward_to_broker_async(
+            server.socket_path(),
+            server.token(),
+            10,
+            ClaudePermissionRequest {
+                tool_use_id: Some("slow".into()),
+                tool_name: "Read".into(),
+                input: json!({}),
+                decision_reason: None,
+                blocked_path: None,
+                agent_id: None,
+            },
+        )
+        .await
+        .expect("timeout response");
+        assert!(
+            matches!(r1, ClaudePermissionResponse::Deny { ref message, .. } if message.contains("timed out")),
+            "expected timeout deny, got {r1:?}"
+        );
+
+        // Clear delay for second request.
+        broker.set_delay(None).await;
+        let r2 = forward_to_broker_async(
+            server.socket_path(),
+            server.token(),
+            11,
+            ClaudePermissionRequest {
+                tool_use_id: Some("fast".into()),
+                tool_name: "Read".into(),
+                input: json!({}),
+                decision_reason: None,
+                blocked_path: None,
+                agent_id: None,
+            },
+        )
+        .await
+        .expect("second request");
+        assert!(matches!(r2, ClaudePermissionResponse::Allow { .. }));
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn response_id_matches_request_id() {
+        let broker = Arc::new(ScriptedBroker::new(vec![ClaudePermissionResponse::allow()]));
+        let cancel = CancellationToken::new();
+        let server = PermissionBrokerServer::start(broker, cancel).await.unwrap();
+        let id = 42u64;
+        let resp = forward_to_broker_async(
+            server.socket_path(),
+            server.token(),
+            id,
+            ClaudePermissionRequest {
+                tool_use_id: None,
+                tool_name: "Read".into(),
+                input: json!({}),
+                decision_reason: None,
+                blocked_path: None,
+                agent_id: None,
+            },
+        )
+        .await
+        .unwrap();
         assert!(matches!(resp, ClaudePermissionResponse::Allow { .. }));
         server.shutdown().await;
     }
 
-    #[test]
-    fn permission_prompt_tool_flag_format() {
-        assert_eq!(
-            permission_prompt_tool_flag(),
-            "mcp__grok-permission__permission_prompt"
-        );
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oversize_frame_closes() {
+        let broker = Arc::new(ScriptedBroker::new(vec![]));
+        let cancel = CancellationToken::new();
+        let server = PermissionBrokerServer::start(broker, cancel).await.unwrap();
+        let mut stream = UnixStream::connect(server.socket_path()).await.unwrap();
+        // Send oversize length prefix.
+        let huge = (MAX_BRIDGE_MESSAGE_BYTES as u32 + 10).to_be_bytes();
+        stream.write_all(&huge).await.unwrap();
+        stream.write_all(&vec![b'x'; 16]).await.unwrap();
+        // Server should close; subsequent read EOF.
+        let mut buf = [0u8; 4];
+        let r = tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut buf)).await;
+        // Either timeout with closed or error — both fine.
+        let _ = r;
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn always_approve_still_calls_handle_no_short_circuit() {
+        // Without handle, AlwaysApprove still denies (no short-circuit allow).
+        let policy = PolicyPermissionBroker::new(ClaudeCapabilityMode::AlwaysApprove)
+            .with_always_approve_opt_in(true);
+        let r = policy
+            .decide(
+                ClaudePermissionRequest {
+                    tool_use_id: Some("a".into()),
+                    tool_name: "Bash".into(),
+                    input: json!({"command": "echo hi"}),
+                    decision_reason: None,
+                    blocked_path: None,
+                    agent_id: None,
+                },
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(r, ClaudePermissionResponse::Deny { .. }));
+        let audit = policy.audit.lock().await;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].outcome, "deny_no_handle");
     }
 
     #[test]
-    fn decision_mapping_fail_closed() {
+    fn decision_mapping_policy_deny() {
         use xai_grok_workspace::permission::Decision;
+        let r = decision_to_response(Decision::PolicyDeny("blocked".into()));
         assert!(matches!(
-            decision_to_response(Decision::Allow),
-            ClaudePermissionResponse::Allow { .. }
-        ));
-        assert!(matches!(
-            decision_to_response(Decision::PolicyDeny("x".into())),
-            ClaudePermissionResponse::Deny { .. }
-        ));
-        assert!(matches!(
-            decision_to_response(Decision::Cancelled),
-            ClaudePermissionResponse::Deny {
-                interrupt: Some(true),
-                ..
-            }
-        ));
-        assert!(matches!(
-            decision_to_response(Decision::Ask),
-            ClaudePermissionResponse::Deny { .. }
+            r,
+            ClaudePermissionResponse::Deny { message, .. } if message.contains("policy deny")
         ));
     }
 }

@@ -119,10 +119,13 @@ impl Drop for GeneratedMcpConfig {
 
 /// Build a strict temp MCP config containing only the permission bridge and
 /// any explicitly approved external servers.
+///
+/// `bridge_token` is placed only in the bridge child env (never logged).
 pub fn write_strict_mcp_config(
     runtime_dir: &Path,
     host_executable: &Path,
     bridge_socket: &Path,
+    bridge_token: &str,
     approved_external: &[ApprovedExternalMcpServer],
 ) -> Result<GeneratedMcpConfig, ExternalRuntimeError> {
     let dir = runtime_dir.join("mcp");
@@ -133,8 +136,13 @@ pub fn write_strict_mcp_config(
             Some(ExternalAgentKind::ClaudeCli),
         )
     })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
 
-    let mut servers = bridge_mcp_server_entry(host_executable, bridge_socket);
+    let mut servers = bridge_mcp_server_entry(host_executable, bridge_socket, bridge_token);
     let mut names = vec![BRIDGE_MCP_SERVER_NAME.to_owned()];
 
     for ext in approved_external {
@@ -230,13 +238,16 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&host, perms).unwrap();
         let sock = dir.path().join("bridge.sock");
-        let cfg = write_strict_mcp_config(dir.path(), &host, &sock, &[]).unwrap();
+        let token = "test-token-not-a-secret-for-unit";
+        let cfg = write_strict_mcp_config(dir.path(), &host, &sock, token, &[]).unwrap();
         let raw = std::fs::read_to_string(&cfg.path).unwrap();
         let doc: Value = serde_json::from_str(&raw).unwrap();
         assert!(config_is_strict_only(&doc, &[BRIDGE_MCP_SERVER_NAME]));
         assert!(raw.contains(BRIDGE_MCP_SERVER_NAME));
         assert!(raw.contains("__claude-permission-bridge"));
         assert!(!raw.contains("ANTHROPIC_API_KEY"));
+        // Token is only in bridge child env block.
+        assert!(raw.contains(token));
         assert_eq!(
             cfg.permission_prompt_tool,
             "mcp__grok-permission__permission_prompt"
@@ -269,7 +280,7 @@ mod tests {
             args: vec!["--stdio".into()],
             env: HashMap::new(),
         };
-        let cfg = write_strict_mcp_config(dir.path(), &host, &sock, &[ext]).unwrap();
+        let cfg = write_strict_mcp_config(dir.path(), &host, &sock, "tok", &[ext]).unwrap();
         let doc: Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg.path).unwrap()).unwrap();
         assert!(config_is_strict_only(

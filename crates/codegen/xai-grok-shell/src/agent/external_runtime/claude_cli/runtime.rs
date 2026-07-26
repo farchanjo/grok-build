@@ -193,27 +193,12 @@ impl ClaudeCliRuntime {
         if *self.bridge_ready.lock().await && self.broker_server.lock().await.is_some() {
             return Ok(());
         }
-        let runtime_dir = {
-            let mut slot = self.runtime_dir.lock().await;
-            if slot.is_none() {
-                let base =
-                    std::env::temp_dir().join(format!("grok-claude-cli-{}", uuid::Uuid::new_v4()));
-                std::fs::create_dir_all(&base).map_err(|e| {
-                    ExternalRuntimeError::new(
-                        ExternalRuntimeErrorKind::Transport,
-                        format!("runtime dir: {e}"),
-                        Some(ExternalAgentKind::ClaudeCli),
-                    )
-                })?;
-                *slot = Some(base);
-            }
-            slot.clone().expect("just set")
-        };
 
         let broker: Arc<dyn ClaudePermissionBroker> = match &self.permission_handle {
             Some(h) => Arc::new(
                 PolicyPermissionBroker::new(self.capability_mode)
                     .with_permission(h.clone())
+                    // always_approve_opt_in only selects allowlist mode; no short-circuit.
                     .with_always_approve_opt_in(self.always_approve_opt_in),
             ),
             None => {
@@ -222,7 +207,9 @@ impl ClaudeCliRuntime {
             }
         };
         let cancel = CancellationToken::new();
-        let server = PermissionBrokerServer::start(&runtime_dir, broker, cancel).await?;
+        // Private 0700 dir + 0600 socket + auth token created inside start().
+        let server = PermissionBrokerServer::start(broker, cancel).await?;
+        *self.runtime_dir.lock().await = Some(server.runtime_dir().to_path_buf());
         let host = self.host_executable.clone().ok_or_else(|| {
             ExternalRuntimeError::new(
                 ExternalRuntimeErrorKind::Transport,
@@ -231,9 +218,10 @@ impl ClaudeCliRuntime {
             )
         })?;
         let mcp = mcp_config::write_strict_mcp_config(
-            &runtime_dir,
+            server.runtime_dir(),
             &host,
             server.socket_path(),
+            server.token(),
             &self.approved_mcp,
         )?;
         *self.broker_server.lock().await = Some(server);
@@ -482,13 +470,24 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             .map_err(|e| e.into_runtime_error())?;
         }
 
-        // Sandbox probe is observational — never weakens parent policy.
-        let _sandbox_obs = sandbox_probe::observe_child_sandbox(sandbox_probe::default_child_probe);
-        let _ = sandbox_probe::verify_child_posture(
-            &_sandbox_obs,
+        // Sandbox gate: when parent is active, inheritance must be positively
+        // verified or the turn fails closed before Claude spawn. Never weakens
+        // parent policy.
+        let sandbox_obs = sandbox_probe::observe_child_sandbox(sandbox_probe::default_child_probe);
+        if let Err(fail) = sandbox_probe::gate_turn_for_sandbox(
+            &sandbox_obs,
             &sandbox_probe::ExpectedChildPosture::default(),
             sandbox_probe::parent_sandbox_active(),
-        );
+        ) {
+            return Err(ExternalRuntimeError::new(
+                ExternalRuntimeErrorKind::Unavailable,
+                format!(
+                    "Claude CLI turn blocked by sandbox inheritance gate: {fail:?}. {}",
+                    sandbox_probe::SANDBOX_POLICY_NOTE
+                ),
+                Some(ExternalAgentKind::ClaudeCli),
+            ));
+        }
 
         // Permission bridge + strict MCP (fail closed if cannot start).
         self.ensure_permission_bridge().await?;

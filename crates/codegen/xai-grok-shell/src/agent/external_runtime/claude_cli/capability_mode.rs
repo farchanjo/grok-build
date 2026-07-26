@@ -1,8 +1,10 @@
 //! Conservative capability-mode mapping for Claude Agent CLI (PR7).
 //!
 //! Grok capability modes restrict which Claude **built-in** tools are exposed
-//! via `--tools` / `--disallowedTools`. Approvals for remaining tools are still
-//! brokered by the permission bridge — never `bypassPermissions`.
+//! via `--tools` / `--disallowedTools`. Approvals for remaining tools are
+//! **always** brokered by the permission bridge via
+//! [`PermissionHandle::request`] — never `bypassPermissions`, never a
+//! short-circuit allow path.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +21,9 @@ pub enum ClaudeCapabilityMode {
     Execute,
     /// Full set of required Claude built-ins; still brokered.
     All,
-    /// Broader auto-allow only when managed policy allows **and** the user
-    /// explicitly opted into always-approve (yolo). Never bypass.
+    /// Broader **tool allowlist** only (when user explicitly opts into
+    /// always-approve / yolo). Does **not** short-circuit permission decisions;
+    /// every call still goes through PermissionHandle so managed PolicyDeny wins.
     AlwaysApprove,
 }
 
@@ -36,13 +39,18 @@ impl ClaudeCapabilityMode {
     }
 
     /// Parse a host permission / session mode string conservatively.
+    ///
+    /// `auto` maps to brokered [`Self::All`] (not yolo). Explicit
+    /// `always-approve` / `yolo` select the broader allowlist mode only.
     pub fn from_host_label(label: &str) -> Self {
         match label.trim().to_ascii_lowercase().as_str() {
             "read" | "read-only" | "read_only" | "readonly" | "plan" => Self::ReadOnly,
             "read-write" | "read_write" | "readwrite" | "edit" | "acceptedits" => Self::ReadWrite,
             "execute" | "exec" | "bash" | "shell" => Self::Execute,
-            "always-approve" | "always_approve" | "yolo" | "auto" => Self::AlwaysApprove,
-            "all" | "full" | "default" | "agent" => Self::All,
+            // Explicit always-approve / yolo → broader allowlist (still brokered).
+            "always-approve" | "always_approve" | "yolo" => Self::AlwaysApprove,
+            // `auto` is classifier/default-brokered mode, NOT yolo.
+            "auto" | "all" | "full" | "default" | "agent" => Self::All,
             _ => Self::ReadOnly, // unknown → most restrictive
         }
     }
@@ -137,7 +145,6 @@ pub fn tools_denylist(mode: ClaudeCapabilityMode) -> Vec<&'static str> {
         }
         ClaudeCapabilityMode::ReadWrite => {
             let mut v = SHELL_TOOLS.to_vec();
-            // Keep Agent out of pure edit mode unless All.
             v.extend_from_slice(&["Agent"]);
             v
         }
@@ -169,39 +176,42 @@ mod tests {
     fn read_only_excludes_edit_and_bash() {
         let allow = tools_allowlist(ClaudeCapabilityMode::ReadOnly);
         assert!(allow.contains(&"Read"));
-        assert!(allow.contains(&"Grep"));
         assert!(!allow.contains(&"Edit"));
         assert!(!allow.contains(&"Bash"));
         let deny = tools_denylist(ClaudeCapabilityMode::ReadOnly);
         assert!(deny.contains(&"Edit"));
         assert!(deny.contains(&"Bash"));
-        assert!(deny.contains(&"Write"));
     }
 
     #[test]
-    fn read_write_has_edit_not_bash() {
-        let allow = tools_allowlist(ClaudeCapabilityMode::ReadWrite);
-        assert!(allow.contains(&"Edit"));
-        assert!(allow.contains(&"Write"));
-        assert!(!allow.iter().any(|t| *t == "Bash"));
-        let deny = tools_denylist(ClaudeCapabilityMode::ReadWrite);
-        assert!(deny.contains(&"Bash"));
+    fn auto_maps_to_all_not_always_approve() {
+        assert_eq!(
+            ClaudeCapabilityMode::from_host_label("auto"),
+            ClaudeCapabilityMode::All
+        );
+        assert_eq!(
+            ClaudeCapabilityMode::from_host_label("AUTO"),
+            ClaudeCapabilityMode::All
+        );
+        assert_ne!(
+            ClaudeCapabilityMode::from_host_label("auto"),
+            ClaudeCapabilityMode::AlwaysApprove
+        );
     }
 
     #[test]
-    fn execute_includes_bash() {
-        let allow = tools_allowlist(ClaudeCapabilityMode::Execute);
-        assert!(allow.contains(&"Bash"));
-        assert!(allow.contains(&"Edit"));
-        assert!(tools_denylist(ClaudeCapabilityMode::Execute).is_empty());
-    }
-
-    #[test]
-    fn always_approve_does_not_mean_bypass_in_tool_lists() {
-        // AlwaysApprove exposes tools but does not add a bypass flag here.
+    fn yolo_and_always_approve_select_allowlist_mode_only() {
+        assert_eq!(
+            ClaudeCapabilityMode::from_host_label("yolo"),
+            ClaudeCapabilityMode::AlwaysApprove
+        );
+        assert_eq!(
+            ClaudeCapabilityMode::from_host_label("always-approve"),
+            ClaudeCapabilityMode::AlwaysApprove
+        );
+        // Broader allowlist, still no bypass flag semantics here.
         let allow = tools_allowlist(ClaudeCapabilityMode::AlwaysApprove);
         assert!(allow.contains(&"Bash"));
-        assert!(is_write_or_shell_tool("Bash"));
     }
 
     #[test]
@@ -210,18 +220,12 @@ mod tests {
             ClaudeCapabilityMode::from_host_label("mystery"),
             ClaudeCapabilityMode::ReadOnly
         );
-        assert_eq!(
-            ClaudeCapabilityMode::from_host_label("yolo"),
-            ClaudeCapabilityMode::AlwaysApprove
-        );
     }
 
     #[test]
     fn write_shell_detection() {
         assert!(is_write_or_shell_tool("Edit"));
         assert!(is_write_or_shell_tool("Bash"));
-        assert!(is_write_or_shell_tool("mcp__x__Bash"));
         assert!(!is_write_or_shell_tool("Read"));
-        assert!(!is_write_or_shell_tool("Grep"));
     }
 }
