@@ -258,14 +258,43 @@ fn bridge_http_to_inference(
     if class == ErrorClass::PermanentAuth || status == 401 {
         return InferenceError::Auth(format!("Unauthorized ({status}) from anthropic: {message}"));
     }
-    let status_code =
-        reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+
+    // Anthropic HTTP 413 is PermanentActionable at this layer, but a literal
+    // 413 InferenceError is treated as RetryWithImageStrip by the generic
+    // sampler retry path (OpenAI-centric image recovery). Remap to 400 so
+    // classify_error is Fatal while keeping the actionable message.
+    let (status_code, should_retry) = if status == 413 {
+        (reqwest::StatusCode::BAD_REQUEST, Some(false))
+    } else if matches!(
+        class,
+        ErrorClass::PermanentActionable
+            | ErrorClass::PermanentPermission
+            | ErrorClass::Local
+            | ErrorClass::Decode
+    ) {
+        (
+            reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_REQUEST),
+            Some(false),
+        )
+    } else {
+        (
+            reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_GATEWAY),
+            None,
+        )
+    };
+
+    let message = if status == 413 && !message.to_ascii_lowercase().contains("too large") {
+        format!("request too large (HTTP 413): {message}")
+    } else {
+        message
+    };
+
     InferenceError::Api {
         status: status_code,
         message,
         model_metadata: None,
         retry_after_secs: meta.retry_after_secs,
-        should_retry: None,
+        should_retry,
         diagnostics: meta.to_api_diagnostics(),
     }
 }
@@ -603,6 +632,38 @@ mod tests {
         match classify_error(&inf, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithClientRebuild { .. } => {}
             other => panic!("expected RetryWithClientRebuild for 529, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_413_bridge_is_fatal_not_image_strip() {
+        let err = AnthropicClientError::Http {
+            status: 413,
+            class: ErrorClass::PermanentActionable,
+            message: "request_too_large: Request exceeds size limit".into(),
+            error_type: Some(AnthropicErrorType::RequestTooLarge),
+            meta: Box::new(AnthropicResponseMeta::default()),
+        };
+        assert_eq!(err.class(), ErrorClass::PermanentActionable);
+        assert!(!err.is_retryable());
+
+        let inf = err.into_inference_error();
+        assert!(
+            !inf.is_payload_too_large(),
+            "bridged 413 must not report as payload-too-large (image-strip gate)"
+        );
+        assert!(!inf.is_auth_error());
+        assert!(!inf.is_retryable());
+        assert!(
+            inf.to_string().contains("size limit") || inf.to_string().contains("too large"),
+            "actionable message preserved: {inf}"
+        );
+        match classify_error(&inf, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Fatal(_) => {}
+            RetryDecision::RetryWithImageStrip => {
+                panic!("server 413 must not trigger RetryWithImageStrip")
+            }
+            other => panic!("expected Fatal, got {other:?}"),
         }
     }
 }

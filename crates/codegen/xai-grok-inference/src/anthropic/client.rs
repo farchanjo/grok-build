@@ -50,6 +50,25 @@ pub(super) fn set_test_max_request_bytes(limit: Option<usize>) {
     TEST_MAX_REQUEST_BYTES.with(|cell| cell.set(limit));
 }
 
+/// RAII guard that restores the default preflight limit when dropped.
+#[cfg(test)]
+pub(super) struct TestMaxRequestBytesGuard;
+
+#[cfg(test)]
+impl TestMaxRequestBytesGuard {
+    pub fn new(limit: usize) -> Self {
+        set_test_max_request_bytes(Some(limit));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestMaxRequestBytesGuard {
+    fn drop(&mut self) {
+        set_test_max_request_bytes(None);
+    }
+}
+
 /// Configuration for [`AnthropicClient`].
 #[derive(Clone)]
 pub struct AnthropicClientConfig {
@@ -685,7 +704,7 @@ mod unit_tests {
     #[test]
     fn preflight_size_accepts_exact_limit_rejects_plus_one() {
         let client = AnthropicClient::new(AnthropicClientConfig::new("key")).unwrap();
-        set_test_max_request_bytes(Some(64));
+        let _guard = TestMaxRequestBytesGuard::new(64);
         assert!(client.preflight_size(64).is_ok());
         let err = client.preflight_size(65).unwrap_err();
         match err {
@@ -698,6 +717,5 @@ mod unit_tests {
             }
             other => panic!("expected RequestTooLarge, got {other:?}"),
         }
-        set_test_max_request_bytes(None);
     }
 }

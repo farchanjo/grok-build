@@ -23,7 +23,7 @@ use xai_grok_inference_types::messages::{
     Message, MessageContent, MessageRole, MessagesRequest, MessagesResponse,
 };
 
-use super::client::{AnthropicClient, AnthropicClientConfig, set_test_max_request_bytes};
+use super::client::{AnthropicClient, AnthropicClientConfig, TestMaxRequestBytesGuard};
 use super::error::{AnthropicClientError, ErrorClass};
 use super::headers::parse_anthropic_rate_limit_headers;
 use crate::retry::{RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error};
@@ -251,6 +251,50 @@ async fn create_message_400_and_413_are_permanent_actionable() {
 }
 
 #[tokio::test]
+async fn http_413_live_bridge_is_fatal_not_image_strip() {
+    let app = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({
+                    "type": "error",
+                    "error": {
+                        "type": "request_too_large",
+                        "message": "Request exceeds the maximum size"
+                    }
+                })
+                .to_string(),
+            )
+        }),
+    );
+    let (addr, _h) = spawn(app).await;
+    let err = client_for(addr)
+        .create_message(sample_messages_request())
+        .await
+        .unwrap_err();
+    assert_eq!(err.class(), ErrorClass::PermanentActionable);
+
+    let inf = err.into_inference_error();
+    assert!(
+        !inf.is_payload_too_large(),
+        "must not preserve literal 413 on InferenceError"
+    );
+    assert!(!inf.is_retryable());
+    assert!(
+        inf.to_string().contains("maximum size") || inf.to_string().contains("too large"),
+        "actionable message preserved: {inf}"
+    );
+    match classify_error(&inf, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+        RetryDecision::Fatal(_) => {}
+        RetryDecision::RetryWithImageStrip => {
+            panic!("live HTTP 413 must not classify as RetryWithImageStrip")
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn create_message_429_is_retryable_with_retry_after() {
     let app = Router::new().route(
         "/v1/messages",
@@ -348,7 +392,7 @@ async fn create_message_preflight_exact_boundary_and_plus_one() {
     .unwrap()
     .len();
 
-    set_test_max_request_bytes(Some(exact_len));
+    let _guard = TestMaxRequestBytesGuard::new(exact_len);
     client
         .create_message(base.clone())
         .await
@@ -356,7 +400,6 @@ async fn create_message_preflight_exact_boundary_and_plus_one() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     // One extra byte of model name pushes serialization past the limit.
-    set_test_max_request_bytes(Some(exact_len));
     let mut oversized = base;
     oversized.model.push('X');
     let err = client.create_message(oversized).await.unwrap_err();
@@ -375,7 +418,6 @@ async fn create_message_preflight_exact_boundary_and_plus_one() {
         1,
         "rejection must not hit the network"
     );
-    set_test_max_request_bytes(None);
 }
 
 #[tokio::test]
@@ -403,14 +445,13 @@ async fn create_message_stream_preflight_rejects_without_network() {
     })
     .unwrap()
     .len();
-    set_test_max_request_bytes(Some(exact_len.saturating_sub(1).max(1)));
+    let _guard = TestMaxRequestBytesGuard::new(exact_len.saturating_sub(1).max(1));
     let err = match client.create_message_stream(base).await {
         Err(e) => e,
         Ok(_) => panic!("expected preflight RequestTooLarge"),
     };
     assert!(matches!(err, AnthropicClientError::RequestTooLarge { .. }));
     assert_eq!(hits.load(Ordering::SeqCst), 0);
-    set_test_max_request_bytes(None);
 }
 
 #[tokio::test]
@@ -438,7 +479,7 @@ async fn upload_file_preflight_raw_size_boundary() {
     let (addr, _h) = spawn(app).await;
     let client = client_for(addr);
 
-    set_test_max_request_bytes(Some(4));
+    let _guard = TestMaxRequestBytesGuard::new(4);
     client
         .upload_file(FileUploadSource::new("a.bin", vec![1, 2, 3, 4]))
         .await
@@ -457,7 +498,6 @@ async fn upload_file_preflight_raw_size_boundary() {
         }
     ));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    set_test_max_request_bytes(None);
 }
 
 // -----------------------------------------------------------------------------
