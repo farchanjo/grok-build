@@ -4,7 +4,7 @@ SHELL := /bin/sh
 CARGO ?= cargo
 CARGO_TARGET_DIR ?= target
 CARGO_INCREMENTAL ?= 0
-CARGO_BUILD_JOBS ?= 8
+CARGO_BUILD_JOBS ?= 16
 RUSTC_WRAPPER ?= sccache
 export CARGO_TARGET_DIR
 export CARGO_INCREMENTAL
@@ -34,7 +34,7 @@ PYTHON3 ?= /usr/bin/python3
 .PHONY: build deploy deploy-binary deploy-wrapper verify help
 
 build:
-	$(CARGO) build --locked --jobs $(CARGO_BUILD_JOBS) -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE)
+	$(CARGO) build --locked --jobs $(CARGO_BUILD_JOBS) --timings -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE)
 
 deploy: deploy-binary
 	+$(MAKE) deploy-wrapper
