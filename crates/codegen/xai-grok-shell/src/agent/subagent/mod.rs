@@ -1183,6 +1183,7 @@ fn resolve_model_override_to_config(
             .map(|p| match p.kind {
                 crate::agent::model_providers::ModelProviderKind::OpenRouter => "OpenRouter",
                 crate::agent::model_providers::ModelProviderKind::OpenAi => "OpenAI",
+                crate::agent::model_providers::ModelProviderKind::Anthropic => "Anthropic",
                 _ => "provider",
             })
             .unwrap_or("provider");

@@ -168,6 +168,7 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
                         BuiltInProviderId::Xai => "xai",
                         BuiltInProviderId::OpenAi => "openai",
                         BuiltInProviderId::OpenRouter => "openrouter",
+                        BuiltInProviderId::Anthropic => "anthropic",
                     },
                     "kind": "built_in",
                     "display_name": status.display_name,
@@ -333,6 +334,32 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             Ok(0)
         }
         ClearKey { id } => {
+            // Built-in product scopes (openrouter::api_key, anthropic::api_key, …)
+            // must not be written as openai_compatible::<id>::api_key.
+            if let Ok(pref) = ProviderRef::parse(&id)
+                && let ProviderRef::BuiltIn(built_in) = pref
+            {
+                use crate::agent::providers::{ProviderId as BuiltInId, ProviderManager};
+                let manager = ProviderManager::new(grok_home());
+                let backend = match built_in {
+                    crate::provider_registry::id::BuiltInProviderId::Xai => BuiltInId::Xai,
+                    crate::provider_registry::id::BuiltInProviderId::OpenAi => BuiltInId::OpenAi,
+                    crate::provider_registry::id::BuiltInProviderId::OpenRouter => {
+                        BuiltInId::OpenRouter
+                    }
+                    crate::provider_registry::id::BuiltInProviderId::Anthropic => {
+                        BuiltInId::Anthropic
+                    }
+                };
+                manager.remove_api_key(backend).map_err(|e| e.to_string())?;
+                crate::cli::output::write_json(&json!({
+                    "ok": true,
+                    "id": built_in.as_str(),
+                    "credential_kind": "api_key",
+                }))
+                .map_err(|e| e.to_string())?;
+                return Ok(0);
+            }
             let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
             clear_provider_secret(&grok_home(), &application_key_scope(&pid))
                 .map_err(|e| e.to_string())?;
@@ -367,15 +394,67 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             Ok(0)
         }
         RefreshModels { id } => {
-            // Drop catalog cache so the next session reload re-fetches.
-            if let Ok(pid) = ProviderId::new(&id) {
-                let _ = CatalogCacheStore::remove(&grok_home(), &pid);
+            use crate::agent::providers::{ProviderId as BuiltInId, ProviderManager};
+            use crate::provider_registry::id::BuiltInProviderId;
+            let home = grok_home();
+            if let Some(built_in) = BuiltInProviderId::parse(&id) {
+                let manager = ProviderManager::new(&home);
+                let backend = match built_in {
+                    BuiltInProviderId::OpenRouter => Some(BuiltInId::OpenRouter),
+                    BuiltInProviderId::Anthropic => Some(BuiltInId::Anthropic),
+                    BuiltInProviderId::OpenAi => Some(BuiltInId::OpenAi),
+                    BuiltInProviderId::Xai => None,
+                };
+                if let Some(backend) = backend {
+                    match backend {
+                        BuiltInId::OpenRouter => {
+                            let _ = manager.refresh_openrouter_catalog().await;
+                        }
+                        BuiltInId::Anthropic => {
+                            let _ = manager.refresh_anthropic_catalog().await;
+                        }
+                        BuiltInId::OpenAi => {
+                            let _ = manager.refresh_openai_catalog().await;
+                        }
+                        BuiltInId::Xai => {}
+                    }
+                }
+            } else if let Ok(pid) = ProviderId::new(&id) {
+                let _ = CatalogCacheStore::remove(&home, &pid);
             }
             crate::cli::output::write_json(&json!({"ok": true, "id": id}))
                 .map_err(|e| e.to_string())?;
             Ok(0)
         }
         Test { id } => {
+            use crate::agent::providers::{
+                ProviderConnectionTest, ProviderId as BuiltInId, ProviderManager,
+            };
+            use crate::provider_registry::id::BuiltInProviderId;
+            if let Some(built_in) = BuiltInProviderId::parse(&id) {
+                let manager = ProviderManager::new(grok_home());
+                let backend = match built_in {
+                    BuiltInProviderId::Xai => BuiltInId::Xai,
+                    BuiltInProviderId::OpenAi => BuiltInId::OpenAi,
+                    BuiltInProviderId::OpenRouter => BuiltInId::OpenRouter,
+                    BuiltInProviderId::Anthropic => BuiltInId::Anthropic,
+                };
+                let result = manager.test_connection(backend).await;
+                let (ok, state) = match result {
+                    Ok(ProviderConnectionTest::Connected { .. }) => (true, "connected"),
+                    Ok(ProviderConnectionTest::NotConfigured) => (false, "not_configured"),
+                    Ok(ProviderConnectionTest::Rejected) => (false, "rejected"),
+                    Ok(ProviderConnectionTest::Unavailable) => (false, "unavailable"),
+                    Err(_) => (false, "error"),
+                };
+                crate::cli::output::write_json(&json!({
+                    "ok": ok,
+                    "id": built_in.as_str(),
+                    "state": state,
+                }))
+                .map_err(|e| e.to_string())?;
+                return Ok(if ok { 0 } else { 1 });
+            }
             crate::cli::output::write_json(&json!({
                 "ok": true,
                 "id": id,
@@ -393,7 +472,6 @@ fn set_secret(
     from_env: Option<String>,
     value: Option<String>,
 ) -> Result<(), String> {
-    let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
     let secret = if let Some(env_name) = from_env {
         std::env::var(&env_name)
             .map_err(|_| format!("environment variable `{env_name}` is unset"))?
@@ -405,6 +483,43 @@ fn set_secret(
     if secret.trim().is_empty() {
         return Err("secret is empty".into());
     }
+
+    // Built-in product scopes: openrouter::api_key / anthropic::api_key /
+    // openai::api_key — never openai_compatible::<builtin>::api_key.
+    if kind == ProviderCredentialKind::Application
+        && let Ok(pref) = ProviderRef::parse(id)
+        && let ProviderRef::BuiltIn(built_in) = pref
+    {
+        use crate::agent::providers::{ProviderId as BuiltInId, ProviderManager};
+        use crate::provider_registry::id::BuiltInProviderId;
+        use crate::provider_registry::secrets::built_in_application_scope;
+        let manager = ProviderManager::new(grok_home());
+        let backend = match built_in {
+            BuiltInProviderId::Xai => BuiltInId::Xai,
+            BuiltInProviderId::OpenAi => BuiltInId::OpenAi,
+            BuiltInProviderId::OpenRouter => BuiltInId::OpenRouter,
+            BuiltInProviderId::Anthropic => BuiltInId::Anthropic,
+        };
+        manager
+            .set_api_key(backend, secret.trim())
+            .map_err(|e| e.to_string())?;
+        let scope = built_in_application_scope(built_in)
+            .unwrap_or_else(|| match built_in {
+                BuiltInProviderId::Xai => "xai::api_key",
+                _ => "unknown",
+            })
+            .to_owned();
+        crate::cli::output::write_json(&json!({
+            "ok": true,
+            "id": built_in.as_str(),
+            "credential_kind": kind.as_str(),
+            "scope": scope,
+        }))
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let pid = ProviderId::new(id).map_err(|e| e.to_string())?;
     let scope = match kind {
         ProviderCredentialKind::Application => application_key_scope(&pid),
         ProviderCredentialKind::Admin => admin_key_scope(&pid),
@@ -423,6 +538,7 @@ fn set_secret(
 
 fn capability_report(id: &str) -> serde_json::Value {
     let openrouter = id == "openrouter";
+    let anthropic = id == "anthropic";
     let zai = id == "zai" || id == "zai-model-api";
     json!({
         "provider_id": id,
@@ -431,6 +547,11 @@ fn capability_report(id: &str) -> serde_json::Value {
             "responses": if openrouter { "supported" } else if zai { "unknown" } else { "unknown" },
             "embeddings": "unknown",
             "note": "Per-provider capability is distinct from client completeness"
+        },
+        "messages": if anthropic {
+            json!({"status": "supported", "auth": "x-api-key", "version_header": xai_grok_inference::ANTHROPIC_VERSION})
+        } else {
+            json!({"status": "not_applicable"})
         },
         "openrouter_native": if openrouter {
             json!({"status": "see grok openrouter --help"})

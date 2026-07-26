@@ -583,6 +583,7 @@ impl SessionActor {
                 match id {
                     "openrouter" => ProviderIdentity::OpenRouter,
                     "openai" => ProviderIdentity::OpenAi,
+                    "anthropic" => ProviderIdentity::Anthropic,
                     _ => ProviderIdentity::Custom,
                 }
             } else {
@@ -1054,10 +1055,12 @@ impl SessionActor {
             );
         }
 
-        // Catalog OpenRouter / official OpenAI API hosts are always API keys.
-        // (ChatGPT already returned above.)
+        // Catalog OpenRouter / official OpenAI / Anthropic API hosts are always
+        // API keys. (ChatGPT already returned above.)
         match provider_kind {
-            Some(ModelProviderKind::OpenRouter) | Some(ModelProviderKind::OpenAi) => {
+            Some(ModelProviderKind::OpenRouter)
+            | Some(ModelProviderKind::OpenAi)
+            | Some(ModelProviderKind::Anthropic) => {
                 return (
                     ProviderCredentialKind::ApiKey,
                     ProviderCredentialAction::OpenProviders,
@@ -1169,12 +1172,14 @@ impl SessionActor {
             identity = match id {
                 "openrouter" => ProviderIdentity::OpenRouter,
                 "openai" => ProviderIdentity::OpenAi,
+                "anthropic" => ProviderIdentity::Anthropic,
                 _ => identity,
             };
             provider_id = Some(id.to_owned());
             provider_kind = Some(match id {
                 "openrouter" => ModelProviderKind::OpenRouter,
                 "openai" => ModelProviderKind::OpenAi,
+                "anthropic" => ModelProviderKind::Anthropic,
                 _ => ModelProviderKind::OpenAiCompatible,
             });
         }
@@ -1191,6 +1196,7 @@ impl SessionActor {
         let (default_id, default_name) = match identity {
             ProviderIdentity::OpenRouter => ("openrouter", "OpenRouter"),
             ProviderIdentity::OpenAi => ("openai", "OpenAI"),
+            ProviderIdentity::Anthropic => ("anthropic", "Anthropic"),
             ProviderIdentity::Xai => return None,
             ProviderIdentity::Custom => {
                 provider_id.as_ref()?;
@@ -1201,6 +1207,7 @@ impl SessionActor {
         let provider_name = match provider_kind.unwrap_or(ModelProviderKind::OpenAiCompatible) {
             ModelProviderKind::OpenRouter => "OpenRouter".to_owned(),
             ModelProviderKind::OpenAi => "OpenAI".to_owned(),
+            ModelProviderKind::Anthropic => "Anthropic".to_owned(),
             ModelProviderKind::Xai => return None,
             ModelProviderKind::Zai => "Z.ai".to_owned(),
             ModelProviderKind::OpenAiCompatible => default_name.to_owned(),

@@ -304,6 +304,13 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
                     );
                     std::process::exit(2);
                 }
+                "anthropic" => {
+                    eprintln!(
+                        "Anthropic uses an API key. Use `grok provider set-key anthropic --from-env ANTHROPIC_API_KEY` \
+                         or open /providers in the TUI. Keys are never accepted on the command line."
+                    );
+                    std::process::exit(2);
+                }
                 other => {
                     eprintln!(
                         "error: `connect` for configured provider `{other}` is key-based. \
@@ -341,6 +348,12 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
                             anyhow::anyhow!("Failed to clear OpenRouter credentials: {e}")
                         })?;
                     println!("Disconnected OpenRouter.");
+                }
+                "anthropic" => {
+                    manager.remove_api_key(ProviderId::Anthropic).map_err(|e| {
+                        anyhow::anyhow!("Failed to clear Anthropic credentials: {e}")
+                    })?;
+                    println!("Disconnected Anthropic.");
                 }
                 other => {
                     let code = run_provider_lifecycle_cli(ProviderLifecycleArgs {

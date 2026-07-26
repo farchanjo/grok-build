@@ -23,11 +23,18 @@ const OPENAI_CACHE_FILE: &str = "openai_models_cache.json";
 const OPENAI_CACHE_VERSION: u8 = 1;
 const OPENROUTER_CACHE_FILE: &str = "openrouter_models_cache.json";
 const OPENROUTER_CACHE_VERSION: u8 = 1;
+const ANTHROPIC_CACHE_FILE: &str = "anthropic_models_cache.json";
+const ANTHROPIC_CACHE_VERSION: u8 = 1;
 /// Default freshness window for the OpenRouter catalog cache. A stale cache is
 /// revalidated in the background while the picker/session keeps using the
 /// last-good models.
 const OPENROUTER_CATALOG_DEFAULT_TTL_SECS: u64 = 6 * 60 * 60;
 const OPENROUTER_CATALOG_TTL_ENV: &str = "GROK_OPENROUTER_CATALOG_TTL_SECS";
+/// Default freshness window for the Anthropic catalog cache (stale-last-good).
+const ANTHROPIC_CATALOG_DEFAULT_TTL_SECS: u64 = 6 * 60 * 60;
+const ANTHROPIC_CATALOG_TTL_ENV: &str = "GROK_ANTHROPIC_CATALOG_TTL_SECS";
+/// Direct Anthropic Messages base used by InferenceClient (`…/v1` + `/messages`).
+const ANTHROPIC_INFERENCE_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 /// A provider understood by the built-in provider screen.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -36,16 +43,19 @@ pub enum ProviderId {
     Xai,
     OpenAi,
     OpenRouter,
+    Anthropic,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 3] = [Self::Xai, Self::OpenAi, Self::OpenRouter];
+    /// Peer ordering: existing order preserved; Anthropic after OpenRouter.
+    pub const ALL: [Self; 4] = [Self::Xai, Self::OpenAi, Self::OpenRouter, Self::Anthropic];
 
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Xai => "xAI",
             Self::OpenAi => "OpenAI",
             Self::OpenRouter => "OpenRouter",
+            Self::Anthropic => "Anthropic",
         }
     }
 
@@ -54,6 +64,7 @@ impl ProviderId {
             Self::Xai => Err(ProviderError::ApiKeyUnsupported),
             Self::OpenAi => Ok(crate::auth::OPENAI_API_KEY_SCOPE),
             Self::OpenRouter => Ok(crate::auth::OPENROUTER_API_KEY_SCOPE),
+            Self::Anthropic => Ok(crate::auth::ANTHROPIC_API_KEY_SCOPE),
         }
     }
 
@@ -64,6 +75,7 @@ impl ProviderId {
             Self::Xai => None,
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
+            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
         }
     }
 
@@ -72,6 +84,7 @@ impl ProviderId {
             Self::Xai => Some(ModelProviderKind::Xai),
             Self::OpenAi => Some(ModelProviderKind::OpenAi),
             Self::OpenRouter => Some(ModelProviderKind::OpenRouter),
+            Self::Anthropic => Some(ModelProviderKind::Anthropic),
         }
     }
 
@@ -87,6 +100,9 @@ impl ProviderId {
             }
             Self::OpenRouter => {
                 "OpenRouter API key is not configured. Open /providers and connect OpenRouter."
+            }
+            Self::Anthropic => {
+                "Anthropic API key is not configured. Open /providers and connect Anthropic."
             }
         }
     }
@@ -200,6 +216,25 @@ pub struct OpenRouterCatalog {
     pub fetched_at: Option<u64>,
 }
 
+/// Source of an Anthropic model catalog. Cache is only used after an
+/// authenticated live Models API request has populated it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicCatalogSource {
+    Live,
+    Cache,
+}
+
+/// Models discovered from the authenticated Anthropic Models API. Credential-
+/// free metadata only; never raw response bodies or API keys.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AnthropicCatalog {
+    pub source: AnthropicCatalogSource,
+    pub models: Vec<ProviderModelPreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<u64>,
+}
+
 /// A safe outcome of testing an API connection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -247,6 +282,8 @@ pub enum ProviderError {
     OpenRouterCatalogUnavailable,
     #[error("OpenAI catalog is unavailable")]
     OpenAiCatalogUnavailable,
+    #[error("Anthropic catalog is unavailable")]
+    AnthropicCatalogUnavailable,
 }
 
 /// Provider service used by the TUI. The default constructor stores secrets in
@@ -259,6 +296,9 @@ pub struct ProviderManager {
     openai_models_url: String,
     openrouter_models_url: String,
     openrouter_catalog_url: String,
+    /// Anthropic API origin for Models connection tests (no `/v1` suffix —
+    /// [`xai_grok_inference::AnthropicClient`] appends `/v1/models`).
+    anthropic_base_url: String,
 }
 
 impl Default for ProviderManager {
@@ -278,6 +318,7 @@ impl ProviderManager {
             // sending an inference request or incurring model charges.
             openrouter_models_url: "https://openrouter.ai/api/v1/key".to_owned(),
             openrouter_catalog_url: "https://openrouter.ai/api/v1/models".to_owned(),
+            anthropic_base_url: xai_grok_inference::DEFAULT_ANTHROPIC_BASE_URL.to_owned(),
         }
     }
 
@@ -299,6 +340,13 @@ impl ProviderManager {
     /// for tests and a deliberately managed proxy; it is never persisted.
     pub fn with_openrouter_catalog_url(mut self, url: impl Into<String>) -> Self {
         self.openrouter_catalog_url = url.into();
+        self
+    }
+
+    /// Override the Anthropic API origin used for Models connection tests and
+    /// catalog refresh. Never persisted; tests only.
+    pub fn with_anthropic_base_url(mut self, url: impl Into<String>) -> Self {
+        self.anthropic_base_url = url.into();
         self
     }
 
@@ -379,6 +427,55 @@ impl ProviderManager {
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
             },
+            // Curated direct Anthropic agent-capable presets (API aliases as of
+            // 2026-07). Visible only when an Anthropic key is configured.
+            ProviderModelPreset {
+                id: "anthropic-claude-sonnet-5".to_owned(),
+                provider: ProviderId::Anthropic,
+                label: "Claude Sonnet 5".to_owned(),
+                model: "claude-sonnet-5".to_owned(),
+                base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
+                is_agent: true,
+                description: Some(
+                    "Best combination of speed and intelligence for agent workflows".to_owned(),
+                ),
+                context_window: Some(1_000_000),
+                max_completion_tokens: Some(128_000),
+                supports_tools: true,
+                supports_reasoning_effort: true,
+                reasoning_efforts: vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()],
+                default_reasoning_effort: Some("high".to_owned()),
+            },
+            ProviderModelPreset {
+                id: "anthropic-claude-opus-5".to_owned(),
+                provider: ProviderId::Anthropic,
+                label: "Claude Opus 5".to_owned(),
+                model: "claude-opus-5".to_owned(),
+                base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
+                is_agent: true,
+                description: Some("Complex agentic coding and enterprise work".to_owned()),
+                context_window: Some(1_000_000),
+                max_completion_tokens: Some(128_000),
+                supports_tools: true,
+                supports_reasoning_effort: true,
+                reasoning_efforts: vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()],
+                default_reasoning_effort: Some("high".to_owned()),
+            },
+            ProviderModelPreset {
+                id: "anthropic-claude-haiku-4-5".to_owned(),
+                provider: ProviderId::Anthropic,
+                label: "Claude Haiku 4.5".to_owned(),
+                model: "claude-haiku-4-5".to_owned(),
+                base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
+                is_agent: true,
+                description: Some("Fastest model with near-frontier intelligence".to_owned()),
+                context_window: Some(200_000),
+                max_completion_tokens: Some(64_000),
+                supports_tools: true,
+                supports_reasoning_effort: true,
+                reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            },
         ]
     }
 
@@ -433,10 +530,35 @@ impl ProviderManager {
                     ..Default::default()
                 }
             });
+        model_providers
+            .entry("grok_build_anthropic".to_owned())
+            .or_insert_with(|| {
+                let mut extra_headers = indexmap::IndexMap::<String, String>::new();
+                // Required for direct Anthropic identity only. Custom Messages
+                // backends never inherit this provider entry.
+                extra_headers.insert(
+                    "anthropic-version".to_owned(),
+                    xai_grok_inference::ANTHROPIC_VERSION.to_owned(),
+                );
+                ModelProviderConfig {
+                    kind: ModelProviderKind::Anthropic,
+                    base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
+                    // snake_case AuthScheme wire form (`x_api_key`).
+                    auth_scheme: Some("x_api_key".to_owned()),
+                    api_backend: Some(ApiBackend::Messages),
+                    extra_headers,
+                    ..Default::default()
+                }
+            });
         // First-class Z.ai Model API profile (credentials never inlined).
         super::zai::install_zai_provider(model_providers);
         let openrouter_configured = credential_lookup_manager()
             .api_key(ProviderId::OpenRouter)
+            .ok()
+            .flatten()
+            .is_some();
+        let anthropic_configured = credential_lookup_manager()
+            .api_key(ProviderId::Anthropic)
             .ok()
             .flatten()
             .is_some();
@@ -474,6 +596,14 @@ impl ProviderManager {
             // auto-refresh entry point; the TTL check is the only trigger.
             maybe_spawn_openrouter_background_refresh(&credential_lookup_manager().grok_home);
         }
+        if anthropic_configured {
+            if let Ok(cached) = load_anthropic_catalog_cache(&credential_lookup_manager().grok_home)
+            {
+                presets.retain(|preset| preset.provider != ProviderId::Anthropic);
+                presets.extend(cached.models);
+            }
+            maybe_spawn_anthropic_background_refresh(&credential_lookup_manager().grok_home);
+        }
         if openai_oauth {
             // OAuth mode: use ChatGPT subscription allowlist with real API slugs.
             presets.retain(|preset| preset.provider != ProviderId::OpenAi);
@@ -484,6 +614,9 @@ impl ProviderManager {
             if preset.provider == ProviderId::OpenRouter && !openrouter_configured {
                 continue;
             }
+            if preset.provider == ProviderId::Anthropic && !anthropic_configured {
+                continue;
+            }
             if preset.provider == ProviderId::OpenAi && !openai_configured {
                 continue;
             }
@@ -491,6 +624,7 @@ impl ProviderManager {
                 ProviderId::Xai => continue,
                 ProviderId::OpenAi => "grok_build_openai",
                 ProviderId::OpenRouter => "grok_build_openrouter",
+                ProviderId::Anthropic => "grok_build_anthropic",
             };
             config_models
                 .entry(preset.id)
@@ -499,6 +633,17 @@ impl ProviderManager {
                     name: Some(preset.label),
                     description: preset.description,
                     model_provider: Some(provider.to_owned()),
+                    // Anthropic Messages requires XApiKey; other presets leave default.
+                    auth_scheme: if preset.provider == ProviderId::Anthropic {
+                        Some(xai_grok_inference::AuthScheme::XApiKey)
+                    } else {
+                        None
+                    },
+                    api_backend: if preset.provider == ProviderId::Anthropic {
+                        Some(ApiBackend::Messages)
+                    } else {
+                        None
+                    },
                     context_window: preset.context_window,
                     // OpenRouter's `top_provider.max_completion_tokens` is a
                     // capability ceiling, not a safe per-request default.
@@ -544,6 +689,12 @@ impl ProviderManager {
         if provider == ProviderId::OpenRouter
             && self.api_key(provider).ok().flatten().is_some()
             && let Ok(cached) = load_openrouter_catalog_cache(&self.grok_home)
+        {
+            presets = cached.models;
+        }
+        if provider == ProviderId::Anthropic
+            && self.api_key(provider).ok().flatten().is_some()
+            && let Ok(cached) = load_anthropic_catalog_cache(&self.grok_home)
         {
             presets = cached.models;
         }
@@ -798,6 +949,9 @@ impl ProviderManager {
             ProviderId::OpenRouter => {
                 let _ = clear_openrouter_catalog_cache(&self.grok_home);
             }
+            ProviderId::Anthropic => {
+                let _ = clear_anthropic_catalog_cache(&self.grok_home);
+            }
             ProviderId::Xai => {}
         }
         Ok(())
@@ -817,10 +971,16 @@ impl ProviderManager {
         let Some(key) = key else {
             return Ok(ProviderConnectionTest::NotConfigured);
         };
+        // Anthropic uses the dedicated Models API client (`x-api-key`), never
+        // a Bearer probe. This is non-inference and validates the key.
+        if provider == ProviderId::Anthropic {
+            return self.test_anthropic_connection(&key).await;
+        }
         let url = match provider {
             ProviderId::Xai => &self.xai_models_url,
             ProviderId::OpenAi => &self.openai_models_url,
             ProviderId::OpenRouter => &self.openrouter_models_url,
+            ProviderId::Anthropic => unreachable!("handled above"),
         };
         let response = reqwest::Client::builder()
             .timeout(CONNECTION_TIMEOUT)
@@ -878,6 +1038,9 @@ impl ProviderManager {
                     ProviderId::OpenRouter => {
                         let _ = self.refresh_openrouter_catalog().await;
                     }
+                    ProviderId::Anthropic => {
+                        let _ = self.refresh_anthropic_catalog().await;
+                    }
                     ProviderId::Xai => {}
                 }
                 Ok(ProviderConnectionTest::Connected { credits })
@@ -888,6 +1051,47 @@ impl ProviderManager {
                 Ok(ProviderConnectionTest::Rejected)
             }
             Ok(_) | Err(_) => Ok(ProviderConnectionTest::Unavailable),
+        }
+    }
+
+    async fn test_anthropic_connection(
+        &self,
+        key: &str,
+    ) -> Result<ProviderConnectionTest, ProviderError> {
+        use xai_grok_inference::{
+            AnthropicClient, AnthropicClientConfig, AnthropicClientError, ErrorClass,
+            ListModelsParams,
+        };
+        let client = AnthropicClient::new(
+            AnthropicClientConfig::new(key).with_base_url(self.anthropic_base_url.clone()),
+        )
+        .map_err(|_| ProviderError::CredentialStore)?;
+        let result = client
+            .list_models(&ListModelsParams {
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await;
+        match result {
+            Ok(_) => {
+                let _ = self.refresh_anthropic_catalog().await;
+                Ok(ProviderConnectionTest::Connected { credits: None })
+            }
+            Err(err) => match err.class() {
+                ErrorClass::PermanentAuth | ErrorClass::PermanentPermission => {
+                    Ok(ProviderConnectionTest::Rejected)
+                }
+                _ => {
+                    // Also treat explicit HTTP 401/403 as rejected when class
+                    // mapping is unexpected.
+                    if let AnthropicClientError::Http { status, .. } = &err
+                        && (*status == 401 || *status == 403)
+                    {
+                        return Ok(ProviderConnectionTest::Rejected);
+                    }
+                    Ok(ProviderConnectionTest::Unavailable)
+                }
+            },
         }
     }
 
@@ -981,6 +1185,37 @@ impl ProviderManager {
             .map_err(|_| ProviderError::OpenRouterCatalogUnavailable)
     }
 
+    /// Fetch the authenticated Anthropic Models catalog (cursor-paginated),
+    /// intersect discovered IDs with curated product capabilities, and
+    /// persist a credential-free owner-only cache. On transport failure,
+    /// return the last-good cache when present.
+    pub async fn refresh_anthropic_catalog(&self) -> Result<AnthropicCatalog, ProviderError> {
+        let Some(key) = self.api_key(ProviderId::Anthropic)? else {
+            return Err(ProviderError::AnthropicCatalogUnavailable);
+        };
+        let live = fetch_anthropic_catalog_live(&self.anthropic_base_url, &key).await;
+        if let Some(models) = live {
+            let catalog = AnthropicCatalog {
+                source: AnthropicCatalogSource::Live,
+                models,
+                fetched_at: current_epoch_secs(),
+            };
+            let _ = save_anthropic_catalog_cache(&self.grok_home, &catalog);
+            return Ok(catalog);
+        }
+        load_anthropic_catalog_cache(&self.grok_home)
+            .map_err(|_| ProviderError::AnthropicCatalogUnavailable)
+    }
+
+    /// Return cached Anthropic models only when a credential is configured.
+    pub fn cached_anthropic_catalog(&self) -> Result<AnthropicCatalog, ProviderError> {
+        if self.api_key(ProviderId::Anthropic)?.is_none() {
+            return Err(ProviderError::AnthropicCatalogUnavailable);
+        }
+        load_anthropic_catalog_cache(&self.grok_home)
+            .map_err(|_| ProviderError::AnthropicCatalogUnavailable)
+    }
+
     /// Refresh every catalog whose provider is currently configured. Used at
     /// startup so the synchronous config resolver sees the latest cached
     /// projection without delaying one provider behind another.
@@ -1022,6 +1257,22 @@ impl ProviderManager {
                 }
             }
         };
+        let refresh_anthropic = async {
+            if self.api_key(ProviderId::Anthropic).ok().flatten().is_some() {
+                match self.refresh_anthropic_catalog().await {
+                    Ok(catalog) => {
+                        tracing::info!(
+                            model_count = catalog.models.len(),
+                            source = ?catalog.source,
+                            "Anthropic model catalog refreshed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Anthropic model catalog refresh failed");
+                    }
+                }
+            }
+        };
         let refresh_codex = async {
             match self.refresh_codex_catalog().await {
                 Ok(models) if !models.is_empty() => {
@@ -1036,7 +1287,12 @@ impl ProviderManager {
                 }
             }
         };
-        tokio::join!(refresh_openai, refresh_openrouter, refresh_codex);
+        tokio::join!(
+            refresh_openai,
+            refresh_openrouter,
+            refresh_anthropic,
+            refresh_codex
+        );
     }
 
     /// Persist the ChatGPT OAuth model allowlist when subscription auth is active.
@@ -1227,6 +1483,7 @@ pub(crate) fn stored_api_key(kind: ModelProviderKind) -> Option<String> {
         ModelProviderKind::Xai => ProviderId::Xai,
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
+        ModelProviderKind::Anthropic => ProviderId::Anthropic,
         _ => return None,
     };
     let manager = credential_lookup_manager();
@@ -1280,6 +1537,7 @@ pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Opt
     let provider = match model.model_provider.as_ref()?.kind {
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
+        ModelProviderKind::Anthropic => ProviderId::Anthropic,
         ModelProviderKind::OpenAiCompatible | ModelProviderKind::Zai | ModelProviderKind::Xai => {
             return None;
         }
@@ -1887,6 +2145,273 @@ fn clear_openrouter_catalog_cache(grok_home: &Path) -> std::io::Result<()> {
     remove_cache_file(&openrouter_cache_path(grok_home))
 }
 
+fn anthropic_cache_path(grok_home: &Path) -> PathBuf {
+    grok_home.join(ANTHROPIC_CACHE_FILE)
+}
+
+fn anthropic_catalog_ttl_secs() -> u64 {
+    std::env::var(ANTHROPIC_CATALOG_TTL_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(ANTHROPIC_CATALOG_DEFAULT_TTL_SECS)
+}
+
+fn anthropic_cache_is_stale(fetched_at: Option<u64>, ttl: u64) -> bool {
+    openrouter_cache_is_stale(fetched_at, ttl)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AnthropicCatalogCache {
+    version: u8,
+    models: Vec<ProviderModelPreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fetched_at: Option<u64>,
+}
+
+/// Live Anthropic Models API fetch with cursor pagination. Intersects
+/// discovered models with curated product capabilities: curated IDs keep
+/// agent-safe tool/reasoning metadata; unknown IDs are admitted as
+/// experimental with tools disabled (never assumed subagent-capable).
+async fn fetch_anthropic_catalog_live(
+    base_url: &str,
+    api_key: &str,
+) -> Option<Vec<ProviderModelPreset>> {
+    use xai_grok_inference::{AnthropicClient, AnthropicClientConfig, ListModelsParams};
+
+    let client =
+        AnthropicClient::new(AnthropicClientConfig::new(api_key).with_base_url(base_url)).ok()?;
+    let mut after_id: Option<String> = None;
+    let mut discovered: Vec<xai_grok_inference::ModelInfo> = Vec::new();
+    // Bound pagination so a pathological catalog cannot hang refresh.
+    for _ in 0..50 {
+        let page = client
+            .list_models(&ListModelsParams {
+                after_id: after_id.clone(),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+        let has_more = page.page.has_more;
+        let last_id = page.page.last_id.clone();
+        discovered.extend(page.page.data);
+        if !has_more {
+            break;
+        }
+        after_id = last_id.or_else(|| discovered.last().map(|m| m.id.clone()));
+        if after_id.is_none() {
+            break;
+        }
+    }
+    Some(merge_anthropic_catalog(discovered))
+}
+
+fn merge_anthropic_catalog(
+    discovered: Vec<xai_grok_inference::ModelInfo>,
+) -> Vec<ProviderModelPreset> {
+    let mut curated = ProviderManager::presets()
+        .into_iter()
+        .filter(|preset| preset.provider == ProviderId::Anthropic)
+        .collect::<Vec<_>>();
+    let curated_models: std::collections::HashSet<String> =
+        curated.iter().map(|preset| preset.model.clone()).collect();
+    // When live catalog is present, keep curated entries that still appear
+    // (or always keep curated as product-blessed defaults when empty live).
+    if !discovered.is_empty() {
+        let live_ids: std::collections::HashSet<String> =
+            discovered.iter().map(|m| m.id.clone()).collect();
+        // Prefer live metadata for context/max_tokens on curated rows when
+        // available, without demoting tools/reasoning capabilities.
+        for preset in &mut curated {
+            if let Some(info) = discovered.iter().find(|m| m.id == preset.model) {
+                if let Some(input) = info.max_input_tokens.filter(|n| *n > 0) {
+                    preset.context_window = Some(input);
+                }
+                if let Some(max_out) = info.max_tokens.and_then(|n| u32::try_from(n).ok()) {
+                    preset.max_completion_tokens = Some(max_out);
+                }
+                if let Some(name) = info.display_name.clone() {
+                    preset.label = name;
+                }
+            }
+            // Curated IDs missing from `live_ids` stay available: product
+            // aliases may not appear under the same slug in every account.
+            let _ = &live_ids;
+        }
+    }
+    let mut experimental: Vec<ProviderModelPreset> = discovered
+        .into_iter()
+        .filter(|info| {
+            let id = info.id.trim();
+            !id.is_empty() && !curated_models.contains(id)
+        })
+        .map(|info| {
+            let id = info.id.trim().to_owned();
+            // Unknown models: never assume tool/subagent capability. Native
+            // structured-output metadata is retained only for future PR4.
+            let _structured = info
+                .capabilities
+                .as_ref()
+                .and_then(|c| c.structured_outputs.as_ref())
+                .is_some_and(|s| s.supported);
+            ProviderModelPreset {
+                id: format!("anthropic:{id}"),
+                provider: ProviderId::Anthropic,
+                label: info
+                    .display_name
+                    .unwrap_or_else(|| format!("{id} (experimental)")),
+                model: id,
+                base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
+                is_agent: false,
+                description: Some("Discovered from Anthropic Models API".to_owned()),
+                context_window: info.max_input_tokens.filter(|n| *n > 0),
+                max_completion_tokens: info.max_tokens.and_then(|n| u32::try_from(n).ok()),
+                supports_tools: false,
+                supports_reasoning_effort: false,
+                reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            }
+        })
+        .collect();
+    experimental.sort_by(|a, b| a.id.cmp(&b.id));
+    experimental.dedup_by(|a, b| a.id == b.id);
+    curated.extend(experimental);
+    curated
+}
+
+fn load_anthropic_catalog_cache(grok_home: &Path) -> Result<AnthropicCatalog, ()> {
+    let path = anthropic_cache_path(grok_home);
+    let bytes = std::fs::read(&path).map_err(|_| ())?;
+    xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(&path).map_err(|_| ())?;
+    let cache: AnthropicCatalogCache = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    if cache.version != ANTHROPIC_CACHE_VERSION || cache.models.is_empty() {
+        return Err(());
+    }
+    Ok(AnthropicCatalog {
+        source: AnthropicCatalogSource::Cache,
+        models: cache.models,
+        fetched_at: cache.fetched_at,
+    })
+}
+
+fn save_anthropic_catalog_cache(
+    grok_home: &Path,
+    catalog: &AnthropicCatalog,
+) -> std::io::Result<()> {
+    let path = anthropic_cache_path(grok_home);
+    let cache = AnthropicCatalogCache {
+        version: ANTHROPIC_CACHE_VERSION,
+        models: catalog.models.clone(),
+        fetched_at: catalog.fetched_at.or_else(current_epoch_secs),
+    };
+    let bytes = serde_json::to_vec(&cache).map_err(std::io::Error::other)?;
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    xai_grok_shell_base::util::secure_file::write_secure_file(&temporary, &bytes)?;
+    #[cfg(windows)]
+    {
+        let _ = std::fs::remove_file(&path);
+    }
+    std::fs::rename(&temporary, &path)?;
+    xai_grok_shell_base::util::secure_file::ensure_owner_only_permissions(&path)
+}
+
+fn clear_anthropic_catalog_cache(grok_home: &Path) -> std::io::Result<()> {
+    remove_cache_file(&anthropic_cache_path(grok_home))
+}
+
+/// Process-wide guard for Anthropic background catalog refresh (same policy
+/// as OpenRouter: one in-flight refresh, debounce by last attempt).
+static ANTHROPIC_REFRESH_GUARD: std::sync::Mutex<Option<OpenRouterRefreshState>> =
+    std::sync::Mutex::new(None);
+
+struct AnthropicRefreshClaim;
+
+impl Drop for AnthropicRefreshClaim {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = ANTHROPIC_REFRESH_GUARD.lock()
+            && let Some(state) = guard.as_mut()
+        {
+            state.in_flight = false;
+        }
+    }
+}
+
+fn try_claim_anthropic_refresh(fetched_at: Option<u64>, ttl: u64) -> Option<AnthropicRefreshClaim> {
+    if !anthropic_cache_is_stale(fetched_at, ttl) {
+        return None;
+    }
+    let now = current_epoch_secs().unwrap_or(0);
+    let mut guard = ANTHROPIC_REFRESH_GUARD.lock().ok()?;
+    let state = guard.get_or_insert(OpenRouterRefreshState {
+        in_flight: false,
+        last_attempt_secs: 0,
+    });
+    if state.in_flight {
+        return None;
+    }
+    if now.saturating_sub(state.last_attempt_secs) < ttl {
+        return None;
+    }
+    state.in_flight = true;
+    state.last_attempt_secs = now;
+    Some(AnthropicRefreshClaim)
+}
+
+fn maybe_spawn_anthropic_background_refresh(grok_home: &Path) {
+    let ttl = anthropic_catalog_ttl_secs();
+    if ttl == 0 {
+        return;
+    }
+    let manager = credential_lookup_manager();
+    let Ok(Some(_)) = manager.api_key(ProviderId::Anthropic) else {
+        return;
+    };
+    let home = if grok_home == manager.grok_home {
+        manager.grok_home.clone()
+    } else {
+        grok_home.to_path_buf()
+    };
+    let fetched_at = load_anthropic_catalog_cache(&home)
+        .ok()
+        .and_then(|catalog| catalog.fetched_at);
+    let Some(_claim) = try_claim_anthropic_refresh(fetched_at, ttl) else {
+        return;
+    };
+    let anthropic_base = manager.anthropic_base_url.clone();
+    std::thread::spawn(move || {
+        let _claim = _claim;
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::warn!(%error, "Anthropic catalog background runtime failed");
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let manager =
+                ProviderManager::new(&home).with_anthropic_base_url(anthropic_base);
+            match manager.refresh_anthropic_catalog().await {
+                Ok(catalog) => {
+                    tracing::info!(
+                        model_count = catalog.models.len(),
+                        source = ?catalog.source,
+                        "Anthropic model catalog background refresh completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Anthropic model catalog background refresh failed; last-good cache retained"
+                    );
+                }
+            }
+        });
+    });
+}
+
 fn reasoning_effort_options(
     efforts: &[String],
     default: Option<&str>,
@@ -2054,11 +2579,252 @@ mod tests {
         manager
             .set_api_key(ProviderId::OpenRouter, "sk-router")
             .unwrap();
+        manager
+            .set_api_key(ProviderId::Anthropic, "sk-ant-test")
+            .unwrap();
         manager.remove_api_key(ProviderId::OpenAi).unwrap();
         assert_eq!(
             manager.status(ProviderId::OpenAi).state,
             ProviderConnectionState::NotConfigured
         );
+        assert_eq!(
+            manager.status(ProviderId::OpenRouter).state,
+            ProviderConnectionState::Configured
+        );
+        assert_eq!(
+            manager.status(ProviderId::Anthropic).state,
+            ProviderConnectionState::Configured
+        );
+        // Anthropic key removal must not clear OpenRouter or xAI vault entries.
+        manager.remove_api_key(ProviderId::Anthropic).unwrap();
+        assert_eq!(
+            manager.status(ProviderId::Anthropic).state,
+            ProviderConnectionState::NotConfigured
+        );
+        assert_eq!(
+            manager.status(ProviderId::OpenRouter).state,
+            ProviderConnectionState::Configured
+        );
+        let auth = std::fs::read_to_string(home.path().join("auth.json")).unwrap();
+        assert!(auth.contains("openrouter::api_key"));
+        assert!(!auth.contains("anthropic::api_key"));
+        assert!(!auth.contains("sk-ant-test"));
+    }
+
+    #[test]
+    fn peer_order_places_anthropic_after_openrouter() {
+        assert_eq!(
+            ProviderId::ALL,
+            [
+                ProviderId::Xai,
+                ProviderId::OpenAi,
+                ProviderId::OpenRouter,
+                ProviderId::Anthropic,
+            ]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn anthropic_presets_require_key_and_never_borrow_xai() {
+        let home = tempfile::tempdir().unwrap();
+        let _anthropic = EnvGuard::unset("ANTHROPIC_API_KEY");
+        let _xai = EnvGuard::unset(crate::agent::auth_method::XAI_API_KEY_ENV_VAR);
+        let _legacy = EnvGuard::unset(crate::agent::auth_method::LEGACY_XAI_API_KEY_ENV_VAR);
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let config = super::super::config::Config::default();
+        let models = super::super::config::resolve_model_list(&config, None);
+        assert!(
+            !models.keys().any(|k| k.starts_with("anthropic")),
+            "Anthropic presets must stay out of the catalog without a key"
+        );
+
+        let manager = ProviderManager::new(home.path());
+        manager
+            .set_api_key(ProviderId::Anthropic, "sk-ant-fixture")
+            .unwrap();
+        let models = super::super::config::resolve_model_list(&config, None);
+        let sonnet = models
+            .get("anthropic-claude-sonnet-5")
+            .expect("curated Anthropic preset");
+        assert_eq!(
+            sonnet.model_provider.as_ref().map(|p| p.kind),
+            Some(ModelProviderKind::Anthropic)
+        );
+        assert_eq!(
+            sonnet.info.auth_scheme,
+            xai_grok_inference::AuthScheme::XApiKey
+        );
+        assert_eq!(
+            sonnet.info.api_backend,
+            crate::inference::ApiBackend::Messages
+        );
+        // Fail closed: session JWT / XAI_API_KEY must not satisfy Anthropic.
+        let creds = super::super::config::resolve_credentials(sonnet, Some("session-jwt"));
+        assert_eq!(creds.api_key.as_deref(), Some("sk-ant-fixture"));
+        assert_ne!(creds.api_key.as_deref(), Some("session-jwt"));
+        assert_eq!(
+            super::super::config::provider_identity_for_model(sonnet),
+            xai_grok_inference::config::ProviderIdentity::Anthropic
+        );
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    fn anthropic_catalog_merge_keeps_curated_tools_and_demotes_unknown() {
+        let discovered = vec![
+            xai_grok_inference::ModelInfo {
+                id: "claude-sonnet-5".into(),
+                display_name: Some("Claude Sonnet 5".into()),
+                created_at: None,
+                r#type: Some("model".into()),
+                max_input_tokens: Some(1_000_000),
+                max_tokens: Some(128_000),
+                capabilities: None,
+                extra: Default::default(),
+            },
+            xai_grok_inference::ModelInfo {
+                id: "claude-mystery-preview".into(),
+                display_name: Some("Mystery".into()),
+                created_at: None,
+                r#type: Some("model".into()),
+                max_input_tokens: Some(50_000),
+                max_tokens: Some(8_000),
+                capabilities: None,
+                extra: Default::default(),
+            },
+        ];
+        let merged = merge_anthropic_catalog(discovered);
+        let curated = merged
+            .iter()
+            .find(|m| m.model == "claude-sonnet-5")
+            .unwrap();
+        assert!(curated.supports_tools);
+        let experimental = merged
+            .iter()
+            .find(|m| m.id == "anthropic:claude-mystery-preview")
+            .unwrap();
+        assert!(
+            !experimental.supports_tools,
+            "unknown Anthropic models must not be assumed tool-capable"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn anthropic_test_connection_uses_x_api_key_and_models_api() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let home = tempfile::tempdir().unwrap();
+        let _anthropic = EnvGuard::unset("ANTHROPIC_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..read]).unwrap();
+            assert!(
+                request.contains("GET /v1/models"),
+                "Anthropic probe must use Models API: {request}"
+            );
+            assert!(
+                request.contains("x-api-key: sk-ant-probe")
+                    || request.contains("x-api-key:sk-ant-probe"),
+                "must send x-api-key, not Bearer: {request}"
+            );
+            assert!(
+                !request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer"),
+                "must never send Bearer for Anthropic: {request}"
+            );
+            assert!(
+                request.contains("anthropic-version:"),
+                "must pin anthropic-version: {request}"
+            );
+            let body = r#"{"data":[{"id":"claude-sonnet-5","type":"model"}],"has_more":false}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let base = format!("http://{address}");
+        let manager = ProviderManager::new(home.path()).with_anthropic_base_url(base);
+        manager
+            .set_api_key(ProviderId::Anthropic, "sk-ant-probe")
+            .unwrap();
+        let result = manager
+            .test_connection(ProviderId::Anthropic)
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            ProviderConnectionTest::Connected { credits: None }
+        ));
+        server.join().unwrap();
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    fn anthropic_remove_does_not_touch_other_provider_cache_files() {
+        let home = tempfile::tempdir().unwrap();
+        let manager = ProviderManager::new(home.path());
+        manager
+            .set_api_key(ProviderId::OpenRouter, "router-key")
+            .unwrap();
+        manager
+            .set_api_key(ProviderId::Anthropic, "ant-key")
+            .unwrap();
+        // Seed sibling cache files.
+        let openrouter_cache = OpenRouterCatalog {
+            source: OpenRouterCatalogSource::Live,
+            models: vec![ProviderModelPreset {
+                id: "openrouter:x".into(),
+                provider: ProviderId::OpenRouter,
+                label: "x".into(),
+                model: "x".into(),
+                base_url: None,
+                is_agent: false,
+                description: None,
+                context_window: None,
+                max_completion_tokens: None,
+                supports_tools: true,
+                supports_reasoning_effort: false,
+                reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            }],
+            fetched_at: current_epoch_secs(),
+        };
+        save_openrouter_catalog_cache(home.path(), &openrouter_cache).unwrap();
+        let anthropic_cache = AnthropicCatalog {
+            source: AnthropicCatalogSource::Live,
+            models: vec![ProviderModelPreset {
+                id: "anthropic-claude-sonnet-5".into(),
+                provider: ProviderId::Anthropic,
+                label: "Claude Sonnet 5".into(),
+                model: "claude-sonnet-5".into(),
+                base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.into()),
+                is_agent: true,
+                description: None,
+                context_window: Some(1_000_000),
+                max_completion_tokens: Some(128_000),
+                supports_tools: true,
+                supports_reasoning_effort: true,
+                reasoning_efforts: Vec::new(),
+                default_reasoning_effort: None,
+            }],
+            fetched_at: current_epoch_secs(),
+        };
+        save_anthropic_catalog_cache(home.path(), &anthropic_cache).unwrap();
+        manager.remove_api_key(ProviderId::Anthropic).unwrap();
+        assert!(home.path().join(OPENROUTER_CACHE_FILE).exists());
+        assert!(!home.path().join(ANTHROPIC_CACHE_FILE).exists());
         assert_eq!(
             manager.status(ProviderId::OpenRouter).state,
             ProviderConnectionState::Configured
@@ -2153,17 +2919,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_codex_api_keys_and_blank_keys() {
+    fn rejects_blank_api_keys() {
         let home = tempfile::tempdir().unwrap();
         let manager = ProviderManager::new(home.path());
-        assert!(matches!(
-            manager.set_api_key(ProviderId::OpenAi, "x"),
-            Err(ProviderError::ApiKeyUnsupported)
-        ));
-        assert!(matches!(
-            manager.set_api_key(ProviderId::OpenAi, " "),
-            Err(ProviderError::InvalidApiKey)
-        ));
+        // Empty / whitespace keys are rejected for every BYOK provider.
+        for provider in [
+            ProviderId::OpenAi,
+            ProviderId::OpenRouter,
+            ProviderId::Anthropic,
+        ] {
+            assert!(
+                matches!(
+                    manager.set_api_key(provider, " "),
+                    Err(ProviderError::InvalidApiKey)
+                ),
+                "{provider:?} must reject blank keys"
+            );
+            assert!(
+                matches!(
+                    manager.set_api_key(provider, ""),
+                    Err(ProviderError::InvalidApiKey)
+                ),
+                "{provider:?} must reject empty keys"
+            );
+        }
     }
 
     #[test]
@@ -2194,18 +2973,24 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _openai = EnvGuard::unset("OPENAI_API_KEY");
         let _openrouter = EnvGuard::unset("OPENROUTER_API_KEY");
+        let _anthropic = EnvGuard::unset("ANTHROPIC_API_KEY");
         set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
         let manager = ProviderManager::new(home.path());
         let config = super::super::config::Config::default();
         let models = super::super::config::resolve_model_list(&config, None);
 
-        assert_eq!(
-            missing_api_key_provider(&models["openai-gpt-5.6-sol"]),
-            Some(ProviderId::OpenAi)
+        // BYOK presets stay out of the catalog until a credential exists.
+        assert!(
+            !models.contains_key("openai-gpt-5.6-sol"),
+            "OpenAI models must not enter the catalog before a key exists"
         );
         assert!(
             !models.contains_key("openrouter-openai-gpt-5.6-terra"),
             "OpenRouter models must not enter the catalog before a key exists"
+        );
+        assert!(
+            !models.contains_key("anthropic-claude-sonnet-5"),
+            "Anthropic models must not enter the catalog before a key exists"
         );
         assert!(
             !models.contains_key("codex-subscription"),
@@ -2219,6 +3004,25 @@ mod tests {
         assert_eq!(
             missing_api_key_provider(&models["openrouter-openai-gpt-5.6-terra"]),
             None
+        );
+
+        // Install an Anthropic model entry while clearing the vault to verify
+        // missing_api_key_provider fail-closed detection.
+        manager
+            .set_api_key(ProviderId::Anthropic, "anthropic-key")
+            .unwrap();
+        let models = super::super::config::resolve_model_list(&config, None);
+        assert_eq!(
+            missing_api_key_provider(&models["anthropic-claude-sonnet-5"]),
+            None
+        );
+        // Snapshot the entry, then clear the vault so credential re-read fails
+        // closed (never xAI session/XAI_API_KEY).
+        let orphan = models["anthropic-claude-sonnet-5"].clone();
+        manager.remove_api_key(ProviderId::Anthropic).unwrap();
+        assert_eq!(
+            missing_api_key_provider(&orphan),
+            Some(ProviderId::Anthropic)
         );
         set_stored_key_home_for_tests(None);
     }

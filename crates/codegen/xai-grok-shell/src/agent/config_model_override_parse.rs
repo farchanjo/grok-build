@@ -680,6 +680,7 @@ mod tests {
             temperature: Some(0.5),
             top_p: Some(0.9),
             api_backend: Some(ApiBackend::Messages),
+            auth_scheme: None,
             openrouter_fallback_models: Some(vec!["openai/gpt-5-mini".into()]),
             provider_preferences: None,
             plugins: None,

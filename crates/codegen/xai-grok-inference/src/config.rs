@@ -45,6 +45,10 @@ pub enum ProviderIdentity {
     OpenAi,
     #[serde(rename = "openrouter")]
     OpenRouter,
+    /// Direct Anthropic Messages API (`x-api-key` + `anthropic-version`).
+    /// Never first-party xAI and never OpenRouter routing/diagnostics.
+    #[serde(rename = "anthropic")]
+    Anthropic,
 }
 
 /// OpenRouter routing `sort`: string shorthand (`"latency"`) or object form
@@ -224,7 +228,7 @@ impl ProviderIdentity {
     ///
     /// Only first-party xAI requests carry the stable session/conversation
     /// identifiers in `x-grok-*` request headers. Third-party providers
-    /// (OpenAI, OpenRouter, custom) must never see those headers.
+    /// (OpenAI, OpenRouter, Anthropic, custom) must never see those headers.
     pub fn is_first_party(self) -> bool {
         matches!(self, ProviderIdentity::Xai)
     }
@@ -236,18 +240,25 @@ impl ProviderIdentity {
         matches!(self, ProviderIdentity::OpenRouter)
     }
 
+    /// Returns `true` only for direct Anthropic (not OpenRouter Claude routes
+    /// and not custom Messages backends).
+    pub fn is_anthropic(self) -> bool {
+        matches!(self, ProviderIdentity::Anthropic)
+    }
+
     /// Generic user-facing label for this provider, used in
     /// provider-aware error copy (502/520-class, 402, etc.). This is the
     /// fallback when the diagnostics `provider_name` (the selected
     /// OpenRouter upstream) is unavailable at the call site.
     ///
-    /// xAI keeps the historical "Grok" wording; OpenRouter and OpenAI use
-    /// their product names; `Custom` uses a neutral phrase.
+    /// xAI keeps the historical "Grok" wording; OpenRouter, OpenAI, and
+    /// Anthropic use their product names; `Custom` uses a neutral phrase.
     pub fn label(self) -> &'static str {
         match self {
             ProviderIdentity::Xai => "Grok",
             ProviderIdentity::OpenAi => "OpenAI",
             ProviderIdentity::OpenRouter => "OpenRouter",
+            ProviderIdentity::Anthropic => "Anthropic",
             ProviderIdentity::Custom => "the model provider",
         }
     }
@@ -571,6 +582,7 @@ mod tests {
             ProviderIdentity::Xai,
             ProviderIdentity::OpenAi,
             ProviderIdentity::OpenRouter,
+            ProviderIdentity::Anthropic,
         ] {
             let cfg = InferenceConfig {
                 provider_identity: identity,
@@ -588,6 +600,7 @@ mod tests {
         assert!(ProviderIdentity::Xai.is_first_party());
         assert!(!ProviderIdentity::OpenAi.is_first_party());
         assert!(!ProviderIdentity::OpenRouter.is_first_party());
+        assert!(!ProviderIdentity::Anthropic.is_first_party());
         assert!(!ProviderIdentity::Custom.is_first_party());
     }
 
@@ -597,6 +610,17 @@ mod tests {
         assert!(ProviderIdentity::OpenRouter.is_openrouter());
         assert!(!ProviderIdentity::Xai.is_openrouter());
         assert!(!ProviderIdentity::OpenAi.is_openrouter());
+        assert!(!ProviderIdentity::Anthropic.is_openrouter());
         assert!(!ProviderIdentity::Custom.is_openrouter());
+    }
+
+    /// `is_anthropic` is true only for direct Anthropic.
+    #[test]
+    fn provider_identity_anthropic_only_for_anthropic() {
+        assert!(ProviderIdentity::Anthropic.is_anthropic());
+        assert!(!ProviderIdentity::Xai.is_anthropic());
+        assert!(!ProviderIdentity::OpenAi.is_anthropic());
+        assert!(!ProviderIdentity::OpenRouter.is_anthropic());
+        assert!(!ProviderIdentity::Custom.is_anthropic());
     }
 }

@@ -77,6 +77,7 @@ fn provider_label(entry: &ModelEntry) -> String {
         return match provider.kind {
             ModelProviderKind::OpenRouter => "openrouter".to_string(),
             ModelProviderKind::OpenAi => "openai".to_string(),
+            ModelProviderKind::Anthropic => "anthropic".to_string(),
             ModelProviderKind::Xai => "xai".to_string(),
             ModelProviderKind::Zai => "zai".to_string(),
             ModelProviderKind::OpenAiCompatible => {

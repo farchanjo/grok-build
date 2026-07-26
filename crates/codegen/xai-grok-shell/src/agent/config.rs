@@ -3954,6 +3954,10 @@ pub struct ConfigModelOverride {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
+    /// Auth scheme override (`bearer` / `x_api_key`). Anthropic presets set
+    /// `XApiKey`; absent inherits provider defaults or Bearer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<AuthScheme>,
     /// OpenRouter models to try after this model's primary `model` slug.
     /// `None` inherits a linked `[model_providers.<id>]` list; `[]` explicitly
     /// disables that provider-level fallback list for this one model.
@@ -4042,6 +4046,9 @@ impl ConfigModelOverride {
         }
         if let Some(ref v) = self.api_backend {
             entry.info.api_backend = v.clone();
+        }
+        if let Some(scheme) = self.auth_scheme {
+            entry.info.auth_scheme = scheme;
         }
         if !self.extra_headers.is_empty() {
             entry.info.extra_headers = self.extra_headers.clone();
@@ -4416,7 +4423,9 @@ impl ModelEntry {
         self.model_provider.as_ref().is_some_and(|provider| {
             matches!(
                 provider.kind,
-                ModelProviderKind::OpenAi | ModelProviderKind::OpenRouter
+                ModelProviderKind::OpenAi
+                    | ModelProviderKind::OpenRouter
+                    | ModelProviderKind::Anthropic
             )
         })
     }
@@ -4848,11 +4857,12 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             provider.kind,
             crate::agent::model_providers::ModelProviderKind::OpenAi
                 | crate::agent::model_providers::ModelProviderKind::OpenRouter
+                | crate::agent::model_providers::ModelProviderKind::Anthropic
         )
     }) {
-        // Named OpenAI/OpenRouter models are always BYOK. If no scoped API
-        // credential exists, fail closed rather than borrowing the xAI session
-        // or XAI_API_KEY for a third-party endpoint.
+        // Named OpenAI/OpenRouter/Anthropic models are always BYOK. If no
+        // scoped API credential exists, fail closed rather than borrowing the
+        // xAI session or XAI_API_KEY for a third-party endpoint.
         (
             None,
             info.base_url.clone(),
@@ -5223,6 +5233,7 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
         Some(ModelProviderKind::Xai) => ProviderIdentity::Xai,
         Some(ModelProviderKind::OpenAi) => ProviderIdentity::OpenAi,
         Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
+        Some(ModelProviderKind::Anthropic) => ProviderIdentity::Anthropic,
         Some(ModelProviderKind::OpenAiCompatible) | Some(ModelProviderKind::Zai) => {
             ProviderIdentity::Custom
         }

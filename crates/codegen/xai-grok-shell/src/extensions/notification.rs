@@ -1262,6 +1262,7 @@ pub fn approved_provider_for_exact_host(host: &str) -> Option<(&'static str, &'s
     match host {
         "openrouter.ai" => Some(("openrouter", "OpenRouter")),
         "api.openai.com" => Some(("openai", "OpenAI")),
+        "api.anthropic.com" => Some(("anthropic", "Anthropic")),
         _ => None,
     }
 }
@@ -1333,8 +1334,14 @@ mod provider_host_tests {
             approved_provider_for_exact_host("api.openai.com"),
             Some(("openai", "OpenAI"))
         );
+        assert_eq!(
+            approved_provider_for_exact_host("api.anthropic.com"),
+            Some(("anthropic", "Anthropic"))
+        );
         assert!(approved_provider_for_exact_host("www.openrouter.ai").is_none());
         assert!(approved_provider_for_exact_host("openrouter.ai.evil").is_none());
+        assert!(approved_provider_for_exact_host("api.anthropic.com.evil").is_none());
+        assert!(approved_provider_for_exact_host("anthropic.com").is_none());
     }
 
     #[test]

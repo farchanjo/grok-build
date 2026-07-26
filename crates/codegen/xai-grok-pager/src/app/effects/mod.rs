@@ -4663,6 +4663,7 @@ async fn run_provider_operation(
             ProviderKind::Xai => Some(ProviderId::Xai),
             ProviderKind::OpenAi => Some(ProviderId::OpenAi),
             ProviderKind::OpenRouter => Some(ProviderId::OpenRouter),
+            ProviderKind::Anthropic => Some(ProviderId::Anthropic),
             ProviderKind::Configured(_) => None,
         }
     }
@@ -4773,7 +4774,7 @@ async fn run_provider_operation(
                 }
             } else if matches!(
                 provider,
-                ProviderKind::OpenAi | ProviderKind::OpenRouter
+                ProviderKind::OpenAi | ProviderKind::OpenRouter | ProviderKind::Anthropic
             ) {
                 // An explicit refresh is also the user's request to refresh
                 // the discovered API-provider catalog. The manager verifies
@@ -4790,6 +4791,9 @@ async fn run_provider_operation(
                         }
                         ProviderKind::OpenRouter => {
                             let _ = manager.refresh_openrouter_catalog().await;
+                        }
+                        ProviderKind::Anthropic => {
+                            let _ = manager.refresh_anthropic_catalog().await;
                         }
                         ProviderKind::Xai | ProviderKind::Configured(_) => unreachable!(),
                     }
