@@ -22,7 +22,7 @@ WRAPPER_SOURCE ?= $(abspath grok-custom)
 DEPLOY_WRAPPER ?= $(DEPLOY_DIR)/grok-custom
 
 CODESIGN ?= /usr/bin/codesign
-CODESIGN_IDENTITY ?= -
+CODESIGN_IDENTITY ?= Developer ID Application: Fabricio Fonseca (MYT54AW7PD)
 CODESIGN_IDENTIFIER ?= grok-custom
 
 SUDO ?= sudo
@@ -212,6 +212,8 @@ help:
 	@echo "make deploy-wrapper  Back up and deploy the wrapper to $(DEPLOY_WRAPPER)"
 	@echo "make verify          Verify the binary, wrapper, permissions, and isolation"
 	@echo
-	@echo "Signing defaults to Apple codesign ad-hoc mode (CODESIGN_IDENTITY=-)."
-	@echo "For Developer ID signing:"
+	@echo "Signing defaults to Developer ID Application: Fabricio Fonseca (MYT54AW7PD)."
+	@echo "For ad-hoc signing (local-only, no Gatekeeper):"
+	@echo '  make deploy CODESIGN_IDENTITY="-"'
+	@echo "For a different Developer ID:"
 	@echo '  make deploy CODESIGN_IDENTITY="Developer ID Application: Name (TEAMID)"'
