@@ -187,39 +187,98 @@ pub struct TurnProcessOutcome {
 #[derive(Debug)]
 pub enum TurnProcessError {
     Spawn(String),
-    StartupTimeout,
-    IdleTimeout,
-    TurnTimeout,
-    LineTooLarge { bytes: usize, max: usize },
-    OutputTooLarge { bytes: usize, max: usize },
-    StderrFlood { bytes: usize, max: usize },
-    InvalidUtf8,
-    Io(String),
-    Cancelled,
+    StartupTimeout {
+        /// Bounded NDJSON lines already read before failure (may be empty).
+        partial_lines: Vec<String>,
+    },
+    IdleTimeout {
+        partial_lines: Vec<String>,
+    },
+    TurnTimeout {
+        partial_lines: Vec<String>,
+    },
+    LineTooLarge {
+        bytes: usize,
+        max: usize,
+        partial_lines: Vec<String>,
+    },
+    OutputTooLarge {
+        bytes: usize,
+        max: usize,
+        partial_lines: Vec<String>,
+    },
+    StderrFlood {
+        bytes: usize,
+        max: usize,
+    },
+    InvalidUtf8 {
+        partial_lines: Vec<String>,
+    },
+    Io {
+        message: String,
+        partial_lines: Vec<String>,
+    },
+    Cancelled {
+        partial_lines: Vec<String>,
+    },
+}
+
+impl TurnProcessError {
+    /// Bounded stdout NDJSON lines observed before this failure (no secrets).
+    pub fn partial_lines(&self) -> &[String] {
+        match self {
+            Self::Spawn(_) | Self::StderrFlood { .. } => &[],
+            Self::StartupTimeout { partial_lines }
+            | Self::IdleTimeout { partial_lines }
+            | Self::TurnTimeout { partial_lines }
+            | Self::LineTooLarge { partial_lines, .. }
+            | Self::OutputTooLarge { partial_lines, .. }
+            | Self::InvalidUtf8 { partial_lines }
+            | Self::Io { partial_lines, .. }
+            | Self::Cancelled { partial_lines } => partial_lines.as_slice(),
+        }
+    }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::Io {
+            message: message.into(),
+            partial_lines: Vec::new(),
+        }
+    }
+
+    pub fn io_with_lines(message: impl Into<String>, partial_lines: Vec<String>) -> Self {
+        Self::Io {
+            message: message.into(),
+            partial_lines,
+        }
+    }
 }
 
 impl std::fmt::Display for TurnProcessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never include partial NDJSON line bodies in Display (logs/diagnostics).
         match self {
             Self::Spawn(m) => write!(f, "failed to spawn Claude CLI: {m}"),
-            Self::StartupTimeout => write!(f, "Claude CLI startup timed out"),
-            Self::IdleTimeout => write!(f, "Claude CLI idle timeout (no output)"),
-            Self::TurnTimeout => write!(f, "Claude CLI turn timed out"),
-            Self::LineTooLarge { bytes, max } => {
+            Self::StartupTimeout { .. } => write!(f, "Claude CLI startup timed out"),
+            Self::IdleTimeout { .. } => write!(f, "Claude CLI idle timeout (no output)"),
+            Self::TurnTimeout { .. } => write!(f, "Claude CLI turn timed out"),
+            Self::LineTooLarge { bytes, max, .. } => {
                 write!(
                     f,
                     "Claude CLI NDJSON line too large ({bytes} > {max} bytes)"
                 )
             }
-            Self::OutputTooLarge { bytes, max } => {
+            Self::OutputTooLarge { bytes, max, .. } => {
                 write!(f, "Claude CLI stdout exceeded cap ({bytes} > {max} bytes)")
             }
             Self::StderrFlood { bytes, max } => {
                 write!(f, "Claude CLI stderr exceeded cap ({bytes} > {max} bytes)")
             }
-            Self::InvalidUtf8 => write!(f, "Claude CLI produced invalid UTF-8 on stdout"),
-            Self::Io(m) => write!(f, "Claude CLI I/O error: {m}"),
-            Self::Cancelled => write!(f, "Claude CLI turn cancelled"),
+            Self::InvalidUtf8 { .. } => {
+                write!(f, "Claude CLI produced invalid UTF-8 on stdout")
+            }
+            Self::Io { message, .. } => write!(f, "Claude CLI I/O error: {message}"),
+            Self::Cancelled { .. } => write!(f, "Claude CLI turn cancelled"),
         }
     }
 }
@@ -268,6 +327,8 @@ pub async fn run_turn_process(
         }
     };
 
+    // Note: stdin write errors below happen before any lines are collected.
+
     // Write prompt; close stdin for one-shot (default). Persistent mode keeps
     // stdin open (handled by persistent.rs) — one-shot always closes.
     if let Some(mut stdin) = child.stdin.take() {
@@ -275,7 +336,7 @@ pub async fn run_turn_process(
             let line = stream_json_user_prompt_line(&plan.prompt);
             if let Err(e) = stdin.write_all(line.as_bytes()).await {
                 terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
-                return Err(TurnProcessError::Io(format!("stdin write: {e}")));
+                return Err(TurnProcessError::io(format!("stdin write: {e}")));
             }
         }
         if plan.close_stdin_after_prompt {
@@ -290,7 +351,7 @@ pub async fn run_turn_process(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| TurnProcessError::Io("stdout missing".into()))?;
+        .ok_or_else(|| TurnProcessError::io("stdout missing"))?;
     let stderr = child.stderr.take();
 
     let mut reader = BufReader::with_capacity(64 * 1024, stdout);
@@ -345,12 +406,16 @@ pub async fn run_turn_process(
         if now >= turn_deadline {
             terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
             let _ = stderr_task.await;
-            return Err(TurnProcessError::TurnTimeout);
+            return Err(TurnProcessError::TurnTimeout {
+                partial_lines: lines,
+            });
         }
         if !saw_first_line && now >= startup_deadline {
             terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
             let _ = stderr_task.await;
-            return Err(TurnProcessError::StartupTimeout);
+            return Err(TurnProcessError::StartupTimeout {
+                partial_lines: lines,
+            });
         }
 
         let idle_budget = if saw_first_line {
@@ -375,12 +440,30 @@ pub async fn run_turn_process(
             }
             _ = tokio::time::sleep(idle_budget) => {
                 Err(if saw_first_line {
-                    TurnProcessError::IdleTimeout
+                    TurnProcessError::IdleTimeout {
+                        partial_lines: lines.clone(),
+                    }
                 } else {
-                    TurnProcessError::StartupTimeout
+                    TurnProcessError::StartupTimeout {
+                        partial_lines: lines.clone(),
+                    }
                 })
             }
-            res = read_line_capped(&mut reader, &mut line_buf, limits.max_line_bytes) => res,
+            res = read_line_capped(&mut reader, &mut line_buf, limits.max_line_bytes) => {
+                res.map_err(|e| match e {
+                    TurnProcessError::LineTooLarge { bytes, max, .. } => {
+                        TurnProcessError::LineTooLarge {
+                            bytes,
+                            max,
+                            partial_lines: lines.clone(),
+                        }
+                    }
+                    TurnProcessError::Io { message, .. } => {
+                        TurnProcessError::io_with_lines(message, lines.clone())
+                    }
+                    other => other,
+                })
+            }
         };
 
         match read_result {
@@ -394,6 +477,7 @@ pub async fn run_turn_process(
                     return Err(TurnProcessError::OutputTooLarge {
                         bytes: total_stdout,
                         max: limits.max_stdout_bytes,
+                        partial_lines: lines,
                     });
                 }
                 // Trim trailing newline for parser; keep empty lines out.
@@ -410,7 +494,9 @@ pub async fn run_turn_process(
                     Err(_) => {
                         terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
                         let _ = stderr_task.await;
-                        return Err(TurnProcessError::InvalidUtf8);
+                        return Err(TurnProcessError::InvalidUtf8 {
+                            partial_lines: lines,
+                        });
                     }
                 };
                 lines.push(line);
@@ -427,7 +513,7 @@ pub async fn run_turn_process(
         Ok(Ok(st)) => st,
         Ok(Err(e)) => {
             terminate_child_tree(&mut child, None, limits.shutdown_grace).await;
-            return Err(TurnProcessError::Io(e.to_string()));
+            return Err(TurnProcessError::io_with_lines(e.to_string(), lines));
         }
         Err(_) => {
             terminate_child_tree(&mut child, Some(group), limits.shutdown_grace).await;
@@ -484,7 +570,7 @@ async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
         let n = reader
             .read(&mut byte)
             .await
-            .map_err(|e| TurnProcessError::Io(e.to_string()))?;
+            .map_err(|e| TurnProcessError::io(e.to_string()))?;
         if n == 0 {
             return Ok(buf.len());
         }
@@ -492,6 +578,7 @@ async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
             return Err(TurnProcessError::LineTooLarge {
                 bytes: buf.len() + 1,
                 max,
+                partial_lines: Vec::new(),
             });
         }
         buf.push(byte[0]);

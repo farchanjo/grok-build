@@ -713,7 +713,7 @@ exit 0
         .await
         .expect_err("invalid UTF-8 must fail");
         assert!(
-            matches!(err, process::TurnProcessError::InvalidUtf8),
+            matches!(err, process::TurnProcessError::InvalidUtf8 { .. }),
             "got {err:?}"
         );
     })

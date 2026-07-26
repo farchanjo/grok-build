@@ -379,6 +379,15 @@ impl SessionActor {
     ) -> bool {
         use crate::session::helpers::memory_flush::*;
 
+        // External backends never run native memory flush (defense in depth).
+        if self.execution_backend.get().is_external() {
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_EXTERNAL_SKIP: refusing memory flush on external backend (trigger={trigger})"
+            );
+            return false;
+        }
+
         // Atomically acquire the flushing lock. If another flush is already
         // running (idle timer, pre-compaction, or user-requested), skip.
         if !self.memory.try_acquire_flush_lock() {

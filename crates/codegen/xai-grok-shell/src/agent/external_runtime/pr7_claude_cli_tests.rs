@@ -739,6 +739,104 @@ fn session_aware_factory_attaches_permission_handle_and_capability_mode() {
     assert!(!auto_rt.test_always_approve_opt_in());
 }
 
+/// Fake Claude emits init + assistant text then hangs → idle timeout (non-cancel).
+/// Runtime error must carry normalized TextDelta partial_events (not raw NDJSON).
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn non_cancel_timeout_preserves_partial_text_delta_events() {
+    with_opt_in_async(|| async {
+        sandbox_probe::set_explicit_verified_posture(Some(ChildSandboxPosture {
+            parent_applied: false,
+            profile: None,
+            mechanism: SandboxMechanism::None,
+            descendants_inherit_fs: true,
+            process_network_open_for_api: true,
+            notes: vec![],
+        }));
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "2.1.250"; exit 0; fi
+done
+echo '{"type":"system","subtype":"init","session_id":"partial-sess-1","model":"sonnet","capabilities":[]}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"partial from timeout"}]}}'
+# Hang so idle timeout fires after lines were read (non-cancel failure).
+while true; do sleep 1; done
+"#;
+        let fake = write_fake_claude(dir.path(), script);
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("CLAUDE_CONFIG_DIR", home.path().join("claude-config"));
+        }
+
+        let runtime = ClaudeCliRuntime::new(Some(fake))
+            .with_limits(ProcessLimits {
+                startup: Duration::from_secs(5),
+                idle: Duration::from_millis(400),
+                turn: Duration::from_secs(10),
+                shutdown_grace: Duration::from_millis(200),
+                max_line_bytes: 1024 * 1024,
+                max_stdout_bytes: 8 * 1024 * 1024,
+                max_stderr_bytes: 64 * 1024,
+            })
+            .with_host_executable(std::env::current_exe().unwrap());
+
+        let _ = runtime.probe().await;
+        let env = runtime
+            .start(ExternalStartRequest {
+                cwd: dir.path().display().to_string(),
+                worktree_identity: None,
+                selected_model: None,
+                reasoning_effort: None,
+                token_budget: None,
+            })
+            .await
+            .expect("start");
+
+        let err = runtime
+            .turn(
+                &env,
+                ExternalTurnRequest {
+                    prompt: "hi".into(),
+                    selected_model: None,
+                    reasoning_effort: None,
+                    token_budget: None,
+                },
+            )
+            .await
+            .expect_err("idle timeout must fail");
+
+        assert_eq!(
+            err.kind,
+            ExternalRuntimeErrorKind::Transport,
+            "must stay Transport (not Cancelled/success): {err:?}"
+        );
+        assert!(
+            err.partial_events.iter().any(
+                |e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { text } if text.contains("partial from timeout"))
+            ),
+            "partial TextDelta must be preserved: {:?}",
+            err.partial_events
+        );
+        // No raw NDJSON in error message / events dump path.
+        let msg = err.to_string();
+        assert!(!msg.contains("stream_event"));
+        assert!(!msg.contains("partial from timeout")); // Display must not leak line bodies
+        if let Some(ref pe) = err.partial_envelope {
+            assert_eq!(pe.session_pointer.as_deref(), Some("partial-sess-1"));
+        }
+
+        sandbox_probe::set_explicit_verified_posture(None);
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn plan_plus_yolo_factory_is_read_only_and_broker_denies_write() {
     use super::claude_cli::permission_bridge::{

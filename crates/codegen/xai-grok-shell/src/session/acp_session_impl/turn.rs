@@ -227,36 +227,50 @@ impl SessionActor {
             Ok(o) => o,
             Err(e) => {
                 // Persist text-only partial assistant content exactly once on
-                // *any* failure that carried TextDelta events (not only Cancelled).
+                // *any* failure that carried TextDelta events (cancel or not).
                 // Never include ToolCall/Status/Error display text; never Grok tools.
+                // Process APIs buffer NDJSON (no live stream), so emit UI TextDelta
+                // once here for all failure kinds without double-emitting.
                 let partial_text = Self::collect_external_text_deltas(&e.partial_events);
                 if !partial_text.is_empty() {
-                    // Stream TextDeltas for cancelled turns (user-visible partial).
-                    if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled
-                    {
-                        for event in &e.partial_events {
-                            if let ExternalRuntimeTurnEvent::TextDelta { text } = event {
-                                if text.is_empty() {
-                                    continue;
-                                }
-                                self.send_update(
-                                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                                        acp::ContentBlock::Text(acp::TextContent::new(
-                                            text.clone(),
-                                        )),
-                                    )),
-                                    None,
-                                )
-                                .await;
+                    for event in &e.partial_events {
+                        if let ExternalRuntimeTurnEvent::TextDelta { text } = event {
+                            if text.is_empty() {
+                                continue;
                             }
+                            self.send_update(
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
+                                )),
+                                None,
+                            )
+                            .await;
                         }
                     }
                     self.chat_state_handle
                         .push_assistant_response(ConversationItem::assistant(partial_text));
                 }
 
+                // Best-effort envelope on any failure that carries a partial pointer.
+                if let Some(partial) = e.partial_envelope.clone() {
+                    if let Ok(validated) = partial.clone().validated() {
+                        *self.external_runtime.borrow_mut() = Some(validated.clone());
+                        let model_id = acp::ModelId::new(selected_model.clone());
+                        let agent_name = self.agent.borrow().definition().name.clone();
+                        let _ = self.notifications.persistence_tx.send(
+                            crate::session::persistence::PersistenceMsg::CurrentModel {
+                                model_id,
+                                agent_name: Some(agent_name),
+                                reasoning_effort: None,
+                                execution_backend: Some(backend),
+                                external_runtime: Some(Some(validated)),
+                            },
+                        );
+                    }
+                }
+
                 if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
-                    // Status/error display only for cancel path (not chat-state).
+                    // Status display only for cancel path (not chat-state).
                     for event in &e.partial_events {
                         if let ExternalRuntimeTurnEvent::Status { message } = event {
                             self.send_update(
@@ -268,24 +282,6 @@ impl SessionActor {
                                 None,
                             )
                             .await;
-                        }
-                    }
-                    // Persist best-effort partial envelope (session pointer) so
-                    // the next turn can --resume.
-                    if let Some(partial) = e.partial_envelope.clone() {
-                        if let Ok(validated) = partial.clone().validated() {
-                            *self.external_runtime.borrow_mut() = Some(validated.clone());
-                            let model_id = acp::ModelId::new(selected_model.clone());
-                            let agent_name = self.agent.borrow().definition().name.clone();
-                            let _ = self.notifications.persistence_tx.send(
-                                crate::session::persistence::PersistenceMsg::CurrentModel {
-                                    model_id,
-                                    agent_name: Some(agent_name),
-                                    reasoning_effort: None,
-                                    execution_backend: Some(backend),
-                                    external_runtime: Some(Some(validated)),
-                                },
-                            );
                         }
                     }
                     return Ok(crate::session::commands::PromptTurnOk {

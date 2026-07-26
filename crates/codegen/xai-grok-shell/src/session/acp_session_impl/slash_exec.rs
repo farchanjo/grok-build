@@ -51,6 +51,12 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::FlushMemory => {
+                if self.execution_backend.get().is_external() {
+                    let msg = "Memory flush is not supported on Claude Agent (CLI, Experimental) \
+                        sessions. Start /new with a native model.";
+                    self.send_host_turn_slash_command_output(msg).await;
+                    return ok_end_turn(0, None);
+                }
                 if self.memory.is_enabled() {
                     let did_flush = self.run_memory_flush("slash_command", None).await;
                     if !did_flush {

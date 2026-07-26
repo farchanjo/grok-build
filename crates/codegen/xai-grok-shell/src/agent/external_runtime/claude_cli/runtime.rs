@@ -320,24 +320,29 @@ fn map_discovery_error(e: ClaudeCliDiscoveryError) -> ExternalRuntimeError {
     ExternalRuntimeError::new(kind, message, Some(ExternalAgentKind::ClaudeCli))
 }
 
-fn map_process_error(e: TurnProcessError) -> ExternalRuntimeError {
+/// Map process failures into transport/cancel errors, preserving already-read
+/// bounded NDJSON as normalized partial_events + best-effort partial_envelope.
+fn map_process_error(
+    e: TurnProcessError,
+    base: &ExternalRuntimeEnvelope,
+    d: &ClaudeCliDiscovery,
+    session_id: Option<String>,
+) -> ExternalRuntimeError {
+    let lines = e.partial_lines().to_vec();
     match e {
-        TurnProcessError::Cancelled => ExternalRuntimeError::cancelled(
-            ExternalAgentKind::ClaudeCli,
+        TurnProcessError::Cancelled { partial_lines } => cancelled_with_partial(
             "Claude Agent CLI turn was cancelled",
-            None,
-            Vec::new(),
+            base,
+            d,
+            session_id,
+            &partial_lines,
         ),
         TurnProcessError::Spawn(m) => ExternalRuntimeError::new(
             ExternalRuntimeErrorKind::Transport,
             format!("failed to spawn Claude CLI: {m}"),
             Some(ExternalAgentKind::ClaudeCli),
         ),
-        other => ExternalRuntimeError::new(
-            ExternalRuntimeErrorKind::Transport,
-            other.to_string(),
-            Some(ExternalAgentKind::ClaudeCli),
-        ),
+        other => transport_with_partial(other.to_string(), base, d, session_id, &lines),
     }
 }
 
@@ -349,13 +354,26 @@ fn map_protocol_error(e: ProtocolError) -> ExternalRuntimeError {
     )
 }
 
-fn cancelled_with_partial(
-    msg: &str,
+fn map_protocol_error_with_partial(
+    e: ProtocolError,
     base: &ExternalRuntimeEnvelope,
     d: &ClaudeCliDiscovery,
     session_id: Option<String>,
     lines: &[String],
 ) -> ExternalRuntimeError {
+    transport_with_partial(e.to_string(), base, d, session_id, lines)
+}
+
+/// Best-effort envelope + normalized events from incomplete NDJSON (no raw lines).
+fn partial_from_lines(
+    base: &ExternalRuntimeEnvelope,
+    d: &ClaudeCliDiscovery,
+    session_id: Option<String>,
+    lines: &[String],
+) -> (
+    Option<ExternalRuntimeEnvelope>,
+    Vec<crate::agent::external_runtime::ExternalRuntimeTurnEvent>,
+) {
     let partial = protocol::parse_turn_lines_allow_incomplete(lines);
     let mut env = base.clone();
     if let Some(sid) = partial.session_id.or(session_id) {
@@ -381,7 +399,6 @@ fn cancelled_with_partial(
     let env = match env.validated() {
         Ok(v) => Some(v),
         Err(_) => {
-            // Minimal pointer-only envelope if full validation fails.
             let mut e = base.clone();
             e.session_pointer = pointer;
             e.observed_version = version;
@@ -389,7 +406,37 @@ fn cancelled_with_partial(
             e.validated().ok()
         }
     };
+    (env, events)
+}
+
+fn cancelled_with_partial(
+    msg: &str,
+    base: &ExternalRuntimeEnvelope,
+    d: &ClaudeCliDiscovery,
+    session_id: Option<String>,
+    lines: &[String],
+) -> ExternalRuntimeError {
+    let (env, events) = partial_from_lines(base, d, session_id, lines);
     ExternalRuntimeError::cancelled(ExternalAgentKind::ClaudeCli, msg, env, events)
+}
+
+/// Non-cancel failure that still carries normalized partial events.
+fn transport_with_partial(
+    msg: impl Into<String>,
+    base: &ExternalRuntimeEnvelope,
+    d: &ClaudeCliDiscovery,
+    session_id: Option<String>,
+    lines: &[String],
+) -> ExternalRuntimeError {
+    let (env, events) = partial_from_lines(base, d, session_id, lines);
+    let mut err = ExternalRuntimeError::new(
+        ExternalRuntimeErrorKind::Transport,
+        msg,
+        Some(ExternalAgentKind::ClaudeCli),
+    );
+    err.partial_envelope = env;
+    err.partial_events = events;
+    err
 }
 
 #[async_trait]
@@ -593,16 +640,9 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
 
         let outcome = match outcome {
             Ok(o) => o,
-            Err(TurnProcessError::Cancelled) => {
-                return Err(cancelled_with_partial(
-                    "Claude Agent CLI turn was cancelled",
-                    envelope,
-                    &d,
-                    session_id,
-                    &[],
-                ));
+            Err(e) => {
+                return Err(map_process_error(e, envelope, &d, session_id));
             }
-            Err(e) => return Err(map_process_error(e)),
         };
 
         // Single terminal for cancellation: always ExternalRuntimeErrorKind::Cancelled
@@ -688,7 +728,14 @@ impl ClaudeCliRuntime {
                     let outcome = sess
                         .run_turn(&request.prompt, cancel.clone())
                         .await
-                        .map_err(map_process_error)?;
+                        .map_err(|e| {
+                            map_process_error(
+                                e,
+                                envelope,
+                                d,
+                                sess.pointer_for_resume().or(session_id.clone()),
+                            )
+                        })?;
                     if outcome.cancelled {
                         return Err(cancelled_with_partial(
                             "Claude Agent CLI persistent turn cancelled",
@@ -739,11 +786,11 @@ impl ClaudeCliRuntime {
         let plan = argv.build_plan();
         let mut sess = PersistentClaudeSession::spawn(&plan, self.limits.clone())
             .await
-            .map_err(map_process_error)?;
+            .map_err(|e| map_process_error(e, envelope, d, session_id.clone()))?;
         let outcome = sess
             .run_turn(&request.prompt, cancel.clone())
             .await
-            .map_err(map_process_error)?;
+            .map_err(|e| map_process_error(e, envelope, d, session_id.clone()))?;
         if outcome.cancelled {
             let ptr = sess.pointer_for_resume().or(session_id.clone());
             // Keep pointer on envelope even if we drop the child.
@@ -790,7 +837,7 @@ impl ClaudeCliRuntime {
         let plan = argv.build_plan();
         let outcome = process::run_turn_process(&plan, &self.limits, cancel)
             .await
-            .map_err(map_process_error)?;
+            .map_err(|e| map_process_error(e, envelope, d, None))?;
         if outcome.cancelled {
             return Err(cancelled_with_partial(
                 "Claude Agent CLI resume turn cancelled",
@@ -814,7 +861,19 @@ fn finalize_turn_outcome(
     let mut outcome = if allow_incomplete {
         persistent::apply_outcome_to_envelope(envelope, lines, true).map_err(map_protocol_error)?
     } else {
-        persistent::apply_outcome_to_envelope(envelope, lines, false).map_err(map_protocol_error)?
+        match persistent::apply_outcome_to_envelope(envelope, lines, false) {
+            Ok(o) => o,
+            Err(pe) => {
+                // Incomplete/malformed after partial stdout: preserve TextDeltas.
+                return Err(map_protocol_error_with_partial(
+                    pe,
+                    envelope,
+                    d,
+                    session_id.clone(),
+                    lines,
+                ));
+            }
+        }
     };
     if outcome.envelope.session_pointer.is_none() {
         if let Some(sid) = session_id {
@@ -837,11 +896,14 @@ fn finalize_turn_outcome(
         });
     }
     let env = outcome.envelope.validated().map_err(|e| {
-        ExternalRuntimeError::new(
+        // Validation failure still keeps normalized events when possible.
+        let mut err = ExternalRuntimeError::new(
             ExternalRuntimeErrorKind::InvalidRequest,
             e.to_string(),
             Some(ExternalAgentKind::ClaudeCli),
-        )
+        );
+        err.partial_events = outcome.events.clone();
+        err
     })?;
     Ok(ExternalTurnOutcome {
         events: outcome.events,

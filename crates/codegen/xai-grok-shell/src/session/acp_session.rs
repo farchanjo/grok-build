@@ -1424,6 +1424,7 @@ mod client_hooks_tests;
 #[path = "acp_session_tests/external_runtime_preflight_tests.rs"]
 mod external_runtime_preflight_tests;
 
+#[cfg(test)]
 #[path = "acp_session_tests/external_runtime_session_tests.rs"]
 mod external_runtime_session_tests;
 #[cfg(test)]

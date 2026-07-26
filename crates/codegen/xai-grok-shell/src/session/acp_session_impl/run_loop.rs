@@ -1163,6 +1163,15 @@ pub(super) async fn run_session(
                         SessionCommand::FlushMemory { respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
+                                if s.execution_backend.get().is_external() {
+                                    let _ = respond_to.send(Err(
+                                        acp::Error::invalid_request().data(
+                                            "memory flush is not supported on external agent sessions"
+                                                .to_string(),
+                                        ),
+                                    ));
+                                    return;
+                                }
                                 if s.memory.is_enabled() {
                                     let did_flush = s.run_memory_flush("user_requested", None).await;
                                     let _ = respond_to.send(Ok(did_flush));

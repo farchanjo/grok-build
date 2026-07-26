@@ -100,11 +100,11 @@ impl PersistentClaudeSession {
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| TurnProcessError::Io("stdin missing".into()))?;
+            .ok_or_else(|| TurnProcessError::io("stdin missing"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| TurnProcessError::Io("stdout missing".into()))?;
+            .ok_or_else(|| TurnProcessError::io("stdout missing"))?;
         let stderr = child.stderr.take();
 
         let stderr_acc = Arc::new(Mutex::new(Vec::new()));
@@ -156,8 +156,8 @@ impl PersistentClaudeSession {
         cancel: CancellationToken,
     ) -> Result<TurnProcessOutcome, TurnProcessError> {
         if self.turn_busy {
-            return Err(TurnProcessError::Io(
-                "persistent session refuses concurrent turns".into(),
+            return Err(TurnProcessError::io(
+                "persistent session refuses concurrent turns",
             ));
         }
         self.turn_busy = true;
@@ -167,11 +167,11 @@ impl PersistentClaudeSession {
         let line = stream_json_user_prompt_line(prompt);
         if let Err(e) = self.stdin.write_all(line.as_bytes()).await {
             self.turn_busy = false;
-            return Err(TurnProcessError::Io(format!("stdin write: {e}")));
+            return Err(TurnProcessError::io(format!("stdin write: {e}")));
         }
         if let Err(e) = self.stdin.flush().await {
             self.turn_busy = false;
-            return Err(TurnProcessError::Io(format!("stdin flush: {e}")));
+            return Err(TurnProcessError::io(format!("stdin flush: {e}")));
         }
 
         let turn_deadline = tokio::time::Instant::now() + self.limits.turn;
@@ -201,12 +201,16 @@ impl PersistentClaudeSession {
             if now >= turn_deadline {
                 self.terminate(cancel.clone()).await;
                 self.turn_busy = false;
-                return Err(TurnProcessError::TurnTimeout);
+                return Err(TurnProcessError::TurnTimeout {
+                    partial_lines: self.current_lines.clone(),
+                });
             }
             if !saw_first && now >= startup_deadline {
                 self.terminate(cancel.clone()).await;
                 self.turn_busy = false;
-                return Err(TurnProcessError::StartupTimeout);
+                return Err(TurnProcessError::StartupTimeout {
+                    partial_lines: self.current_lines.clone(),
+                });
             }
 
             let idle = if saw_first {
@@ -231,12 +235,30 @@ impl PersistentClaudeSession {
                 }
                 _ = tokio::time::sleep(idle) => {
                     Err(if saw_first {
-                        TurnProcessError::IdleTimeout
+                        TurnProcessError::IdleTimeout {
+                            partial_lines: self.current_lines.clone(),
+                        }
                     } else {
-                        TurnProcessError::StartupTimeout
+                        TurnProcessError::StartupTimeout {
+                            partial_lines: self.current_lines.clone(),
+                        }
                     })
                 }
-                res = read_line_capped(&mut self.stdout, &mut line_buf, self.limits.max_line_bytes) => res,
+                res = read_line_capped(&mut self.stdout, &mut line_buf, self.limits.max_line_bytes) => {
+                    res.map_err(|e| match e {
+                        TurnProcessError::LineTooLarge { bytes, max, .. } => {
+                            TurnProcessError::LineTooLarge {
+                                bytes,
+                                max,
+                                partial_lines: self.current_lines.clone(),
+                            }
+                        }
+                        TurnProcessError::Io { message, .. } => {
+                            TurnProcessError::io_with_lines(message, self.current_lines.clone())
+                        }
+                        other => other,
+                    })
+                }
             };
 
             match read_result {
@@ -263,6 +285,7 @@ impl PersistentClaudeSession {
                         return Err(TurnProcessError::OutputTooLarge {
                             bytes: total_stdout,
                             max: self.limits.max_stdout_bytes,
+                            partial_lines: self.current_lines.clone(),
                         });
                     }
                     while line_buf.last().copied() == Some(b'\n')
@@ -278,7 +301,9 @@ impl PersistentClaudeSession {
                         Err(_) => {
                             self.terminate(cancel.clone()).await;
                             self.turn_busy = false;
-                            return Err(TurnProcessError::InvalidUtf8);
+                            return Err(TurnProcessError::InvalidUtf8 {
+                                partial_lines: self.current_lines.clone(),
+                            });
                         }
                     };
                     // Update session metadata from init/result opportunistically.
@@ -407,7 +432,7 @@ async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
         let n = reader
             .read(&mut byte)
             .await
-            .map_err(|e| TurnProcessError::Io(e.to_string()))?;
+            .map_err(|e| TurnProcessError::io(e.to_string()))?;
         if n == 0 {
             return Ok(buf.len());
         }
@@ -415,6 +440,7 @@ async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
             return Err(TurnProcessError::LineTooLarge {
                 bytes: buf.len() + 1,
                 max,
+                partial_lines: Vec::new(),
             });
         }
         buf.push(byte[0]);
@@ -510,7 +536,7 @@ mod tests {
     #[test]
     fn no_concurrent_turn_error_message() {
         // Documented contract string for UI.
-        let err = TurnProcessError::Io("persistent session refuses concurrent turns".into());
+        let err = TurnProcessError::io("persistent session refuses concurrent turns");
         assert!(err.to_string().contains("concurrent"));
     }
 }

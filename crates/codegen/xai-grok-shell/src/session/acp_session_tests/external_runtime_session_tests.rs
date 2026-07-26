@@ -493,6 +493,43 @@ async fn switching_to_native_shuts_down_external_runtime() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn memory_flush_deeper_entry_refuses_external_without_side_effects() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+            actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                ExternalAgentKind::ClaudeCli,
+            ));
+            let flush_before = actor.memory.flush_count.load(Ordering::Relaxed);
+
+            // Core entry (also covers SessionCommand / slash once they call it).
+            let did = actor.run_memory_flush("test_external", None).await;
+            assert!(!did, "external flush must return false");
+            assert_eq!(
+                actor.memory.flush_count.load(Ordering::Relaxed),
+                flush_before,
+                "no flush side effects on external backend"
+            );
+
+            // Slash path explicit message + no mutation.
+            let result = actor
+                .execute_builtin_slash_command(slash_commands::BuiltinAction::FlushMemory)
+                .await
+                .expect("slash ok");
+            assert_eq!(result.stop_reason, acp::StopReason::EndTurn);
+            assert_eq!(
+                actor.memory.flush_count.load(Ordering::Relaxed),
+                flush_before
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn dream_slash_rejected_on_external_backend_without_side_effects() {
     let local = tokio::task::LocalSet::new();
     local
