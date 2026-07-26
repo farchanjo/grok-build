@@ -443,7 +443,14 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                reasoning_efforts: vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()],
+                // Sonnet 5 effort ladder (docs 2026-07): low/medium/high/xhigh;
+                // product default is high.
+                reasoning_efforts: vec![
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                ],
                 default_reasoning_effort: Some("high".to_owned()),
             },
             ProviderModelPreset {
@@ -458,7 +465,15 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                reasoning_efforts: vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()],
+                // Opus 5 documents low/medium/high/xhigh/max; surface xhigh as
+                // the top curated ladder step used by agent presets (max remains
+                // available via hand-written TOML if needed).
+                reasoning_efforts: vec![
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                ],
                 default_reasoning_effort: Some("high".to_owned()),
             },
             ProviderModelPreset {
@@ -472,6 +487,8 @@ impl ProviderManager {
                 context_window: Some(200_000),
                 max_completion_tokens: Some(64_000),
                 supports_tools: true,
+                // Haiku 4.5 supports extended thinking but does not document the
+                // full adaptive effort ladder used by Sonnet/Opus 5.
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
@@ -3030,20 +3047,114 @@ mod tests {
     #[test]
     fn presets_are_credential_free_and_cover_every_model_provider() {
         let presets = ProviderManager::presets();
+        // Exhaustive peer coverage (Xai has no static BYOK presets).
         for provider in [
             ProviderId::OpenAi,
             ProviderId::OpenRouter,
-            ProviderId::OpenAi,
+            ProviderId::Anthropic,
         ] {
-            assert!(presets.iter().any(|preset| preset.provider == provider));
+            assert!(
+                presets.iter().any(|preset| preset.provider == provider),
+                "presets must include {provider:?}"
+            );
         }
-        assert!(manager_status_is_credential_free(
-            &ProviderManager::new(tempfile::tempdir().unwrap().path()).status(ProviderId::Xai)
-        ));
+        assert_eq!(
+            ProviderId::ALL,
+            [
+                ProviderId::Xai,
+                ProviderId::OpenAi,
+                ProviderId::OpenRouter,
+                ProviderId::Anthropic,
+            ],
+            "peer order must stay Xai → OpenAi → OpenRouter → Anthropic"
+        );
+        let home = tempfile::tempdir().unwrap();
+        let manager = ProviderManager::new(home.path());
+        for provider in ProviderId::ALL {
+            let status = manager.status(provider);
+            assert!(
+                manager_status_is_credential_free(&status),
+                "status for {provider:?} must be credential-free"
+            );
+            let json = serde_json::to_string(&status).unwrap();
+            assert!(
+                !json.contains("sk-") && !json.contains("api_key\":\""),
+                "status JSON for {provider:?} must not embed secrets: {json}"
+            );
+            // Serde rename_all = snake_case (OpenAi → open_ai).
+            let expected = match provider {
+                ProviderId::Xai => "\"xai\"",
+                ProviderId::OpenAi => "\"open_ai\"",
+                ProviderId::OpenRouter => "\"open_router\"",
+                ProviderId::Anthropic => "\"anthropic\"",
+            };
+            assert!(
+                json.contains(expected),
+                "status serialization must name {provider:?}: {json}"
+            );
+        }
         assert!(
             serde_json::to_string(&presets)
                 .unwrap()
                 .contains("openai-gpt-5.6-sol")
+        );
+        assert!(
+            serde_json::to_string(&presets)
+                .unwrap()
+                .contains("anthropic-claude-sonnet-5")
+        );
+    }
+
+    #[test]
+    fn anthropic_curated_presets_expose_exact_capability_metadata() {
+        let presets = ProviderManager::presets();
+        let sonnet = presets
+            .iter()
+            .find(|p| p.id == "anthropic-claude-sonnet-5")
+            .expect("sonnet preset");
+        assert_eq!(sonnet.model, "claude-sonnet-5");
+        assert_eq!(sonnet.context_window, Some(1_000_000));
+        assert_eq!(sonnet.max_completion_tokens, Some(128_000));
+        assert!(sonnet.supports_tools);
+        assert!(sonnet.supports_reasoning_effort);
+        assert_eq!(
+            sonnet.reasoning_efforts,
+            vec![
+                "low".to_owned(),
+                "medium".to_owned(),
+                "high".to_owned(),
+                "xhigh".to_owned(),
+            ]
+        );
+        assert_eq!(sonnet.default_reasoning_effort.as_deref(), Some("high"));
+
+        let opus = presets
+            .iter()
+            .find(|p| p.id == "anthropic-claude-opus-5")
+            .expect("opus preset");
+        assert_eq!(opus.model, "claude-opus-5");
+        assert_eq!(
+            opus.reasoning_efforts,
+            vec![
+                "low".to_owned(),
+                "medium".to_owned(),
+                "high".to_owned(),
+                "xhigh".to_owned(),
+            ]
+        );
+        assert_eq!(opus.default_reasoning_effort.as_deref(), Some("high"));
+
+        let haiku = presets
+            .iter()
+            .find(|p| p.id == "anthropic-claude-haiku-4-5")
+            .expect("haiku preset");
+        assert_eq!(haiku.model, "claude-haiku-4-5");
+        assert_eq!(haiku.context_window, Some(200_000));
+        assert_eq!(haiku.max_completion_tokens, Some(64_000));
+        assert!(haiku.supports_tools);
+        assert!(
+            haiku.reasoning_efforts.is_empty(),
+            "Haiku 4.5 does not advertise the Sonnet/Opus adaptive ladder"
         );
     }
 

@@ -737,8 +737,9 @@ impl InferenceClient {
             match config.auth_scheme {
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
+                        // Never log the key value (any provider).
                         tracing::debug!(
-                            api_key = %api_key,
+                            key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
                         InferenceError::Auth(
@@ -751,8 +752,9 @@ impl InferenceClient {
                 AuthScheme::Bearer => {
                     let bearer = format!("Bearer {}", api_key);
                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
+                        // Never log the key value (any provider).
                         tracing::debug!(
-                            api_key = %api_key,
+                            key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
                         InferenceError::Auth(
