@@ -2098,6 +2098,7 @@ fn fork_filter_consecutive_users_with_tool_calls() {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "output"),
             ConversationItem::user("follow-up"),
@@ -2126,6 +2127,7 @@ fn fork_filter_preserves_complete_tool_turn() {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "output"),
         ];
@@ -2150,6 +2152,7 @@ fn fork_filter_strips_incomplete_tool_turn() {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             // Missing tool result — incomplete
         ];
@@ -2360,6 +2363,7 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "output"),
             ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item(
@@ -2407,6 +2411,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "out1"),
             ConversationItem::Reasoning(xai_grok_inference_types::synthesized_reasoning_item("mid")),
@@ -2503,6 +2508,8 @@ fn write_test_summary(
         agent_name: None,
         sandbox_profile: None,
         reasoning_effort: None,
+        execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+        external_runtime: None,
     };
     let json = serde_json::to_vec_pretty(&summary).unwrap();
     std::fs::write(session_dir.join("summary.json"), json).unwrap();
@@ -3504,7 +3511,9 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
             reasoning_effort: None,
             stream_tool_calls: None,
-        },
+        supports_native_schema: None,
+            supports_strict_tools: None,
+},
         Box::new(persistence),
         event_tx,
         tokio_util::sync::CancellationToken::new(),

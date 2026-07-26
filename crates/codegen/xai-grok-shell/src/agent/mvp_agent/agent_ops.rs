@@ -1806,6 +1806,78 @@ impl MvpAgent {
         self.wait_for_in_flight_session_load(session_id).await;
         self.sessions.borrow().get(session_id).cloned()
     }
+
+    /// Resolve the execution backend for a catalog model id (defaults native).
+    pub(crate) fn execution_backend_for_model_id(
+        &self,
+        model_id: &acp::ModelId,
+    ) -> crate::agent::execution_backend::ExecutionBackend {
+        self.resolve_model_id(model_id)
+            .map(|e| e.info.execution_backend)
+            .unwrap_or_default()
+    }
+
+    /// Apply execution mode to the live actor and re-persist it on the Summary.
+    ///
+    /// Used on new-session seed (from catalog model) and on resume (summary is
+    /// authoritative — call **after** model_switch so catalog cannot win).
+    /// Envelope validation failures are returned (fail closed).
+    pub(crate) async fn restore_summary_execution_mode(
+        &self,
+        session_id: &acp::SessionId,
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
+        external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+    ) -> Result<(), acp::Error> {
+        let handle = self
+            .sessions
+            .borrow()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                acp::Error::internal_error()
+                    .data("restore_summary_execution_mode: unknown session")
+            })?;
+        let (tx, rx) = oneshot::channel();
+        if handle
+            .cmd_tx
+            .send(crate::session::SessionCommand::RestoreExecutionMode {
+                execution_backend,
+                external_runtime: external_runtime.clone(),
+                responds_to: tx,
+            })
+            .is_err()
+        {
+            return Err(acp::Error::internal_error()
+                .data("restore_summary_execution_mode: session actor closed"));
+        }
+        let restore_result = rx.await.map_err(|_| {
+            acp::Error::internal_error()
+                .data("restore_summary_execution_mode: no response from actor")
+        })?;
+        restore_result.map_err(|e| acp::Error::invalid_params().data(e))?;
+
+        // Re-persist Summary so a prior model_switch CurrentModel write cannot
+        // leave disk with the catalog's mode.
+        let (ptx, prx) = oneshot::channel();
+        if handle
+            .cmd_tx
+            .send(crate::session::SessionCommand::PersistExecutionMode {
+                execution_backend,
+                external_runtime,
+                responds_to: ptx,
+            })
+            .is_err()
+        {
+            return Err(acp::Error::internal_error()
+                .data("restore_summary_execution_mode: session actor closed (persist)"));
+        }
+        prx.await.map_err(|_| {
+            acp::Error::internal_error()
+                .data("restore_summary_execution_mode: no persist response")
+        })?
+        .map_err(|e| acp::Error::invalid_params().data(e))?;
+        Ok(())
+    }
     /// If a `session/load` for `session_id` is in flight, wait (bounded) for
     /// it to finish. Returns immediately when no load is in flight.
     ///
@@ -3543,12 +3615,27 @@ impl MvpAgent {
             let initial_reasoning_effort = chat_history
                 .is_empty()
                 .then_some(inference_config.reasoning_effort);
+            // Seed durable execution mode from the selected catalog model so a
+            // new session does not require an explicit model switch to persist
+            // external backend / envelope (defaults native).
+            let seed_execution_backend =
+                self.execution_backend_for_model_id(&session_model_id);
+            let seed_external_runtime = seed_execution_backend.external_kind().map(|kind| {
+                crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind)
+            });
+            if let Some(ref env) = seed_external_runtime
+                && let Err(e) = env.validate()
+            {
+                return Err(acp::Error::invalid_params().data(e.to_string()));
+            }
             let _ = persistence
                 .tx
                 .send(crate::session::persistence::PersistenceMsg::CurrentModel {
                     model_id: session_model_id.clone(),
                     agent_name: Some(agent_definition.name.clone()),
                     reasoning_effort: initial_reasoning_effort,
+                    execution_backend: Some(seed_execution_backend),
+                    external_runtime: Some(seed_external_runtime.clone()),
                 });
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
                 session_meta,
@@ -3702,6 +3789,36 @@ impl MvpAgent {
         self.ensure_session_supervisor();
         self.heap_profile_set_session_id(&session_info.id.0);
         self.push_roster_delta_upserted(&session_info.id);
+        // Seed live actor execution mode from the selected model (new sessions).
+        // Resume overwrites this later with summary-authoritative RestoreExecutionMode.
+        {
+            let backend = self.execution_backend_for_model_id(&handle.model_id);
+            let envelope = backend.external_kind().map(|kind| {
+                crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind)
+            });
+            let (tx, rx) = oneshot::channel();
+            if handle
+                .cmd_tx
+                .send(SessionCommand::RestoreExecutionMode {
+                    execution_backend: backend,
+                    external_runtime: envelope,
+                    responds_to: tx,
+                })
+                .is_ok()
+            {
+                match rx.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        return Err(acp::Error::invalid_params().data(e));
+                    }
+                    Err(_) => {
+                        return Err(acp::Error::internal_error().data(
+                            "spawn: failed to seed execution backend on session actor",
+                        ));
+                    }
+                }
+            }
+        }
         if chat_history.is_empty() {
             let _timer = crate::instrumentation_timer!("session.system_prompt_inject");
             let system_prompt = build_spawn_system_prompt(

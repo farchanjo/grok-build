@@ -33,6 +33,7 @@ pub(crate) async fn apply(
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let model = agent.resolve_model_id(&model_id)?;
     let use_concise = model.info().use_concise;
+    let target_execution_backend = model.info().execution_backend;
     let session_default = handle
         .session_default_agent_profile
         .as_deref()
@@ -49,6 +50,45 @@ pub(crate) async fn apply(
             .await
             .map(|s| s.turn_count)
             .unwrap_or(0);
+        // Cross-mode execution backend guard (NativeInference ↔ ClaudeCli, …).
+        // Allowed only before the first established user turn; after that the
+        // session must stay on its persisted mode (resume cannot silently switch).
+        // Fail closed if the actor channel drops — never default to native.
+        {
+            let (mode_tx, mode_rx) = oneshot::channel();
+            if handle
+                .cmd_tx
+                .send(SessionCommand::GetExecutionBackend {
+                    responds_to: mode_tx,
+                })
+                .is_err()
+            {
+                return Err(acp::Error::internal_error().data(
+                    "set_session_model: session actor closed while reading execution backend",
+                ));
+            }
+            let active_backend = mode_rx.await.map_err(|_| {
+                acp::Error::internal_error()
+                    .data("set_session_model: failed to read execution backend (actor closed)")
+            })?;
+            if active_backend.is_cross_mode_with(target_execution_backend) && turn_count > 0 {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    model_id = %model_id.0,
+                    active = %active_backend,
+                    required = %target_execution_backend,
+                    turn_count,
+                    "set_session_model: cross-mode execution backend rejected"
+                );
+                let err_payload =
+                    crate::agent::execution_backend::ModelSwitchCrossExecutionModeError::new(
+                        active_backend,
+                        target_execution_backend,
+                        model_id.0.to_string(),
+                    );
+                return Err(err_payload.into_acp_error());
+            }
+        }
         let (agent_tx, agent_rx) = oneshot::channel();
         let _ = handle.cmd_tx.send(SessionCommand::GetActiveAgent {
             responds_to: agent_tx,
@@ -212,6 +252,7 @@ pub(crate) async fn apply(
         apply_prompt_override,
         skip_prompt_rewrite: did_rebuild || model_unchanged,
         auto_compact_threshold_percent: new_threshold,
+        execution_backend: target_execution_backend,
         responds_to: tx,
     });
     let updated_model = rx

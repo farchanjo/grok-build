@@ -158,8 +158,14 @@ pub fn map_sampling_err_to_acp(err: InferenceError) -> acp::Error {
             context.finish_reason_str(),
         )),
         InferenceError::MaxTokensTruncation => {
+            // Sampler converts Length stop → MaxTokensTruncation before a
+            // Completed turn is delivered, so partial JSON from truncation
+            // is never accepted as structured output. Surface a clear
+            // truncation marker for clients (error_kind = max_tokens_truncation).
             acp::Error::internal_error().data(terminal_error_data(
-                err.to_string(),
+                "model hit max_tokens before completing the response \
+                 (structured output, if required, is incomplete)"
+                    .to_string(),
                 None,
                 xai_grok_inference::InferenceErrorKind::MaxTokensTruncation,
             ))

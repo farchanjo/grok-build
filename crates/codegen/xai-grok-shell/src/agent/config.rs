@@ -3979,11 +3979,15 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 supports_reasoning_effort: m.supports_reasoning_effort,
                 reasoning_efforts: m.reasoning_efforts,
                 supports_backend_search: m.supports_backend_search,
+                supports_native_schema: None,
+                supports_strict_tools: None,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             };
             (key, config)
         })
@@ -4107,6 +4111,21 @@ pub struct ModelEntryConfig {
     /// the all-disabled state via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+    /// Native response JSON schema alongside tools. See
+    /// [`ModelInfo::supports_native_schema`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_schema: Option<bool>,
+    /// Opt-in Anthropic strict tool definitions. See
+    /// [`ModelInfo::supports_strict_tools`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
+    /// How turns execute for this model. Defaults to native HTTP inference.
+    /// Distinct from [`ApiBackend`] (wire protocol) and from provider kind.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::execution_backend::ExecutionBackend::is_native"
+    )]
+    pub execution_backend: crate::agent::execution_backend::ExecutionBackend,
 }
 /// True when `cfg` equals the all-disabled default. Derives `PartialEq`
 /// on `f32`, which is fine for the current shape because both `f32`
@@ -4147,6 +4166,10 @@ pub struct ConfigModelOverride {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
+    /// Auth scheme override (`bearer` / `x_api_key`). Anthropic presets set
+    /// `XApiKey`; absent inherits provider defaults or Bearer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<AuthScheme>,
     /// OpenRouter models to try after this model's primary `model` slug.
     /// `None` inherits a linked `[model_providers.<id>]` list; `[]` explicitly
     /// disables that provider-level fallback list for this one model.
@@ -4200,6 +4223,18 @@ pub struct ConfigModelOverride {
     /// catalog's `supports_tools` flag here so it survives into `ModelInfo`
     /// via [`ConfigModelOverride::apply`].
     pub supports_tools: Option<bool>,
+    /// Native structured-output schema capability (Messages
+    /// `output_config.format` alongside tools). See
+    /// [`ModelInfo::supports_native_schema`].
+    pub supports_native_schema: Option<bool>,
+    /// Opt-in Anthropic strict tool definitions. See
+    /// [`ModelInfo::supports_strict_tools`].
+    pub supports_strict_tools: Option<bool>,
+    /// Optional execution backend override (`native_inference` /
+    /// `{ external_agent = "claude_cli" }`). Absent inherits base / default
+    /// native. Never confuses with `api_backend` or provider `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
 }
 impl ConfigModelOverride {
     pub(crate) fn apply(
@@ -4235,6 +4270,9 @@ impl ConfigModelOverride {
         }
         if let Some(ref v) = self.api_backend {
             entry.info.api_backend = v.clone();
+        }
+        if let Some(scheme) = self.auth_scheme {
+            entry.info.auth_scheme = scheme;
         }
         if !self.extra_headers.is_empty() {
             entry.info.extra_headers = self.extra_headers.clone();
@@ -4290,6 +4328,27 @@ impl ConfigModelOverride {
         }
         if let Some(v) = self.supports_tools {
             entry.info.supports_tools = Some(v);
+        }
+        if let Some(v) = self.supports_native_schema {
+            entry.info.supports_native_schema = Some(v);
+        } else if entry.info.supports_native_schema.is_none()
+            && matches!(entry.info.api_backend, ApiBackend::Messages)
+            && entry
+                .model_provider
+                .as_ref()
+                .is_some_and(|p| p.kind == ModelProviderKind::Anthropic)
+        {
+            // Direct Anthropic + Messages: default native schema on so the
+            // agent loop can emit output_config.format with tools. Custom
+            // Messages providers keep None (StructuredOutput-tool fallback)
+            // unless the user/config sets the flag explicitly.
+            entry.info.supports_native_schema = Some(true);
+        }
+        if let Some(v) = self.supports_strict_tools {
+            entry.info.supports_strict_tools = Some(v);
+        }
+        if let Some(backend) = self.execution_backend {
+            entry.info.execution_backend = backend;
         }
         if self.api_key.is_some() {
             entry.api_key.clone_from(&self.api_key);
@@ -4408,6 +4467,23 @@ pub struct ModelInfo {
     /// `None` means unknown (e.g. a hand-written TOML `[model.X]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_tools: Option<bool>,
+    /// Native response JSON schema alongside tools (Messages
+    /// `output_config.format`). `None` derives from [`ApiBackend`] alone
+    /// (Messages → StructuredOutput-tool fallback). Direct Anthropic capable
+    /// models set `Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_schema: Option<bool>,
+    /// When `Some(true)`, tool definitions may carry Messages `strict: true`
+    /// (capped at 20). Default/`None`/`false` never mark Grok tools strict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
+    /// How turns execute for this model. Defaults to native HTTP inference.
+    /// Distinct from [`ApiBackend`] and provider identity.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::execution_backend::ExecutionBackend::is_native"
+    )]
+    pub execution_backend: crate::agent::execution_backend::ExecutionBackend,
 }
 impl ModelInfo {
     /// Minimal fallback descriptor for an unknown model slug.
@@ -4445,6 +4521,9 @@ impl ModelInfo {
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             supports_tools: None,
+            supports_native_schema: None,
+            supports_strict_tools: None,
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         }
     }
     /// Extract shared model metadata from a flat config entry.
@@ -4484,6 +4563,9 @@ impl ModelInfo {
             // models default to unknown (`None`) until a catalog/override
             // install supplies it.
             supports_tools: None,
+            supports_native_schema: entry.supports_native_schema,
+            supports_strict_tools: entry.supports_strict_tools,
+            execution_backend: entry.execution_backend,
         }
     }
     /// Derive the legacy effort gate/default from `reasoning_efforts` so the
@@ -5306,6 +5388,10 @@ pub fn resolve_aux_model_inference_config(
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 supports_tools: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
             model_provider: None,
             api_key: Some(bearer),
@@ -5409,6 +5495,7 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
         Some(ModelProviderKind::Xai) => ProviderIdentity::Xai,
         Some(ModelProviderKind::OpenAi) => ProviderIdentity::OpenAi,
         Some(ModelProviderKind::OpenRouter) => ProviderIdentity::OpenRouter,
+        Some(ModelProviderKind::Anthropic) => ProviderIdentity::Anthropic,
         Some(ModelProviderKind::OpenAiCompatible) | Some(ModelProviderKind::Zai) => {
             ProviderIdentity::Custom
         }
@@ -5545,6 +5632,8 @@ pub fn inference_config_for_model(
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: info.supports_backend_search,
+        supports_native_schema: info.supports_native_schema,
+        supports_strict_tools: info.supports_strict_tools,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
@@ -5645,6 +5734,9 @@ fn resolve_hidden_default_web_search_inference_config(
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             supports_tools: None,
+            supports_native_schema: None,
+            supports_strict_tools: None,
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
         api_key: None,
@@ -5744,6 +5836,7 @@ pub fn to_acp_model_info(
                             "openrouter"
                         }
                         crate::agent::model_providers::ModelProviderKind::OpenAi => "openai",
+                        crate::agent::model_providers::ModelProviderKind::Anthropic => "anthropic",
                         crate::agent::model_providers::ModelProviderKind::Xai => "xai",
                         crate::agent::model_providers::ModelProviderKind::OpenAiCompatible
                         | crate::agent::model_providers::ModelProviderKind::Zai => "custom",
@@ -6818,6 +6911,10 @@ reasoning_effort = "low"
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
                 supports_tools: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
             model_provider: None,
             api_key: api_key.map(|s| s.to_string()),
@@ -7955,6 +8052,110 @@ reasoning_effort = "low"
             "explicit supports_reasoning_effort=false in config must override the Messages auto-default",
         );
     }
+    /// Custom Messages (no Anthropic provider) must not auto-enable native
+    /// schema — StructuredOutput-tool fallback stays the default.
+    #[test]
+    fn custom_messages_backend_does_not_auto_default_native_schema() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model.my-claude]
+            model = "claude-custom"
+            base_url = "https://messages.example.com"
+            context_window = 200000
+            api_backend = "messages"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("my-claude").expect("model should exist");
+        assert_eq!(
+            model.info.supports_native_schema, None,
+            "custom Messages must not auto-enable native schema"
+        );
+        assert!(
+            !xai_grok_inference_types::resolve_supports_native_schema(
+                &model.info.api_backend,
+                model.info.supports_native_schema,
+            ),
+            "effective native schema stays false for custom Messages"
+        );
+    }
+
+    /// Explicit supports_native_schema=true on custom Messages opts into the
+    /// native path (StructuredOutput tool is not forced).
+    #[test]
+    fn custom_messages_respects_explicit_native_schema_true() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model.my-claude]
+            model = "claude-custom"
+            base_url = "https://messages.example.com"
+            context_window = 200000
+            api_backend = "messages"
+            supports_native_schema = true
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("my-claude").expect("model should exist");
+        assert_eq!(model.info.supports_native_schema, Some(true));
+        assert!(xai_grok_inference_types::resolve_supports_native_schema(
+            &model.info.api_backend,
+            model.info.supports_native_schema,
+        ));
+    }
+
+    /// Direct Anthropic curated presets enable native schema so the agent
+    /// loop can emit output_config.format alongside tools.
+    #[test]
+    fn anthropic_preset_enables_native_schema_capability() {
+        use crate::agent::providers::{ProviderId, ProviderManager};
+        let sonnet = ProviderManager::presets()
+            .into_iter()
+            .find(|p| p.id == "anthropic-claude-sonnet-5")
+            .expect("curated Anthropic sonnet preset");
+        assert_eq!(sonnet.provider, ProviderId::Anthropic);
+        assert_eq!(
+            sonnet.supports_native_schema,
+            Some(true),
+            "curated direct Anthropic agent models enable native schema"
+        );
+        assert!(
+            sonnet.supports_strict_tools.is_none() || sonnet.supports_strict_tools == Some(false),
+            "strict tools must stay off by default"
+        );
+        // When installed into config (with Anthropic configured), the flag
+        // lands on ConfigModelOverride.
+        let mut override_entry = ConfigModelOverride {
+            supports_native_schema: sonnet.supports_native_schema,
+            supports_strict_tools: sonnet.supports_strict_tools,
+            api_backend: Some(ApiBackend::Messages),
+            model_provider: Some("grok_build_anthropic".into()),
+            ..Default::default()
+        };
+        // Apply onto a fallback Messages entry with Anthropic provider so the
+        // auto-default path is also covered.
+        let mut base = ModelEntry::fallback("claude-sonnet-5", &EndpointsConfig::default());
+        base.info.api_backend = ApiBackend::Messages;
+        base.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
+            id: "grok_build_anthropic".into(),
+            kind: ModelProviderKind::Anthropic,
+            openrouter_fallback_models: Vec::new(),
+            openrouter_provider_preferences: None,
+            openrouter_plugins: Vec::new(),
+            openrouter_pacing: false,
+            command: Vec::new(),
+        });
+        let applied = override_entry.apply(
+            "anthropic-claude-sonnet-5",
+            Some(base),
+            &EndpointsConfig::default(),
+        );
+        assert_eq!(applied.info.supports_native_schema, Some(true));
+    }
+
     /// Non-Messages backends keep their existing default (false) since adaptive
     /// thinking is Anthropic-specific and other providers vary per upstream model.
     #[test]
@@ -8073,11 +8274,14 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         };
         let info = ModelInfo::from_config(&entry);
         assert!(info.use_concise);
@@ -8232,11 +8436,14 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
@@ -8683,11 +8890,14 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
@@ -12420,6 +12630,10 @@ default = "grok-4.5"
                 supports_tools: None,
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
             model_provider: None,
             api_key: None,

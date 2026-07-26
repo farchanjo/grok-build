@@ -1956,7 +1956,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_result_error(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
@@ -2290,13 +2290,19 @@ impl SessionActor {
                 pdf.total_pages,
             );
         }
+        let tool_failed = result.output.is_error();
         let tool_chat = if inline_images.is_empty() {
-            ConversationItem::tool_result(call_id.to_string(), prompt_text)
+            if tool_failed {
+                ConversationItem::tool_result_error(call_id.to_string(), prompt_text)
+            } else {
+                ConversationItem::tool_result(call_id.to_string(), prompt_text)
+            }
         } else {
-            ConversationItem::tool_result_with_images(
+            ConversationItem::tool_result_with_images_and_error(
                 call_id.to_string(),
                 prompt_text,
                 inline_images,
+                tool_failed,
             )
         };
         self.chat_state_handle.push_tool_result(tool_chat);
@@ -2397,7 +2403,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_result_error(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         vec![]
     }
@@ -2736,6 +2742,9 @@ impl SessionActor {
         );
         self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
             .await;
+        // User cancel / reject / follow-up-not-run are policy outcomes, not
+        // tool execution failures — emit a normal tool_result without
+        // `is_error` so the model does not treat them as hard tool errors.
         let tool_chat = ConversationItem::tool_result(model_call_id.to_owned(), reason);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())

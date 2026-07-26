@@ -422,6 +422,8 @@ pub(crate) async fn spawn_session_actor(
         context_window: context_window_override.unwrap_or(baseline_context_window),
         reasoning_effort: inference_config.reasoning_effort,
         stream_tool_calls: Some(inference_config.stream_tool_calls),
+        supports_native_schema: inference_config.supports_native_schema,
+        supports_strict_tools: inference_config.supports_strict_tools,
     };
     let actor_pruning_config = xai_chat_state::PruningConfig {
         enabled: session_pruning_config.enabled,
@@ -1666,6 +1668,12 @@ pub(crate) async fn spawn_session_actor(
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle,
+        // Default native; callers restore from Summary / model switch.
+        execution_backend: std::cell::Cell::new(
+            crate::agent::execution_backend::ExecutionBackend::NativeInference,
+        ),
+        external_runtime: std::cell::RefCell::new(None),
+        external_agent_runtime: std::cell::RefCell::new(None),
         rebuild_spec: rebuild_spec.clone(),
         image_description_model,
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),

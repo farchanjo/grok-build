@@ -580,7 +580,7 @@ pub enum Action {
     /// `Effect::PersistSetting`.
     SetCompactionTriggerPolicy(String),
     /// Set the rolling compaction band count (3-8).
-    /// SHELL-owned: persisted to `[compaction].band_count` via
+    /// SHELL-owned: persisted to `[compaction].rolling_band_count` via
     /// `Effect::PersistSetting`.
     SetCompactionBandCount(i64),
     /// Set the primary compaction route to a stable catalog `ModelId`.

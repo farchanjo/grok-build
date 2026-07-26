@@ -6,7 +6,7 @@ Grok connects to custom model endpoints for alternative providers, self-hosted m
 
 ## Default Models
 
-By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Connect xAI from `/providers` (or `grok provider connect xai`), or set an API key before sending prompts to first-party models. The TUI itself starts without a mandatory Grok login so you can also use OpenAI (ChatGPT OAuth or API key) or OpenRouter alone.
+By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Connect xAI from `/providers` (or `grok provider connect xai`), or set an API key before sending prompts to first-party models. The TUI itself starts without a mandatory Grok login so you can also use OpenAI (ChatGPT OAuth or API key), OpenRouter, or Anthropic alone.
 
 List all available models:
 
@@ -65,7 +65,11 @@ Grok supports three API backends. Set `api_backend` in your `[model.*]` config t
 
 When you omit `api_backend`, Grok uses `chat_completions`.
 
-To send provider-specific authentication or version headers -- for example, Anthropic's `x-api-key` -- use the `extra_headers` field described below. Grok sends those headers verbatim with every request to the endpoint.
+For non-secret provider-specific headers (version pins, routing titles, and so
+on), use `extra_headers`. **Never put API keys in `extra_headers` or in
+`config.toml`.** Prefer the owner-only vault (`/providers` or
+`grok provider set-key … --from-env <VAR>`) or a process environment variable
+named by `env_key`.
 
 ---
 
@@ -79,31 +83,35 @@ model = "model-id"                        # Model identifier sent to the API
 base_url = "https://api.example.com/v1"   # OpenAI-compatible endpoint
 name = "Display Name"                     # Shown in the model picker
 description = "Model description"          # Optional description
-api_key = "sk-..."                        # API key for this provider (optional)
-env_key = "XAI_API_KEY"                   # Env var holding the API key (optional; string or array)
+# Prefer env_key or the vault over inlining secrets:
+env_key = "MY_PROVIDER_API_KEY"           # Env var holding the API key (string or array)
+# api_key is supported but not recommended (secrets must not land in config files)
 api_backend = "chat_completions"          # "chat_completions", "responses", or "messages"
+auth_scheme = "bearer"                    # "bearer" (default) or "x_api_key"
 temperature = 0.7                         # Sampling temperature
 top_p = 0.95                              # Nucleus sampling parameter
 max_completion_tokens = 8192              # Maximum tokens per response
 context_window = 128000                   # Total context window in tokens
-extra_headers = { "x-api-key" = "sk-..." } # Extra request headers, sent verbatim (optional)
+# Non-secret headers only — never put credentials here:
+extra_headers = { "X-Request-Tags" = "team=example" }
 ```
 
 For several models on the same upstream, define the connection once under
 `[model_providers.<name>]`, then reference it from each model with
 `model_provider`. A provider can declare its identity with
-`kind = "openai"`, `"openrouter"`, `"codex"`, `"xai"`, or `"custom"`.
-Provider headers are inherited per key; a model can add headers or override
-individual provider keys without dropping the others.
+`kind = "openai"`, `"openrouter"`, `"anthropic"`, `"codex"`, `"xai"`, or
+`"openai_compatible"` / `"custom"`. Provider headers are inherited per key; a
+model can add headers or override individual provider keys without dropping
+the others.
 
 ### Credential Resolution
 
-Grok resolves the API key in this order:
+Grok resolves credentials in this order:
 
-1. The `api_key` field in the model config
-2. The environment variable(s) named by `env_key` — a single string or an array of names. The first set, non-empty value wins (for example `env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]` for SSH `LC_*` forwarding)
-3. Your signed-in session token (from connecting xAI in `/providers`), for a model with no `api_key`/`env_key` of its own
-4. The `XAI_API_KEY` environment variable (global fallback; Grok also accepts `GROK_CODE_XAI_API_KEY` for backward compatibility)
+1. The `api_key` field in the model config.
+2. The environment variable(s) named by `env_key` — a single string or an array of names. The first set, non-empty value wins (for example `env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]` for SSH `LC_*` forwarding).
+3. The model's provider-scoped vault or OAuth credential. OpenAI routes select ChatGPT OAuth for Codex endpoints and the independently stored Platform API key for `api.openai.com`; configured providers use their own vault scope.
+4. Only for an unscoped xAI model, the signed-in xAI session token and then `XAI_API_KEY` (Grok also accepts `GROK_CODE_XAI_API_KEY` for backward compatibility).
 
 For a third-party `model_provider`, missing provider credentials fail closed:
 Grok does not send an xAI session token or `XAI_API_KEY` to that provider.
@@ -113,11 +121,11 @@ Grok does not send an xAI session token or `XAI_API_KEY` to that provider.
 First-party xAI requests carry stable session and conversation identifiers in
 `x-grok-*` request headers (for example `x-grok-session-id`,
 `x-grok-conv-id`, `x-grok-req-id`). These headers are gated to the xAI
-provider only: OpenAI, OpenRouter, and any custom provider never receive them,
-so third-party endpoints cannot correlate Grok sessions or turns. The `kind`
-field on the provider (`"xai"`, `"openai"`, `"openrouter"`, `"codex"`, or
-`"custom"`) drives the gate — it is identity-based, not URL-based, so a
-mistyped `base_url` cannot leak the headers.
+provider only: OpenAI, OpenRouter, Anthropic, and any custom provider never
+receive them, so third-party endpoints cannot correlate Grok sessions or turns.
+The `kind` field on the provider (`"xai"`, `"openai"`, `"openrouter"`,
+`"anthropic"`, `"codex"`, or `"custom"`) drives the gate — it is identity-based,
+not URL-based, so a mistyped `base_url` cannot leak the headers.
 
 ### Context Window
 
@@ -159,14 +167,13 @@ This is a small, fixed set of environment-wide knobs. Settings that identify a s
 You can override specific fields of built-in models without redefining everything. Only specify the fields you want to change:
 
 ```toml
-# Override only the API key for a default model
+# Prefer env_key or /providers vault over literal secrets
 [model.grok-build]
-api_key = "my-api-key"
+env_key = "XAI_API_KEY"
 
-# Override temperature and add a custom API key
+# Override temperature only
 [model.grok-build]
 temperature = 0.5
-api_key = "sk-custom"
 ```
 
 When you override a built-in model, Grok starts with the default configuration (including the correct `base_url`), then applies only the fields you specify. Unspecified fields inherit from the default.
@@ -181,29 +188,94 @@ When you override a built-in model, Grok starts with the default configuration (
 
 ## Provider Examples
 
-### Anthropic (Claude)
+### Anthropic (Claude) — first-class peer
 
-Use Claude models directly via the Anthropic Messages API:
+Anthropic is a **built-in peer provider** (never the global default). Connect
+it the same way as OpenRouter: through the TUI or the CLI. Keys live in the
+owner-only vault under `anthropic::api_key` (or the process environment); they
+are **never** written to `config.toml` or `extra_headers`.
 
-```toml
-[model.claude-opus]
-model = "claude-opus-4-6"
-base_url = "https://api.anthropic.com/v1"
-name = "Claude Opus 4.6"
-api_backend = "messages"
-context_window = 200000
-extra_headers = { "x-api-key" = "sk-ant-...", "anthropic-version" = "2023-06-01" }
+```bash
+# Preferred: store the key from the environment (value is never printed)
+export ANTHROPIC_API_KEY="…"   # set in your shell; do not commit
+grok provider set-key anthropic --from-env ANTHROPIC_API_KEY
+
+# Or open the TUI and use /providers → Anthropic → Connect / Replace key
 ```
 
-The `messages` backend uses the Anthropic Messages protocol. Anthropic authenticates with an `x-api-key` header rather than `Authorization: Bearer`, so pass your key through `extra_headers`, which Grok sends verbatim.
+```bash
+# Disconnect clears only the Anthropic vault entry and catalog cache
+grok provider disconnect anthropic
+```
 
-### xAI, OpenAI API, and OpenRouter
+With an Anthropic key configured, the model picker includes the curated
+Messages API presets (current product aliases):
+
+| Picker id | API model | Context | Max output |
+|-----------|-----------|---------|------------|
+| `anthropic-claude-sonnet-5` | `claude-sonnet-5` | 1M | 128k |
+| `anthropic-claude-opus-5` | `claude-opus-5` | 1M | 128k |
+| `anthropic-claude-haiku-4-5` | `claude-haiku-4-5` | 200k | 64k |
+
+Grok Build also refreshes the authenticated Anthropic Models API catalog into
+the owner-only `anthropic_models_cache.json`. Additional account-visible models
+appear as `anthropic:<upstream-id>` and are treated as experimental (tool
+support is not assumed). Disconnecting Anthropic removes that cache without
+touching other providers.
+
+Environment fallback (without writing the vault):
+
+```bash
+export ANTHROPIC_API_KEY="…"
+```
+
+HTTP 401/403 from `api.anthropic.com` keeps **Anthropic identity** through
+sampling and compaction repair: the prompt names Anthropic and directs you to
+`/providers`. It does **not** mention `/login` and does not start xAI OAuth.
+
+#### Optional custom Messages gateway
+
+For a **non-product** Anthropic-compatible Messages endpoint (or a hand-written
+model entry), use secure credentials — never a literal secret in TOML:
+
+```toml
+[model_providers.anthropic-gateway]
+kind = "openai_compatible"   # custom Messages; not the built-in Anthropic peer
+base_url = "https://messages-gateway.example/v1"
+env_key = "ANTHROPIC_API_KEY"
+auth_scheme = "x_api_key"
+api_backend = "messages"
+
+[model_providers.anthropic-gateway.extra_headers]
+# Version pin only — never put the API key in extra_headers
+anthropic-version = "2023-06-01"
+
+[model.gateway-claude-sonnet-5]
+model = "claude-sonnet-5"
+model_provider = "anthropic-gateway"
+name = "Claude Sonnet 5 (gateway)"
+context_window = 1000000
+max_completion_tokens = 128000
+```
+
+First-class product Anthropic (`kind = "anthropic"`, id `grok_build_anthropic`)
+is installed automatically when you connect via `/providers` or
+`grok provider set-key anthropic`; you do not need to hand-write it.
+
+Full architecture, Files retention, experimental Claude Agent CLI gates, and
+troubleshooting: [Anthropic Provider](26-anthropic-provider.md). Non-destructive
+migration from older custom Messages configs:
+[Migrating to Anthropic Peer](27-anthropic-migration.md). Short reference:
+[docs/providers/anthropic.md](../providers/anthropic.md).
+
+### xAI, OpenAI API, OpenRouter, and Anthropic
 
 Run `/providers` to manage xAI OAuth, xAI API-key, OpenAI API-key, OpenRouter
-API-key, and ChatGPT OAuth login independently. Keys are masked in the TUI and
-stored under separate scopes in the owner-only `auth.json`; they are never
-written to `config.toml`. Removing one API key preserves every other provider
-credential. For xAI, removing the API key also preserves the OAuth session.
+API-key, Anthropic API-key, and ChatGPT OAuth login independently. Keys are
+masked in the TUI and stored under separate scopes in the owner-only
+`auth.json`; they are never written to `config.toml`. Removing one API key
+preserves every other provider credential. For xAI, removing the API key also
+preserves the OAuth session.
 
 With an OpenAI key, the picker includes the curated native Responses API
 entries `openai-gpt-5.6-sol`, `openai-gpt-5.6-terra`, and
@@ -234,6 +306,7 @@ generate model usage. Environment variables remain supported:
 ```bash
 export OPENAI_API_KEY="..."
 export OPENROUTER_API_KEY="..."
+export ANTHROPIC_API_KEY="..."
 ```
 
 The following manual configuration is optional. Use it to add other models,
@@ -373,22 +446,22 @@ non-JSON bodies (HTML edge pages) are never surfaced verbatim.
 HTTP 401 from OpenRouter (including models such as Moonshot that are only
 reached through OpenRouter) keeps **OpenRouter identity** through the shell
 and pager — including auto-compaction and model-switch compaction failures.
-OpenRouter and official OpenAI API-key routes are treated as provider-scoped
-credentials even when the key lives in the provider vault (not inline on the
-model). On 401 the runtime resolves that identity **before** any xAI session
-token refresh, OIDC recovery, or WebLogin copy, so a concurrent xAI
-`cached_token` / WebLogin session cannot refresh and resubmit. Per-turn
-sampler reconstruction uses the same catalog-aware gate, so an xAI
-`bearer_resolver` is never installed for OpenRouter/OpenAI vault models (or
-for exact approved third-party hosts when the catalog misses). ChatGPT
-OAuth pre-turn refresh applies only when the active model base URL is the
-Codex Responses route; a disk-global ChatGPT login never overwrites
-OpenRouter, OpenAI API-key, or first-party xAI credentials. The repair
-prompt names OpenRouter (or OpenAI) and directs you to `/providers` to
-replace or test the key. It does **not** mention `/login` and does not start
-xAI OAuth. ChatGPT OAuth may remint only its own OpenAI credential. First-party
-xAI session failures still use the existing session recovery path until
-provider-scoped login fully replaces it.
+The same rule applies to direct Anthropic (`api.anthropic.com`) and official
+OpenAI API-key routes: they are provider-scoped credentials even when the key
+lives in the provider vault (not inline on the model). On 401 the runtime
+resolves that identity **before** any xAI session token refresh, OIDC recovery,
+or WebLogin copy, so a concurrent xAI `cached_token` / WebLogin session cannot
+refresh and resubmit. Per-turn sampler reconstruction uses the same
+catalog-aware gate, so an xAI `bearer_resolver` is never installed for
+OpenRouter/OpenAI/Anthropic vault models (or for exact approved third-party
+hosts when the catalog misses). ChatGPT OAuth pre-turn refresh applies only
+when the active model base URL is the Codex Responses route; a disk-global
+ChatGPT login never overwrites OpenRouter, OpenAI API-key, Anthropic, or
+first-party xAI credentials. The repair prompt names the provider and directs
+you to `/providers` to replace or test the key. It does **not** mention
+`/login` and does not start xAI OAuth. ChatGPT OAuth may remint only its own
+OpenAI credential. First-party xAI session failures still use the existing
+session recovery path until provider-scoped login fully replaces it.
 
 Safe terminal diagnostics use a strict allowlist only: provider ID/name,
 catalog model ID, backend, HTTP status, bounded request/generation IDs, and a
@@ -729,9 +802,9 @@ grok
 [endpoints]
 models_base_url = "https://api.acme.com/v1"
 
-# Override only the API key for a specific model
+# Prefer env for model-specific keys (never commit literals)
 [model.grok-build]
-api_key = "my-api-key"
+env_key = "XAI_API_KEY"
 ```
 
 When you use `[endpoints]` with partial model overrides, Grok inherits the `base_url` from the endpoints config, so you do not need to specify it in each `[model.*]` section.

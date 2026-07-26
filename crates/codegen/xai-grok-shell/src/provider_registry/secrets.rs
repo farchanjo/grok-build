@@ -2,8 +2,8 @@
 
 use super::id::{ProviderId, ProviderIdError, validate_provider_id_str};
 use crate::auth::{
-    OPENAI_API_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE, clear_provider_api_key, read_provider_api_key,
-    store_provider_api_key,
+    ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE,
+    clear_provider_api_key, read_provider_api_key, store_provider_api_key,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -61,6 +61,7 @@ pub fn built_in_application_scope(provider: super::id::BuiltInProviderId) -> Opt
     match provider {
         super::id::BuiltInProviderId::OpenAi => Some(OPENAI_API_KEY_SCOPE),
         super::id::BuiltInProviderId::OpenRouter => Some(OPENROUTER_API_KEY_SCOPE),
+        super::id::BuiltInProviderId::Anthropic => Some(ANTHROPIC_API_KEY_SCOPE),
         super::id::BuiltInProviderId::Xai => None,
     }
 }
@@ -72,6 +73,9 @@ pub fn parse_secret_scope(scope: &str) -> Result<ParsedSecretScope, ScopeParseEr
     }
     if scope == OPENROUTER_API_KEY_SCOPE {
         return Ok(ParsedSecretScope::BuiltInOpenRouterApp);
+    }
+    if scope == ANTHROPIC_API_KEY_SCOPE {
+        return Ok(ParsedSecretScope::BuiltInAnthropicApp);
     }
     if scope == "openai::admin_key" {
         return Ok(ParsedSecretScope::BuiltInOpenAiAdmin);
@@ -99,6 +103,7 @@ pub enum ParsedSecretScope {
     BuiltInOpenAiApp,
     BuiltInOpenAiAdmin,
     BuiltInOpenRouterApp,
+    BuiltInAnthropicApp,
     Configured(ProviderSecretScope),
 }
 
@@ -189,6 +194,10 @@ mod tests {
         assert!(matches!(
             parse_secret_scope(OPENROUTER_API_KEY_SCOPE).unwrap(),
             ParsedSecretScope::BuiltInOpenRouterApp
+        ));
+        assert!(matches!(
+            parse_secret_scope(ANTHROPIC_API_KEY_SCOPE).unwrap(),
+            ParsedSecretScope::BuiltInAnthropicApp
         ));
     }
 }

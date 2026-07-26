@@ -580,6 +580,8 @@ mod compaction_route_tests {
             doom_loop_recovery: None,
             header_injector: None,
             provider_identity,
+            supports_native_schema: None,
+            supports_strict_tools: None,
         }
     }
 

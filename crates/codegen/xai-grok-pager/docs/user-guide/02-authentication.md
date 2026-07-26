@@ -14,10 +14,12 @@ the providers you need from `/providers` (or the command palette):
 | **xAI** | Browser OAuth and/or an xAI API key (separate choices) |
 | **OpenAI / ChatGPT** | Browser OAuth and/or an OpenAI API key; model routes select the appropriate method |
 | **OpenRouter** | API key stored in the owner-only vault |
+| **Anthropic** | API key stored in the owner-only vault (`set-key` / `/providers`) |
 
-You can also set `XAI_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY` in the
-environment. Missing credentials for a model surface when you use that model —
-they do not block startup.
+You can also set `XAI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or
+`ANTHROPIC_API_KEY` in the environment. Missing credentials for a model surface
+when you use that model — they do not block startup. Anthropic is never required
+to open the TUI and is never the global principal provider.
 
 Enterprise deployments that set `disable_api_key_auth` or force OIDC still
 require interactive login at startup.
@@ -81,8 +83,9 @@ Stored API keys occupy distinct scopes in the owner-only `auth.json` vault.
 Disconnecting one API-key provider preserves the other providers and the xAI
 OAuth session. OpenAI's ChatGPT OAuth tokens and Platform API key are also
 stored independently; ChatGPT Codex routes use OAuth and `api.openai.com`
-routes use the API key. Environment variables (`XAI_API_KEY`, `OPENAI_API_KEY`, and
-`OPENROUTER_API_KEY`) remain supported but cannot be removed by the TUI.
+routes use the API key. Environment variables (`XAI_API_KEY`, `OPENAI_API_KEY`,
+`OPENROUTER_API_KEY`, and `ANTHROPIC_API_KEY`) remain supported but cannot be
+removed by the TUI (clear the env var in your shell instead).
 
 When `GROK_HOME` is set, all Grok-owned credentials and provider catalog caches
 resolve under that directory. The `grok-custom` wrapper sets it to
@@ -322,6 +325,13 @@ Team admins can also enable or disable Zero Data Retention (ZDR) for their team.
 See [How to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr).
 When ZDR is on, `/privacy` cannot change coding-data sharing.
 
+Grok privacy / ZDR settings govern **SpaceXAI-side** retention and sharing.
+They do **not** change Anthropic (or other third-party) retention of API
+traffic or of any Anthropic Files objects created through the repository-owned
+client library. Ordinary Grok product flows do not auto-upload to Anthropic
+Files; that surface is library-only and product integration is deferred. See
+[Anthropic Provider](26-anthropic-provider.md#7-security-and-troubleshooting).
+
 See [Monitoring Usage](24-monitoring-usage.md#related-settings) and [Configuration](05-configuration.md#telemetry).
 
 ---
@@ -374,6 +384,7 @@ Grok Build does **not** use a global login. Authenticate each provider from
 grok provider connect xai
 grok provider connect openai
 grok provider set-key openrouter --from-env OPENROUTER_API_KEY
+grok provider set-key anthropic --from-env ANTHROPIC_API_KEY
 grok provider set-key zai-model-api --from-env ZAI_API_KEY
 ```
 

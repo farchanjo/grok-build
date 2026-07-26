@@ -356,7 +356,9 @@ impl InferenceError {
             InferenceError::Http(err) => is_retryable_reqwest(err),
             InferenceError::Serialization(_) => false,
             InferenceError::Api { status, .. } => {
-                matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520)
+                // 529: Anthropic overloaded_error (service capacity). Retryable
+                // like other transient server-side failures; not a client error.
+                matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520 | 529)
             }
             InferenceError::EventStreamError(_) => true,
             InferenceError::StreamError { .. } => true,
@@ -1044,6 +1046,25 @@ mod tests {
         assert!(err.is_retryable(), "429 should be retryable");
         assert!(!err.is_auth_error());
         assert!(!err.is_payload_too_large());
+    }
+
+    #[test]
+    fn anthropic_overloaded_529_is_retryable() {
+        let status = StatusCode::from_u16(529).expect("529 is a valid status code");
+        let err = InferenceError::Api {
+            status,
+            message: "overloaded_error: Overloaded".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+        };
+        assert!(
+            err.is_retryable(),
+            "Anthropic 529 overloaded_error must be retryable"
+        );
+        assert!(!err.is_rate_limited());
+        assert!(!err.is_auth_error());
     }
 
     #[test]

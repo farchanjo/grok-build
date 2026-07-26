@@ -9,8 +9,37 @@ impl SessionActor {
         apply_prompt_override: bool,
         skip_prompt_rewrite: bool,
         auto_compact_threshold_percent: u8,
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(inference_config.model.clone());
+        let prev_backend = self.execution_backend.get();
+        // When leaving external mode, or switching to a different external kind,
+        // shut down the retained runtime (bridge + temp resources + child).
+        let backend_incompatible = match (
+            prev_backend.external_kind(),
+            execution_backend.external_kind(),
+        ) {
+            (Some(a), Some(b)) if a != b => true,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if backend_incompatible {
+            self.shutdown_external_agent_runtime().await;
+        }
+        self.execution_backend.set(execution_backend);
+        if execution_backend.is_native() {
+            *self.external_runtime.borrow_mut() = None;
+        } else if self.external_runtime.borrow().is_none() {
+            if let Some(kind) = execution_backend.external_kind() {
+                let envelope =
+                    crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind);
+                // Empty envelope always validates; keep the call for symmetry with restore.
+                if let Err(e) = envelope.validate() {
+                    return Err(acp::Error::invalid_params().data(e.to_string()));
+                }
+                *self.external_runtime.borrow_mut() = Some(envelope);
+            }
+        }
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(inference_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -65,6 +94,8 @@ impl SessionActor {
                 context_window: new_context_window,
                 reasoning_effort: inference_config.reasoning_effort,
                 stream_tool_calls: Some(inference_config.stream_tool_calls),
+                supports_native_schema: inference_config.supports_native_schema,
+                supports_strict_tools: inference_config.supports_strict_tools,
             },
         );
         let existing = self.chat_state_handle.get_credentials().await;
@@ -116,6 +147,12 @@ impl SessionActor {
             );
         }
         let agent_name = self.agent.borrow().definition().name.clone();
+        let envelope = self.external_runtime.borrow().clone();
+        if let Some(ref env) = envelope
+            && let Err(e) = env.validate()
+        {
+            return Err(acp::Error::invalid_params().data(e.to_string()));
+        }
         let _ = self
             .notifications
             .persistence_tx
@@ -123,6 +160,8 @@ impl SessionActor {
                 model_id: model_id.clone(),
                 agent_name: Some(agent_name),
                 reasoning_effort: Some(inference_config.reasoning_effort),
+                execution_backend: Some(execution_backend),
+                external_runtime: Some(envelope),
             });
         Ok(model_id)
     }

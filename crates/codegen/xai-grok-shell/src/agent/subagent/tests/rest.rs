@@ -442,6 +442,8 @@ fn resumed_from_field_in_meta_roundtrips() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
     assert!(json.contains("resumed_from"));
@@ -492,6 +494,8 @@ fn resumed_from_none_not_serialized_in_meta() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
     assert!(
@@ -542,6 +546,8 @@ fn snapshot_ref_field_in_meta_roundtrips() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
     assert!(json.contains("snapshot_ref"));
@@ -595,6 +601,8 @@ fn snapshot_test_meta(id: &str) -> SubagentMeta {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     }
 }
 /// The follow-up writer persists `snapshot_ref` into an already-finalized
@@ -1036,6 +1044,8 @@ fn subagent_session_metadata_roundtrip() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
         &meta,
@@ -1099,6 +1109,8 @@ fn subagent_session_metadata_non_forked() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let session_meta = SubagentSessionMetadata::from_meta(
         &meta,
@@ -1166,6 +1178,8 @@ fn upload_lifecycle_spawn_then_completion_preserves_fields() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let spawn_gcs = SubagentSessionMetadata::from_meta(
         &spawn_meta,
@@ -1252,6 +1266,8 @@ fn upload_lifecycle_failure_preserves_error() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
         &meta,
@@ -1303,6 +1319,8 @@ fn session_metadata_session_kind_for_resumed() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     let gcs = SubagentSessionMetadata::from_meta(
         &meta,
@@ -1644,6 +1662,8 @@ fn durable_fallback_roundtrips_child_cwd_worktree_and_codex_resume_pointer() {
         codex_thread_id: Some("thread-codex-durable".into()),
         codex_provider: Some("codex".into()),
         codex_sandbox: Some("workspace-write".into()),
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     write_subagent_meta(&dir, &meta);
     let data = std::fs::read_to_string(dir.join("meta.json")).unwrap();
@@ -1689,6 +1709,8 @@ fn durable_fallback_rejects_running_status() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     write_subagent_meta(&parent_dir, &meta);
     let data = std::fs::read_to_string(parent_dir.join("meta.json")).unwrap();
@@ -1774,6 +1796,8 @@ fn running_test_meta(id: &str, parent_session_id: &str) -> SubagentMeta {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     }
 }
 #[test]
@@ -2264,6 +2288,8 @@ fn durable_meta_roundtrips_effective_model_id() {
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     write_subagent_meta(&dir, &meta);
     let data = std::fs::read_to_string(dir.join("meta.json")).unwrap();

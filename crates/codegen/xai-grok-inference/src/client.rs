@@ -737,8 +737,9 @@ impl InferenceClient {
             match config.auth_scheme {
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
+                        // Never log the key value (any provider).
                         tracing::debug!(
-                            api_key = %api_key,
+                            key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
                         InferenceError::Auth(
@@ -751,8 +752,9 @@ impl InferenceClient {
                 AuthScheme::Bearer => {
                     let bearer = format!("Bearer {}", api_key);
                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
+                        // Never log the key value (any provider).
                         tracing::debug!(
-                            api_key = %api_key,
+                            key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
                         InferenceError::Auth(
@@ -776,41 +778,46 @@ impl InferenceClient {
             headers.insert(header_name, header_value);
         }
 
-        // Add x-grok-client-version header for version gating at the proxy.
-        if let Some(client_version) = config.client_version.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(client_version)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-client-version"),
-                header_value,
-            );
-        }
-
-        if let Some(deployment_id) = config.deployment_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(deployment_id)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-deployment-id"),
-                header_value,
-            );
-        }
-
-        if let Some(user_id) = config.user_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(user_id)
-        {
-            headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
-        }
-
-        {
-            let client_id = config
-                .client_identifier
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
-            if let Ok(header_value) = HeaderValue::from_str(&client_id) {
+        // Default `x-grok-client-*` / deployment / user headers are first-party
+        // only. Direct Anthropic (and other third-party identities) must not
+        // receive stable Grok client identifiers on the wire.
+        if config.provider_identity.is_first_party() {
+            // Add x-grok-client-version header for version gating at the proxy.
+            if let Some(client_version) = config.client_version.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(client_version)
+            {
                 headers.insert(
-                    HeaderName::from_static("x-grok-client-identifier"),
+                    HeaderName::from_static("x-grok-client-version"),
                     header_value,
                 );
+            }
+
+            if let Some(deployment_id) = config.deployment_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(deployment_id)
+            {
+                headers.insert(
+                    HeaderName::from_static("x-grok-deployment-id"),
+                    header_value,
+                );
+            }
+
+            if let Some(user_id) = config.user_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(user_id)
+            {
+                headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
+            }
+
+            {
+                let client_id = config
+                    .client_identifier
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
+                if let Ok(header_value) = HeaderValue::from_str(&client_id) {
+                    headers.insert(
+                        HeaderName::from_static("x-grok-client-identifier"),
+                        header_value,
+                    );
+                }
             }
         }
 
@@ -924,14 +931,8 @@ impl InferenceClient {
             }
         }
         {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
+            // Presence/scheme only — never log Authorization / x-api-key values
+            // or stable prefixes (Anthropic sk-ant-… must never enter logs).
             tracing::info!(
                 target: crate::inference_log::TARGET,
                 event = "client_post",
@@ -942,8 +943,6 @@ impl InferenceClient {
                 has_bearer_resolver = self.bearer_resolver.is_some(),
                 has_authorization_header = headers.get(AUTHORIZATION).is_some(),
                 has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
             );
         }
         if let Some(injector) = &self.header_injector {
@@ -1026,16 +1025,21 @@ impl InferenceClient {
             .unwrap_or(&self.provider_label)
     }
 
+    /// Non-secret auth facts for sampling logs (scheme + presence only).
+    /// Never returns credential values or stable prefixes.
     pub fn auth_info(&self) -> crate::inference_log::AuthInfo {
-        let auth_prefix = self.current_sent_bearer_prefix();
-        let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
-            (AuthScheme::XApiKey, Some(_)) => "x-api-key",
-            (AuthScheme::Bearer, Some(_)) => "bearer",
-            (_, None) => "none",
+        let has_credential = self.current_sent_bearer_prefix().is_some();
+        let auth_type = if !has_credential {
+            "none"
+        } else {
+            match self.defaults.auth_scheme {
+                AuthScheme::XApiKey => "x-api-key",
+                AuthScheme::Bearer => "bearer",
+            }
         };
         crate::inference_log::AuthInfo {
             auth_type,
-            auth_prefix,
+            has_credential,
         }
     }
 
@@ -2525,6 +2529,8 @@ mod tests {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -3161,7 +3167,17 @@ mod tests {
             client
                 .default_headers
                 .get(HeaderName::from_static("x-api-key"))
-                .is_none()
+                .is_none(),
+            "Messages protocol alone must not inject x-api-key"
+        );
+        // Direct Anthropic identity headers must not appear solely because the
+        // backend is Messages; only AnthropicClient pins anthropic-version.
+        assert!(
+            client
+                .default_headers
+                .get(HeaderName::from_static("anthropic-version"))
+                .is_none(),
+            "Messages protocol alone must not inject anthropic-version"
         );
     }
 
@@ -3948,6 +3964,7 @@ mod tests {
             (ProviderIdentity::Xai, true),
             (ProviderIdentity::OpenAi, false),
             (ProviderIdentity::OpenRouter, false),
+            (ProviderIdentity::Anthropic, false),
             (ProviderIdentity::Custom, false),
         ] {
             let cfg = InferenceConfig {
@@ -3960,6 +3977,51 @@ mod tests {
                 "first_party mismatch for {identity:?}"
             );
         }
+    }
+
+    /// Direct Anthropic identity must not receive any default `x-grok-*`
+    /// client/deployment/user headers on construction.
+    #[test]
+    fn anthropic_identity_omits_all_default_x_grok_headers() {
+        use crate::config::ProviderIdentity;
+        use reqwest::header::HeaderName;
+
+        let cfg = InferenceConfig {
+            api_key: Some("sk-ant-test".into()),
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            provider_identity: ProviderIdentity::Anthropic,
+            client_version: Some("1.2.3".into()),
+            client_identifier: Some("should-not-leak".into()),
+            deployment_id: Some("dep-1".into()),
+            user_id: Some("user-1".into()),
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).expect("client should build");
+        let req = client
+            .post("https://api.anthropic.com/v1/messages")
+            .build()
+            .expect("build request");
+        let h = req.headers();
+        for name in [
+            "x-grok-client-version",
+            "x-grok-client-identifier",
+            "x-grok-deployment-id",
+            "x-grok-user-id",
+            "x-grok-conv-id",
+            "x-grok-session-id",
+            "x-grok-agent-id",
+        ] {
+            assert!(
+                h.get(HeaderName::from_static(name)).is_none(),
+                "Anthropic request must not carry {name}"
+            );
+        }
+        // Auth still uses x-api-key for Anthropic Messages.
+        assert!(
+            h.get(HeaderName::from_static("x-api-key")).is_some(),
+            "Anthropic must still send x-api-key"
+        );
     }
 
     // ── Change 2: Chat/Responses conformance ─────────────────────────────
@@ -4175,6 +4237,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: vec![detail.clone()],
+            provider_payload: None,
         });
         let items = vec![
             ConversationItem::user("use the tool"),
@@ -4202,6 +4265,7 @@ mod tests {
                     "type": "object",
                     "properties": { "command": { "type": "string" } }
                 }),
+                strict: None,
             }],
             tool_choice: Some(ConversationToolChoice::Auto),
             reasoning_effort: Some(xai_grok_inference_types::ReasoningEffort::Medium),

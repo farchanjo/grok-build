@@ -91,6 +91,12 @@ async fn maybe_schedule_rolling_compaction(
     rolling_job_tx: &mpsc::Sender<crate::session::rolling_compaction::RollingCompactionJob>,
     completion_tx: &mpsc::UnboundedSender<(String, PromptTurnResult)>,
 ) {
+    // External runtimes own their authoritative conversation context. Host-side
+    // compaction would mutate only the mirrored transcript and could invoke an
+    // unrelated native inference route without affecting the external agent.
+    if session.execution_backend.get().is_external() {
+        return;
+    }
     let policy = session.agent.borrow().compaction_policy().clone();
     if matches!(
         policy.strategy,
@@ -358,6 +364,7 @@ pub(super) async fn run_session(
                 // Idle flush timer fired — run background flush.
                 _ = &mut idle_flush_sleep, if session.idle_flush_timeout.is_some()
                     && session.memory.is_enabled()
+                    && !session.execution_backend.get().is_external()
                     && !session.memory.is_flushing.load(std::sync::atomic::Ordering::Relaxed) => {
                     // Skip if no new messages since last idle flush
                     let current_len = session.chat_state_handle.get_conversation_len().await;
@@ -388,7 +395,8 @@ pub(super) async fn run_session(
                 }
                 // Dream check timer — periodically run dream consolidation.
                 _ = &mut dream_check_sleep, if session.dream_check_timeout.is_some()
-                    && session.memory.is_enabled() => {
+                    && session.memory.is_enabled()
+                    && !session.execution_backend.get().is_external() => {
                     tracing::debug!(target: xai_grok_telemetry::memory_log::TARGET,
                         "MEMORY_DREAM_CHECK: timer fired");
                     tokio::task::spawn_local({
@@ -616,9 +624,12 @@ pub(super) async fn run_session(
                         }
                         session.dispatch_session_end_stop("channel_closed").await;
                         // Channel closed -- run memory session-end hook.
+                        // External backends exclude native memory accounting.
                         let mut session_end_result = "disabled";
                         let mut total_chunks_at_end = 0usize;
-                        if !session.startup_hints.is_subagent {
+                        if !session.startup_hints.is_subagent
+                            && !session.execution_backend.get().is_external()
+                        {
                             if let Some(storage) = session.memory.storage() {
                                 let conversation = session.chat_state_handle.get_conversation().await;
                                 let result = crate::session::memory::hooks::on_session_end(
@@ -649,14 +660,16 @@ pub(super) async fn run_session(
                                     }).await;
                                 }
                             }
-                        } else {
+                        } else if session.startup_hints.is_subagent {
                             tracing::debug!(
                                 target: xai_grok_telemetry::memory_log::TARGET,
                                 "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
                             );
                         }
-                        // Dream: attempt consolidation at session end
-                        session.maybe_run_dream().await;
+                        // Dream: attempt consolidation at session end (native only).
+                        if !session.execution_backend.get().is_external() {
+                            session.maybe_run_dream().await;
+                        }
                         // Structured telemetry after dream so counters are populated
                         let telem = session.memory.telemetry_snapshot();
                         session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
@@ -677,6 +690,8 @@ pub(super) async fn run_session(
                                 );
                             }
                         }
+                        // Tear down session-scoped external runtime (bridge/temp/child).
+                        session.shutdown_external_agent_runtime().await;
                         shutdown_workflows(&session).await;
                         if let Some(cancel) = &session.sync_loop_cancel {
                             cancel.cancel();
@@ -809,9 +824,79 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
                             let _ = responds_to.send(updated_model_id);
+                        }
+                        SessionCommand::GetExecutionBackend { responds_to } => {
+                            let _ = responds_to.send(session.execution_backend.get());
+                        }
+                        SessionCommand::RestoreExecutionMode {
+                            execution_backend,
+                            external_runtime,
+                            responds_to,
+                        } => {
+                            // Restore may change backend; drop any live retained runtime.
+                            session.shutdown_external_agent_runtime().await;
+                            let result = match external_runtime {
+                                Some(env) => match env.validated() {
+                                    Ok(env) => {
+                                        session.execution_backend.set(execution_backend);
+                                        *session.external_runtime.borrow_mut() = Some(env);
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            session_id = %session.session_info.id.0,
+                                            error = %e,
+                                            "RestoreExecutionMode: envelope validation failed"
+                                        );
+                                        Err(e.to_string())
+                                    }
+                                },
+                                None => {
+                                    session.execution_backend.set(execution_backend);
+                                    *session.external_runtime.borrow_mut() = None;
+                                    Ok(())
+                                }
+                            };
+                            let _ = responds_to.send(result);
+                        }
+                        SessionCommand::PersistExecutionMode {
+                            execution_backend,
+                            external_runtime,
+                            responds_to,
+                        } => {
+                            let outcome = async {
+                                if let Some(ref env) = external_runtime {
+                                    env.validate().map_err(|e| e.to_string())?;
+                                }
+                                let model = session
+                                    .chat_state_handle
+                                    .get_inference_settings()
+                                    .await
+                                    .map(|c| c.model)
+                                    .unwrap_or_default();
+                                let model_id = acp::ModelId::new(model);
+                                let agent_name = session.agent.borrow().definition().name.clone();
+                                session
+                                    .notifications
+                                    .persistence_tx
+                                    .send(PersistenceMsg::CurrentModel {
+                                        model_id,
+                                        agent_name: Some(agent_name),
+                                        reasoning_effort: None,
+                                        execution_backend: Some(execution_backend),
+                                        external_runtime: Some(external_runtime),
+                                    })
+                                    .map_err(|_| {
+                                        "PersistExecutionMode: persistence channel closed"
+                                            .to_string()
+                                    })?;
+                                Ok::<_, String>(())
+                            }
+                            .await;
+                            let _ = responds_to.send(outcome);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;
@@ -1218,6 +1303,15 @@ pub(super) async fn run_session(
                         SessionCommand::FlushMemory { respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
+                                if s.execution_backend.get().is_external() {
+                                    let _ = respond_to.send(Err(
+                                        acp::Error::invalid_request().data(
+                                            "memory flush is not supported on external agent sessions"
+                                                .to_string(),
+                                        ),
+                                    ));
+                                    return;
+                                }
                                 if s.memory.is_enabled() {
                                     let did_flush = s.run_memory_flush("user_requested", None).await;
                                     let _ = respond_to.send(Ok(did_flush));
@@ -2294,9 +2388,12 @@ pub(super) async fn run_session(
                             }
                             session.dispatch_session_end_stop("shutdown").await;
                             // Memory: save session summary before shutdown
+                            // (native only — external sessions exclude memory).
                             let mut session_end_result = "disabled";
                             let mut total_chunks_at_end = 0usize;
-                            if !session.startup_hints.is_subagent {
+                            if !session.startup_hints.is_subagent
+                                && !session.execution_backend.get().is_external()
+                            {
                                 if let Some(storage) = session.memory.storage() {
                                     let conversation = session.chat_state_handle.get_conversation().await;
                                     let result = crate::session::memory::hooks::on_session_end(
@@ -2328,17 +2425,21 @@ pub(super) async fn run_session(
                                         }).await;
                                     }
                                 }
-                            } else {
+                            } else if session.startup_hints.is_subagent {
                                 tracing::debug!(
                                     target: xai_grok_telemetry::memory_log::TARGET,
                                     "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
                                 );
                             }
-                            // Dream: attempt consolidation at session end
-                            session.maybe_run_dream().await;
+                            // Dream: native only.
+                            if !session.execution_backend.get().is_external() {
+                                session.maybe_run_dream().await;
+                            }
                             // Structured telemetry after dream so counters are populated
                             let telem = session.memory.telemetry_snapshot();
                             session.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
+                            // Tear down session-scoped external runtime first.
+                            session.shutdown_external_agent_runtime().await;
                             // Shutdown feedback sync loop and do final sync
                             if let Some(cancel) = &session.sync_loop_cancel {
                                 cancel.cancel();

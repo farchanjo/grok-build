@@ -45,6 +45,10 @@ pub enum ProviderIdentity {
     OpenAi,
     #[serde(rename = "openrouter")]
     OpenRouter,
+    /// Direct Anthropic Messages API (`x-api-key` + `anthropic-version`).
+    /// Never first-party xAI and never OpenRouter routing/diagnostics.
+    #[serde(rename = "anthropic")]
+    Anthropic,
 }
 
 /// OpenRouter routing `sort`: string shorthand (`"latency"`) or object form
@@ -224,7 +228,7 @@ impl ProviderIdentity {
     ///
     /// Only first-party xAI requests carry the stable session/conversation
     /// identifiers in `x-grok-*` request headers. Third-party providers
-    /// (OpenAI, OpenRouter, custom) must never see those headers.
+    /// (OpenAI, OpenRouter, Anthropic, custom) must never see those headers.
     pub fn is_first_party(self) -> bool {
         matches!(self, ProviderIdentity::Xai)
     }
@@ -236,18 +240,25 @@ impl ProviderIdentity {
         matches!(self, ProviderIdentity::OpenRouter)
     }
 
+    /// Returns `true` only for direct Anthropic (not OpenRouter Claude routes
+    /// and not custom Messages backends).
+    pub fn is_anthropic(self) -> bool {
+        matches!(self, ProviderIdentity::Anthropic)
+    }
+
     /// Generic user-facing label for this provider, used in
     /// provider-aware error copy (502/520-class, 402, etc.). This is the
     /// fallback when the diagnostics `provider_name` (the selected
     /// OpenRouter upstream) is unavailable at the call site.
     ///
-    /// xAI keeps the historical "Grok" wording; OpenRouter and OpenAI use
-    /// their product names; `Custom` uses a neutral phrase.
+    /// xAI keeps the historical "Grok" wording; OpenRouter, OpenAI, and
+    /// Anthropic use their product names; `Custom` uses a neutral phrase.
     pub fn label(self) -> &'static str {
         match self {
             ProviderIdentity::Xai => "Grok",
             ProviderIdentity::OpenAi => "OpenAI",
             ProviderIdentity::OpenRouter => "OpenRouter",
+            ProviderIdentity::Anthropic => "Anthropic",
             ProviderIdentity::Custom => "the model provider",
         }
     }
@@ -275,8 +286,19 @@ impl ProviderIdentity {
 /// `InferenceConfig` is handed to the actor. Auth is selected separately
 /// via `auth_scheme`, while `api_backend` controls only the request/response
 /// protocol shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # Credential safety
+///
+/// [`Self::api_key`] is never written to `Debug` output. Serde **serialization**
+/// omits the field entirely (`skip_serializing`) so diagnostics, IPC dumps,
+/// and accidental `serde_json::to_value` cannot leak the secret. Deserialization
+/// still accepts `api_key` so in-process and test round-trips that re-attach a
+/// key remain valid; production callers resolve the key from the vault/env and
+/// set the field in memory only.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InferenceConfig {
+    /// In-memory API credential. Omitted from serde serialization and Debug.
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
     pub base_url: String,
     pub model: String,
@@ -380,6 +402,18 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub supports_backend_search: bool,
 
+    /// Durable model capability: native response JSON schema may be used
+    /// alongside tools. Propagated into chat-state `InferenceSettings` so the
+    /// agent loop can choose `output_config.format` vs StructuredOutput-tool.
+    /// `None` falls back to backend-only behavior (Messages = tool fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_schema: Option<bool>,
+
+    /// When `Some(true)`, Messages tool definitions may carry `strict: true`
+    /// (capped at 20). Default/`None` never marks Grok tools strict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_tools: Option<bool>,
+
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default)]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -400,6 +434,66 @@ pub struct InferenceConfig {
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
+}
+
+impl std::fmt::Debug for InferenceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately omit `api_key` (and other non-serializable hooks).
+        f.debug_struct("InferenceConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("max_completion_tokens", &self.max_completion_tokens)
+            .field("temperature", &self.temperature)
+            .field("top_p", &self.top_p)
+            .field(
+                "openrouter_fallback_models",
+                &self.openrouter_fallback_models,
+            )
+            .field(
+                "openrouter_provider_preferences",
+                &self.openrouter_provider_preferences,
+            )
+            .field("openrouter_plugins", &self.openrouter_plugins)
+            .field("openrouter_pacing", &self.openrouter_pacing)
+            .field("zai_tool_stream", &self.zai_tool_stream)
+            .field("zai_thinking", &self.zai_thinking)
+            .field("api_backend", &self.api_backend)
+            .field("include_message_model_id", &self.include_message_model_id)
+            .field("auth_scheme", &self.auth_scheme)
+            .field("provider_identity", &self.provider_identity)
+            .field("extra_headers", &self.extra_headers)
+            .field("context_window", &self.context_window)
+            .field("force_http1", &self.force_http1)
+            .field("max_retries", &self.max_retries)
+            .field("stream_tool_calls", &self.stream_tool_calls)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("origin_client", &self.origin_client)
+            .field("client_identifier", &self.client_identifier)
+            .field("deployment_id", &self.deployment_id)
+            .field("user_id", &self.user_id)
+            .field("client_version", &self.client_version)
+            .field(
+                "attribution_callback",
+                &self.attribution_callback.as_ref().map(|_| "<set>"),
+            )
+            .field(
+                "bearer_resolver",
+                &self.bearer_resolver.as_ref().map(|_| "<set>"),
+            )
+            .field("supports_backend_search", &self.supports_backend_search)
+            .field("supports_native_schema", &self.supports_native_schema)
+            .field("supports_strict_tools", &self.supports_strict_tools)
+            .field("compactions_remaining", &self.compactions_remaining)
+            .field("compaction_at_tokens", &self.compaction_at_tokens)
+            .field("doom_loop_recovery", &self.doom_loop_recovery)
+            .field(
+                "header_injector",
+                &self.header_injector.as_ref().map(|_| "<set>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for InferenceConfig {
@@ -438,6 +532,8 @@ impl Default for InferenceConfig {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -571,6 +667,7 @@ mod tests {
             ProviderIdentity::Xai,
             ProviderIdentity::OpenAi,
             ProviderIdentity::OpenRouter,
+            ProviderIdentity::Anthropic,
         ] {
             let cfg = InferenceConfig {
                 provider_identity: identity,
@@ -588,6 +685,7 @@ mod tests {
         assert!(ProviderIdentity::Xai.is_first_party());
         assert!(!ProviderIdentity::OpenAi.is_first_party());
         assert!(!ProviderIdentity::OpenRouter.is_first_party());
+        assert!(!ProviderIdentity::Anthropic.is_first_party());
         assert!(!ProviderIdentity::Custom.is_first_party());
     }
 
@@ -597,6 +695,63 @@ mod tests {
         assert!(ProviderIdentity::OpenRouter.is_openrouter());
         assert!(!ProviderIdentity::Xai.is_openrouter());
         assert!(!ProviderIdentity::OpenAi.is_openrouter());
+        assert!(!ProviderIdentity::Anthropic.is_openrouter());
         assert!(!ProviderIdentity::Custom.is_openrouter());
+    }
+
+    /// `is_anthropic` is true only for direct Anthropic.
+    #[test]
+    fn provider_identity_anthropic_only_for_anthropic() {
+        assert!(ProviderIdentity::Anthropic.is_anthropic());
+        assert!(!ProviderIdentity::Xai.is_anthropic());
+        assert!(!ProviderIdentity::OpenAi.is_anthropic());
+        assert!(!ProviderIdentity::OpenRouter.is_anthropic());
+        assert!(!ProviderIdentity::Custom.is_anthropic());
+    }
+
+    /// Credentials must never appear in Debug or serde serialization for any
+    /// provider (not just Anthropic).
+    #[test]
+    fn inference_config_debug_and_json_never_leak_api_key() {
+        const SECRET: &str = "sk-super-secret-api-key-value-never-log";
+        let cfg = InferenceConfig {
+            api_key: Some(SECRET.to_owned()),
+            base_url: "https://api.example.com/v1".into(),
+            model: "test-model".into(),
+            provider_identity: ProviderIdentity::OpenAi,
+            ..Default::default()
+        };
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains(SECRET),
+            "Debug must redact api_key: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug should mark the key as redacted: {debug}"
+        );
+        let json = serde_json::to_value(&cfg).expect("serialize");
+        let json_str = json.to_string();
+        assert!(
+            !json_str.contains(SECRET),
+            "JSON serialization must omit raw api_key: {json_str}"
+        );
+        assert!(
+            json.get("api_key").is_none(),
+            "api_key field must be skip_serializing: {json_str}"
+        );
+        // Deserialization still accepts an explicit key when present.
+        let with_key = serde_json::json!({
+            "api_key": SECRET,
+            "base_url": "https://api.example.com/v1",
+            "model": "m",
+            "api_backend": "chat_completions",
+            "extra_headers": {},
+            "context_window": 0,
+            "force_http1": false,
+            "stream_tool_calls": false,
+        });
+        let loaded: InferenceConfig = serde_json::from_value(with_key).unwrap();
+        assert_eq!(loaded.api_key.as_deref(), Some(SECRET));
     }
 }

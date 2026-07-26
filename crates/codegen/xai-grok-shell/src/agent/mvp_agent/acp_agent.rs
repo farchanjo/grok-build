@@ -2003,6 +2003,16 @@ impl acp::Agent for MvpAgent {
                         .meta(restore_meta),
                 )
                 .await;
+            // Summary execution mode is authoritative on resume. Re-apply after
+            // model_switch (which seeds from the catalog) so Native↔external
+            // cannot flip silently, including when turn_count > 0.
+            Self::restore_summary_execution_mode(
+                self,
+                &session_id,
+                summary.execution_backend,
+                summary.external_runtime.clone(),
+            )
+            .await?;
         }
         let mut response_meta_map = serde_json::Map::new();
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));

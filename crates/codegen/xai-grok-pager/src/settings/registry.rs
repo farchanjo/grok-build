@@ -1389,6 +1389,8 @@ mod tests {
                         pager.plan_mode_active,
                     );
                 }
+                // Read-only runtime row; it has no scalar PagerLocalSnapshot default.
+                ("compaction_status", SettingKind::Status) => {}
                 _ => panic!(
                     "settings::defs::default_settings() contains PAGER entry `{}` with no \
                      matching arm in defaults_match_pager_state. Add an arm.",

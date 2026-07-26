@@ -230,6 +230,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })
     }
 
@@ -333,6 +334,7 @@ mod tests {
                 tool_call_id: "tc_1".to_string(),
                 content: "file written".into(),
                 images: Vec::new(),
+                is_error: None,
             }),
         ];
 

@@ -299,3 +299,5 @@ release-dist = []
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
 test-support = ["xai-grok-pager-render/test-support"]
+# Experimental Claude Agent CLI process runtime (PR6). Off by default.
+claude-cli-runtime = ["xai-grok-shell/claude-cli-runtime"]

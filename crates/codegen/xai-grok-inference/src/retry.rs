@@ -893,6 +893,21 @@ mod tests {
     }
 
     #[test]
+    fn classify_529_overloaded_is_retryable_like_5xx() {
+        let status = StatusCode::from_u16(529).expect("529");
+        let err = api_err(status, "overloaded_error: Overloaded");
+        assert!(err.is_retryable());
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("expected RetryWithClientRebuild for 529, got {other:?}"),
+        }
+        match classify_error(&err, 1, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { .. } => {}
+            other => panic!("expected Retry for subsequent 529, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn classify_5xx_subsequent_retry_uses_plain_retry() {
         let err = api_err(StatusCode::BAD_GATEWAY, "boom");
         match classify_error(&err, 1, 5, RATE_LIMIT_RETRY_THRESHOLD) {

@@ -940,7 +940,55 @@ pub fn parse_remote_model_value(
                 }
             })
             .unwrap_or_default(),
+        supports_native_schema: obj
+            .get("supportsNativeSchema")
+            .or_else(|| obj.get("supports_native_schema"))
+            .or_else(|| meta.and_then(|m| m.get("supportsNativeSchema")))
+            .and_then(|v| v.as_bool()),
+        supports_strict_tools: obj
+            .get("supportsStrictTools")
+            .or_else(|| obj.get("supports_strict_tools"))
+            .or_else(|| meta.and_then(|m| m.get("supportsStrictTools")))
+            .and_then(|v| v.as_bool()),
+        execution_backend: parse_remote_execution_backend(obj, meta),
     })
+}
+
+/// Parse optional `executionBackend` / `execution_backend` from remote model JSON.
+/// Absent or unknown values default to native inference.
+fn parse_remote_execution_backend(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> crate::agent::execution_backend::ExecutionBackend {
+    use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
+
+    let value = obj
+        .get("executionBackend")
+        .or_else(|| obj.get("execution_backend"))
+        .or_else(|| meta.and_then(|m| m.get("executionBackend")))
+        .or_else(|| meta.and_then(|m| m.get("execution_backend")));
+
+    let Some(value) = value else {
+        return ExecutionBackend::NativeInference;
+    };
+
+    if let Ok(backend) = serde_json::from_value::<ExecutionBackend>(value.clone()) {
+        return backend;
+    }
+
+    match value.as_str() {
+        Some("native_inference") | Some("native") => ExecutionBackend::NativeInference,
+        Some("claude_cli") | Some("external_agent_claude_cli") => {
+            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli)
+        }
+        other => {
+            tracing::warn!(
+                execution_backend = ?other,
+                "unknown remote execution_backend; defaulting to native_inference"
+            );
+            ExecutionBackend::NativeInference
+        }
+    }
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
     obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
@@ -1503,6 +1551,23 @@ mod tests {
         );
         assert_eq!(result.agent_type, "concise");
     }
+    #[test]
+    fn parse_remote_model_value_reads_supports_native_schema() {
+        let value = serde_json::json!({
+            "id": "m1",
+            "model": "claude-sonnet-5",
+            "apiBackend": "messages",
+            "supportsNativeSchema": true,
+            "supportsStrictTools": false,
+            "contextWindow": 200000
+        });
+        let entry = parse_remote_model_value(&value, "https://api.example.com/v1")
+            .expect("parse remote model");
+        assert_eq!(entry.api_backend, crate::inference::ApiBackend::Messages);
+        assert_eq!(entry.supports_native_schema, Some(true));
+        assert_eq!(entry.supports_strict_tools, Some(false));
+    }
+
     #[test]
     fn parse_remote_model_value_no_laziness_detector_block_yields_default() {
         let value = serde_json::json!({

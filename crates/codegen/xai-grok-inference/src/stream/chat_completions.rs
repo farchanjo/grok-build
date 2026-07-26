@@ -300,6 +300,7 @@ pub fn stream_chat_completions<'a>(
                 // OpenRouter structured reasoning detail blocks, echoed back
                 // verbatim on the next turn for multi-turn reasoning fidelity.
                 reasoning_details: reasoning_details_acc,
+            provider_payload: None,
             }));
         } else {
             items.push(ConversationItem::assistant(""));
@@ -1179,6 +1180,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         });
         let messages = xai_grok_inference_types::conversation_to_chat_messages(vec![item]);
         let json = serde_json::to_value(&messages[0]).unwrap();

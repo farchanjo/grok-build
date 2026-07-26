@@ -1088,6 +1088,8 @@ async fn read_parent_inference_config(
                     doom_loop_recovery: ctx.inference_config.doom_loop_recovery,
                     header_injector: ctx.inference_config.header_injector.clone(),
                     provider_identity: ctx.inference_config.provider_identity,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                 }
             };
 
@@ -1183,6 +1185,7 @@ fn resolve_model_override_to_config(
             .map(|p| match p.kind {
                 crate::agent::model_providers::ModelProviderKind::OpenRouter => "OpenRouter",
                 crate::agent::model_providers::ModelProviderKind::OpenAi => "OpenAI",
+                crate::agent::model_providers::ModelProviderKind::Anthropic => "Anthropic",
                 _ => "provider",
             })
             .unwrap_or("provider");
@@ -2664,14 +2667,26 @@ pub(crate) struct SubagentMeta {
     /// Durable Codex app-server thread identifier. This is intentionally
     /// distinct from `child_session_id`: native Codex subagents do not own a
     /// Grok Build session and must reconnect with `thread/resume`.
+    ///
+    /// Legacy field: new external agents use
+    /// [`Self::external_session_pointer`] instead. Kept for read compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_thread_id: Option<String>,
     /// Provider discriminator for native external-agent metadata.
+    /// Legacy Codex-specific; prefer [`Self::external_runtime_kind`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider: Option<String>,
     /// Sandbox originally selected for the Codex thread.
+    /// Legacy Codex-specific; not used by Claude CLI or generic externals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_sandbox: Option<String>,
+    /// Generic external-runtime kind (`claude_cli`, …). Additive; does not
+    /// migrate or remove the legacy `codex_*` fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_runtime_kind: Option<String>,
+    /// Generic external session / resume pointer (not `codex_thread_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_session_pointer: Option<String>,
 }
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 ///
@@ -2735,13 +2750,19 @@ pub struct SubagentSessionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
     /// Native Codex app-server resume pointer, if this external subagent used
-    /// the Codex provider.
+    /// the Codex provider. Legacy; prefer [`Self::external_session_pointer`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_sandbox: Option<String>,
+    /// Generic external-runtime kind for non-Codex external agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_runtime_kind: Option<String>,
+    /// Generic external session / resume pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_session_pointer: Option<String>,
 }
 impl SubagentSessionMetadata {
     /// Current schema version.
@@ -2796,6 +2817,8 @@ impl SubagentSessionMetadata {
             codex_thread_id: meta.codex_thread_id.clone(),
             codex_provider: meta.codex_provider.clone(),
             codex_sandbox: meta.codex_sandbox.clone(),
+            external_runtime_kind: meta.external_runtime_kind.clone(),
+            external_session_pointer: meta.external_session_pointer.clone(),
         }
     }
 }

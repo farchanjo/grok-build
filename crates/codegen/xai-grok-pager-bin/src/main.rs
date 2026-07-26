@@ -304,6 +304,13 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
                     );
                     std::process::exit(2);
                 }
+                "anthropic" => {
+                    eprintln!(
+                        "Anthropic uses an API key. Use `grok provider set-key anthropic --from-env ANTHROPIC_API_KEY` \
+                         or open /providers in the TUI. Keys are never accepted on the command line."
+                    );
+                    std::process::exit(2);
+                }
                 other => {
                     eprintln!(
                         "error: `connect` for configured provider `{other}` is key-based. \
@@ -341,6 +348,12 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
                             anyhow::anyhow!("Failed to clear OpenRouter credentials: {e}")
                         })?;
                     println!("Disconnected OpenRouter.");
+                }
+                "anthropic" => {
+                    manager.remove_api_key(ProviderId::Anthropic).map_err(|e| {
+                        anyhow::anyhow!("Failed to clear Anthropic credentials: {e}")
+                    })?;
+                    println!("Disconnected Anthropic.");
                 }
                 other => {
                     let code = run_provider_lifecycle_cli(ProviderLifecycleArgs {
@@ -1964,6 +1977,14 @@ fn main() {
         std::process::exit(code);
     }
     if let Some(code) = xai_grok_pager::voice::maybe_run_capture_subprocess() {
+        std::process::exit(code);
+    }
+    // PR7: Claude CLI permission-bridge MCP child (feature-gated).
+    #[cfg(feature = "claude-cli-runtime")]
+    if let Some(code) =
+        xai_grok_shell::agent::external_runtime::claude_cli::maybe_run_permission_bridge_subprocess(
+        )
+    {
         std::process::exit(code);
     }
     let args = PagerArgs::parse_cli();

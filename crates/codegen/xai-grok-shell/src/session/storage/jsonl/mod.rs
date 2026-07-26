@@ -1312,6 +1312,8 @@ impl JsonlStorageAdapter {
             agent_name: source_summary.agent_name,
             sandbox_profile: source_summary.sandbox_profile,
             reasoning_effort: source_summary.reasoning_effort,
+            execution_backend: source_summary.execution_backend,
+            external_runtime: source_summary.external_runtime,
         };
         let summary_bytes = serde_json::to_vec_pretty(&target_summary)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1617,12 +1619,14 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
         self.append_cwd_switch_with_bookkeeping(info, message).await
     }
-    async fn update_current_model_and_agent(
+    async fn update_current_model_agent_and_execution(
         &self,
         info: &Info,
         model_id: &acp::ModelId,
         agent_name: Option<&str>,
         reasoning_effort: Option<Option<xai_grok_inference_types::ReasoningEffort>>,
+        execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
+        external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
     ) -> io::Result<()> {
         self.apply_summary_patch(
             info,
@@ -1631,6 +1635,8 @@ impl StorageAdapter for JsonlStorageAdapter {
                     model_id: model_id.clone(),
                     agent_name: agent_name.map(String::from),
                     reasoning_effort,
+                    execution_backend,
+                    external_runtime,
                 }),
                 ..Default::default()
             },

@@ -33,6 +33,8 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
                         std::sync::Arc::<str>::from(s)
                     };
                     a.tool_calls.clear();
+                    // Text/tool mutation invalidates signed Messages payloads.
+                    a.clear_provider_payload();
                 }
                 Some(ConversationItem::Assistant(a))
             }
@@ -42,11 +44,15 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
 }
 /// Drops provider-specific reasoning payloads from conversation history.
 ///
-/// This removes both top-level `ConversationItem::Reasoning` siblings and
-/// OpenRouter's `AssistantItem::reasoning_details`. Both are opaque replay
-/// artifacts tied to the provider/model that produced them, so carrying them
-/// into summarization after a route switch can trigger schema or signature
-/// validation failures on the active provider.
+/// Required before sending to backends that reject the structured reasoning
+/// shape (signed `Thinking` blocks after text mutation; some Chat Completions
+/// providers entirely) and before summarization.
+///
+/// This removes top-level `ConversationItem::Reasoning` siblings, OpenRouter's
+/// `AssistantItem::reasoning_details`, and durable Messages provider payloads.
+/// These opaque replay artifacts are tied to the provider/model that produced
+/// them; carrying them into summarization after a route switch can trigger
+/// schema or signature validation failures on the active provider.
 pub fn strip_reasoning_blocks(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
     conversation
         .into_iter()
@@ -54,6 +60,7 @@ pub fn strip_reasoning_blocks(conversation: Vec<ConversationItem>) -> Vec<Conver
             ConversationItem::Reasoning(_) => None,
             ConversationItem::Assistant(mut assistant) => {
                 assistant.reasoning_details.clear();
+                assistant.clear_provider_payload();
                 Some(ConversationItem::Assistant(assistant))
             }
             other => Some(other),
@@ -215,6 +222,9 @@ fn truncate_item_to_tokens(item: ConversationItem, max_tokens: u64) -> Conversat
         ConversationItem::Assistant(mut a) => {
             if let Some(s) = truncate_text_to_bytes(&a.content, max_bytes) {
                 a.content = s;
+                // Truncation mutates assistant text, so any durable Messages
+                // signed payload is no longer valid for exact replay.
+                a.clear_provider_payload();
             }
             ConversationItem::Assistant(a)
         }
@@ -429,6 +439,7 @@ pub fn extract_messages_since_last_user(
                 tool_call_id: t.tool_call_id.clone(),
                 content: std::sync::Arc::<str>::from("Tool call omitted..."),
                 images: Vec::new(),
+                is_error: None,
             })),
             _ => None,
         })
@@ -467,6 +478,7 @@ pub fn extract_messages_since_last_real_user(
                 tool_call_id: t.tool_call_id.clone(),
                 content: std::sync::Arc::<str>::from("Tool call omitted..."),
                 images: Vec::new(),
+                is_error: None,
             })),
             _ => None,
         })
@@ -2723,6 +2735,7 @@ actual user question";
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             // [4] Tool result for call_1
             ConversationItem::tool_result(
@@ -2763,6 +2776,7 @@ actual user question";
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             // [9] Tool result for call_3
             ConversationItem::tool_result("call_3", "File edited successfully."),
@@ -3100,6 +3114,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
         assert_eq!(result.len(), 3);
@@ -3107,7 +3122,10 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     }
     #[test]
     fn strip_reasoning_blocks_drops_all_provider_specific_reasoning() {
-        use xai_grok_inference_types::{AssistantItem, rs};
+        use xai_grok_inference_types::messages::ContentBlock;
+        use xai_grok_inference_types::{
+            AssistantItem, AssistantProviderPayload, MessagesAssistantPayload, rs,
+        };
         let result = strip_reasoning_blocks(vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
                 id: "r_123".to_string(),
@@ -3127,6 +3145,16 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 reasoning_details: vec![
                     serde_json::json!({"type": "reasoning.text", "text": "private"}),
                 ],
+                provider_payload: Some(AssistantProviderPayload {
+                    messages: Some(MessagesAssistantPayload {
+                        content: vec![ContentBlock::Text {
+                            text: "response".into(),
+                            cache_control: None,
+                            citations: None,
+                        }],
+                        replayable: true,
+                    }),
+                }),
             }),
         ]);
         assert_eq!(result.len(), 1, "reasoning sibling must be dropped");
@@ -3137,6 +3165,11 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             assistant.reasoning_details.is_empty(),
             "provider-specific reasoning details must be dropped"
         );
+        assert!(
+            assistant.provider_payload.is_none(),
+            "durable Messages provider payload must be cleared"
+        );
+        assert!(assistant.replayable_messages_content().is_none());
     }
     #[test]
     fn strip_reasoning_blocks_passes_other_items_through() {
@@ -3184,6 +3217,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "match found"),
         ]);
@@ -3228,6 +3262,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
         assert_eq!(result.len(), 1);
@@ -3265,6 +3300,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "match"),
             ConversationItem::user("second turn"),
@@ -3276,6 +3312,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc2", "stray"),
             ConversationItem::user("third turn"),
@@ -3286,6 +3323,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
         assert_eq!(result.len(), 6);
@@ -3356,6 +3394,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "files"),
         ];
@@ -3710,6 +3749,56 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             other => panic!("expected truncated trailing assistant, got {other:?}"),
         }
     }
+
+    /// Truncating assistant content must clear any durable Messages provider
+    /// payload so later requests do not replay a stale signed block array.
+    #[test]
+    fn fit_truncation_clears_assistant_messages_provider_payload() {
+        use xai_grok_inference_types::messages::ContentBlock;
+        use xai_grok_inference_types::{
+            AssistantItem, AssistantProviderPayload, MessagesAssistantPayload,
+        };
+
+        let huge = "q".repeat(40_000);
+        let assistant = AssistantItem {
+            content: huge.clone().into(),
+            tool_calls: vec![],
+            model_id: Some("m".into()),
+            model_fingerprint: None,
+            reasoning_effort: None,
+            reasoning_details: Vec::new(),
+            provider_payload: Some(AssistantProviderPayload {
+                messages: Some(MessagesAssistantPayload {
+                    content: vec![ContentBlock::Text {
+                        text: huge.clone(),
+                        cache_control: None,
+                        citations: None,
+                    }],
+                    replayable: true,
+                }),
+            }),
+        };
+        assert!(assistant.replayable_messages_content().is_some());
+
+        let conv = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("old"),
+            ConversationItem::Assistant(assistant),
+        ];
+        let out = fit_conversation_to_budget(conv, 100);
+        match out.last().expect("tail kept") {
+            ConversationItem::Assistant(a) => {
+                assert!(a.content.contains("truncated"));
+                assert!(
+                    a.provider_payload.is_none(),
+                    "truncation must clear the Messages provider payload"
+                );
+                assert!(a.replayable_messages_content().is_none());
+            }
+            other => panic!("expected truncated assistant, got {other:?}"),
+        }
+    }
+
     /// Incompactable-state regression: `fit` must charge images (765 each), so an image-heavy old turn is trimmed.
     #[test]
     fn fit_counts_user_images_against_budget() {

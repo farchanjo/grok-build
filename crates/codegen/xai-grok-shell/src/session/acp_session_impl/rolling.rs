@@ -38,6 +38,9 @@ impl SessionActor {
     pub(super) async fn plan_rolling_compaction_job(
         &self,
     ) -> Result<Option<RollingCompactionJob>, String> {
+        if self.execution_backend.get().is_external() {
+            return Ok(None);
+        }
         let policy = self.agent.borrow().compaction_policy().clone();
         if matches!(
             policy.strategy,
@@ -401,6 +404,7 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::{SessionActor, rolling_fixed_prefix_count};
+    use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
     use crate::session::persistence::PersistenceMsg;
     use crate::session::rolling_compaction::RollingCompactionResult;
     use tokio::sync::mpsc;
@@ -560,6 +564,29 @@ mod tests {
                 assert!(
                     error.contains("sampling failed"),
                     "error should contain the failure reason: {error}"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_rolling_returns_none_for_external_backend() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor =
+                    create_test_actor_for_rolling(0, 256_000, gateway_tx, persistence_tx).await;
+                actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                    ExternalAgentKind::ClaudeCli,
+                ));
+
+                let result = actor.plan_rolling_compaction_job().await;
+                assert!(result.is_ok(), "external planning should not error");
+                assert!(
+                    result.unwrap().is_none(),
+                    "host rolling compaction must not run for external-agent context"
                 );
             })
             .await;

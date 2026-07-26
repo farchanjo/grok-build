@@ -17,6 +17,8 @@
 //! and the actor with its per-request task tie these layers together.
 
 pub mod actor;
+/// Repository-owned Anthropic HTTP client (direct identity, not Messages protocol).
+pub mod anthropic;
 pub mod attribution;
 pub mod client;
 pub mod commands;
@@ -38,6 +40,15 @@ pub mod types;
 
 // Public re-exports — the API surface consumers see.
 pub use actor::InferenceActor;
+pub use anthropic::{
+    ANTHROPIC_VERSION, AnthropicBeta, AnthropicBetaSet, AnthropicClient, AnthropicClientConfig,
+    AnthropicClientError, AnthropicErrorBody, AnthropicMessagesOutcome, AnthropicPage,
+    AnthropicRateLimitHeaders, AnthropicResponseMeta, AnthropicResult, CountTokensRequest,
+    CountTokensResponse, DEFAULT_ANTHROPIC_BASE_URL, DeleteFileResponse, ErrorClass,
+    FILES_API_BETA, FileListPage, FileMetadata, FileUploadSource, ListFilesParams,
+    ListModelsParams, MAX_REQUEST_BYTES, ModelInfo, ModelListPage,
+    parse_anthropic_rate_limit_headers,
+};
 pub use attribution::{
     Auth401AttributionCallback, InferenceConsumer, SENT_BEARER_PREFIX_LEN,
     SharedAttributionCallback,

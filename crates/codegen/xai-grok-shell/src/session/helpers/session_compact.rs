@@ -621,8 +621,12 @@ pub(crate) async fn generate_session_compact(
             }
         }
         ApiBackend::Messages => {
+            // Portable compaction omits tools entirely. When first-party xAI
+            // explicitly enables tool-prefix reuse, attach auto only while
+            // definitions are present.
             let request = ConversationRequest {
                 items: chat_history,
+                tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
                 tools,
                 hosted_tools,
                 model: Some(inference_config.model.to_owned()),
@@ -1069,6 +1073,7 @@ mod compacted_history_shape_tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "fn login() { /* buggy code */ }"),
             ConversationItem::Assistant(AssistantItem {
@@ -1082,6 +1087,7 @@ mod compacted_history_shape_tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc2", "Successfully replaced text."),
         ];
@@ -1248,6 +1254,7 @@ mod compacted_history_shape_tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "fn login() { /* ... */ }"),
         ];
@@ -1739,6 +1746,8 @@ mod reasoning_compaction_regression_tests {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -1905,6 +1914,7 @@ mod reasoning_compaction_regression_tests {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
@@ -1978,6 +1988,7 @@ mod reasoning_compaction_regression_tests {
                 name: "read_file".to_string(),
                 description: Some("Reads a file".to_string()),
                 parameters: json!({"type": "object", "properties": {}}),
+                strict: None,
             }],
             vec![],
             client,
@@ -2042,6 +2053,7 @@ mod reasoning_compaction_regression_tests {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
@@ -2182,6 +2194,7 @@ mod reasoning_compaction_regression_tests {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
@@ -2221,40 +2234,11 @@ mod reasoning_compaction_regression_tests {
         let _ = shutdown_tx.send(());
     }
     fn messages_summary_stream() -> Vec<Event> {
-        vec![
-            Event::default().data(
-                json!({
-                    "type": "message_start",
-                    "message": {
-                        "id": "msg_test",
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [],
-                        "model": "test-model",
-                        "stop_reason": null,
-                        "usage": {"input_tokens": 10, "output_tokens": 0}
-                    }
-                })
-                .to_string(),
-            ),
-            Event::default().data(
-                json!({
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "text_delta", "text": "<summary>ok</summary>"}
-                })
-                .to_string(),
-            ),
-            Event::default().data(
-                json!({
-                    "type": "message_delta",
-                    "delta": {"stop_reason": "end_turn"},
-                    "usage": {"output_tokens": 5}
-                })
-                .to_string(),
-            ),
-            Event::default().data(json!({"type": "message_stop"}).to_string()),
-        ]
+        xai_grok_test_support::sse::messages_api_events(
+            "<summary>ok</summary>",
+            "test-model",
+            "end_turn",
+        )
     }
     fn test_config_messages(base_url: &str) -> InferenceConfig {
         let mut config = test_config(base_url);
@@ -2298,6 +2282,7 @@ mod reasoning_compaction_regression_tests {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
@@ -2368,6 +2353,7 @@ mod reasoning_compaction_regression_tests {
                 name: "read_file".to_string(),
                 description: Some("Reads a file".to_string()),
                 parameters: json!({"type": "object", "properties": {}}),
+                strict: None,
             }],
             vec![],
             client,
@@ -2434,6 +2420,7 @@ mod reasoning_compaction_regression_tests {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }];
         let hosted = vec![HostedTool::WebSearch { options: None }];
         let client = Client::new(config.clone()).unwrap();
@@ -2503,6 +2490,7 @@ mod reasoning_compaction_regression_tests {
         );
         let _ = shutdown_tx.send(());
     }
+
     #[tokio::test]
     async fn stalled_compaction_stream_times_out_as_transient() {
         let app = Router::new().route(

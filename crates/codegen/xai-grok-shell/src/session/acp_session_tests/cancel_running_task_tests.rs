@@ -70,6 +70,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     attribution_callback: None,
                     bearer_resolver: None,
                     supports_backend_search: false,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                     compactions_remaining: None,
                     compaction_at_tokens: None,
                     doom_loop_recovery: None,
@@ -106,6 +108,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
                     reasoning_effort: None,
                     stream_tool_calls: None,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -300,6 +304,11 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+                execution_backend: std::cell::Cell::new(
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                ),
+                external_runtime: std::cell::RefCell::new(None),
+                external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
@@ -391,6 +400,8 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     attribution_callback: None,
                     bearer_resolver: None,
                     supports_backend_search: false,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                     compactions_remaining: None,
                     compaction_at_tokens: None,
                     doom_loop_recovery: None,
@@ -430,7 +441,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
                     reasoning_effort: None,
                     stream_tool_calls: None,
-                },
+                supports_native_schema: None,
+            supports_strict_tools: None,
+},
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
                         persistence.tx.clone(),
@@ -530,6 +543,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     attribution_callback: None,
                     bearer_resolver: None,
                     supports_backend_search: false,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                     compactions_remaining: None,
                     compaction_at_tokens: None,
                     doom_loop_recovery: None,
@@ -571,6 +586,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
                     reasoning_effort: None,
                     stream_tool_calls: None,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -784,6 +801,11 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+                execution_backend: std::cell::Cell::new(
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                ),
+                external_runtime: std::cell::RefCell::new(None),
+                external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
@@ -1090,6 +1112,11 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+                execution_backend: std::cell::Cell::new(
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                ),
+                external_runtime: std::cell::RefCell::new(None),
+                external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
@@ -2087,6 +2114,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 attribution_callback: None,
                 bearer_resolver: None,
                 supports_backend_search: false,
+                supports_native_schema: None,
+                supports_strict_tools: None,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
@@ -2357,6 +2386,11 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: sampler_handle.clone(),
+                execution_backend: std::cell::Cell::new(
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                ),
+                external_runtime: std::cell::RefCell::new(None),
+                external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(

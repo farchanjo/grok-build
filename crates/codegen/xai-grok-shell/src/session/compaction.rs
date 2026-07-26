@@ -600,6 +600,10 @@ impl SessionActor {
         self: &Arc<Self>,
         user_context: Option<String>,
     ) -> Result<(), acp::Error> {
+        if self.execution_backend.get().is_external() {
+            return Err(acp::Error::invalid_request()
+                .data("compaction is not supported on external agent sessions".to_string()));
+        }
         self.record_compaction_variant();
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", total_tokens as i64);
@@ -2204,6 +2208,10 @@ impl SessionActor {
         self: &Arc<Self>,
         trigger_info: AutoCompactTriggerInfo,
     ) -> Result<(), acp::Error> {
+        if self.execution_backend.get().is_external() {
+            return Err(acp::Error::invalid_request()
+                .data("compaction is not supported on external agent sessions".to_string()));
+        }
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
         self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
@@ -2436,6 +2444,8 @@ mod inline_auto_compact_flow_tests {
                     .expect("test context_window must be non-zero"),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             Box::new(xai_chat_state::NullChatPersistence),
             chat_event_tx,
@@ -2623,6 +2633,11 @@ mod inline_auto_compact_flow_tests {
             ),
             turn_stream_drained: parking_lot::Mutex::new(None),
             sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+            execution_backend: std::cell::Cell::new(
+                crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            ),
+            external_runtime: std::cell::RefCell::new(None),
+            external_agent_runtime: std::cell::RefCell::new(None),
             rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
             image_description_model: crate::test_support::TEST_MODEL.to_owned(),
             image_describe_cache: Arc::new(
@@ -3007,6 +3022,101 @@ mod inline_auto_compact_flow_tests {
                     saw_retry_auth,
                     "expected RetryState::Failed auth notification"
                 );
+            })
+            .await;
+    }
+
+    /// Auto-compaction 401 on a direct Anthropic model emits provider-scoped
+    /// credential failure (`/providers` repair, no `/login`, no global
+    /// auth_required / xAI refresh path).
+    #[tokio::test(flavor = "current_thread")]
+    async fn surface_compact_auth_failure_anthropic_provider_scoped() {
+        use crate::agent::config::{ModelEntry, ModelInfo};
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+        use crate::extensions::notification::{
+            PROVIDER_CREDENTIAL_ERROR_TYPE, SessionUpdate as XaiSessionUpdate,
+        };
+        use crate::session::storage::SessionUpdate;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+                let actor =
+                    create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await;
+                let model_slug = "claude-sonnet-5";
+                let mut entry = ModelEntry {
+                    info: ModelInfo::fallback(model_slug),
+                    model_provider: Some(ResolvedModelProvider {
+                        id: "anthropic".to_string(),
+                        kind: ModelProviderKind::Anthropic,
+                        openrouter_fallback_models: Vec::new(),
+                        openrouter_provider_preferences: None,
+                        openrouter_plugins: Vec::new(),
+                        openrouter_pacing: false,
+                        command: Vec::new(),
+                    }),
+                    api_key: None,
+                    env_key: None,
+                    auth_provider: None,
+                    api_base_url: Some("https://api.anthropic.com/v1".to_string()),
+                };
+                entry.info.base_url = "https://api.anthropic.com/v1".to_string();
+                entry.info.model = model_slug.to_string();
+                actor.models_manager.insert_test_entry(model_slug, entry);
+                let mut settings = actor
+                    .chat_state_handle
+                    .get_inference_settings()
+                    .await
+                    .unwrap();
+                settings.model = model_slug.to_string();
+                settings.base_url = "https://api.anthropic.com/v1".to_string();
+                actor.chat_state_handle.update_inference_settings(settings);
+
+                let err = acp::Error::internal_error()
+                    .data("compact failed: API error (status 401 Unauthorized)");
+                let out = actor.surface_compact_auth_failure(err).await;
+                assert_ne!(
+                    out.code,
+                    acp::Error::auth_required().code,
+                    "Anthropic compact must not emit global auth_required"
+                );
+                let mut saw = false;
+                while let Ok(msg) = persistence_rx.try_recv() {
+                    if let PersistenceMsg::Update(SessionUpdate::Xai(notif)) = msg
+                        && let XaiSessionUpdate::RetryState(
+                            crate::extensions::notification::RetryState::Failed {
+                                error_type,
+                                message,
+                                provider,
+                            },
+                        ) = &notif.update
+                    {
+                        assert_eq!(error_type, PROVIDER_CREDENTIAL_ERROR_TYPE);
+                        assert!(
+                            message.contains("Anthropic"),
+                            "repair must name Anthropic: {message}"
+                        );
+                        assert!(
+                            message.contains("/providers"),
+                            "Anthropic repair must direct to /providers: {message}"
+                        );
+                        assert!(
+                            !message.contains("/login") && !message.contains("grok login"),
+                            "must not mention global login: {message}"
+                        );
+                        assert_eq!(
+                            provider.as_ref().map(|p| p.provider_id.as_str()),
+                            Some("anthropic")
+                        );
+                        assert_eq!(
+                            provider.as_ref().map(|p| p.provider_name.as_str()),
+                            Some("Anthropic")
+                        );
+                        saw = true;
+                    }
+                }
+                assert!(saw, "expected Anthropic provider-scoped RetryState");
             })
             .await;
     }

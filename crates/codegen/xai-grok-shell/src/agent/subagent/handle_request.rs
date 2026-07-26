@@ -719,6 +719,8 @@ pub(crate) async fn handle_subagent_request(
         codex_thread_id: None,
         codex_provider: None,
         codex_sandbox: None,
+        external_runtime_kind: None,
+        external_session_pointer: None,
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);
     if let (Some(bucket_url), Some(upload_method)) = (
@@ -1113,6 +1115,8 @@ pub(crate) async fn handle_subagent_request(
             model_id: effective_model_id.clone(),
             agent_name: Some(definition.name.clone()),
             reasoning_effort: Some(effective_inference_config.reasoning_effort),
+            execution_backend: None,
+            external_runtime: None,
         });
     let forked_tool_override = if verbatim_mirror_fork && !request.owner.is_workflow() {
         ctx.parent_tool_snapshot.clone()

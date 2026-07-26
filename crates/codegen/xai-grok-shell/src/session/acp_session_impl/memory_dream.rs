@@ -132,6 +132,13 @@ impl SessionActor {
             );
             return;
         }
+        if self.execution_backend.get().is_external() {
+            tracing::debug!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_EXTERNAL_SKIP: skipping dream for external execution backend"
+            );
+            return;
+        }
 
         use crate::session::memory::dream::*;
 
@@ -165,6 +172,15 @@ impl SessionActor {
     /// Run dream from `/dream` slash command, bypassing time/session gates.
     pub(super) async fn run_dream_slash_command(&self) {
         use crate::session::memory::dream_lock::sessions_since;
+
+        // Defense in depth: external sessions never consolidate.
+        if self.execution_backend.get().is_external() {
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_EXTERNAL_SKIP: refusing /dream on external execution backend"
+            );
+            return;
+        }
 
         let Some((storage, lock, sessions_dir, sid8)) = self.dream_context() else {
             return;
@@ -362,6 +378,15 @@ impl SessionActor {
         snapshot: Option<MemoryFlushSnapshot>,
     ) -> bool {
         use crate::session::helpers::memory_flush::*;
+
+        // External backends never run native memory flush (defense in depth).
+        if self.execution_backend.get().is_external() {
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_EXTERNAL_SKIP: refusing memory flush on external backend (trigger={trigger})"
+            );
+            return false;
+        }
 
         // Atomically acquire the flushing lock. If another flush is already
         // running (idle timer, pre-compaction, or user-requested), skip.

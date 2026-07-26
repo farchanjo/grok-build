@@ -1983,6 +1983,12 @@ pub fn resolve_model_catalog(
         }
     }
 
+    // PR5: external-agent execution modes that are not yet selectable (Claude
+    // Agent CLI) must not appear in the picker. Capability matrix is the gate;
+    // config/remote/catalog entries that set execution_backend=external still
+    // resolve for internal/resume use but stay hidden + non-selectable.
+    crate::agent::external_runtime::capability_matrix::apply_catalog_visibility(&mut catalog);
+
     // Persisted default first; CLI override below wins when set.
     // Only apply if the model supports reasoning effort.
     if let Some(effort) = cfg.models.default_reasoning_effort
@@ -3565,11 +3571,14 @@ mod tests {
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: config::LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         }
     }
 

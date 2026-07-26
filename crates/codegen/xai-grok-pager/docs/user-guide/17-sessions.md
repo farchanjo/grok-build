@@ -52,6 +52,14 @@ The TUI creates a new session each time you launch. To explicitly start fresh mi
 
 This clears the current context and begins a new conversation. Alias: `/clear`.
 
+Sessions also preserve their **execution backend** (native HTTP inference vs an
+experimental external agent such as Claude Agent CLI when that path is enabled).
+After the first established user turn, switching across execution modes is
+rejected — start `/new` instead. Model switches among native providers (xAI,
+OpenAI, Anthropic API, OpenRouter) follow the ordinary model-switch rules.
+See [Anthropic Provider](26-anthropic-provider.md#6-claude-agent-cli-experimental-subscription-mode)
+and [Migration](27-anthropic-migration.md#sessions-and-execution-modes).
+
 ### Exit
 
 End the session and quit Grok:

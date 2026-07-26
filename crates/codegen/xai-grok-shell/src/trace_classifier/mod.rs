@@ -1375,6 +1375,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })
     }
 
@@ -1581,11 +1582,13 @@ mod tests {
                 tool_call_id: "s1".into(),
                 content: "done".into(),
                 images: vec![],
+                is_error: None,
             }),
             ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: "b1".into(),
                 content: "done".into(),
                 images: vec![],
+                is_error: None,
             }),
         ];
         let counts = count_outstanding_dispatches(&items);
@@ -1605,6 +1608,7 @@ mod tests {
                 tool_call_id: "later".into(),
                 content: "preemptive".into(),
                 images: vec![],
+                is_error: None,
             }),
             assistant_with_tool_calls(vec![tc("later", "spawn_subagent", "{}")]),
         ];
@@ -1940,6 +1944,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }));
         }
         hist.push(ConversationItem::User(UserItem {
@@ -2538,6 +2543,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }));
         }
         hist.push(ConversationItem::User(UserItem {

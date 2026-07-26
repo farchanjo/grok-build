@@ -207,7 +207,30 @@ pub enum SessionCommand {
         /// `compaction.threshold_percent` (which is `Cell<u8>` so it can
         /// update without `&mut self`).
         auto_compact_threshold_percent: u8,
+        /// Execution backend for the target model (native vs external agent).
+        /// Persisted on the session summary so resume cannot silently switch.
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+    },
+    /// Current session execution backend (native inference vs external agent).
+    GetExecutionBackend {
+        responds_to: oneshot::Sender<crate::agent::execution_backend::ExecutionBackend>,
+    },
+    /// Restore execution backend + external envelope into the live actor cells
+    /// (session resume / seed). Does not rewrite sampling config. Fails when
+    /// the envelope fails validation (caller must not ignore the error).
+    RestoreExecutionMode {
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
+        external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+        responds_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Persist execution backend + envelope onto the session Summary without
+    /// changing sampling / model id. Used after resume restore so disk matches
+    /// the authoritative summary mode.
+    PersistExecutionMode {
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
+        external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+        responds_to: oneshot::Sender<Result<(), String>>,
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,

@@ -13,7 +13,9 @@ Manually compact the current conversation:
 /compact [context]
 ```
 
-The optional `context` argument provides additional instructions about what to preserve during compaction.
+The optional `context` argument provides additional instructions about what to preserve during compaction. Manual `/compact` always uses the compatible full-replace path; the `strategy` setting controls automatic idle compaction.
+
+Host compaction, including `/compact`, is not supported in Claude Agent CLI or other external-agent sessions because the external runtime owns the authoritative conversation. Start `/new` with a native model. See [Anthropic Provider](26-anthropic-provider.md#6-claude-agent-cli-experimental-subscription-mode).
 
 ---
 
@@ -52,15 +54,17 @@ models = ["@session"]          # @session or catalog model IDs
 
 | Value | Description |
 |-------|-------------|
-| `auto` (default) | Uses rolling compaction when an automatic idle safe point has eligible cold history; otherwise it retains the compatible full-replace path. |
-| `rolling` | Summarizes the oldest eligible logical band while preserving the fixed prefix and recent raw tail. |
-| `full_replace` | Summarizes the mutable conversation into a replacement summary. |
+| `auto` (default) | At an automatic idle safe point, uses rolling compaction when eligible cold history exists and otherwise falls back to full-replace compaction. |
+| `rolling` | At automatic idle safe points, summarizes the oldest eligible logical band while preserving the fixed prefix and recent raw tail. If no cold band is eligible, it waits rather than falling back. |
+| `full_replace` | Uses full-replace compaction for automatic threshold and overflow recovery. |
+
+Manual `/compact` always uses full-replace compaction, independent of this setting. Provider overflow recovery also remains on the full-replace path.
 
 ### When Each Strategy Is Best
 
-- **`auto`**: For most users. Grok prefers rolling automatic compaction while keeping compatibility with existing full-replace flows.
-- **`rolling`**: For long sessions where recent context is critical (e.g., active coding, debugging). Preserves the newest turns in raw form.
-- **`full_replace`**: For sessions where the full context has been summarized and you want maximum space savings.
+- **`auto`**: For most users. Grok prefers rolling automatic compaction while retaining full-replace fallback when rolling is not eligible.
+- **`rolling`**: For long sessions where recent context is critical and you prefer to wait for an eligible cold band rather than fall back automatically.
+- **`full_replace`**: For sessions where you want automatic compaction to consolidate the mutable history into one replacement summary.
 
 ---
 

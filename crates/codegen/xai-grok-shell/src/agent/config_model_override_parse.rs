@@ -680,6 +680,7 @@ mod tests {
             temperature: Some(0.5),
             top_p: Some(0.9),
             api_backend: Some(ApiBackend::Messages),
+            auth_scheme: None,
             openrouter_fallback_models: Some(vec!["openai/gpt-5-mini".into()]),
             provider_preferences: None,
             plugins: None,
@@ -706,11 +707,14 @@ mod tests {
                 default: true,
             }],
             supports_backend_search: Some(false),
+            supports_native_schema: None,
+            supports_strict_tools: None,
             compactions_remaining: Some(CompactionsRemaining::Fixed(1)),
             compaction_at_tokens: Some(CompactionAtTokens::Fixed(100_000)),
             show_model_fingerprint: Some(true),
             stream_tool_calls: Some(false),
             supports_tools: Some(true),
+            execution_backend: None,
         }
     }
 

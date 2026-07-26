@@ -29,21 +29,24 @@ pub enum ProviderKind {
     Xai,
     OpenAi,
     OpenRouter,
+    Anthropic,
     /// User-configured provider id (e.g. `local_vllm`, `zai-model-api`).
     Configured(String),
 }
 
 impl ProviderKind {
-    pub const BUILTINS: [Self; 3] = [Self::Xai, Self::OpenAi, Self::OpenRouter];
+    /// Peer order: existing built-ins, then Anthropic, then configured rows.
+    pub const BUILTINS: [Self; 4] = [Self::Xai, Self::OpenAi, Self::OpenRouter, Self::Anthropic];
 
     /// Default browse list before configured providers are loaded.
-    pub const ALL: [Self; 3] = Self::BUILTINS;
+    pub const ALL: [Self; 4] = Self::BUILTINS;
 
     pub fn label(&self) -> String {
         match self {
             Self::Xai => "xAI".into(),
             Self::OpenAi => "OpenAI".into(),
             Self::OpenRouter => "OpenRouter".into(),
+            Self::Anthropic => "Anthropic".into(),
             Self::Configured(id) => id.clone(),
         }
     }
@@ -53,6 +56,12 @@ impl ProviderKind {
             Self::Xai => "Grok/xAI account (OAuth) or xAI API key".into(),
             Self::OpenAi => "ChatGPT OAuth or API key · Responses".into(),
             Self::OpenRouter => "Chat Completions · key stored securely".into(),
+            Self::Anthropic => {
+                // API key path is independent of the experimental Claude Agent CLI
+                // subscription path (build-gated + runtime opt-in elsewhere).
+                "Messages API · x-api-key stored securely · Claude Agent (CLI, Experimental) when gated"
+                    .into()
+            }
             Self::Configured(id) if id == "zai-model-api" || id == "zai" => {
                 "Z.ai Model API · Chat Completions · key stored securely".into()
             }
@@ -63,7 +72,10 @@ impl ProviderKind {
     }
 
     pub fn needs_api_key(&self) -> bool {
-        matches!(self, Self::OpenAi | Self::OpenRouter | Self::Configured(_))
+        matches!(
+            self,
+            Self::OpenAi | Self::OpenRouter | Self::Anthropic | Self::Configured(_)
+        )
     }
 
     pub fn id_str(&self) -> &str {
@@ -71,6 +83,7 @@ impl ProviderKind {
             Self::Xai => "xai",
             Self::OpenAi => "openai",
             Self::OpenRouter => "openrouter",
+            Self::Anthropic => "anthropic",
             Self::Configured(id) => id.as_str(),
         }
     }
@@ -504,7 +517,7 @@ fn start_connect(state: &mut ProviderModalState) -> ProviderModalOutcome {
         };
         ProviderModalOutcome::Changed
     } else if provider == ProviderKind::OpenAi {
-        // ChatGPT OAuth or API key (mutually exclusive).
+        // ChatGPT OAuth and an API key may coexist; the selected route chooses one.
         state.mode = ProviderModalMode::ChoosingOpenAi { selected: 0 };
         ProviderModalOutcome::Changed
     } else if provider.needs_api_key() {
@@ -737,7 +750,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             buf,
             content.content,
             &mut y,
-            "OAuth and API keys are independent options; model routes select the right method.",
+            "xAI/OpenAI: OAuth and API keys are independent; model routes select the method. OpenRouter/Anthropic: API key.",
             Style::default().fg(theme.gray_dim),
         );
     }
@@ -863,6 +876,71 @@ mod tests {
         assert_eq!(
             state.status(&ProviderKind::OpenRouter).label(),
             "Connection error"
+        );
+    }
+
+    #[test]
+    fn anthropic_is_a_builtin_card_after_openrouter() {
+        let state = ProviderModalState::new();
+        assert_eq!(ProviderKind::BUILTINS.len(), 4);
+        assert_eq!(
+            ProviderKind::BUILTINS[3],
+            ProviderKind::Anthropic,
+            "peer order: Anthropic after OpenRouter"
+        );
+        assert_eq!(state.rows[3], ProviderKind::Anthropic);
+        assert!(ProviderKind::Anthropic.needs_api_key());
+        assert_eq!(ProviderKind::Anthropic.id_str(), "anthropic");
+        assert!(ProviderKind::Anthropic.detail().contains("Messages"));
+    }
+
+    #[test]
+    fn anthropic_connect_replace_test_disconnect_never_put_secret_in_command() {
+        let mut state = ProviderModalState::new();
+        state.selected = 3; // Anthropic
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(
+            &state.mode,
+            ProviderModalMode::EditingKey {
+                provider: ProviderKind::Anthropic,
+                ..
+            }
+        ));
+        assert_eq!(
+            handle_paste(&mut state, "sk-ant-test-secret"),
+            ProviderModalOutcome::Changed
+        );
+        let cmd = handle_key(&mut state, &key(KeyCode::Enter));
+        assert_eq!(
+            cmd,
+            ProviderModalOutcome::Command(ProviderCommand::Connect(ProviderKind::Anthropic))
+        );
+        assert!(!format!("{cmd:?}").contains("sk-ant-test-secret"));
+        assert!(!format!("{state:?}").contains("sk-ant-test-secret"));
+        assert_eq!(
+            state
+                .take_submitted_secret(&ProviderKind::Anthropic)
+                .as_deref(),
+            Some("sk-ant-test-secret")
+        );
+
+        state.set_status(
+            &ProviderKind::Anthropic,
+            ProviderStatus::Connected {
+                detail: Some("ok".into()),
+            },
+        );
+        state.selected = 3;
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('t'))),
+            ProviderModalOutcome::Command(ProviderCommand::Test(ProviderKind::Anthropic))
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('d'))),
+            ProviderModalOutcome::Command(ProviderCommand::Disconnect(ProviderKind::Anthropic))
         );
     }
 

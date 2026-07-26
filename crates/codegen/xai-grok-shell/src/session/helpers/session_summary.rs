@@ -109,6 +109,7 @@ Just generate the session_title and nothing else"#,
             },
             "additionalProperties": false
         }),
+        strict: None,
     }])
     .with_max_output_tokens(100)
     .with_temperature(1.0)

@@ -74,9 +74,18 @@ remote_fetch = true                    # allow optional online model-catalog fet
 auto_compact_threshold_percent = 85    # auto-compact at this % of context window (default: 85)
 load_envrc = true                      # load .envrc environment variables
 
+[compaction]
+strategy = "auto"                     # auto | rolling | full_replace
+trigger_policy = "fixed"              # fixed | dynamic
+rolling_band_count = 4                 # 3..=8; used by rolling compaction
+models = ["@session"]                 # primary, then optional fallback
+
 [tools]
 respect_gitignore = false              # default: false; set true to make every tool skip gitignored files
 ```
+
+For automatic compaction strategy, trigger, band, and model details, see
+[Compaction Settings](25-compaction.md).
 
 #### Input mode
 
@@ -215,27 +224,35 @@ model = "model-id"                    # model identifier sent to API
 base_url = "https://api.example.com/v1"  # OpenAI-compatible endpoint
 name = "Display Name"                 # shown in model picker
 description = "Model description"      # optional
-api_key = "sk-..."                    # API key for this provider
-env_key = "XAI_API_KEY"               # env var(s) holding the API key; string or array (first set, non-empty wins)
+# Prefer env_key or /providers vault — never commit literal secrets:
+env_key = "MY_PROVIDER_API_KEY"       # env var(s); string or array (first set, non-empty wins)
+# api_key is supported but not recommended for secrets in config files
 temperature = 0.7                     # sampling temperature (0.0-2.0)
 top_p = 0.95                          # nucleus sampling parameter
 max_completion_tokens = 8192          # max tokens per response
 context_window = 128000               # context window size (for auto-compact)
+# Non-secret headers only:
+# extra_headers = { "X-Request-Tags" = "team=example" }
 ```
 
-Credential resolution: `api_key` > `env_key` > signed-in session token > `XAI_API_KEY`.
+Credential resolution prefers model-local `api_key` / `env_key`, then the
+model's provider-scoped vault or OAuth credential. Named third-party providers
+fail closed if that credential is unavailable. Only unscoped xAI models may
+fall back to the signed-in xAI session or `XAI_API_KEY`.
 
-Use `/providers` for the built-in xAI, OpenAI, OpenRouter, and Codex/ChatGPT
-connections; no TOML is required. For custom models and reusable provider
-blocks, see [Custom Models](11-custom-models.md#openai-api-and-openrouter).
-Third-party provider blocks fail closed when their own credential is
-unavailable.
+Use `/providers` for the built-in xAI, OpenAI, OpenRouter, Anthropic, and
+ChatGPT OAuth connections; no TOML is required for those peers. For custom
+models and reusable provider blocks, see
+[Custom Models](11-custom-models.md) and
+[Anthropic Provider](26-anthropic-provider.md). Third-party provider blocks fail
+closed when their own credential is unavailable.
 
-To override a built-in model, use its name as the section key and set only the fields you need:
+To override a built-in model, use its name as the section key and set only the
+fields you need (prefer env or vault over literals):
 
 ```toml
 [model.grok-build]
-api_key = "my-api-key"
+env_key = "XAI_API_KEY"
 ```
 
 ### MCP servers

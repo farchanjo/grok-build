@@ -1156,6 +1156,8 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 attribution_callback: None,
                 bearer_resolver: None,
                 supports_backend_search: false,
+                supports_native_schema: None,
+                supports_strict_tools: None,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
@@ -1163,7 +1165,14 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 provider_identity: Default::default(),
             };
             let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
+                .handle_set_session_model(
+                    cfg,
+                    false,
+                    false,
+                    true,
+                    85,
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                )
                 .await;
 
             assert!(
@@ -1256,6 +1265,8 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 attribution_callback: None,
                 bearer_resolver: None,
                 supports_backend_search: false,
+                supports_native_schema: None,
+                supports_strict_tools: None,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
@@ -1263,7 +1274,14 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
             };
             let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
+                .handle_set_session_model(
+                    cfg,
+                    false,
+                    false,
+                    true,
+                    85,
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                )
                 .await;
 
             let creds = actor.chat_state_handle.get_credentials().await;

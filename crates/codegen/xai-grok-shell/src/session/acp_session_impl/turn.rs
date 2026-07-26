@@ -1,9 +1,443 @@
 //! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
 //! sampling loop).
 use super::*;
+
+impl SessionActor {
+    /// Single effective capability mode key for external runtimes.
+    ///
+    /// Precedence (security): plan / read-only **always wins** over yolo.
+    /// `plan + yolo=true` → `read_only` (never always_approve). When not in
+    /// plan, yolo → `always_approve` (broad allowlist, still brokered). Auto
+    /// and default → `all`.
+    ///
+    /// This key is used both to configure the runtime and as the retained-runtime
+    /// compatibility key (mode changes force recreate + shutdown).
+    pub(crate) fn external_effective_mode_key(&self) -> String {
+        use crate::session::plan_mode::PlanModeState;
+        let plan_active = self.plan_mode.lock().state() != PlanModeState::Inactive
+            || *self.current_prompt_mode.lock() == PromptMode::Plan;
+        // Plan always wins over yolo / always-approve.
+        if plan_active {
+            return "read_only".to_owned();
+        }
+        if self.permissions.is_yolo_mode() {
+            return "always_approve".to_owned();
+        }
+        if self.permissions.is_auto_mode() {
+            return "all".to_owned();
+        }
+        match *self.current_prompt_mode.lock() {
+            PromptMode::Ask => "read_only".to_owned(),
+            PromptMode::Plan => "read_only".to_owned(),
+            // Default/agent: brokered all mode.
+            PromptMode::Agent => "all".to_owned(),
+        }
+    }
+
+    /// Back-compat alias used by older tests.
+    pub(crate) fn external_host_mode_label(&self) -> String {
+        self.external_effective_mode_key()
+    }
+
+    /// Obtain or create the session-scoped external runtime (PermissionHandle +
+    /// effective capability mode). Reuses one Arc across turns when kind and
+    /// effective mode are unchanged.
+    pub(crate) async fn ensure_external_agent_runtime(
+        &self,
+        kind: crate::agent::execution_backend::ExternalAgentKind,
+    ) -> Result<
+        std::sync::Arc<dyn crate::agent::external_runtime::ExternalAgentRuntime>,
+        crate::agent::external_runtime::ExternalRuntimeError,
+    > {
+        use crate::agent::external_runtime::{
+            ExternalRuntimeSessionContext, RetainedExternalAgentRuntime, default_registry,
+        };
+
+        let effective_mode = self.external_effective_mode_key();
+        {
+            let guard = self.external_agent_runtime.borrow();
+            if let Some(retained) = guard.as_ref() {
+                if retained.kind == kind && retained.effective_mode == effective_mode {
+                    return Ok(retained.runtime.clone());
+                }
+            }
+        }
+        // Kind or effective capability mode changed: shut down prior instance.
+        self.shutdown_external_agent_runtime().await;
+
+        let ctx =
+            ExternalRuntimeSessionContext::new(self.permissions.clone(), effective_mode.clone());
+        let runtime = default_registry()
+            .create_for_session(kind, &ctx)
+            .ok_or_else(|| {
+                crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
+            })?;
+        *self.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
+            kind,
+            effective_mode,
+            runtime.clone(),
+        ));
+        Ok(runtime)
+    }
+
+    /// Shut down and drop the retained external runtime (bridge, temp dirs,
+    /// persistent child). Safe to call when none is retained.
+    pub(crate) async fn shutdown_external_agent_runtime(&self) {
+        let retained = self.external_agent_runtime.borrow_mut().take();
+        if let Some(retained) = retained {
+            let envelope = self.external_runtime.borrow().clone().unwrap_or_else(|| {
+                crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(retained.kind)
+            });
+            if let Err(e) = retained.runtime.shutdown(&envelope).await {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    kind = %retained.kind,
+                    error = %e,
+                    "external agent runtime shutdown returned error"
+                );
+            }
+        }
+    }
+
+    /// Fail closed when the session's execution backend is an external agent
+    /// that is not available (gates closed, missing binary, probe failure).
+    /// Safe to call before any turn mutation (`increment_turn`, history append).
+    pub(crate) async fn preflight_external_execution_backend(
+        &self,
+    ) -> Result<(), crate::agent::external_runtime::ExternalRuntimeError> {
+        let backend = self.execution_backend.get();
+        if backend.is_native() {
+            return Ok(());
+        }
+        let kind = backend.external_kind().ok_or_else(|| {
+            crate::agent::external_runtime::ExternalRuntimeError::new(
+                crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                "external execution backend selected without a kind",
+                None,
+            )
+        })?;
+        // Session-aware factory: attach PermissionHandle + capability mode.
+        // Preflight and turn share the retained Arc.
+        let runtime = self.ensure_external_agent_runtime(kind).await?;
+        // Successful probe is required before turn establishment. Probe
+        // failure fails closed with no session mutation of turn_count/history.
+        runtime.probe().await?;
+        Ok(())
+    }
+
+    /// Run one external-agent turn (Claude CLI, …), mapping normalized events
+    /// into ACP SessionUpdates. Does **not** enter InferenceActor / Grok tool
+    /// loop / compaction / memory / goals / workflow machinery.
+    ///
+    /// Reuses the session-scoped runtime Arc. Successful assistant text is
+    /// persisted as a text-only ConversationItem (Claude tools are display-only).
+    pub(crate) async fn run_external_agent_turn(
+        self: &std::sync::Arc<Self>,
+        prompt_id: &str,
+        prompt_text: &str,
+    ) -> crate::session::commands::PromptTurnResult {
+        use crate::agent::external_runtime::{
+            ExternalRuntimeTurnEvent, ExternalStartRequest, ExternalTurnRequest,
+        };
+        use crate::session::commands::ok_end_turn;
+
+        let backend = self.execution_backend.get();
+        let kind = backend.external_kind().ok_or_else(|| {
+            crate::agent::external_runtime::ExternalRuntimeError::new(
+                crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                "external execution backend selected without a kind",
+                None,
+            )
+            .into_acp_error()
+        })?;
+
+        let runtime = self
+            .ensure_external_agent_runtime(kind)
+            .await
+            .map_err(|e| e.into_acp_error())?;
+
+        // Unsupported host operations for external turns (explicit report).
+        if self.goal_harness_enabled() {
+            return Err(
+                crate::agent::external_runtime::ExternalRuntimeError::new(
+                    crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                    "Goals are not supported on Claude Agent CLI sessions. Start /new with a native model.",
+                    Some(kind),
+                )
+                .into_acp_error(),
+            );
+        }
+
+        let cwd = self.tool_context.cwd.as_str().to_owned();
+        let selected_model = self.current_model_id().await;
+        let effort = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .and_then(|c| c.reasoning_effort.map(|e| e.as_str().to_owned()));
+
+        let mut envelope = self.external_runtime.borrow().clone();
+        if envelope.is_none() {
+            let started = runtime
+                .start(ExternalStartRequest {
+                    cwd: cwd.clone(),
+                    worktree_identity: None,
+                    selected_model: Some(selected_model.clone()),
+                    reasoning_effort: effort.clone(),
+                    token_budget: None,
+                })
+                .await
+                .map_err(|e| e.into_acp_error())?;
+            envelope = Some(started);
+        } else if let Some(ref env) = envelope {
+            // Resume path validates pointer when present.
+            if env.session_pointer.as_ref().is_some_and(|s| !s.is_empty()) {
+                let resumed = runtime.resume(env).await.map_err(|e| e.into_acp_error())?;
+                envelope = Some(resumed);
+            }
+        }
+        let envelope = envelope.ok_or_else(|| {
+            crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind).into_acp_error()
+        })?;
+
+        // Wire cancel: if the session turn_cancel fires, cancel the *retained* runtime.
+        let cancel_token = self.turn_cancel.borrow().clone();
+        let runtime_for_cancel = runtime.clone();
+        let env_for_cancel = envelope.clone();
+        let cancel_watch = tokio::spawn(async move {
+            cancel_token.cancelled().await;
+            let _ = runtime_for_cancel.cancel(&env_for_cancel).await;
+        });
+
+        let turn_result = runtime
+            .turn(
+                &envelope,
+                ExternalTurnRequest {
+                    prompt: prompt_text.to_owned(),
+                    selected_model: Some(selected_model.clone()),
+                    reasoning_effort: effort,
+                    token_budget: None,
+                },
+            )
+            .await;
+
+        cancel_watch.abort();
+
+        let outcome = match turn_result {
+            Ok(o) => o,
+            Err(e) => {
+                // Persist text-only partial assistant content exactly once on
+                // *any* failure that carried TextDelta events (cancel or not).
+                // Never include ToolCall/Status/Error display text; never Grok tools.
+                // Process APIs buffer NDJSON (no live stream), so emit UI TextDelta
+                // once here for all failure kinds without double-emitting.
+                let partial_text = Self::collect_external_text_deltas(&e.partial_events);
+                if !partial_text.is_empty() {
+                    for event in &e.partial_events {
+                        if let ExternalRuntimeTurnEvent::TextDelta { text } = event {
+                            if text.is_empty() {
+                                continue;
+                            }
+                            self.send_update(
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
+                                )),
+                                None,
+                            )
+                            .await;
+                        }
+                    }
+                    self.chat_state_handle
+                        .push_assistant_response(ConversationItem::assistant(partial_text));
+                }
+
+                // Best-effort envelope on any failure that carries a partial pointer.
+                if let Some(partial) = e.partial_envelope.clone() {
+                    if let Ok(validated) = partial.clone().validated() {
+                        *self.external_runtime.borrow_mut() = Some(validated.clone());
+                        let model_id = acp::ModelId::new(selected_model.clone());
+                        let agent_name = self.agent.borrow().definition().name.clone();
+                        let _ = self.notifications.persistence_tx.send(
+                            crate::session::persistence::PersistenceMsg::CurrentModel {
+                                model_id,
+                                agent_name: Some(agent_name),
+                                reasoning_effort: None,
+                                execution_backend: Some(backend),
+                                external_runtime: Some(Some(validated)),
+                            },
+                        );
+                    }
+                }
+
+                if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
+                    // Status display only for cancel path (not chat-state).
+                    for event in &e.partial_events {
+                        if let ExternalRuntimeTurnEvent::Status { message } = event {
+                            self.send_update(
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::Text(acp::TextContent::new(format!(
+                                        "[{message}]"
+                                    ))),
+                                )),
+                                None,
+                            )
+                            .await;
+                        }
+                    }
+                    return Ok(crate::session::commands::PromptTurnOk {
+                        stop_reason: acp::StopReason::Cancelled,
+                        total_tokens: 0,
+                        turn_snapshot: None,
+                        completion_kind:
+                            crate::session::commands::PromptCompletionKind::Cancelled {
+                                category: None,
+                                context: None,
+                            },
+                        structured_output: None,
+                        usage: None,
+                        tool_overrides: None,
+                    });
+                }
+                return Err(e.into_acp_error());
+            }
+        };
+
+        // Map normalized events → ACP SessionUpdates (no second protocol).
+        // Collect assistant text only (never Claude tool events as Grok tools).
+        let mut assistant_text = String::new();
+        for event in &outcome.events {
+            match event {
+                ExternalRuntimeTurnEvent::TextDelta { text } => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    assistant_text.push_str(text);
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+                ExternalRuntimeTurnEvent::ToolCall { name, summary } => {
+                    // Display/audit only — never dispatch to Grok tool executor
+                    // and never record as Grok tool_call ConversationItems.
+                    let msg = match summary {
+                        Some(s) => format!("[Claude tool: {name} ({s})]"),
+                        None => format!("[Claude tool: {name}]"),
+                    };
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(msg)),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+                ExternalRuntimeTurnEvent::Status { message } => {
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(format!("[{message}]"))),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+                ExternalRuntimeTurnEvent::Error { message } => {
+                    self.send_update(
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(format!(
+                                "[error: {message}]"
+                            ))),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // Persist successful external assistant text as a normalized text-only
+        // ConversationItem for replay/export/rewind (no tool_calls).
+        if !assistant_text.is_empty() {
+            self.chat_state_handle
+                .push_assistant_response(ConversationItem::assistant(assistant_text));
+        }
+
+        // Persist redacted envelope only (no raw NDJSON).
+        let envelope_to_store = match outcome.envelope.clone().validated() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    error = %e,
+                    "external envelope failed validation; keeping prior pointer only"
+                );
+                outcome.envelope.clone()
+            }
+        };
+        *self.external_runtime.borrow_mut() = Some(envelope_to_store.clone());
+        let model_id = acp::ModelId::new(selected_model.clone());
+        let agent_name = self.agent.borrow().definition().name.clone();
+        let _ = self.notifications.persistence_tx.send(
+            crate::session::persistence::PersistenceMsg::CurrentModel {
+                model_id,
+                agent_name: Some(agent_name),
+                reasoning_effort: None,
+                execution_backend: Some(backend),
+                external_runtime: Some(Some(envelope_to_store)),
+            },
+        );
+
+        let tokens = outcome
+            .usage
+            .as_ref()
+            .and_then(|u| {
+                u.total_tokens
+                    .or_else(|| match (u.input_tokens, u.output_tokens) {
+                        (Some(i), Some(o)) => Some(i.saturating_add(o)),
+                        (Some(i), None) => Some(i),
+                        (None, Some(o)) => Some(o),
+                        _ => None,
+                    })
+            })
+            .unwrap_or(0);
+
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            prompt_id = %prompt_id,
+            kind = %kind,
+            tokens,
+            "external agent turn completed"
+        );
+
+        ok_end_turn(tokens, None)
+    }
+
+    /// Collect TextDelta only from external events (exactly once for chat-state).
+    /// Excludes ToolCall / Status / Error display strings.
+    pub(crate) fn collect_external_text_deltas(
+        events: &[crate::agent::external_runtime::ExternalRuntimeTurnEvent],
+    ) -> String {
+        use crate::agent::external_runtime::ExternalRuntimeTurnEvent;
+        let mut out = String::new();
+        for event in events {
+            if let ExternalRuntimeTurnEvent::TextDelta { text } = event {
+                if !text.is_empty() {
+                    out.push_str(text);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Synthetic tool the model calls to return its schema-constrained final answer
-/// on backends that can't constrain output natively (Messages API). Intercepted
-/// in the loop, never executed as a real tool.
+/// on backends that cannot constrain output natively (custom Messages, or
+/// Messages without model-level native-schema capability). Direct Anthropic
+/// capable models use `output_config.format` instead and leave this unused.
+/// Intercepted in the loop, never executed as a real tool.
 const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
@@ -269,6 +703,18 @@ impl SessionActor {
                 "block_count": prompt_blocks.len(),
             })),
         );
+        // External-runtime preflight MUST run before turn_count increment and
+        // durable user history append. Unavailable CLI (PR5 stub) fails closed
+        // with InvalidRequest so the session remains switchable to native.
+        if let Err(err) = self.preflight_external_execution_backend().await {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                prompt_id = %prompt_id,
+                error = %err,
+                "handle_prompt: external execution preflight failed (no turn mutation)"
+            );
+            return Err(err.into_acp_error());
+        }
         let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         if let Some(completion_id) = origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
@@ -356,6 +802,30 @@ impl SessionActor {
                     span.record("command_source", "builtin");
                 }
                 match action {
+                    BuiltinAction::GoalSet { .. }
+                    | BuiltinAction::GoalResume
+                    | BuiltinAction::GoalStatus
+                    | BuiltinAction::GoalPause
+                    | BuiltinAction::GoalClear
+                    | BuiltinAction::DeepResearch { .. }
+                    | BuiltinAction::WorkflowLaunch { .. }
+                    | BuiltinAction::WorkflowManage { .. }
+                    | BuiltinAction::Compact { .. }
+                    | BuiltinAction::Dream
+                    | BuiltinAction::FlushMemory
+                        if self.execution_backend.get().is_external() =>
+                    {
+                        // Reject before any goal/workflow/memory/dream mutation.
+                        xai_grok_telemetry::session_ctx::log_event(slash_used);
+                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        let msg = format!(
+                            "{} is not supported on Claude Agent (CLI, Experimental) sessions. \
+                             Start /new with a native model.",
+                            action.command_name()
+                        );
+                        self.send_host_turn_slash_command_output(&msg).await;
+                        return ok_end_turn(0, None);
+                    }
                     BuiltinAction::GoalSet {
                         objective,
                         token_budget,
@@ -823,12 +1293,33 @@ impl SessionActor {
         self.dispatch_hook(
             xai_grok_hooks::event::HookEventName::UserPromptSubmit,
             xai_grok_hooks::event::HookPayload::UserPromptSubmit {
-                prompt: Some(prompt_text_for_hook),
+                prompt: Some(prompt_text_for_hook.clone()),
             },
             Some(prompt_id),
             None,
         )
         .await;
+        // External agent path: session-scoped runtime (persistent multi-turn
+        // when capability-supported), no InferenceActor / Grok tool loop /
+        // compaction / memory / goals / workflow machinery.
+        if self.execution_backend.get().is_external() {
+            let prompt_for_external = {
+                // Prefer the hook text (post-parse); fall back to concatenated blocks.
+                if !prompt_text_for_hook.is_empty() {
+                    prompt_text_for_hook
+                } else {
+                    prompt_blocks.iter().fold(String::new(), |mut acc, b| {
+                        if let acp::ContentBlock::Text(t) = b {
+                            acc.push_str(&t.text);
+                        }
+                        acc
+                    })
+                }
+            };
+            return self
+                .run_external_agent_turn(prompt_id, &prompt_for_external)
+                .await;
+        }
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
         let turn_model_id = self.current_model_id().await;
@@ -1905,9 +2396,14 @@ impl SessionActor {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
         });
         let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
+        // Provider/model-aware: ChatCompletions/Responses always native;
+        // Messages uses native output_config.format only when the durable
+        // model capability (supports_native_schema) opts in — direct Anthropic
+        // curated/capable models. Custom Messages keeps StructuredOutput-tool
+        // fallback unless explicitly capable.
         let native_backend = if json_schema.is_some() {
             match self.chat_state_handle.get_inference_settings().await {
-                Some(c) => c.api_backend.supports_native_schema(),
+                Some(c) => c.effective_supports_native_schema(),
                 None => {
                     tracing::warn!(
                         "structured output: no sampling config; using StructuredOutput tool"
@@ -2034,6 +2530,7 @@ impl SessionActor {
                             .to_string(),
                     ),
                     parameters: schema,
+                    strict: None,
                 });
             }
             let build_req_start = std::time::Instant::now();
@@ -2101,6 +2598,12 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
+            // Defense-in-depth: preflight already ran at handle_prompt entry.
+            // Re-check so a mid-session mode restore cannot reach InferenceActor.
+            if let Err(err) = self.preflight_external_execution_backend().await {
+                self.tool_context.fail_task_output_usage_closed();
+                return Err(err.into_acp_error());
+            }
             let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
                 Ok(InferenceTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
@@ -2426,11 +2929,26 @@ impl SessionActor {
                     );
                     continue;
                 }
+                // Refusal must never be treated as valid schema output.
+                //
+                // `StopReason::Length` is converted by the sampler actor into
+                // `InferenceError::MaxTokensTruncation` before a Completed
+                // outcome is delivered, so partial JSON from truncation never
+                // reaches this branch on the normal InferenceClient path. The
+                // Length arm below is defense-in-depth only.
                 let structured_output = match (
                     structured_output_validator.as_ref(),
                     final_answer_text.as_ref(),
+                    turn_refused,
+                    stop_reason,
                 ) {
-                    (Some(validator), Some(text)) => {
+                    (Some(_), _, true, _) => Some(Err(
+                        "model refused to produce structured output (content filter)".to_string(),
+                    )),
+                    (Some(_), _, _, Some(xai_grok_inference_types::StopReason::Length)) => Some(
+                        Err("model hit max_tokens before completing structured output".to_string()),
+                    ),
+                    (Some(validator), Some(text), false, _) => {
                         Some(validate_structured_output(validator, text))
                     }
                     _ => None,

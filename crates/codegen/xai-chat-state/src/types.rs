@@ -241,6 +241,8 @@ mod tests {
                 context_window: NonZeroU64::new(128_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             prompt_index: 0,
             total_tokens: 0,
@@ -266,6 +268,57 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_round_trips_native_schema_capability() {
+        let snapshot = ChatStateSnapshot {
+            conversation: vec![],
+            inference_settings: InferenceSettings {
+                base_url: "https://api.anthropic.com/v1".to_string(),
+                model: "claude-sonnet-5".to_string(),
+                max_completion_tokens: Some(8192),
+                temperature: None,
+                top_p: None,
+                api_backend: xai_grok_inference_types::ApiBackend::Messages,
+                extra_headers: Default::default(),
+                context_window: NonZeroU64::new(200_000).unwrap(),
+                reasoning_effort: Some(xai_grok_inference_types::ReasoningEffort::High),
+                stream_tool_calls: None,
+                supports_native_schema: Some(true),
+                supports_strict_tools: Some(false),
+            },
+            prompt_index: 1,
+            total_tokens: 10,
+            estimate_at_last_response: 0,
+            agent_edited_paths: BTreeSet::new(),
+            prompt_texts: vec!["hi".into()],
+            stream_start_ms: None,
+            turn_start_ms: None,
+            last_compaction_prompt_index: None,
+            credentials: Credentials::default(),
+            structural_epoch: 0,
+        };
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let deserialized: ChatStateSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            deserialized.inference_settings.supports_native_schema,
+            Some(true)
+        );
+        assert_eq!(
+            deserialized.inference_settings.supports_strict_tools,
+            Some(false)
+        );
+        assert!(
+            deserialized
+                .inference_settings
+                .effective_supports_native_schema(),
+            "restored Messages + supports_native_schema=true selects native schema"
+        );
+        assert_eq!(
+            deserialized.inference_settings.api_backend,
+            xai_grok_inference_types::ApiBackend::Messages
+        );
+    }
+
+    #[test]
     fn snapshot_round_trips_with_data() {
         use xai_grok_inference_types::ConversationItem;
 
@@ -286,6 +339,8 @@ mod tests {
                 context_window: NonZeroU64::new(128_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             },
             prompt_index: 5,
             total_tokens: 1234,

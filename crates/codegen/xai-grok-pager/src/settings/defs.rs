@@ -1709,16 +1709,15 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // ── Runtime status row (non-editable) ─────────────────────────────
         //
-        // This is a special "status" row that shows the current live state
-        // of compaction. It's not a real setting - it's rendered as a row
-        // but doesn't produce actions. The value is computed from the active
-        // session's compaction config.
+        // This is a special status row that shows whether automatic
+        // compaction is currently idle or running. It is not a real setting:
+        // the row renders live activity but does not produce actions.
         SettingMeta {
             key: "compaction_status",
             category: SettingCategory::Compaction,
             owner: SettingOwner::Pager,
             label: "Status",
-            description: "Current compaction settings and state for this session.",
+            description: "Whether automatic compaction is currently idle or running.",
             keywords: &["status", "runtime", "live"],
             kind: SettingKind::Status,
             restart_required: false,

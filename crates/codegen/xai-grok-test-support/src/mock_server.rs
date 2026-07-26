@@ -105,6 +105,8 @@ pub struct MockModelEntry {
     pub supports_backend_search: bool,
     /// Emitted as `supportsReasoningEffort` (top-level) when true.
     pub supports_reasoning_effort: bool,
+    /// Emitted as `supportsNativeSchema` when `Some`.
+    pub supports_native_schema: Option<bool>,
     /// Emitted as `reasoningEffort` (top-level) when set.
     pub reasoning_effort: Option<String>,
     /// Emitted as `reasoningEfforts` (top-level) when non-empty. Each entry is a
@@ -121,6 +123,7 @@ impl MockModelEntry {
             api_backend: None,
             supports_backend_search: false,
             supports_reasoning_effort: false,
+            supports_native_schema: None,
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
         }
@@ -145,6 +148,11 @@ impl MockModelEntry {
 
     pub fn with_supports_reasoning_effort(mut self, supports: bool) -> Self {
         self.supports_reasoning_effort = supports;
+        self
+    }
+
+    pub fn with_supports_native_schema(mut self, supports: bool) -> Self {
+        self.supports_native_schema = Some(supports);
         self
     }
 
@@ -176,6 +184,9 @@ impl MockModelEntry {
         }
         if self.supports_reasoning_effort {
             obj["supportsReasoningEffort"] = json!(true);
+        }
+        if let Some(supports) = self.supports_native_schema {
+            obj["supportsNativeSchema"] = json!(supports);
         }
         if let Some(ref effort) = self.reasoning_effort {
             obj["reasoningEffort"] = json!(effort);

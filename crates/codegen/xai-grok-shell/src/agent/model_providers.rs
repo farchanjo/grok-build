@@ -33,6 +33,12 @@ pub enum ModelProviderKind {
     OpenAi,
     #[serde(rename = "openrouter")]
     OpenRouter,
+    /// Direct Anthropic Messages API (`https://api.anthropic.com`).
+    ///
+    /// Distinct from OpenRouter Claude routes and from custom Messages
+    /// backends. Never inherits OpenAI-compatible credential scopes.
+    #[serde(rename = "anthropic")]
+    Anthropic,
     /// First-class Z.ai Model API profile (`https://api.z.ai/api/paas/v4`).
     #[serde(rename = "zai")]
     Zai,
@@ -54,6 +60,7 @@ impl ModelProviderKind {
             Self::Xai => "xai",
             Self::OpenAi => "openai",
             Self::OpenRouter => "openrouter",
+            Self::Anthropic => "anthropic",
             Self::Zai => "zai",
         }
     }
@@ -433,7 +440,7 @@ impl ConfigModelOverride {
             admin_base_url: _,
             enabled: _,
             default_backend: _,
-            auth_scheme: _,
+            auth_scheme,
             env_key,
             admin_env_key: _,
             api_key,
@@ -489,6 +496,15 @@ impl ConfigModelOverride {
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
+        if merged.auth_scheme.is_none() {
+            merged.auth_scheme = auth_scheme.as_deref().and_then(|raw| match raw {
+                "x_api_key" | "x-api-key" | "xapikey" => {
+                    Some(xai_grok_inference::AuthScheme::XApiKey)
+                }
+                "bearer" => Some(xai_grok_inference::AuthScheme::Bearer),
+                _ => None,
+            });
+        }
         merged.context_window = merged.context_window.or(*context_window);
         if !extra_headers.is_empty() {
             let mut headers = extra_headers.clone();

@@ -356,6 +356,8 @@ pub fn test_inference_config(
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: false,
+        supports_native_schema: None,
+        supports_strict_tools: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         doom_loop_recovery: None,

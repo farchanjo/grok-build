@@ -113,6 +113,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     context_window: std::num::NonZeroU64::new(200_000).unwrap(),
                     reasoning_effort: None,
                     stream_tool_calls: None,
+                    supports_native_schema: None,
+                    supports_strict_tools: None,
                 },
                 Box::new(xai_chat_state::NullChatPersistence),
                 chat_event_tx,
@@ -319,6 +321,11 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+                execution_backend: std::cell::Cell::new(
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                ),
+                external_runtime: std::cell::RefCell::new(None),
+                external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(

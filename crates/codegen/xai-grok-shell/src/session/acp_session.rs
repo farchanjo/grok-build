@@ -1041,7 +1041,23 @@ pub(crate) struct SessionActor {
     /// Live sessions get a real handle from `spawn_session_actor`;
     /// tests and other constructor sites use `InferenceHandle::noop()`.
     /// All inference flows through this handle.
+    ///
+    /// For external execution backends the actor may remain idle; turns
+    /// branch before `run_turn_via_sampler` and never submit work to it.
     pub(crate) sampler_handle: xai_grok_inference::InferenceHandle,
+    /// Session execution mode (native HTTP vs external agent). Persisted on
+    /// the summary envelope so resume cannot silently switch modes.
+    pub(crate) execution_backend:
+        std::cell::Cell<crate::agent::execution_backend::ExecutionBackend>,
+    /// Durable external-runtime envelope (resume pointer, observed version,
+    /// selected model/effort). `None` for native sessions.
+    pub(crate) external_runtime:
+        std::cell::RefCell<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
+    /// Session-scoped live external agent runtime (process, permission bridge,
+    /// temp MCP config). One Arc retained across turns; shut down on session
+    /// end or when switching away from / between incompatible backends.
+    pub(crate) external_agent_runtime:
+        std::cell::RefCell<Option<crate::agent::external_runtime::RetainedExternalAgentRuntime>>,
     /// Cached recipe for constructing this session's [`xai_grok_agent::Agent`].
     ///
     /// Populated once at session spawn and then reused by
@@ -1454,6 +1470,13 @@ fn load_prompt_context_from_dir(
 #[cfg(test)]
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/external_runtime_preflight_tests.rs"]
+mod external_runtime_preflight_tests;
+
+#[cfg(test)]
+#[path = "acp_session_tests/external_runtime_session_tests.rs"]
+mod external_runtime_session_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;

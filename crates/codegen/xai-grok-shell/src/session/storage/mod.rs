@@ -551,6 +551,7 @@ pub(crate) mod chat_rebuild {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             });
             self.has_agent_content = false;
             self.item_count += 1;
@@ -1228,6 +1229,28 @@ pub trait StorageAdapter: Send + Sync {
         model_id: &acp::ModelId,
         agent_name: Option<&str>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
+    ) -> io::Result<()> {
+        self.update_current_model_agent_and_execution(
+            info,
+            model_id,
+            agent_name,
+            reasoning_effort,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::update_current_model_and_agent`], also updating optional
+    /// execution-backend / external-runtime durable fields.
+    async fn update_current_model_agent_and_execution(
+        &self,
+        info: &Info,
+        model_id: &acp::ModelId,
+        agent_name: Option<&str>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
+        execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
+        external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
     ) -> io::Result<()>;
 
     /// Update the collection ID for telemetry tracing

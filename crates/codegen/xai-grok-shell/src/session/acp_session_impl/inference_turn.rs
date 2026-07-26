@@ -509,6 +509,8 @@ impl SessionActor {
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                supports_native_schema: None,
+                supports_strict_tools: None,
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
@@ -571,6 +573,7 @@ impl SessionActor {
                 match id {
                     "openrouter" => ProviderIdentity::OpenRouter,
                     "openai" => ProviderIdentity::OpenAi,
+                    "anthropic" => ProviderIdentity::Anthropic,
                     _ => ProviderIdentity::Custom,
                 }
             } else {
@@ -650,6 +653,14 @@ impl SessionActor {
                 None
             },
             supports_backend_search: self.supports_backend_search.get(),
+            supports_native_schema: match resolved_entry {
+                Some(e) => e.info().supports_native_schema,
+                None => cfg.supports_native_schema,
+            },
+            supports_strict_tools: match resolved_entry {
+                Some(e) => e.info().supports_strict_tools,
+                None => cfg.supports_strict_tools,
+            },
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
@@ -1114,10 +1125,12 @@ impl SessionActor {
             );
         }
 
-        // Catalog OpenRouter / official OpenAI API hosts are always API keys.
-        // (ChatGPT already returned above.)
+        // Catalog OpenRouter / official OpenAI / Anthropic API hosts are always
+        // API keys. (ChatGPT already returned above.)
         match provider_kind {
-            Some(ModelProviderKind::OpenRouter) | Some(ModelProviderKind::OpenAi) => {
+            Some(ModelProviderKind::OpenRouter)
+            | Some(ModelProviderKind::OpenAi)
+            | Some(ModelProviderKind::Anthropic) => {
                 return (
                     ProviderCredentialKind::ApiKey,
                     ProviderCredentialAction::OpenProviders,
@@ -1229,12 +1242,14 @@ impl SessionActor {
             identity = match id {
                 "openrouter" => ProviderIdentity::OpenRouter,
                 "openai" => ProviderIdentity::OpenAi,
+                "anthropic" => ProviderIdentity::Anthropic,
                 _ => identity,
             };
             provider_id = Some(id.to_owned());
             provider_kind = Some(match id {
                 "openrouter" => ModelProviderKind::OpenRouter,
                 "openai" => ModelProviderKind::OpenAi,
+                "anthropic" => ModelProviderKind::Anthropic,
                 _ => ModelProviderKind::OpenAiCompatible,
             });
         }
@@ -1251,6 +1266,7 @@ impl SessionActor {
         let default_id = match identity {
             ProviderIdentity::OpenRouter => "openrouter",
             ProviderIdentity::OpenAi => "openai",
+            ProviderIdentity::Anthropic => "anthropic",
             ProviderIdentity::Xai => return None,
             ProviderIdentity::Custom => {
                 provider_id.as_ref()?;
@@ -1261,6 +1277,7 @@ impl SessionActor {
         let provider_name = match provider_kind.unwrap_or(ModelProviderKind::OpenAiCompatible) {
             ModelProviderKind::OpenRouter => "OpenRouter".to_owned(),
             ModelProviderKind::OpenAi => "OpenAI".to_owned(),
+            ModelProviderKind::Anthropic => "Anthropic".to_owned(),
             ModelProviderKind::Xai => return None,
             ModelProviderKind::Zai => "Z.ai".to_owned(),
             ModelProviderKind::OpenAiCompatible => provider_id.clone(),

@@ -311,6 +311,12 @@ pub enum PersistenceMsg {
         /// on the mutable model catalog.
         agent_name: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
+        /// Session execution backend (native vs external). `None` leaves the
+        /// summary field unchanged.
+        execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
+        /// When `Some`, overwrite the durable external-runtime envelope
+        /// (`Some(None)` clears it for native sessions).
+        external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
     },
     PlanState(TodoState),
     /// Plan mode lifecycle state to persist
@@ -921,6 +927,19 @@ pub struct Summary {
     pub sandbox_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// How this session executes model turns. Defaults to native HTTP
+    /// inference so old summaries remain loadable without migration.
+    /// Persisted so resume cannot silently switch Native↔external modes.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::execution_backend::ExecutionBackend::is_native"
+    )]
+    pub execution_backend: crate::agent::execution_backend::ExecutionBackend,
+    /// Durable external-runtime envelope (session pointer, observed version,
+    /// selected model/effort/budget, cwd/worktree identity, result/usage).
+    /// Secrets, argv, and raw NDJSON must never be stored here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
 }
 
 /// Current `grok_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
@@ -977,6 +996,8 @@ impl Summary {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            external_runtime: None,
         })
     }
 
@@ -2004,14 +2025,18 @@ impl SessionPersistence {
                     model_id,
                     agent_name,
                     reasoning_effort,
+                    execution_backend,
+                    external_runtime,
                 } => {
                     if let Err(e) = self
                         .storage
-                        .update_current_model_and_agent(
+                        .update_current_model_agent_and_execution(
                             &self.info,
                             &model_id,
                             agent_name.as_deref(),
                             reasoning_effort,
+                            execution_backend,
+                            external_runtime,
                         )
                         .await
                     {
