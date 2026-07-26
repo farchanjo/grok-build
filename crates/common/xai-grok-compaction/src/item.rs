@@ -75,6 +75,18 @@ pub trait CompactionItem {
     /// `false` for all non-assistant items.
     fn has_tool_requests(&self) -> bool;
 
+    /// Stable request IDs owned by this assistant item, when the host exposes
+    /// them. Returning an empty vector keeps compatibility with hosts whose
+    /// compaction representation only identifies the presence of tool calls.
+    fn tool_request_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Stable request ID answered by this tool-result item, when available.
+    fn tool_result_id(&self) -> Option<String> {
+        None
+    }
+
     /// Whether this item carries a *prior compaction summary* (Grok chat: a
     /// `Developer` turn with `DeveloperPromptCategory::ConversationCompaction`).
     ///
@@ -161,6 +173,12 @@ impl<T: CompactionItem + ?Sized> CompactionItem for std::sync::Arc<T> {
     }
     fn has_tool_requests(&self) -> bool {
         (**self).has_tool_requests()
+    }
+    fn tool_request_ids(&self) -> Vec<String> {
+        (**self).tool_request_ids()
+    }
+    fn tool_result_id(&self) -> Option<String> {
+        (**self).tool_result_id()
     }
     fn is_compaction_summary(&self) -> bool {
         (**self).is_compaction_summary()

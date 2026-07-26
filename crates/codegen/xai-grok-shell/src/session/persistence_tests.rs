@@ -65,6 +65,40 @@ fn neutral_update(info: &Info, text: &str) -> SessionUpdate {
     SessionUpdate::Acp(Box::new(notification(info, text)))
 }
 
+fn compaction_request(
+    id: &str,
+    previous_history: Vec<ConversationItem>,
+    compacted_history: Vec<ConversationItem>,
+) -> xai_chat_state::CompactionPersistenceRequest {
+    xai_chat_state::CompactionPersistenceRequest {
+        metadata: xai_chat_state::CompactionPersistenceMetadata {
+            checkpoint_id: id.to_owned(),
+            prompt_index: 1,
+            auto_continue_prompt: None,
+            original_user_info: Some("<user_info>test</user_info>".to_owned()),
+            created_at: "2026-07-26T00:00:00Z".to_owned(),
+        },
+        previous_history,
+        compacted_history,
+    }
+}
+
+async fn commit_compaction_through_actor(
+    actor: &ActorGuard,
+    request: xai_chat_state::CompactionPersistenceRequest,
+) -> Result<(), xai_chat_state::CompactionPersistenceError> {
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::CommitCompactionAndAck {
+            request,
+            respond_to,
+        })
+        .unwrap();
+    response.await.unwrap()
+}
+
 fn break_summary_writes(dir: &std::path::Path) {
     let summary = dir.join("summary.json");
     std::fs::remove_file(&summary).unwrap();
@@ -120,6 +154,568 @@ fn uncommitted_error_returns_restore_disposition() {
     };
     assert_eq!(pending_notification.session_id, info.id);
     assert_eq!(error.to_string(), "append failed");
+}
+
+#[tokio::test]
+async fn compaction_commit_persists_checkpoint_history_then_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-commit"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("old"),
+    ];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    let compacted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::compaction_summary("summary"),
+    ];
+    let actor = test_actor(info.clone(), storage.clone());
+    commit_compaction_through_actor(
+        &actor,
+        compaction_request("checkpoint-1", previous, compacted.clone()),
+    )
+    .await
+    .unwrap();
+
+    let persisted = storage.load_session(&info).await.unwrap();
+    assert_eq!(
+        persisted
+            .chat_history
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["sys", "summary"]
+    );
+    assert!(persisted.updates.iter().any(|update| matches!(
+        update,
+        SessionUpdate::Xai(notification)
+            if matches!(
+                notification.update,
+                crate::extensions::notification::SessionUpdate::CompactionCheckpoint(_)
+            )
+    )));
+    let checkpoint = storage
+        .read_compaction_checkpoint(&info, "compaction_checkpoints/checkpoint-1.json")
+        .await
+        .unwrap();
+    assert_eq!(checkpoint.schema_version, 2);
+    assert_eq!(checkpoint.compacted_history.len(), compacted.len());
+    assert!(
+        !dir.path().join("compaction_pending.json").exists(),
+        "the recovery marker must be removed after the durable marker commits"
+    );
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn history_replacement_and_rollback_failure_does_not_append_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-history-failure"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("old"),
+    ];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    std::fs::remove_file(dir.path().join("chat_history.jsonl")).unwrap();
+    std::fs::create_dir(dir.path().join("chat_history.jsonl")).unwrap();
+    let actor = test_actor(info.clone(), storage.clone());
+    let result = commit_compaction_through_actor(
+        &actor,
+        compaction_request(
+            "checkpoint-history-failure",
+            previous,
+            vec![ConversationItem::compaction_summary("summary")],
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(xai_chat_state::CompactionPersistenceError::Indeterminate(_))
+    ));
+    let updates_path = dir.path().join("updates.jsonl");
+    let updates = match std::fs::read_to_string(&updates_path) {
+        Ok(updates) => updates,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => panic!("failed to read {}: {error}", updates_path.display()),
+    };
+    assert!(!updates.contains("compaction_checkpoint"));
+    assert!(
+        dir.path().join("compaction_pending.json").exists(),
+        "indeterminate replacement must retain the startup recovery journal"
+    );
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn compaction_marker_failure_restores_previous_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-marker-failure"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_update_append_probe(
+        dir.path().to_path_buf(),
+        |durability| {
+            assert!(matches!(durability, AppendDurability::Durable));
+            Err(io::Error::other("marker append failed"))
+        },
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("old"),
+    ];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage.clone());
+
+    let result = commit_compaction_through_actor(
+        &actor,
+        compaction_request(
+            "checkpoint-marker-failure",
+            previous.clone(),
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::compaction_summary("summary"),
+            ],
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(xai_chat_state::CompactionPersistenceError::NotCommitted(_))
+    ));
+    let persisted = storage.load_session(&info).await.unwrap();
+    assert_eq!(
+        persisted
+            .chat_history
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["sys", "old"]
+    );
+    assert!(persisted.updates.is_empty());
+    assert!(
+        !dir.path().join("compaction_pending.json").exists(),
+        "rollback must clear the pending recovery marker"
+    );
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn load_restores_previous_history_from_pending_compaction_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-crash-recovery"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("old"),
+    ];
+    let compacted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::compaction_summary("uncommitted summary"),
+    ];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    storage
+        .replace_chat_history_with_compaction_pending(&info, "crash-window", &previous, &compacted)
+        .await
+        .unwrap();
+    assert!(dir.path().join("compaction_pending.json").exists());
+
+    let persisted = storage.load_session(&info).await.unwrap();
+    assert_eq!(
+        persisted
+            .chat_history
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["sys", "old"]
+    );
+    assert!(
+        !dir.path().join("compaction_pending.json").exists(),
+        "startup recovery must clear the pending marker after rollback"
+    );
+}
+
+#[tokio::test]
+async fn load_preserves_items_appended_after_indeterminate_compaction_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-indeterminate-tail-recovery"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("old"),
+    ];
+    let compacted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::compaction_summary("uncertain summary"),
+    ];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    storage
+        .replace_chat_history_with_compaction_pending(
+            &info,
+            "indeterminate-window",
+            &previous,
+            &compacted,
+        )
+        .await
+        .unwrap();
+    storage
+        .append_chat_message(&info, &ConversationItem::user("later user"))
+        .await
+        .unwrap();
+    storage
+        .append_chat_message(&info, &ConversationItem::assistant("later assistant"))
+        .await
+        .unwrap();
+
+    let persisted = storage.load_session(&info).await.unwrap();
+    assert_eq!(
+        persisted
+            .chat_history
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["sys", "old", "later user", "later assistant"]
+    );
+    assert!(!dir.path().join("compaction_pending.json").exists());
+}
+
+#[tokio::test]
+async fn load_clears_pending_marker_after_rollback_cleanup_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-rollback-cleanup-recovery"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![ConversationItem::user("old")];
+    let compacted = vec![ConversationItem::compaction_summary("uncertain summary")];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    storage
+        .replace_chat_history_with_compaction_pending(
+            &info,
+            "rolled-back-window",
+            &previous,
+            &compacted,
+        )
+        .await
+        .unwrap();
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    storage
+        .append_chat_message(&info, &ConversationItem::user("later user"))
+        .await
+        .unwrap();
+
+    let persisted = storage.load_session(&info).await.unwrap();
+    assert_eq!(
+        persisted
+            .chat_history
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["old", "later user"]
+    );
+    assert!(!dir.path().join("compaction_pending.json").exists());
+}
+
+#[tokio::test]
+async fn load_keeps_compacted_history_when_marker_committed_before_pending_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-committed-pending-recovery"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![ConversationItem::user("old")];
+    let compacted = vec![ConversationItem::compaction_summary("committed summary")];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    let checkpoint = crate::extensions::notification::CompactionCheckpointFile {
+        checkpoint_id: "committed-window".to_string(),
+        prompt_index_at_compaction: 1,
+        compacted_history: compacted.clone(),
+        schema_version: 2,
+        created_at: "2026-07-26T00:00:00Z".to_string(),
+        original_user_info: None,
+        reread_file_paths: vec![],
+    };
+    storage
+        .write_compaction_checkpoint(&info, &checkpoint)
+        .await
+        .unwrap();
+    storage
+        .replace_chat_history_with_compaction_pending(
+            &info,
+            "committed-window",
+            &previous,
+            &compacted,
+        )
+        .await
+        .unwrap();
+    let marker = SessionUpdate::Xai(Box::new(
+        crate::extensions::notification::SessionNotification {
+            session_id: info.id.clone(),
+            update: crate::extensions::notification::SessionUpdate::CompactionCheckpoint(Box::new(
+                crate::extensions::notification::CompactionCheckpointInfo {
+                    checkpoint_id: "committed-window".to_string(),
+                    prompt_index_at_compaction: 1,
+                    checkpoint_file: "compaction_checkpoints/committed-window.json".to_string(),
+                    auto_continue: None,
+                    schema_version: 2,
+                    created_at: "2026-07-26T00:00:00Z".to_string(),
+                },
+            )),
+            meta: None,
+        },
+    ));
+    storage
+        .append_update_durable_commit_aware(&info, &marker)
+        .await
+        .unwrap();
+
+    let persisted = storage.load_session(&info).await.unwrap();
+    assert_eq!(
+        persisted
+            .chat_history
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["committed summary"]
+    );
+    assert!(!dir.path().join("compaction_pending.json").exists());
+}
+
+#[tokio::test]
+async fn invalid_compaction_checkpoint_id_is_rejected_before_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-invalid-id"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![ConversationItem::user("old")];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage.clone());
+
+    let result = commit_compaction_through_actor(
+        &actor,
+        compaction_request(
+            "../escape",
+            previous,
+            vec![ConversationItem::compaction_summary("summary")],
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(xai_chat_state::CompactionPersistenceError::NotCommitted(_))
+    ));
+    assert!(!dir.path().join("compaction_pending.json").exists());
+    assert!(!dir.path().join("compaction_checkpoints").exists());
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn history_replacement_with_failed_rollback_is_indeterminate() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-history-rollback-failure"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(
+        dir.path().to_path_buf(),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("old"),
+    ];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    // Both replacement attempts rename chat_history.jsonl before summary
+    // bookkeeping fails. Persistence therefore cannot claim that the old base
+    // was restored, and startup must resolve the retained pending journal.
+    break_summary_writes(dir.path());
+    let compacted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::compaction_summary("summary"),
+    ];
+    let actor = test_actor(info.clone(), storage.clone());
+
+    let result = commit_compaction_through_actor(
+        &actor,
+        compaction_request("checkpoint-history-rollback-failure", previous, compacted),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(xai_chat_state::CompactionPersistenceError::Indeterminate(_))
+    ));
+    let updates_path = dir.path().join("updates.jsonl");
+    let updates = match std::fs::read_to_string(&updates_path) {
+        Ok(updates) => updates,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => panic!("failed to read {}: {error}", updates_path.display()),
+    };
+    assert!(!updates.contains("compaction_checkpoint"));
+    assert!(
+        dir.path().join("compaction_pending.json").exists(),
+        "indeterminate replacement must retain the startup recovery journal"
+    );
+    actor.stop().await;
+}
+
+#[tokio::test]
+async fn committed_marker_error_keeps_compacted_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-marker-committed"),
+        cwd: "/test".into(),
+    };
+    let summary_dir = dir.path().to_path_buf();
+    let storage = Arc::new(JsonlStorageAdapter::with_update_append_probe(
+        dir.path().to_path_buf(),
+        move |durability| {
+            if matches!(durability, AppendDurability::Durable) {
+                break_summary_writes(&summary_dir);
+            }
+            Ok(())
+        },
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let previous = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("old"),
+    ];
+    storage
+        .replace_chat_history(&info, &previous)
+        .await
+        .unwrap();
+    let compacted = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::compaction_summary("summary"),
+    ];
+    let actor = test_actor(info.clone(), storage.clone());
+
+    let result = commit_compaction_through_actor(
+        &actor,
+        compaction_request("checkpoint-marker-committed", previous, compacted),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(xai_chat_state::CompactionPersistenceError::Committed(_))
+    ));
+    let history = storage
+        .load_chat_history_from_dir(dir.path())
+        .expect("committed compacted history remains readable");
+    assert_eq!(
+        history
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["sys", "summary"]
+    );
+    let updates = std::fs::read_to_string(dir.path().join("updates.jsonl")).unwrap();
+    assert!(updates.contains("compaction_checkpoint"));
+    assert!(
+        !dir.path().join("compaction_pending.json").exists(),
+        "a committed marker must clear the rollback marker even if later bookkeeping fails"
+    );
+    actor.stop().await;
 }
 
 #[tokio::test]

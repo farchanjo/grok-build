@@ -28,7 +28,17 @@ impl ChatStateActor {
             turn_start_ms: self.state.turn_start_ms,
             last_compaction_prompt_index: self.state.last_compaction_prompt_index,
             credentials: self.state.credentials.clone(),
+            structural_epoch: self.state.structural_epoch,
         }
+    }
+
+    /// Get the current structural epoch.
+    ///
+    /// The structural epoch is incremented on each mutation that changes
+    /// the conversation item sequence or content. Used for CAS operations
+    /// to detect stale state.
+    pub(super) fn get_structural_epoch(&self) -> u64 {
+        self.state.structural_epoch
     }
 
     /// Truncate conversation to a target prompt index (rewind).
@@ -44,6 +54,8 @@ impl ChatStateActor {
     ///
     /// Truncating to `target_prompt_index = 1` keeps only items up to (but not
     /// including) the 2nd `User` message.
+    ///
+    /// Increments the structural epoch to invalidate any stale snapshots.
     pub(super) fn truncate_to_prompt_index(&mut self, target_prompt_index: usize) {
         if target_prompt_index >= self.state.prompt_index {
             // Nothing to truncate — already at or before the target.
@@ -74,6 +86,9 @@ impl ChatStateActor {
         self.state.estimate_at_last_response = self.state.total_tokens;
 
         self.persistence.replace_history(&self.state.conversation);
+
+        // Bump epoch for structural change
+        self.bump_structural_epoch();
 
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.conversation.len(),

@@ -51,6 +51,9 @@ pub struct Config {
     pub ask_user_question: crate::tools::config::AskUserQuestionToolConfig,
     /// `[privacy]` — local banner ack (not auth-metadata).
     pub privacy: PrivacyConfig,
+    /// `[compaction]` section — round-tripped so the pager's live compaction
+    /// config updates persist and future sessions adopt them.
+    pub compaction: crate::agent::config::CompactionConfig,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

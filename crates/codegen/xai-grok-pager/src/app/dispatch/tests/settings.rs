@@ -3,7 +3,7 @@ use super::*;
 /// `Action::ToggleVimMode` flips the active agent's `vim_mode` field,
 /// updates the in-process pager cache so future agents pick it up
 /// via `load_vim_mode`, emits `Effect::PersistSetting` so the new
-/// value is written to `[ui].vim_mode` in config.toml, and a second
+/// value is written to `[ui]vim_mode` in config.toml, and a second
 /// toggle restores the original.
 #[test]
 fn toggle_vim_mode_flips_state_and_persistence_cache() {
@@ -150,7 +150,7 @@ fn toggle_vim_mode_works_on_dashboard_and_focuses_overview() {
     let _ = dispatch(Action::ToggleVimMode, &mut app);
     assert!(
         !crate::appearance::cache::load_vim_mode(),
-        "second /vim-mode must toggle vim OFF",
+        "/vim-mode must toggle vim OFF",
     );
     assert!(
         !app.dashboard.as_ref().unwrap().list_focused,
@@ -261,7 +261,7 @@ fn set_default_model_allowed_when_agent_chat_kind() {
     assert!(app.agents[&id].session.model_switch_pending);
 }
 /// `/model <name>` dispatches `SetDefaultModel` which routes
-/// through both `PersistSetting` and `SwitchModel`.
+/// through both `PersistSetting` and `SwitchModel` effects.
 #[test]
 fn slash_model_valid_dispatches_set_default_model_with_switch_and_persist() {
     let mut app = test_app_with_agent();
@@ -428,6 +428,11 @@ fn resize_derivation_never_writes_user_cache() {
         assert!(
             !crate::appearance::cache::load(),
             "resize must not write the user cache"
+        );
+        let _ = app.handle_input(&Event::Resize(100, 40));
+        assert!(
+            !app.appearance.prompt.compact,
+            "growing back must restore the user value"
         );
     })
     .join()
@@ -921,7 +926,10 @@ fn every_setting_has_action_for_reset_arm() {
     with_theme_test_env(|| {
         let reg = crate::settings::SettingsRegistry::defaults();
         for meta in reg.all() {
-            if matches!(meta.kind, crate::settings::SettingKind::Group { .. }) {
+            if matches!(
+                meta.kind,
+                crate::settings::SettingKind::Group { .. } | crate::settings::SettingKind::Status
+            ) {
                 continue;
             }
             let default_value = crate::settings::default_value_for(meta);
@@ -1025,11 +1033,11 @@ fn clear_default_model_persists_but_keeps_live_current() {
     );
     assert!(
         matches!(
-            &effects[0],
-            Effect::PersistSetting {
-                key: "default_model",
-                value: crate::settings::SettingValue::String(s),
-                .. } if s.is_empty()
+        &effects[0],
+        Effect::PersistSetting {
+            key: "default_model",
+            value: crate::settings::SettingValue::String(s),
+            .. } if s.is_empty()
         ),
         "expected PersistSetting(default_model, ''), got {:?}",
         effects[0],
@@ -1218,8 +1226,8 @@ fn pr13_show_tips_rollback_from_none_state_restores_none() {
     assert_eq!(
         app.show_tips, None,
         "PR 13: rollback from prev=None must restore None (not Some(true)) — \
-             otherwise the AppView mirror drifts from disk, which is still None \
-             after the failed persist"
+         otherwise the AppView mirror drifts from disk, which is still None \
+         after the failed persist"
     );
 }
 /// Toast text includes the "(restart to apply)" cue —
@@ -1310,7 +1318,7 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetAutoDarkTheme("tokyonight".to_owned()), app);
         }
         "auto_light_theme" => {
-            let _ = dispatch(Action::SetAutoLightTheme("rosepine-dawn".to_owned()), app);
+            let _ = dispatch(Action::SetAutoLightTheme("rosepine-moon".to_owned()), app);
         }
         "permission_mode" => {
             let _ = dispatch(Action::SetYoloMode(true), app);
@@ -1427,6 +1435,47 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 Action::SetDefaultSelectedPermission("allow_once".to_string()),
                 app,
             );
+        }
+        // Compaction settings
+        "compaction_strategy" => {
+            let _ = dispatch(Action::SetCompactionStrategy("rolling".to_string()), app);
+        }
+        "compaction_trigger_policy" => {
+            let _ = dispatch(
+                Action::SetCompactionTriggerPolicy("dynamic".to_string()),
+                app,
+            );
+        }
+        "compaction_band_count" => {
+            let _ = dispatch(Action::SetCompactionBandCount(6), app);
+        }
+        "compaction_primary_model" => {
+            use agent_client_protocol as acp;
+            use std::sync::Arc;
+            if let ActiveView::Agent(aid) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&aid)
+            {
+                let id = acp::ModelId::new(Arc::from("grok-4.5"));
+                let info = acp::ModelInfo::new(id.clone(), "Grok 4.5".to_string());
+                agent.session.models.available.insert(id.clone(), info);
+                let _ = dispatch(Action::SetCompactionPrimaryModel(id), app);
+            }
+        }
+        "compaction_fallback_model" => {
+            use agent_client_protocol as acp;
+            use std::sync::Arc;
+            if let ActiveView::Agent(aid) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&aid)
+            {
+                let id = acp::ModelId::new(Arc::from("grok-test-model"));
+                let info = acp::ModelInfo::new(id.clone(), "Grok Test Model".to_string());
+                agent.session.models.available.insert(id.clone(), info);
+                let _ = dispatch(Action::SetCompactionFallbackModel(id), app);
+            }
+        }
+        "compaction_status" => {
+            // Status is read-only, no action to dispatch
+            panic!("compaction_status is read-only, no action to dispatch");
         }
         other => {
             panic!(
@@ -3336,7 +3385,7 @@ fn new_session_inherits_switched_default_model_for_welcome() {
     models.current = Some(id_a.clone());
     app.models = models.clone();
     app.agents.get_mut(&AgentId(0)).unwrap().session.models = models;
-    assert!(set_default_model_inner(&mut app, &id_b));
+    assert!(crate::app::dispatch::settings::setters::set_default_model_inner(&mut app, &id_b));
     assert_eq!(
         app.models.current.as_ref(),
         Some(&id_b),
@@ -3437,4 +3486,247 @@ fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
         Some("Mouse reporting on"),
     );
     reset_mouse_capture_enabled(true);
+}
+// ============================================================================
+// Compaction-specific dispatch tests
+// ============================================================================
+
+/// Test that SetCompactionStrategy emits PersistSetting with correct payload.
+#[test]
+fn set_compaction_strategy_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetCompactionStrategy("rolling".to_string()),
+        &mut app,
+    );
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "compaction_strategy");
+            assert_eq!(*value, SettingValue::Enum("rolling"));
+            assert_eq!(*rollback_value, SettingValue::Enum("auto"));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+}
+
+/// Test that setting the already-effective default is idempotent.
+#[test]
+fn set_compaction_strategy_idempotent_when_default() {
+    let mut app = test_app_with_agent();
+
+    let effects = dispatch(Action::SetCompactionStrategy("auto".to_string()), &mut app);
+
+    assert!(
+        effects.is_empty(),
+        "the absent-config default already resolves to auto"
+    );
+}
+
+/// Test that SetCompactionTriggerPolicy emits PersistSetting with correct payload.
+#[test]
+fn set_compaction_trigger_policy_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SetCompactionTriggerPolicy("dynamic".to_string()),
+        &mut app,
+    );
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "compaction_trigger_policy");
+            assert_eq!(*value, SettingValue::Enum("dynamic"));
+            assert_eq!(*rollback_value, SettingValue::Enum("fixed"));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+}
+
+/// Test that SetCompactionBandCount emits PersistSetting with correct payload.
+#[test]
+fn set_compaction_band_count_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetCompactionBandCount(6), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "compaction_band_count");
+            assert_eq!(*value, SettingValue::Int(6));
+            assert_eq!(*rollback_value, SettingValue::Int(4));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+}
+
+/// Test that SetCompactionBandCount clamps to bounds 3..=8.
+#[test]
+fn set_compaction_band_count_clamps_to_bounds() {
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::SetCompactionBandCount(1), &mut app);
+    assert_eq!(
+        app.compaction_config.rolling_band_count,
+        Some(3),
+        "value below min should clamp to 3"
+    );
+    let _ = dispatch(Action::SetCompactionBandCount(10), &mut app);
+    assert_eq!(
+        app.compaction_config.rolling_band_count,
+        Some(8),
+        "value above max should clamp to 8"
+    );
+    let _ = dispatch(Action::SetCompactionBandCount(5), &mut app);
+    assert_eq!(
+        app.compaction_config.rolling_band_count,
+        Some(5),
+        "value within bounds should be accepted"
+    );
+}
+
+/// Reset maps the explicit session-route sentinel to the clear action instead
+/// of treating it as a catalog model ID.
+#[test]
+fn compaction_primary_reset_uses_explicit_session_route() {
+    assert!(matches!(
+        action_for_reset(
+            "compaction_primary_model",
+            &crate::settings::SettingValue::String("@session".to_owned())
+        ),
+        Some(Action::ClearCompactionPrimaryModel)
+    ));
+}
+
+/// Test that SetCompactionPrimaryModel emits PersistSetting with correct payload.
+#[test]
+fn set_compaction_primary_model_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let model_id = acp::ModelId::new(Arc::from("grok-4.5"));
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Grok 4.5".to_owned()),
+        );
+    let effects = dispatch(
+        Action::SetCompactionPrimaryModel(model_id.clone()),
+        &mut app,
+    );
+
+    // Should emit at least PersistSetting
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting {
+                key: "compaction_primary_model",
+                value: SettingValue::String(s),
+                ..
+            } if s == "grok-4.5"
+        )),
+        "expected PersistSetting with model ID canonical, got {effects:?}"
+    );
+}
+
+/// Clearing an already-default primary route is idempotent.
+#[test]
+fn clear_compaction_primary_model_is_idempotent_at_session_default() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::ClearCompactionPrimaryModel, &mut app);
+
+    assert!(effects.is_empty());
+    assert!(app.compaction_config.normalize_validate().unwrap().models[0].is_session());
+}
+
+/// Test that SetCompactionFallbackModel emits PersistSetting with correct payload.
+#[test]
+fn set_compaction_fallback_model_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let model_id = acp::ModelId::new(Arc::from("grok-test-model"));
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Grok Test Model".to_owned()),
+        );
+    let effects = dispatch(
+        Action::SetCompactionFallbackModel(model_id.clone()),
+        &mut app,
+    );
+
+    // Should emit PersistSetting
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting {
+                key: "compaction_fallback_model",
+                value: SettingValue::String(s),
+                ..
+            } if s == "grok-test-model"
+        )),
+        "expected PersistSetting with model ID canonical, got {effects:?}"
+    );
+}
+
+/// Clearing an absent fallback route is idempotent.
+#[test]
+fn clear_compaction_fallback_model_is_idempotent_when_absent() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::ClearCompactionFallbackModel, &mut app);
+
+    assert!(effects.is_empty());
+    assert_eq!(
+        app.compaction_config
+            .normalize_validate()
+            .unwrap()
+            .models
+            .len(),
+        1
+    );
+}
+
+/// Test that compaction_status cannot enter an editor or produce an action.
+#[test]
+fn compaction_status_is_read_only() {
+    let registry = crate::settings::SettingsRegistry::defaults();
+    let status = registry.find("compaction_status").unwrap();
+    assert!(matches!(status.kind, crate::settings::SettingKind::Status));
+}
+
+/// The absent primary route resolves to the explicit @session sentinel.
+#[test]
+fn compaction_session_default_resolves_correctly() {
+    let app = test_app_with_agent();
+    let resolved = app.compaction_config.normalize_validate().unwrap();
+
+    assert_eq!(resolved.models.len(), 1);
+    assert!(resolved.models[0].is_session());
 }

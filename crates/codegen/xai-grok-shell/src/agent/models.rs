@@ -438,6 +438,14 @@ impl ModelsManager {
         self.inner.cfg.read().endpoints.clone()
     }
 
+    /// Return the normalized compaction settings from the current authoritative
+    /// configuration snapshot.
+    pub fn compaction_config(
+        &self,
+    ) -> Result<config::ResolvedCompactionConfig, config::CompactionConfigError> {
+        self.inner.cfg.read().compaction.normalize_validate()
+    }
+
     /// Does the current credential grant access to OAuth-only models?
     pub(crate) fn is_session_auth(&self) -> bool {
         self.inner

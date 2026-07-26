@@ -516,6 +516,37 @@ const CONTEXTUAL_HINTS_CHILDREN: &[&str] = &[
     "contextual_hints.ssh_wrap",
 ];
 
+const COMPACTION_STRATEGY_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "auto",
+        display: "Auto",
+        description: "Use rolling compaction when eligible, with full replacement as a compatibility fallback.",
+    },
+    EnumChoice {
+        canonical: "rolling",
+        display: "Rolling",
+        description: "Continuously summarize older history while preserving the recent hot tail.",
+    },
+    EnumChoice {
+        canonical: "full_replace",
+        display: "Full replace",
+        description: "Replace the eligible conversation history with one summary.",
+    },
+];
+
+const COMPACTION_TRIGGER_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "fixed",
+        display: "Fixed",
+        description: "Trigger at the configured fixed context percentage.",
+    },
+    EnumChoice {
+        canonical: "dynamic",
+        display: "Dynamic",
+        description: "Trigger from the usable context budget after output, prefix, and safety reserves.",
+    },
+];
+
 /// Build the catalog. Called once at process start via
 /// `SettingsRegistry::defaults()`.
 pub fn default_settings() -> Vec<SettingMeta> {
@@ -1560,6 +1591,136 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 source: DynamicEnumSource::ActiveModelCatalog,
                 supports_preview: false,
             },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // ── Compaction settings ────────────────────────────────────────
+        //
+        // SHELL-owned: persisted to `[compaction]` in config.toml.
+        // Strategy controls how compaction is performed (auto/rolling/full_replace).
+        // Trigger controls when auto-compaction fires (fixed/dynamic threshold).
+        // Band count controls rolling compaction partition count (3..=8).
+        // Primary/fallback models control which models are used for summarization.
+        //
+        SettingMeta {
+            key: "compaction_strategy",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Shell,
+            label: "Compaction strategy",
+            description: "How conversation history is summarized during auto-compaction. Auto selects the best method, rolling preserves recent context in bands, and full replace consolidates everything into one summary.",
+            keywords: &[
+                "compaction",
+                "strategy",
+                "summarize",
+                "history",
+                "summary",
+                "rolling",
+                "batch",
+                "band",
+            ],
+            kind: SettingKind::Enum {
+                default: "auto",
+                choices: COMPACTION_STRATEGY_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "compaction_trigger_policy",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Shell,
+            label: "Compaction trigger",
+            description: "When auto-compaction triggers. Fixed uses the configured percentage; dynamic accounts for output, fixed-prefix, and safety reserves.",
+            keywords: &[
+                "compaction",
+                "trigger",
+                "threshold",
+                "percentage",
+                "dynamic",
+                "adaptive",
+            ],
+            kind: SettingKind::Enum {
+                default: "fixed",
+                choices: COMPACTION_TRIGGER_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "compaction_band_count",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Shell,
+            label: "Rolling band count",
+            description: "Number of bands for rolling compaction (3-8). More bands preserve more recent context while summarizing older history.",
+            keywords: &[
+                "compaction",
+                "band",
+                "count",
+                "rolling",
+                "context",
+                "preserve",
+            ],
+            kind: SettingKind::Int {
+                default: 4,
+                min: 3,
+                max: 8,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "compaction_primary_model",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Shell,
+            label: "Primary compaction model",
+            description: "First compaction route. Select Session model to reuse the active route, or choose any configured catalog model. External providers receive conversation history.",
+            keywords: &["compaction", "model", "primary", "summarize", "session"],
+            kind: SettingKind::DynamicEnum {
+                default: "@session",
+                source: DynamicEnumSource::CompactionPrimaryModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "compaction_fallback_model",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Shell,
+            label: "Fallback compaction model",
+            description: "Optional second route, tried only for retryable transport, provider, rate-limit, timeout, 5xx, empty, or degenerate failures. External providers receive conversation history.",
+            keywords: &[
+                "compaction",
+                "model",
+                "fallback",
+                "secondary",
+                "backup",
+                "session",
+            ],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::CompactionFallbackModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // ── Runtime status row (non-editable) ─────────────────────────────
+        //
+        // This is a special "status" row that shows the current live state
+        // of compaction. It's not a real setting - it's rendered as a row
+        // but doesn't produce actions. The value is computed from the active
+        // session's compaction config.
+        SettingMeta {
+            key: "compaction_status",
+            category: SettingCategory::Compaction,
+            owner: SettingOwner::Pager,
+            label: "Status",
+            description: "Current compaction settings and state for this session.",
+            keywords: &["status", "runtime", "live"],
+            kind: SettingKind::Status,
             restart_required: false,
             hidden_in_minimal: false,
         },

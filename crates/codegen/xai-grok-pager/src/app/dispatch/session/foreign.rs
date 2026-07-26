@@ -197,6 +197,16 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
     if seq != app.session_picker_list_seq {
         return vec![];
     }
+    // Closing the welcome picker clears both its loading flag and entries.
+    // Drop a late Build-mode response instead of reopening the picker the user
+    // just dismissed. Modal responses keep their existing behavior because
+    // their active view is an agent, not Welcome.
+    if matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
+        && !app.session_picker_loading
+        && app.session_picker_entries.is_none()
+    {
+        return vec![];
+    }
     app.session_picker_detail_generation += 1;
     if let Some(partial) = partial {
         crate::unified_log::warn(
@@ -299,6 +309,12 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
     query: Option<String>,
 ) -> Vec<Effect> {
     if seq != app.session_picker_list_seq {
+        return vec![];
+    }
+    if matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
+        && !app.session_picker_loading
+        && app.session_picker_entries.is_none()
+    {
         return vec![];
     }
     app.session_picker_detail_generation += 1;

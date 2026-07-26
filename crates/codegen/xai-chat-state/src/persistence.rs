@@ -12,6 +12,50 @@ use xai_grok_inference_types::ConversationItem;
 
 use crate::commands::{StrictAppendAck, StrictAppendError};
 
+/// Shell-neutral metadata needed to persist a compaction checkpoint and its
+/// marker. Host-specific persistence adapts this to its own on-disk schema.
+#[derive(Debug, Clone)]
+pub struct CompactionPersistenceMetadata {
+    pub checkpoint_id: String,
+    pub prompt_index: usize,
+    pub auto_continue_prompt: Option<String>,
+    pub original_user_info: Option<String>,
+    pub created_at: String,
+}
+
+/// Complete old/new state handed to persistence for one marker-last commit.
+#[derive(Debug, Clone)]
+pub struct CompactionPersistenceRequest {
+    pub metadata: CompactionPersistenceMetadata,
+    pub previous_history: Vec<ConversationItem>,
+    pub compacted_history: Vec<ConversationItem>,
+}
+
+/// Commit-aware persistence failure.
+#[derive(Debug)]
+pub enum CompactionPersistenceError {
+    /// The durable marker was not committed and disk was restored to the old history.
+    NotCommitted(io::Error),
+    /// The marker committed despite a later durability/reporting error.
+    Committed(io::Error),
+    /// Persistence could not determine or restore the final disk state.
+    Indeterminate(io::Error),
+}
+
+impl std::fmt::Display for CompactionPersistenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCommitted(error) => write!(f, "compaction was not committed: {error}"),
+            Self::Committed(error) => write!(f, "compaction committed with an error: {error}"),
+            Self::Indeterminate(error) => {
+                write!(f, "compaction persistence state is indeterminate: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompactionPersistenceError {}
+
 /// Abstraction over chat-specific persistence operations.
 ///
 /// The actor owns this exclusively via `Box<dyn ChatPersistence>`, so all
@@ -30,8 +74,15 @@ pub trait ChatPersistence: Send + 'static {
         item: &ConversationItem,
     ) -> oneshot::Receiver<Result<StrictAppendAck, StrictAppendError>>;
 
-    /// Replace the entire chat history (compaction / rewind).
+    /// Replace the entire chat history (non-transactional repairs / rewind).
     fn replace_history(&mut self, items: &[ConversationItem]);
+
+    /// Persist a compaction checkpoint, replacement history, and marker using
+    /// the host's marker-last protocol, then acknowledge the final state.
+    fn commit_compaction_and_ack(
+        &mut self,
+        request: CompactionPersistenceRequest,
+    ) -> oneshot::Receiver<Result<(), CompactionPersistenceError>>;
 
     /// Flush pending writes to disk.
     fn flush(&mut self);
@@ -50,6 +101,8 @@ pub enum PersistenceRecord {
     AcknowledgedMessage(ConversationItem),
     /// The full history was replaced.
     ReplaceHistory(Vec<ConversationItem>),
+    /// A marker-last compaction commit was requested.
+    CommitCompaction(CompactionPersistenceRequest),
     /// A flush was requested.
     Flush,
 }
@@ -61,6 +114,8 @@ pub struct MockChatPersistence {
     tx: mpsc::UnboundedSender<PersistenceRecord>,
     persistence_ack_tx:
         Option<mpsc::UnboundedSender<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>>>,
+    compaction_ack_tx:
+        Option<mpsc::UnboundedSender<oneshot::Sender<Result<(), CompactionPersistenceError>>>>,
     persisted_working_directory_switches: Vec<ConversationItem>,
 }
 
@@ -70,6 +125,8 @@ pub struct MockPersistenceReceiver {
     persistence_ack_rx: Option<
         mpsc::UnboundedReceiver<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>>,
     >,
+    compaction_ack_rx:
+        Option<mpsc::UnboundedReceiver<oneshot::Sender<Result<(), CompactionPersistenceError>>>>,
 }
 
 impl MockChatPersistence {
@@ -81,11 +138,13 @@ impl MockChatPersistence {
             Self {
                 tx,
                 persistence_ack_tx: None,
+                compaction_ack_tx: None,
                 persisted_working_directory_switches: Vec::new(),
             },
             MockPersistenceReceiver {
                 rx,
                 persistence_ack_rx: None,
+                compaction_ack_rx: None,
             },
         )
     }
@@ -94,15 +153,18 @@ impl MockChatPersistence {
     pub fn new_with_manual_persistence_ack() -> (Self, MockPersistenceReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (persistence_ack_tx, persistence_ack_rx) = mpsc::unbounded_channel();
+        let (compaction_ack_tx, compaction_ack_rx) = mpsc::unbounded_channel();
         (
             Self {
                 tx,
                 persistence_ack_tx: Some(persistence_ack_tx),
+                compaction_ack_tx: Some(compaction_ack_tx),
                 persisted_working_directory_switches: Vec::new(),
             },
             MockPersistenceReceiver {
                 rx,
                 persistence_ack_rx: Some(persistence_ack_rx),
+                compaction_ack_rx: Some(compaction_ack_rx),
             },
         )
     }
@@ -123,6 +185,16 @@ impl MockPersistenceReceiver {
         &mut self,
     ) -> Option<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>> {
         match &mut self.persistence_ack_rx {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
+    }
+
+    /// Receive the next manual compaction-transaction acknowledgement sender.
+    pub async fn next_compaction_ack(
+        &mut self,
+    ) -> Option<oneshot::Sender<Result<(), CompactionPersistenceError>>> {
+        match &mut self.compaction_ack_rx {
             Some(rx) => rx.recv().await,
             None => None,
         }
@@ -185,6 +257,34 @@ impl ChatPersistence for MockChatPersistence {
             .send(PersistenceRecord::ReplaceHistory(items.to_vec()));
     }
 
+    fn commit_compaction_and_ack(
+        &mut self,
+        request: CompactionPersistenceRequest,
+    ) -> oneshot::Receiver<Result<(), CompactionPersistenceError>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .tx
+            .send(PersistenceRecord::CommitCompaction(request))
+            .is_err()
+        {
+            let _ = reply.send(Err(CompactionPersistenceError::NotCommitted(
+                io::Error::new(io::ErrorKind::BrokenPipe, "mock persistence closed"),
+            )));
+        } else if let Some(ack_tx) = &self.compaction_ack_tx {
+            if let Err(error) = ack_tx.send(reply) {
+                let _ = error.0.send(Err(CompactionPersistenceError::NotCommitted(
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "mock compaction acknowledgement channel closed",
+                    ),
+                )));
+            }
+        } else {
+            let _ = reply.send(Ok(()));
+        }
+        receiver
+    }
+
     fn flush(&mut self) {
         let _ = self.tx.send(PersistenceRecord::Flush);
     }
@@ -208,6 +308,14 @@ impl ChatPersistence for NullChatPersistence {
         receiver
     }
     fn replace_history(&mut self, _items: &[ConversationItem]) {}
+    fn commit_compaction_and_ack(
+        &mut self,
+        _request: CompactionPersistenceRequest,
+    ) -> oneshot::Receiver<Result<(), CompactionPersistenceError>> {
+        let (reply, receiver) = oneshot::channel();
+        let _ = reply.send(Ok(()));
+        receiver
+    }
     fn flush(&mut self) {}
 }
 

@@ -571,6 +571,28 @@ pub enum Action {
     /// Clear the persisted fork-secondary model — restores to built-in
     /// default. Active agent keeps its value; next fork uses the default.
     ClearForkSecondaryModel,
+    /// Set the compaction strategy (`auto` | `rolling` | `full_replace`).
+    /// SHELL-owned: persisted to `[compaction].strategy` via
+    /// `Effect::PersistSetting`.
+    SetCompactionStrategy(String),
+    /// Set the compaction trigger policy (`fixed` | `dynamic`).
+    /// SHELL-owned: persisted to `[compaction].trigger_policy` via
+    /// `Effect::PersistSetting`.
+    SetCompactionTriggerPolicy(String),
+    /// Set the rolling compaction band count (3-8).
+    /// SHELL-owned: persisted to `[compaction].band_count` via
+    /// `Effect::PersistSetting`.
+    SetCompactionBandCount(i64),
+    /// Set the primary compaction route to a stable catalog `ModelId`.
+    /// Persisted as the first entry in `[compaction].models`.
+    SetCompactionPrimaryModel(acp::ModelId),
+    /// Restore the primary route to the explicit `@session` sentinel.
+    ClearCompactionPrimaryModel,
+    /// Set the optional second entry in `[compaction].models`. `@session`
+    /// is accepted as an explicit route; an empty value means no fallback.
+    SetCompactionFallbackModel(acp::ModelId),
+    /// Clear the persisted fallback compaction model.
+    ClearCompactionFallbackModel,
     /// Commit the `show_tips` preference. Persisted to `[cli].show_tips`.
     /// Restart-required — tips are resolved once at startup.
     SetShowTips(bool),

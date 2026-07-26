@@ -444,6 +444,11 @@ pub(super) fn handle_check_subscription_complete(
     if !applied && let Some(generation) = verify {
         app.promote_deferred_gate(generation, "check_failed");
     }
+    let access_restored = was_blocked && app.has_access();
+    let mut effects = maybe_start_paywall_chain(app, was_blocked);
+    if access_restored {
+        effects.extend(super::ctx::maybe_open_welcome_session_picker(app));
+    }
     crate::unified_log::info(
         "subscription.check.complete",
         None,
@@ -455,7 +460,7 @@ pub(super) fn handle_check_subscription_complete(
             "tier": app.subscription_tier,
         })),
     );
-    maybe_start_paywall_chain(app, was_blocked)
+    effects
 }
 
 /// Safety net for a hung verification check: show the still-pending

@@ -728,8 +728,10 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
             // out either way, and the dispatch arm shows an
             // "Already at default" toast on idempotent confirm.
             match state.focused_setting() {
-                // Group rows have no scalar default to reset.
-                Some((_, meta)) if matches!(meta.kind, SettingKind::Group { .. }) => {
+                // Group and status rows have no scalar default to reset.
+                Some((_, meta))
+                    if matches!(meta.kind, SettingKind::Group { .. } | SettingKind::Status) =>
+                {
                     SettingsKeyOutcome::Unchanged
                 }
                 Some((key, _meta)) => SettingsKeyOutcome::Action(Action::OpenResetConfirm { key }),

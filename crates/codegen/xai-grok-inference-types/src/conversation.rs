@@ -79,6 +79,10 @@ pub enum SyntheticReason {
     /// Metadata injected by the compaction pipeline (e.g., re-read file
     /// contents). Not real user input.
     CompactionMeta,
+    /// Summary produced by a compaction pass. Kept distinct from
+    /// [`Self::CompactionMeta`] so hierarchical compaction can identify and
+    /// merge prior summaries without parsing message text.
+    CompactionSummary,
     /// Runtime-injected `<system-reminder>` message. Not real user input.
     SystemReminder,
     /// Project-level instruction message (AGENTS.md / CLAUDE.md) injected at
@@ -149,6 +153,7 @@ impl SyntheticReason {
             | Self::GoalClassifierNudge
             | Self::SchedulerFired => true,
             Self::CompactionMeta
+            | Self::CompactionSummary
             | Self::SystemReminder
             | Self::ProjectInstructions
             | Self::AutoContinue
@@ -958,6 +963,22 @@ impl ConversationItem {
         })
     }
 
+    /// Create a synthetic user message carrying a compaction summary.
+    ///
+    /// The dedicated marker lets rolling and divide-and-conquer compaction
+    /// distinguish prior summaries from other compaction metadata.
+    pub fn compaction_summary(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::CompactionSummary),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
     /// Create a synthetic user message for a runtime system reminder.
     ///
     /// Used for injected `<system-reminder>` content such as skill discovery
@@ -1314,15 +1335,30 @@ impl xai_grok_compaction::CompactionItem for ConversationItem {
         matches!(self, Self::Assistant(a) if !a.tool_calls.is_empty())
     }
 
+    fn tool_request_ids(&self) -> Vec<String> {
+        match self {
+            Self::Assistant(assistant) => assistant
+                .tool_calls
+                .iter()
+                .map(|call| call.id.as_ref().to_owned())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn tool_result_id(&self) -> Option<String> {
+        match self {
+            Self::ToolResult(result) => Some(result.tool_call_id.clone()),
+            _ => None,
+        }
+    }
+
     fn is_compaction_summary(&self) -> bool {
-        // grok-build has no structural marker that uniquely identifies a prior
-        // compaction summary: the carrier is a `user_meta` item whose
-        // `SyntheticReason::CompactionMeta` is also used for re-injected file
-        // contents. Returning `false` is safe for the full-replace path, which
-        // does not consult this (it summarizes the whole conversation). Revisit
-        // (add a dedicated marker) before routing grok-build history through
-        // the shared `history`/`inter` filter.
-        false
+        matches!(
+            self,
+            Self::User(user)
+                if user.synthetic_reason.as_ref() == Some(&SyntheticReason::CompactionSummary)
+        )
     }
 
     fn attachment_refs(&self) -> Vec<xai_grok_compaction::CompactionFileRef> {
@@ -3536,14 +3572,15 @@ mod compaction_item_bridge_tests {
     }
 
     #[test]
-    fn metadata_accessors_are_conservative() {
-        // grok-build has no structural compaction-summary marker, and no
-        // id+name attachment refs, so both return empty/false.
+    fn compaction_summary_accessor_requires_dedicated_marker() {
         assert!(!CompactionItem::is_compaction_summary(
             &ConversationItem::user("u")
         ));
         assert!(!CompactionItem::is_compaction_summary(
-            &ConversationItem::user_meta("summary")
+            &ConversationItem::user_meta("metadata")
+        ));
+        assert!(CompactionItem::is_compaction_summary(
+            &ConversationItem::compaction_summary("summary")
         ));
         assert!(CompactionItem::attachment_refs(&ConversationItem::user("u")).is_empty());
     }
@@ -8327,6 +8364,57 @@ mod tests {
         } else {
             panic!("expected User variant after round-trip");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // compaction_summary tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compaction_summary_tagged_correctly() {
+        let item = ConversationItem::compaction_summary("summary text");
+        if let ConversationItem::User(u) = item {
+            assert_eq!(
+                u.synthetic_reason,
+                Some(SyntheticReason::CompactionSummary),
+                "compaction_summary must carry SyntheticReason::CompactionSummary"
+            );
+        } else {
+            panic!("expected User variant");
+        }
+    }
+
+    #[test]
+    fn compaction_summary_content_preserved() {
+        let text = "Summary: did things.";
+        let item = ConversationItem::compaction_summary(text);
+        assert_eq!(item.text_content(), text);
+    }
+
+    #[test]
+    fn compaction_summary_serde_roundtrip() {
+        let item = ConversationItem::compaction_summary("summary text");
+        let json = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(
+            json["synthetic_reason"],
+            serde_json::json!("compaction_summary"),
+            "synthetic_reason must serialize as snake_case string"
+        );
+        let back: ConversationItem = serde_json::from_value(json).expect("deserialize");
+        if let ConversationItem::User(u) = back {
+            assert_eq!(u.synthetic_reason, Some(SyntheticReason::CompactionSummary));
+        } else {
+            panic!("expected User variant after round-trip");
+        }
+    }
+
+    #[test]
+    fn compaction_summary_starts_prompt_turn_is_false() {
+        // CompactionSummary is a mid-turn summary, not a prompt turn starter.
+        assert!(
+            !SyntheticReason::CompactionSummary.starts_prompt_turn(),
+            "CompactionSummary must not start a prompt turn"
+        );
     }
 
     #[test]

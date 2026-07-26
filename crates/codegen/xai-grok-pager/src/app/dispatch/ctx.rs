@@ -139,6 +139,32 @@ pub(super) fn show_welcome(app: &mut AppView) {
     app.welcome_announcement = WelcomeAnnouncementState::default();
 }
 
+/// Open the welcome-screen session picker when the welcome view is ready.
+///
+/// Startup intents, authentication, folder trust, access gates, and minimal
+/// mode all take precedence. The existing picker owns grouping, filtering,
+/// loading, and selection; this helper only decides when to start its fetch.
+pub(in crate::app) fn maybe_open_welcome_session_picker(
+    app: &mut AppView,
+) -> Vec<crate::app::actions::Effect> {
+    use crate::app::app_view::{AuthState, TrustState};
+
+    let eligible = matches!(app.active_view, ActiveView::Welcome)
+        && !app.screen_mode.is_minimal()
+        && matches!(app.auth_state, AuthState::Done)
+        && matches!(app.trust_state, TrustState::Done)
+        && !app.is_access_blocked()
+        && !app.privacy_banner_should_show()
+        && app.deferred_startup.is_empty()
+        && !app.session_picker_loading
+        && app.session_picker_entries.is_none();
+    if !eligible {
+        return vec![];
+    }
+
+    super::router::dispatch(crate::app::actions::Action::FetchSessionList, app)
+}
+
 /// Restore the view a mid-session auth flow launched from, falling back to the
 /// welcome screen (via `show_welcome`) when the original agent is gone. Shared by
 /// cancel-login and AuthComplete so they can't diverge.

@@ -4,6 +4,38 @@
     // ── apply_session_event ────────────────────────────────────────────
 
     #[test]
+    fn compaction_notifications_refresh_open_settings_status() {
+        let mut app = make_app_with_agent("s1");
+        let _ = crate::app::dispatch::dispatch(
+            crate::app::actions::Action::OpenSettings,
+            &mut app,
+        );
+
+        let start = XaiSessionUpdate::AutoCompactStarted {
+            tokens_used: 90_000,
+            context_window: 131_072,
+            percentage: 85,
+            reason: "threshold".into(),
+        };
+        assert!(handle(make_ext_session_notification("s1", start), &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let Some(crate::views::modal::ActiveModal::Settings { state }) = &agent.active_modal else {
+            panic!("settings modal must remain open")
+        };
+        assert!(state.pager_snapshot.compaction_in_progress);
+
+        let failed = XaiSessionUpdate::AutoCompactFailed {
+            error: "test failure".into(),
+        };
+        assert!(handle(make_ext_session_notification("s1", failed), &mut app));
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let Some(crate::views::modal::ActiveModal::Settings { state }) = &agent.active_modal else {
+            panic!("settings modal must remain open")
+        };
+        assert!(!state.pager_snapshot.compaction_in_progress);
+    }
+
+    #[test]
     fn apply_compaction_started_sets_activity() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -671,10 +703,10 @@
         assert_eq!(session.in_flight_prompt.unwrap().text, "retry after login");
     }
 
-    /// A 401 reported with a non-auth `error_type` but an "Unauthorized
-    /// (401)" message (the `InferenceErrorKind::Api` path) also prompts.
+    /// A 401 reported with a non-auth `error_type` and no structured provider
+    /// identity must not guess which credential flow to open from message text.
     #[test]
-    fn apply_retry_state_401_message_without_auth_type_prompts_reauth() {
+    fn apply_retry_state_401_message_without_auth_type_does_not_prompt_reauth() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         apply_retry_state(
@@ -688,7 +720,7 @@
             &mut scrollback, false);
         assert!(matches!(
             last_session_event(&scrollback),
-            Some(SessionEvent::ReAuthRequired)
+            Some(SessionEvent::RetryFailed { .. })
         ));
     }
 

@@ -8,10 +8,12 @@ use xai_grok_inference_types::{
     ToolSpec, TraceContext,
 };
 
-use crate::commands::{ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError};
+use crate::commands::{
+    CasSpliceResult, ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError,
+};
 use crate::types::{
-    AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
-    TurnCapture,
+    AutoCompactTrigger, ChatStateSnapshot, CompactSourceIdentity, ConversationCounts, Credentials,
+    NotificationMeta, TurnCapture,
 };
 
 /// Handle to communicate with ChatStateActor.
@@ -654,6 +656,63 @@ impl ChatStateHandle {
         })
         .await
         .flatten()
+    }
+
+    /// Get the current structural epoch.
+    ///
+    /// The structural epoch is incremented on each mutation that changes
+    /// the conversation item sequence or content. This is used for CAS
+    /// operations to detect stale state.
+    pub async fn get_structural_epoch(&self) -> u64 {
+        self.query("GetStructuralEpoch", |reply| {
+            ChatStateCommand::GetStructuralEpoch { reply }
+        })
+        .await
+        .unwrap_or(0)
+    }
+
+    /// Atomically apply a conversation replacement only when the expected
+    /// epoch, range, and fingerprint match the current state.
+    ///
+    /// This is the core API for rolling compaction: it prevents stale compaction
+    /// jobs from modifying state by requiring the source to match expectations.
+    ///
+    /// # Arguments
+    /// - `identity`: The expected source identity (epoch, range, fingerprint)
+    /// - `items`: The replacement conversation items
+    ///
+    /// # Returns
+    /// - `CasSpliceResult::Applied` if the replacement was applied
+    /// - `CasSpliceResult::Stale` if epoch, range, or fingerprint mismatch
+    /// - `CasSpliceResult::InvalidRange` if the source range was invalid
+    /// - `CasSpliceResult::PersistenceFailed` for a definite non-commit
+    /// - `CasSpliceResult::PersistenceIndeterminate` when startup recovery is required
+    pub async fn cas_splice_conversation(
+        &self,
+        identity: CompactSourceIdentity,
+        items: Vec<ConversationItem>,
+    ) -> CasSpliceResult {
+        self.cas_splice_conversation_with_persistence(identity, items, None)
+            .await
+    }
+
+    /// CAS splice with an acknowledged marker-last persistence commit.
+    pub async fn cas_splice_conversation_with_persistence(
+        &self,
+        identity: CompactSourceIdentity,
+        items: Vec<ConversationItem>,
+        persistence: Option<crate::persistence::CompactionPersistenceMetadata>,
+    ) -> CasSpliceResult {
+        self.query("CasSpliceConversation", |reply| {
+            ChatStateCommand::CasSpliceConversation {
+                identity,
+                items,
+                persistence,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(CasSpliceResult::Stale)
     }
 }
 

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use agent_client_protocol as acp;
 use ratatui::layout::Rect;
 
 use crate::app::actions::Action;
@@ -955,6 +956,11 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
+        // --- Compaction settings ---
+        // Strategy: enum round-trip.
+        "compaction_strategy" => Some(Action::SetCompactionStrategy(choice.to_string())),
+        // Trigger policy: enum round-trip.
+        "compaction_trigger_policy" => Some(Action::SetCompactionTriggerPolicy(choice.to_string())),
         _ => None,
     }
 }
@@ -986,6 +992,23 @@ pub(super) fn action_for_string(
                     .map(Action::SetForkSecondaryModel)
             }
         }
+        // --- Compaction model settings ---
+        // Primary model: empty → Clear, non-empty resolves to ModelId.
+        "compaction_primary_model" => {
+            if value.is_empty() || value == "@session" {
+                Some(Action::ClearCompactionPrimaryModel)
+            } else {
+                Some(Action::SetCompactionPrimaryModel(acp::ModelId::new(value)))
+            }
+        }
+        // Fallback model: empty → no fallback; `@session` is an explicit route.
+        "compaction_fallback_model" => {
+            if value.is_empty() {
+                Some(Action::ClearCompactionFallbackModel)
+            } else {
+                Some(Action::SetCompactionFallbackModel(acp::ModelId::new(value)))
+            }
+        }
 
         _ => {
             let _ = value;
@@ -1001,6 +1024,8 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "max_thoughts_width" => Some(Action::SetMaxThoughtsWidth(value)),
         "scroll_speed" => Some(Action::SetScrollSpeed(value)),
         "scroll_lines" => Some(Action::SetScrollLines(value)),
+        // Compaction band count: int round-trip.
+        "compaction_band_count" => Some(Action::SetCompactionBandCount(value)),
         _ => None,
     }
 }

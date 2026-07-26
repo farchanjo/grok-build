@@ -677,13 +677,7 @@ pub(super) fn render_rows(
                             "off".to_string()
                         }
                     }
-                    SettingValue::String(s) => {
-                        if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                            "(no override)".to_string()
-                        } else {
-                            s.clone()
-                        }
-                    }
+                    SettingValue::String(s) => dynamic_value_display(meta, s).into_owned(),
                     SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
                     SettingValue::Int(i) => i.to_string(),
                 };
@@ -842,13 +836,7 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                             "off".to_string()
                         }
                     }
-                    SettingValue::String(s) => {
-                        if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                            "(no override)".to_string()
-                        } else {
-                            s.clone()
-                        }
-                    }
+                    SettingValue::String(s) => dynamic_value_display(meta, s).into_owned(),
                     SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
                     SettingValue::Int(i) => i.to_string(),
                 };
@@ -2194,6 +2182,24 @@ fn display_for_enum_canonical<'a>(kind: &'a SettingKind, canonical: &'a str) -> 
     canonical
 }
 
+fn dynamic_value_display<'a>(meta: &SettingMeta, canonical: &'a str) -> std::borrow::Cow<'a, str> {
+    let SettingKind::DynamicEnum { source, .. } = &meta.kind else {
+        return std::borrow::Cow::Borrowed(canonical);
+    };
+    use crate::settings::DynamicEnumSource;
+    match (*source, canonical) {
+        (DynamicEnumSource::ActiveModelCatalog, "") => std::borrow::Cow::Borrowed("(no override)"),
+        (DynamicEnumSource::CompactionPrimaryModelCatalog, "@session")
+        | (DynamicEnumSource::CompactionFallbackModelCatalog, "@session") => {
+            std::borrow::Cow::Borrowed("Session model")
+        }
+        (DynamicEnumSource::CompactionFallbackModelCatalog, "") => {
+            std::borrow::Cow::Borrowed("No fallback")
+        }
+        _ => std::borrow::Cow::Borrowed(canonical),
+    }
+}
+
 /// Word-wrap a description string. Returns owned lines for re-styling.
 /// Asserts descriptions are single-line (no `\n`/`\t`).
 pub(super) fn wrap_description(description: &str, width: u16) -> Vec<String> {
@@ -2338,11 +2344,8 @@ pub(super) fn render_setting_row(
             }
         }
         SettingValue::String(s) => {
-            if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                "(no override)"
-            } else {
-                s.as_str()
-            }
+            value_text_owned = dynamic_value_display(meta, s).into_owned();
+            &value_text_owned
         }
         SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e),
         SettingValue::Int(i) => {
@@ -2363,7 +2366,7 @@ pub(super) fn render_setting_row(
         (SettingKind::Enum { .. }, _)
             | (SettingKind::String { .. }, _)
             | (SettingKind::DynamicEnum { .. }, _)
-    );
+    ) && !matches!(meta.kind, SettingKind::Status);
     let chevron_str = format!(" {}", crate::glyphs::chevron()); // › → > on legacy ConHost
     let chevron_w = if show_chevron {
         chevron_str.width() as u16

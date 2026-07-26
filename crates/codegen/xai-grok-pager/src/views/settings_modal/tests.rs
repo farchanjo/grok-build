@@ -425,7 +425,12 @@ fn every_dynamic_enum_setting_has_action_for_string_arm() {
         // a generic `Action::DynamicSettingChanged(...)` would
         // pass `is_some()` while breaking the typed dispatch.
         let empty_action = action_for_string(meta.key, String::new(), &snapshot);
-        let nonempty_action = action_for_string(meta.key, "Test Model".to_string(), &snapshot);
+        let nonempty_value = if meta.key.starts_with("compaction_") {
+            "test-model"
+        } else {
+            "Test Model"
+        };
+        let nonempty_action = action_for_string(meta.key, nonempty_value.to_string(), &snapshot);
         match meta.key {
             "default_model" => {
                 assert!(
@@ -450,6 +455,26 @@ fn every_dynamic_enum_setting_has_action_for_string_arm() {
                     "fork_secondary_model non-empty canonical must produce \
                      SetForkSecondaryModel(_), got {nonempty_action:?}",
                 );
+            }
+            "compaction_primary_model" => {
+                assert!(matches!(
+                    empty_action,
+                    Some(Action::ClearCompactionPrimaryModel)
+                ));
+                assert!(matches!(
+                    nonempty_action,
+                    Some(Action::SetCompactionPrimaryModel(_))
+                ));
+            }
+            "compaction_fallback_model" => {
+                assert!(matches!(
+                    empty_action,
+                    Some(Action::ClearCompactionFallbackModel)
+                ));
+                assert!(matches!(
+                    nonempty_action,
+                    Some(Action::SetCompactionFallbackModel(_))
+                ));
             }
             other => panic!(
                 "Unknown DynamicEnum key `{other}` — add a discriminating arm in \
@@ -574,9 +599,10 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
 /// (3 bools + 3 enums + 1 int = 7 entries), the Editor entry
 /// `multiline_mode`, the Agent entries `permission_mode` and
 /// `plan_mode`, the Privacy entry `coding_data_sharing`, the
-/// Models entry `default_model`, and the Advanced entries
-/// `show_tips` and `auto_update`. `default_reasoning_effort` and
-/// `auto_compact_threshold_percent` are not exposed in the modal.
+/// Models entry `default_model`, the dedicated Compaction entries,
+/// and the Advanced entries `show_tips` and `auto_update`.
+/// `default_reasoning_effort` and `auto_compact_threshold_percent`
+/// are not exposed in the modal.
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let prev_voice = crate::app::voice_mode_enabled();
@@ -602,6 +628,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Agent,
             &SettingCategory::Privacy,
             &SettingCategory::Models,
+            &SettingCategory::Compaction,
             // The Session category has no registered settings, so its
             // header is not emitted.
             // Advanced category (first entries:
@@ -694,6 +721,13 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
+            // Dedicated Compaction category.
+            "compaction_strategy",
+            "compaction_trigger_policy",
+            "compaction_band_count",
+            "compaction_primary_model",
+            "compaction_fallback_model",
+            "compaction_status",
             // `auto_compact_threshold_percent` (Session category) is
             // not exposed in the modal.
             // Advanced category.
@@ -2671,13 +2705,13 @@ fn picker_highlights_current_choice() {
     };
     assert_eq!(
         bg_at(4),
-        Some(theme.bg_visual),
-        "focused row must have bg_visual background"
+        Some(settings_list_row_bg(&theme, true, false)),
+        "focused row must use the selected-row background policy"
     );
     assert_eq!(
         bg_at(3),
-        Some(theme.bg_base),
-        "unfocused row must have bg_base background"
+        Some(settings_list_row_bg(&theme, false, false)),
+        "unfocused row must use the normal-row background policy"
     );
 
     // Display text on focused row carries BOLD modifier
@@ -6698,9 +6732,7 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         crate::theme::ThemeKind::TokyoNight => crate::theme::Theme::tokyonight(),
         crate::theme::ThemeKind::GrokDay => crate::theme::Theme::grokday(),
         crate::theme::ThemeKind::RosePineMoon => crate::theme::Theme::rosepine_moon(),
-        // Resolved via `Theme::current()` rather than a constructor
-        // because `theme::oscura` is a private module.
-        crate::theme::ThemeKind::OscuraMidnight => crate::theme::Theme::current(),
+        crate::theme::ThemeKind::OscuraMidnight => crate::theme::Theme::oscura_midnight(),
         crate::theme::ThemeKind::Auto => crate::theme::Theme::groknight(),
     };
     assert_ne!(

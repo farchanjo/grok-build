@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 
 use crate::extensions::notification::{
-    CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as XaiSessionUpdate,
+    CompactionCheckpointInfo, SessionUpdate as XaiSessionUpdate,
 };
 use crate::inference::ConversationItem;
 use crate::session::storage::{SessionUpdate, UpdatesIterator};
@@ -286,6 +286,8 @@ impl ReplayState {
         info: &CompactionCheckpointInfo,
         session_dir: &Path,
     ) -> io::Result<ReplayAction> {
+        let file =
+            crate::session::storage::load_validated_compaction_checkpoint(session_dir, info)?;
         if self.target < info.prompt_index_at_compaction {
             // Target is before this compaction — don't load the compacted
             // history (we'll reconstruct from raw updates). But the
@@ -293,46 +295,8 @@ impl ReplayState {
             // historical User(user_info) that the model saw for these
             // pre-compaction turns. Without it we'd use the post-compaction
             // rebuilt user_info, which is wrong data.
-            let checkpoint_path = session_dir.join(&info.checkpoint_file);
-            let bytes = match std::fs::read(&checkpoint_path) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    tracing::error!(
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file missing, cannot restore original user_info"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "Compaction checkpoint file missing: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
-                }
-                Err(e) => return Err(e),
-            };
-            match serde_json::from_slice::<CompactionCheckpointFile>(&bytes) {
-                Ok(file) => {
-                    if self.original_user_info.is_none() {
-                        self.original_user_info = file.original_user_info;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        ?e,
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file corrupt, cannot restore original user_info"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Compaction checkpoint file corrupt: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
-                }
+            if self.original_user_info.is_none() {
+                self.original_user_info = file.original_user_info;
             }
             tracing::debug!(
                 target = self.target,
@@ -341,60 +305,6 @@ impl ReplayState {
             );
             Ok(ReplayAction::Continue)
         } else {
-            let checkpoint_path = session_dir.join(&info.checkpoint_file);
-            let bytes = match std::fs::read(&checkpoint_path) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    tracing::error!(
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file missing, cannot reconstruct conversation"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "Compaction checkpoint file missing: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
-                }
-                Err(e) => return Err(e),
-            };
-            let file: CompactionCheckpointFile = match serde_json::from_slice(&bytes) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::error!(
-                        ?e,
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file corrupt, cannot reconstruct conversation"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Compaction checkpoint file corrupt: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
-                }
-            };
-
-            if file.schema_version > 1 {
-                tracing::error!(
-                    schema_version = file.schema_version,
-                    path = %checkpoint_path.display(),
-                    "Unsupported checkpoint schema version, cannot reconstruct conversation"
-                );
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Unsupported checkpoint schema version {}. \
-                         Cannot safely rewind past the compaction point.",
-                        file.schema_version
-                    ),
-                ));
-            }
-
             // Capture original_user_info from the checkpoint (even if we
             // replace the conversation — it's needed by handle_rewind for
             // the raw-updates prefix case).
@@ -773,14 +683,54 @@ mod tests {
         prompt_index_at_compaction: usize,
         auto_continue: Option<AutoContinueInfo>,
     ) -> SessionUpdate {
+        make_checkpoint_with_schema(checkpoint_id, prompt_index_at_compaction, auto_continue, 1)
+    }
+
+    fn make_checkpoint_with_schema(
+        checkpoint_id: &str,
+        prompt_index_at_compaction: usize,
+        auto_continue: Option<AutoContinueInfo>,
+        schema_version: u32,
+    ) -> SessionUpdate {
+        make_checkpoint_with_path_and_schema(
+            checkpoint_id,
+            prompt_index_at_compaction,
+            auto_continue,
+            format!("compaction_checkpoints/{checkpoint_id}.json"),
+            schema_version,
+        )
+    }
+
+    fn make_checkpoint_with_path(
+        checkpoint_id: &str,
+        prompt_index_at_compaction: usize,
+        auto_continue: Option<AutoContinueInfo>,
+        checkpoint_file: String,
+    ) -> SessionUpdate {
+        make_checkpoint_with_path_and_schema(
+            checkpoint_id,
+            prompt_index_at_compaction,
+            auto_continue,
+            checkpoint_file,
+            1,
+        )
+    }
+
+    fn make_checkpoint_with_path_and_schema(
+        checkpoint_id: &str,
+        prompt_index_at_compaction: usize,
+        auto_continue: Option<AutoContinueInfo>,
+        checkpoint_file: String,
+        schema_version: u32,
+    ) -> SessionUpdate {
         SessionUpdate::Xai(Box::new(XaiNotification {
             session_id: acp::SessionId::new("test"),
             update: XaiSessionUpdate::CompactionCheckpoint(Box::new(CompactionCheckpointInfo {
                 checkpoint_id: checkpoint_id.to_string(),
                 prompt_index_at_compaction,
-                checkpoint_file: format!("compaction_checkpoints/{checkpoint_id}.json"),
+                checkpoint_file,
                 auto_continue,
-                schema_version: 1,
+                schema_version,
                 created_at: "2024-01-01T00:00:00Z".to_string(),
             })),
             meta: None,
@@ -793,13 +743,29 @@ mod tests {
         prompt_index_at_compaction: usize,
         compacted_history: Vec<ConversationItem>,
     ) {
+        write_checkpoint_file_with_schema(
+            session_dir,
+            checkpoint_id,
+            prompt_index_at_compaction,
+            compacted_history,
+            1,
+        );
+    }
+
+    fn write_checkpoint_file_with_schema(
+        session_dir: &Path,
+        checkpoint_id: &str,
+        prompt_index_at_compaction: usize,
+        compacted_history: Vec<ConversationItem>,
+        schema_version: u32,
+    ) {
         let dir = session_dir.join("compaction_checkpoints");
         std::fs::create_dir_all(&dir).unwrap();
         let file = CompactionCheckpointFile {
             checkpoint_id: checkpoint_id.to_string(),
             prompt_index_at_compaction,
             compacted_history,
-            schema_version: 1,
+            schema_version,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             original_user_info: None,
             reread_file_paths: vec![],
@@ -950,6 +916,104 @@ mod tests {
     }
 
     #[test]
+    fn replay_rejects_checkpoint_path_outside_checkpoint_directory() {
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside.json");
+        let file = CompactionCheckpointFile {
+            checkpoint_id: "ckpt1".to_string(),
+            prompt_index_at_compaction: 1,
+            compacted_history: vec![ConversationItem::system("poison")],
+            schema_version: 1,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            original_user_info: None,
+            reread_file_paths: vec![],
+        };
+        std::fs::write(&outside, serde_json::to_vec(&file).unwrap()).unwrap();
+        let updates = vec![make_checkpoint_with_path(
+            "ckpt1",
+            1,
+            None,
+            "../outside.json".to_string(),
+        )];
+        let updates_path = tmp.path().join("updates.jsonl");
+        let mut content = Vec::new();
+        for update in &updates {
+            let envelope =
+                crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap();
+            content.extend(serde_json::to_vec(&envelope).unwrap());
+            content.push(b'\n');
+        }
+        std::fs::write(&updates_path, content).unwrap();
+
+        let error = replay_to_prompt(&updates_path, tmp.path(), 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("invalid compaction checkpoint path")
+        );
+    }
+
+    #[test]
+    fn replay_rejects_checkpoint_metadata_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        write_checkpoint_file(
+            tmp.path(),
+            "ckpt1",
+            2,
+            vec![ConversationItem::system("poison")],
+        );
+        let updates = vec![make_checkpoint("ckpt1", 1, None)];
+        let updates_path = tmp.path().join("updates.jsonl");
+        let mut content = Vec::new();
+        for update in &updates {
+            let envelope =
+                crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap();
+            content.extend(serde_json::to_vec(&envelope).unwrap());
+            content.push(b'\n');
+        }
+        std::fs::write(&updates_path, content).unwrap();
+
+        let error = replay_to_prompt(&updates_path, tmp.path(), 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("does not match committed marker")
+        );
+    }
+
+    #[test]
+    fn replay_rejects_checkpoint_schema_version_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        write_checkpoint_file_with_schema(
+            tmp.path(),
+            "ckpt1",
+            2,
+            vec![ConversationItem::system("poison")],
+            2,
+        );
+        let updates = vec![make_checkpoint_with_schema("ckpt1", 2, None, 1)];
+        let updates_path = tmp.path().join("updates.jsonl");
+        let mut content = Vec::new();
+        for update in &updates {
+            let envelope =
+                crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap();
+            content.extend(serde_json::to_vec(&envelope).unwrap());
+            content.push(b'\n');
+        }
+        std::fs::write(&updates_path, content).unwrap();
+
+        let error = replay_to_prompt(&updates_path, tmp.path(), 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("does not match committed marker")
+        );
+    }
+
+    #[test]
     fn test_replay_post_compaction_target() {
         let tmp = TempDir::new().unwrap();
 
@@ -985,6 +1049,68 @@ mod tests {
         assert_eq!(result.conversation[2].text_content(), "P2");
         assert_eq!(result.conversation[3].text_content(), "R2");
         assert_eq!(result.prompt_index_reached, 3);
+    }
+
+    #[test]
+    fn schema_two_checkpoint_replays_after_compaction() {
+        let tmp = TempDir::new().unwrap();
+        write_checkpoint_file_with_schema(
+            tmp.path(),
+            "ckpt2",
+            2,
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::compaction_summary("rolling summary"),
+            ],
+            2,
+        );
+        let updates = vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_user_update("s1", "P1"),
+            make_agent_update("s1", "R1"),
+            make_checkpoint_with_schema("ckpt2", 2, None, 2),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+        ];
+        let result = replay_updates(&updates, tmp.path(), 3);
+        assert_eq!(result.conversation[0].text_content(), "sys");
+        assert_eq!(result.conversation[1].text_content(), "rolling summary");
+        assert_eq!(result.conversation[2].text_content(), "P2");
+        assert_eq!(result.prompt_index_reached, 3);
+    }
+
+    #[test]
+    fn future_checkpoint_schema_is_rejected_even_for_pre_compaction_rewind() {
+        let tmp = TempDir::new().unwrap();
+        write_checkpoint_file_with_schema(
+            tmp.path(),
+            "future",
+            2,
+            vec![ConversationItem::system("sys")],
+            3,
+        );
+        let updates = vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_checkpoint_with_schema("future", 2, None, 3),
+        ];
+        let updates_path = tmp.path().join("updates.jsonl");
+        let mut content = Vec::new();
+        for update in &updates {
+            let envelope =
+                crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap();
+            content.extend(serde_json::to_vec(&envelope).unwrap());
+            content.push(b'\n');
+        }
+        std::fs::write(&updates_path, content).unwrap();
+        let error = replay_to_prompt(&updates_path, tmp.path(), 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported checkpoint schema version 3")
+        );
     }
 
     /// A checkpoint written before this binary's validation (or before the

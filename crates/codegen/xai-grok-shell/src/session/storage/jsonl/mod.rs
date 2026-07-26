@@ -14,6 +14,18 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use xai_chat_state::StrictAppendAck;
 use xai_grok_workspace::session::file_state::RewindPoint;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PendingCompactionFile {
+    checkpoint_id: String,
+    previous_history: Vec<ConversationItem>,
+    /// Identity of the replacement base written before the marker. Startup uses
+    /// it to preserve items appended while marker durability was indeterminate
+    /// without retaining a second full conversation buffer.
+    compacted_history_len: usize,
+    compacted_history_fingerprint: [u8; 32],
+}
+
 #[derive(Clone)]
 enum SessionDirMode {
     FromRoot(PathBuf),
@@ -99,12 +111,95 @@ impl JsonlStorageAdapter {
     fn chat_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::CHAT_HISTORY_FILE)
     }
+    fn compaction_pending_file(&self, info: &Info) -> PathBuf {
+        self.session_dir(info).join(super::COMPACTION_PENDING_FILE)
+    }
     fn ensure_chat_history(&self, info: &Info, chat_format_version: u8) -> io::Result<()> {
         if chat_format_version != crate::session::persistence::CHAT_FORMAT_VERSION {
             return Ok(());
         }
         let chat_file = self.chat_file(info);
-        if std::fs::metadata(&chat_file).map(|m| m.len()).unwrap_or(0) == 0 {
+        let pending_file = self.compaction_pending_file(info);
+        if pending_file.exists() {
+            let bytes = std::fs::read(&pending_file)?;
+            let pending: PendingCompactionFile = serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let committed_marker = self
+                .read_updates_jsonl(self.updates_file(info))?
+                .into_iter()
+                .find_map(|update| {
+                    let super::SessionUpdate::Xai(notification) = update else {
+                        return None;
+                    };
+                    let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(
+                        marker,
+                    ) = notification.update
+                    else {
+                        return None;
+                    };
+                    (marker.checkpoint_id == pending.checkpoint_id).then_some(*marker)
+                });
+            if let Some(marker) = committed_marker {
+                super::load_validated_compaction_checkpoint(&self.session_dir(info), &marker)?;
+                tracing::warn!(
+                    checkpoint_id = %pending.checkpoint_id,
+                    "clearing pending compaction recovery marker after committed checkpoint"
+                );
+            } else {
+                let current =
+                    self.read_chat_history_sync(chat_file.clone(), chat_format_version)?;
+                let starts_with_fingerprint = |base_len: usize,
+                                               base_fingerprint: [u8; 32]|
+                 -> io::Result<bool> {
+                    if current.len() < base_len {
+                        return Ok(false);
+                    }
+                    Ok(
+                        xai_chat_state::fingerprint_conversation_items(&current[..base_len])
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+                            == base_fingerprint,
+                    )
+                };
+                let previous_len = pending.previous_history.len();
+                let previous_fingerprint =
+                    xai_chat_state::fingerprint_conversation_items(&pending.previous_history)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                let restored = if starts_with_fingerprint(
+                    pending.compacted_history_len,
+                    pending.compacted_history_fingerprint,
+                )? {
+                    let appended_tail = &current[pending.compacted_history_len..];
+                    let mut restored = pending.previous_history;
+                    restored.extend_from_slice(appended_tail);
+                    tracing::warn!(
+                        checkpoint_id = %pending.checkpoint_id,
+                        appended_items = appended_tail.len(),
+                        "rolling back history left before compaction marker commit"
+                    );
+                    Some(restored)
+                } else if starts_with_fingerprint(previous_len, previous_fingerprint)? {
+                    tracing::warn!(
+                        checkpoint_id = %pending.checkpoint_id,
+                        appended_items = current.len().saturating_sub(previous_len),
+                        "pending compaction history was already rolled back"
+                    );
+                    None
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "pending compaction history matches neither transaction base",
+                    ));
+                };
+                if let Some(restored) = restored {
+                    super::write_jsonl_atomic(&chat_file, &restored)?;
+                }
+            }
+            match std::fs::remove_file(&pending_file) {
+                Ok(()) => super::sync_parent_directory(&pending_file)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        } else if std::fs::metadata(&chat_file).map(|m| m.len()).unwrap_or(0) == 0 {
             super::chat_rebuild::rebuild_chat_history(&self.session_dir(info))?;
         }
         Ok(())
@@ -286,6 +381,58 @@ impl JsonlStorageAdapter {
         Self::append_jsonl_line_sync_with(path, line, durability, Self::sync_file_durable, || {
             Self::sync_parent_directory(path)
         })
+    }
+    fn append_durable_jsonl_line_commit_aware(
+        path: &Path,
+        line: Vec<u8>,
+    ) -> Result<(), super::AppendUpdateError> {
+        Self::append_durable_jsonl_line_commit_aware_with(
+            path,
+            line,
+            Self::sync_file_durable,
+            || Self::sync_parent_directory(path),
+        )
+    }
+    fn append_durable_jsonl_line_commit_aware_with(
+        path: &Path,
+        mut line: Vec<u8>,
+        mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
+        mut sync_parent: impl FnMut() -> io::Result<()>,
+    ) -> Result<(), super::AppendUpdateError> {
+        debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
+        let lock = Self::lock_append(path).map_err(super::AppendUpdateError::NotCommitted)?;
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(super::AppendUpdateError::NotCommitted)?;
+            let len = file
+                .metadata()
+                .map_err(super::AppendUpdateError::NotCommitted)?
+                .len();
+            if len > 0 {
+                file.seek(io::SeekFrom::Start(len - 1))
+                    .map_err(super::AppendUpdateError::NotCommitted)?;
+                let mut last = [0u8; 1];
+                file.read_exact(&mut last)
+                    .map_err(super::AppendUpdateError::NotCommitted)?;
+                if last[0] != b'\n' {
+                    line.insert(0, b'\n');
+                }
+            }
+            file.write_all(&line)
+                .map_err(super::AppendUpdateError::NotCommitted)?;
+            file.flush()
+                .map_err(super::AppendUpdateError::Indeterminate)?;
+            sync_file(&file).map_err(super::AppendUpdateError::Indeterminate)?;
+            drop(file);
+            sync_parent().map_err(super::AppendUpdateError::Indeterminate)?;
+            Ok(())
+        })();
+        let _ = lock.unlock();
+        result
     }
     fn append_jsonl_line_sync_with(
         path: &Path,
@@ -470,23 +617,8 @@ impl JsonlStorageAdapter {
     fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
         super::sync_file_durable(file)
     }
-    #[cfg(unix)]
     fn sync_parent_directory(path: &Path) -> io::Result<()> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "update has no parent"))?;
-        std::fs::File::open(parent)?.sync_all()
-    }
-    #[cfg(windows)]
-    fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-        Ok(())
-    }
-    #[cfg(not(any(unix, windows)))]
-    fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "durable directory sync is unsupported on this platform",
-        ))
+        super::sync_parent_directory(path)
     }
     /// Write a full JSONL file (rewriting all items), crash-atomically: serialize
     /// to a temp file then rename over the target, so a crash / `ENOSPC` mid-write
@@ -536,9 +668,35 @@ impl JsonlStorageAdapter {
         update: &super::SessionUpdate,
         durability: AppendDurability,
     ) -> Result<(), super::AppendUpdateError> {
-        self.append_update_to_file(self.updates_file(info), update, durability)
+        let updates_path = self.updates_file(info);
+        if matches!(durability, AppendDurability::Durable) {
+            let envelope = SessionUpdateEnvelope::from_update(update).map_err(|error| {
+                super::AppendUpdateError::NotCommitted(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    error,
+                ))
+            })?;
+            let mut line = serde_json::to_vec(&envelope).map_err(|error| {
+                super::AppendUpdateError::NotCommitted(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    error,
+                ))
+            })?;
+            line.push(b'\n');
+            #[cfg(test)]
+            if let Some(append_probe) = &self.update_append_probe {
+                append_probe(durability).map_err(super::AppendUpdateError::NotCommitted)?;
+            }
+            tokio::task::spawn_blocking(move || {
+                Self::append_durable_jsonl_line_commit_aware(&updates_path, line)
+            })
             .await
-            .map_err(super::AppendUpdateError::NotCommitted)?;
+            .map_err(|error| super::AppendUpdateError::NotCommitted(io::Error::other(error)))??;
+        } else {
+            self.append_update_to_file(updates_path, update, durability)
+                .await
+                .map_err(super::AppendUpdateError::NotCommitted)?;
+        }
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
@@ -1844,6 +2002,70 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
+    async fn replace_chat_history_with_compaction_pending(
+        &self,
+        info: &Info,
+        checkpoint_id: &str,
+        previous_history: &[ConversationItem],
+        compacted_history: &[ConversationItem],
+    ) -> Result<(), super::ReplaceCompactionHistoryError> {
+        use super::ReplaceCompactionHistoryError;
+
+        let pending = PendingCompactionFile {
+            checkpoint_id: checkpoint_id.to_owned(),
+            previous_history: previous_history.to_vec(),
+            compacted_history_len: compacted_history.len(),
+            compacted_history_fingerprint: xai_chat_state::fingerprint_conversation_items(
+                compacted_history,
+            )
+            .map_err(|error| {
+                ReplaceCompactionHistoryError::NotCommitted(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    error,
+                ))
+            })?,
+        };
+        let bytes = serde_json::to_vec_pretty(&pending).map_err(|error| {
+            ReplaceCompactionHistoryError::NotCommitted(io::Error::new(
+                io::ErrorKind::InvalidData,
+                error,
+            ))
+        })?;
+        super::write_bytes_atomic_async(&self.compaction_pending_file(info), bytes)
+            .await
+            .map_err(ReplaceCompactionHistoryError::NotCommitted)?;
+
+        if let Err(error) = self.replace_chat_history(info, compacted_history).await {
+            // `replace_chat_history` can fail after its atomic rename while
+            // updating summary bookkeeping. Restore the old cache explicitly
+            // before removing the recovery marker so a reported non-commit is
+            // always safe for the live actor to continue from.
+            if let Err(restore_error) = self.replace_chat_history(info, previous_history).await {
+                return Err(ReplaceCompactionHistoryError::Indeterminate(
+                    io::Error::other(format!(
+                        "history replacement failed ({error}); history rollback failed ({restore_error})"
+                    )),
+                ));
+            }
+            if let Err(clear_error) = self.clear_compaction_pending(info).await {
+                return Err(ReplaceCompactionHistoryError::Indeterminate(
+                    io::Error::other(format!(
+                        "history replacement failed ({error}); pending compaction cleanup failed ({clear_error})"
+                    )),
+                ));
+            }
+            return Err(ReplaceCompactionHistoryError::NotCommitted(error));
+        }
+        Ok(())
+    }
+    async fn clear_compaction_pending(&self, info: &Info) -> io::Result<()> {
+        let path = self.compaction_pending_file(info);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => super::sync_parent_directory(&path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
     async fn copy_session_data(
         &self,
         source_info: &Info,
@@ -1930,12 +2152,18 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         checkpoint: &crate::extensions::notification::CompactionCheckpointFile,
     ) -> io::Result<()> {
+        super::validate_compaction_checkpoint_id(&checkpoint.checkpoint_id)?;
         let dir = self.session_dir(info).join("compaction_checkpoints");
         tokio::fs::create_dir_all(&dir).await?;
+        // A durable marker must never outlive discovery of its checkpoint.
+        // Sync the session directory so a newly created checkpoint directory
+        // entry is durable; the atomic file write below separately syncs the
+        // checkpoint directory after renaming the file into it.
+        super::sync_parent_directory(&dir)?;
         let path = dir.join(format!("{}.json", checkpoint.checkpoint_id));
         let bytes = serde_json::to_vec_pretty(checkpoint)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        tokio::fs::write(path, bytes).await
+        super::write_bytes_atomic_async(&path, bytes).await
     }
     async fn write_compaction_request(
         &self,

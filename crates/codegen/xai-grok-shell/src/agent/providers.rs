@@ -14,9 +14,6 @@ use super::model_providers::ModelProviderKind;
 
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-const CODEX_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
-const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
-const MIN_CODEX_VERSION: (u64, u64, u64) = (0, 145, 0);
 const CODEX_CACHE_FILE: &str = "codex_models_cache.json";
 const CODEX_CACHE_VERSION: u8 = 1;
 const OPENAI_CACHE_FILE: &str = "openai_models_cache.json";
@@ -233,13 +230,7 @@ pub enum ProviderError {
     InvalidApiKey,
     #[error("provider credential store is unavailable")]
     CredentialStore,
-    #[error("official Codex executable is unavailable")]
-    CodexUnavailable,
-    #[error("Codex CLI 0.145.0 or newer is required")]
-    CodexTooOld,
-    #[error("official Codex command timed out")]
-    CodexTimedOut,
-    #[error("official Codex command failed")]
+    #[error("ChatGPT OAuth login failed")]
     CodexFailed,
     #[error("Codex model catalog is unavailable")]
     CodexCatalogUnavailable,
@@ -450,9 +441,9 @@ impl ProviderManager {
                 == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected;
         let openai_configured = openai_api_key || openai_oauth;
         let mut presets = Self::presets();
-        // API-key catalog only when OAuth is not the active method.
+        // The OpenAI Platform and ChatGPT subscription catalogs have distinct
+        // model IDs and can coexist. Each entry retains its own route.
         if openai_api_key
-            && !openai_oauth
             && let Ok(cached) = load_openai_catalog_cache(&credential_lookup_manager().grok_home)
         {
             presets.retain(|preset| preset.provider != ProviderId::OpenAi);
@@ -475,16 +466,11 @@ impl ProviderManager {
             maybe_spawn_openrouter_background_refresh(&credential_lookup_manager().grok_home);
         }
         if openai_oauth {
-            // OAuth mode: use ChatGPT subscription allowlist with real API slugs.
-            presets.retain(|preset| preset.provider != ProviderId::OpenAi);
             presets.extend(static_chatgpt_oauth_presets());
         }
 
         for preset in presets {
             if preset.provider == ProviderId::OpenRouter && !openrouter_configured {
-                continue;
-            }
-            if preset.provider == ProviderId::OpenAi && !openai_configured {
                 continue;
             }
             let provider = match preset.provider {
@@ -496,6 +482,7 @@ impl ProviderManager {
                 .entry(preset.id)
                 .or_insert_with(|| ConfigModelOverride {
                     model: Some(preset.model),
+                    base_url: preset.base_url,
                     name: Some(preset.label),
                     description: preset.description,
                     model_provider: Some(provider.to_owned()),
@@ -554,9 +541,11 @@ impl ProviderManager {
             presets = cached.models;
         }
         if provider == ProviderId::OpenAi
+            && crate::auth::chatgpt_oauth::status(&self.grok_home)
+                == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected
             && let Ok(cached) = load_codex_catalog_cache(&self.grok_home)
         {
-            presets = cached;
+            presets.extend(cached);
         }
         match provider {
             ProviderId::Xai => {
@@ -605,12 +594,10 @@ impl ProviderManager {
                 let oauth_connected = matches!(oauth, ChatGptOAuthStatus::Connected);
                 let oauth_expired = matches!(oauth, ChatGptOAuthStatus::Expired);
                 let api_key_source = self.credential_source(provider).ok().flatten();
-                // Mutual exclusion: OAuth wins when present.
-                let api_key_configured =
-                    !oauth_connected && !oauth_expired && api_key_source.is_some();
+                let api_key_configured = api_key_source.is_some();
                 let mut openai_presets = presets;
                 if oauth_connected {
-                    openai_presets = static_chatgpt_oauth_presets();
+                    openai_presets.extend(static_chatgpt_oauth_presets());
                 }
                 ProviderStatus {
                     provider,
@@ -622,12 +609,14 @@ impl ProviderManager {
                     } else {
                         ProviderConnectionState::NotConfigured
                     },
-                    credential_source: if oauth_connected {
+                    credential_source: if api_key_configured {
+                        api_key_source
+                    } else if oauth_connected {
                         Some(ProviderCredentialSource::SecureStore)
                     } else {
-                        api_key_source
+                        None
                     },
-                    can_test_connection: api_key_configured,
+                    can_test_connection: oauth_connected || api_key_configured,
                     authentication: vec![
                         ProviderAuthenticationStatus {
                             kind: ProviderAuthenticationKind::ChatGpt,
@@ -724,7 +713,10 @@ impl ProviderManager {
         })
     }
 
-    /// Browser (or device) ChatGPT OAuth login for OpenAI. Clears any API key.
+    /// Browser (or device) ChatGPT OAuth login for OpenAI.
+    ///
+    /// The separately scoped OpenAI Platform API key is preserved so each
+    /// model route can select the credential it requires.
     ///
     /// Prefer browser PKCE by default. Device-code is used only when
     /// `GROK_CHATGPT_DEVICE_AUTH` is set, or on Linux without a graphical
@@ -774,8 +766,7 @@ impl ProviderManager {
                 .map_err(|_| ProviderError::CredentialStore);
         }
         if provider == ProviderId::OpenAi {
-            // Mutual exclusion: API key clears ChatGPT OAuth.
-            return crate::auth::chatgpt_oauth::store_api_key_exclusive(&self.grok_home, api_key)
+            return crate::auth::chatgpt_oauth::store_api_key(&self.grok_home, api_key)
                 .map_err(|_| ProviderError::CredentialStore);
         }
         crate::auth::store_provider_api_key(&self.grok_home, provider.auth_scope()?, api_key)
@@ -791,9 +782,7 @@ impl ProviderManager {
         result.map_err(|_| ProviderError::CredentialStore)?;
         match provider {
             ProviderId::OpenAi => {
-                let _ = crate::auth::chatgpt_oauth::clear_tokens(&self.grok_home);
                 let _ = clear_openai_catalog_cache(&self.grok_home);
-                let _ = clear_codex_catalog_cache(&self.grok_home);
             }
             ProviderId::OpenRouter => {
                 let _ = clear_openrouter_catalog_cache(&self.grok_home);
@@ -809,10 +798,24 @@ impl ProviderManager {
         &self,
         provider: ProviderId,
     ) -> Result<ProviderConnectionTest, ProviderError> {
-        let key = if provider == ProviderId::Xai {
-            self.xai_oauth_bearer()?.or(self.api_key(provider)?)
-        } else {
-            self.api_key(provider)?
+        let key = match provider {
+            ProviderId::Xai => self.xai_oauth_bearer()?.or(self.api_key(provider)?),
+            ProviderId::OpenAi => {
+                if let Some(key) = self.api_key(provider)? {
+                    Some(key)
+                } else {
+                    return Ok(
+                        if crate::auth::chatgpt_oauth::status(&self.grok_home)
+                            == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected
+                        {
+                            ProviderConnectionTest::connected()
+                        } else {
+                            ProviderConnectionTest::NotConfigured
+                        },
+                    );
+                }
+            }
+            ProviderId::OpenRouter => self.api_key(provider)?,
         };
         let Some(key) = key else {
             return Ok(ProviderConnectionTest::NotConfigured);
@@ -1128,24 +1131,6 @@ impl ProviderManager {
     }
 }
 
-fn parse_version_triplet(value: &str) -> Option<(u64, u64, u64)> {
-    let value = value.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '.');
-    let mut segments = value.split('.');
-    let major = segments.next()?.parse().ok()?;
-    let minor = segments.next()?.parse().ok()?;
-    let patch = segments
-        .next()?
-        .split(|ch: char| !ch.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()?;
-    Some((major, minor, patch))
-}
-
-fn codex_models_to_presets(_models: Vec<()>) -> Vec<ProviderModelPreset> {
-    static_chatgpt_oauth_presets()
-}
-
 /// Whether ChatGPT OAuth should use the headless device-code path.
 ///
 /// Device auth when:
@@ -1193,9 +1178,9 @@ fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
     MODELS
         .iter()
         .map(|(model, label, ctx, max_out)| ProviderModelPreset {
-            id: format!("openai-{model}"),
+            id: format!("chatgpt-{model}"),
             provider: ProviderId::OpenAi,
-            label: (*label).to_owned(),
+            label: format!("{label} via ChatGPT"),
             model: (*model).to_owned(),
             base_url: Some(CODEX_RESPONSES_BASE_URL.to_owned()),
             is_agent: false,
@@ -1215,25 +1200,36 @@ fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
         .collect()
 }
 
-fn static_codex_presets() -> Vec<ProviderModelPreset> {
-    static_chatgpt_oauth_presets()
-}
-
 /// Resolve a key saved by [`ProviderManager`] for the model resolver. This is
 /// intentionally crate-private: callers should use the manager, which keeps
 /// keys out of all UI DTOs.
-pub(crate) fn stored_api_key(kind: ModelProviderKind) -> Option<String> {
-    let provider = match kind {
-        ModelProviderKind::Xai => ProviderId::Xai,
-        ModelProviderKind::OpenAi => ProviderId::OpenAi,
-        ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
-        _ => return None,
+pub(crate) fn stored_api_key(
+    provider: &super::model_providers::ResolvedModelProvider,
+) -> Option<String> {
+    use crate::provider_registry::id::ProviderId as ConfiguredProviderId;
+    use crate::provider_registry::secrets::{application_key_scope, read_provider_secret};
+
+    let built_in = match (provider.kind, provider.id.as_str()) {
+        (ModelProviderKind::Xai, "xai") => Some(ProviderId::Xai),
+        (ModelProviderKind::OpenAi, "openai" | "grok_build_openai") => Some(ProviderId::OpenAi),
+        (ModelProviderKind::OpenRouter, "openrouter" | "grok_build_openrouter") => {
+            Some(ProviderId::OpenRouter)
+        }
+        _ => None,
     };
-    let manager = credential_lookup_manager();
-    manager.api_key(provider).ok().flatten()
+    if let Some(built_in) = built_in {
+        return credential_lookup_manager().api_key(built_in).ok().flatten();
+    }
+    let id = ConfiguredProviderId::new(&provider.id).ok()?;
+    read_provider_secret(
+        &credential_lookup_manager().grok_home,
+        &application_key_scope(&id),
+    )
+    .ok()
+    .flatten()
 }
 
-/// Resolved OpenAI credential: ChatGPT OAuth (preferred) or API key.
+/// Resolved OpenAI credential selected for the active model route.
 pub(crate) struct StoredOpenAiCredentials {
     pub bearer: String,
     pub base_url: Option<String>,
@@ -1241,21 +1237,29 @@ pub(crate) struct StoredOpenAiCredentials {
 }
 
 pub(crate) fn stored_openai_credentials(
-    kind: ModelProviderKind,
+    provider: &super::model_providers::ResolvedModelProvider,
+    model_base_url: &str,
 ) -> Option<StoredOpenAiCredentials> {
-    if kind != ModelProviderKind::OpenAi {
+    if provider.kind != ModelProviderKind::OpenAi {
         return None;
     }
     let home = credential_lookup_manager().grok_home.clone();
-    // Sync path: prefer non-expired access token; refresh is done pre-turn.
-    if let Ok(Some(tokens)) = crate::auth::chatgpt_oauth::read_tokens(&home) {
+    let is_builtin_openai = matches!(provider.id.as_str(), "openai" | "grok_build_openai");
+    if is_builtin_openai && crate::auth::chatgpt_oauth::is_codex_base_url(model_base_url) {
+        // Sync path: use the subscription token only for the ChatGPT Codex
+        // route. Refresh is performed by the route-scoped pre-turn path.
+        let tokens = crate::auth::chatgpt_oauth::read_tokens(&home)
+            .ok()
+            .flatten()?;
         return Some(StoredOpenAiCredentials {
             bearer: tokens.access_token,
             base_url: Some(crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL.to_owned()),
             account_id: tokens.account_id,
         });
     }
-    let key = stored_api_key(ModelProviderKind::OpenAi)?;
+    // Platform and custom OpenAI-kind endpoints use the separately stored API
+    // key even when ChatGPT OAuth is connected.
+    let key = stored_api_key(provider)?;
     Some(StoredOpenAiCredentials {
         bearer: key,
         base_url: None,
@@ -1280,9 +1284,8 @@ pub(crate) fn missing_api_key_provider(model: &super::config::ModelEntry) -> Opt
     let provider = match model.model_provider.as_ref()?.kind {
         ModelProviderKind::OpenAi => ProviderId::OpenAi,
         ModelProviderKind::OpenRouter => ProviderId::OpenRouter,
-        ModelProviderKind::OpenAiCompatible | ModelProviderKind::Zai | ModelProviderKind::Xai => {
-            return None;
-        }
+        ModelProviderKind::OpenAiCompatible | ModelProviderKind::Zai => return None,
+        ModelProviderKind::Xai => return None,
     };
     crate::agent::config::resolve_credentials(model, None)
         .api_key
@@ -2112,6 +2115,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn openai_oauth_and_api_key_are_reported_together_and_removed_independently() {
+        let home = tempfile::tempdir().unwrap();
+        let manager = ProviderManager::new(home.path());
+        manager
+            .set_api_key(ProviderId::OpenAi, "openai-api-key")
+            .unwrap();
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "chatgpt-access".into(),
+                refresh_token: "chatgpt-refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: Some("account".into()),
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let status = manager.status(ProviderId::OpenAi);
+        assert_eq!(status.state, ProviderConnectionState::Connected);
+        assert!(status.authentication.iter().any(|entry| {
+            entry.kind == ProviderAuthenticationKind::ChatGpt
+                && entry.state == ProviderConnectionState::Connected
+        }));
+        assert!(status.authentication.iter().any(|entry| {
+            entry.kind == ProviderAuthenticationKind::ApiKey
+                && entry.state == ProviderConnectionState::Configured
+        }));
+
+        manager.remove_api_key(ProviderId::OpenAi).unwrap();
+        let status = manager.status(ProviderId::OpenAi);
+        assert_eq!(status.state, ProviderConnectionState::Connected);
+        assert_eq!(
+            crate::auth::chatgpt_oauth::status(home.path()),
+            crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected
+        );
+
+        manager
+            .set_api_key(ProviderId::OpenAi, "replacement-api-key")
+            .unwrap();
+        manager.chatgpt_oauth_logout().await.unwrap();
+        let status = manager.status(ProviderId::OpenAi);
+        assert_eq!(status.state, ProviderConnectionState::Configured);
+        assert_eq!(
+            manager.api_key(ProviderId::OpenAi).unwrap().as_deref(),
+            Some("replacement-api-key")
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn xai_provider_status_honors_the_legacy_environment_key() {
@@ -2153,13 +2206,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_codex_api_keys_and_blank_keys() {
+    fn openai_accepts_nonblank_api_keys_and_rejects_blank_keys() {
         let home = tempfile::tempdir().unwrap();
         let manager = ProviderManager::new(home.path());
-        assert!(matches!(
-            manager.set_api_key(ProviderId::OpenAi, "x"),
-            Err(ProviderError::ApiKeyUnsupported)
-        ));
+        manager.set_api_key(ProviderId::OpenAi, "x").unwrap();
         assert!(matches!(
             manager.set_api_key(ProviderId::OpenAi, " "),
             Err(ProviderError::InvalidApiKey)
@@ -2208,8 +2258,8 @@ mod tests {
             "OpenRouter models must not enter the catalog before a key exists"
         );
         assert!(
-            !models.contains_key("codex-subscription"),
-            "Codex models must not enter the catalog without a verified login cache"
+            !models.contains_key("chatgpt-gpt-5.6-sol"),
+            "ChatGPT models must not enter the catalog without OAuth"
         );
 
         manager
@@ -2656,6 +2706,107 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn openai_oauth_and_api_key_select_credentials_by_model_route() {
+        let home = tempfile::tempdir().unwrap();
+        let _openai = EnvGuard::unset("OPENAI_API_KEY");
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let manager = ProviderManager::new(home.path());
+        manager
+            .set_api_key(ProviderId::OpenAi, "platform-api-key")
+            .unwrap();
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "subscription-oauth-token".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: Some("account".into()),
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let raw: toml::Value = toml::from_str("").unwrap();
+        let config = super::super::config::Config::new_from_toml_cfg(&raw).unwrap();
+        let models = super::super::config::resolve_model_list(&config, None);
+        let oauth_model = &models["chatgpt-gpt-5.6-sol"];
+        assert!(crate::auth::chatgpt_oauth::is_codex_base_url(
+            &oauth_model.info.base_url
+        ));
+        let oauth = super::super::config::resolve_credentials(oauth_model, None);
+        assert_eq!(oauth.api_key.as_deref(), Some("subscription-oauth-token"));
+        assert!(crate::auth::chatgpt_oauth::is_codex_base_url(
+            &oauth.base_url
+        ));
+
+        let platform_entry = super::super::config::ModelEntry {
+            info: super::super::config::ModelInfo::fallback("gpt-platform"),
+            model_provider: Some(super::super::model_providers::ResolvedModelProvider {
+                id: "grok_build_openai".into(),
+                kind: ModelProviderKind::OpenAi,
+                openrouter_fallback_models: Vec::new(),
+                openrouter_provider_preferences: None,
+                openrouter_plugins: Vec::new(),
+                openrouter_pacing: false,
+                command: Vec::new(),
+            }),
+            api_key: None,
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        };
+        let mut platform_entry = platform_entry;
+        platform_entry.info.base_url = "https://api.openai.com/v1".into();
+        let platform = super::super::config::resolve_credentials(&platform_entry, None);
+        assert_eq!(platform.api_key.as_deref(), Some("platform-api-key"));
+        assert_eq!(platform.base_url, "https://api.openai.com/v1");
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn configured_provider_vault_keys_are_isolated_and_used_per_turn() {
+        use crate::provider_registry::id::ProviderId as ConfiguredProviderId;
+        use crate::provider_registry::secrets::{application_key_scope, store_provider_secret};
+
+        let home = tempfile::tempdir().unwrap();
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let a = ConfiguredProviderId::new("local_a").unwrap();
+        let b = ConfiguredProviderId::new("local_b").unwrap();
+        store_provider_secret(home.path(), &application_key_scope(&a), "key-a").unwrap();
+        store_provider_secret(home.path(), &application_key_scope(&b), "key-b").unwrap();
+
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model_providers.local_a]
+            base_url = "https://a.example/v1"
+            [model.a]
+            model = "shared-model"
+            model_provider = "local_a"
+
+            [model_providers.local_b]
+            base_url = "https://b.example/v1"
+            [model.b]
+            model = "shared-model"
+            model_provider = "local_b"
+            "#,
+        )
+        .unwrap();
+        let config = super::super::config::Config::new_from_toml_cfg(&raw).unwrap();
+        let models = super::super::config::resolve_model_list(&config, None);
+        let a_creds = super::super::config::resolve_credentials(&models["a"], Some("xai-session"));
+        let b_creds = super::super::config::resolve_credentials(&models["b"], Some("xai-session"));
+        assert_eq!(a_creds.api_key.as_deref(), Some("key-a"));
+        assert_eq!(a_creds.base_url, "https://a.example/v1");
+        assert_eq!(b_creds.api_key.as_deref(), Some("key-b"));
+        assert_eq!(b_creds.base_url, "https://b.example/v1");
+        assert!(models["a"].is_provider_scoped_byok());
+        assert!(models["b"].is_provider_scoped_byok());
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn installs_presets_in_memory_without_config_toml() {
         let home = tempfile::tempdir().unwrap();
         set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
@@ -2693,41 +2844,50 @@ mod tests {
         let by_id: std::collections::HashMap<_, _> =
             presets.into_iter().map(|p| (p.id.clone(), p)).collect();
         assert_eq!(
-            by_id["openai-gpt-5.6-sol"].context_window,
+            by_id["chatgpt-gpt-5.6-sol"].context_window,
             Some(372_000),
             "Codex product catalog caps GPT-5.6 Sol at 372k (not API 1.05M)"
         );
-        assert_eq!(by_id["openai-gpt-5.6-terra"].context_window, Some(372_000));
-        assert_eq!(by_id["openai-gpt-5.6-luna"].context_window, Some(372_000));
-        assert_eq!(by_id["openai-gpt-5.5"].context_window, Some(400_000));
-        assert_eq!(by_id["openai-gpt-5.4"].context_window, Some(400_000));
-        assert_eq!(by_id["openai-gpt-5.4-mini"].context_window, Some(400_000));
+        assert_eq!(by_id["chatgpt-gpt-5.6-terra"].context_window, Some(372_000));
+        assert_eq!(by_id["chatgpt-gpt-5.6-luna"].context_window, Some(372_000));
+        assert_eq!(by_id["chatgpt-gpt-5.5"].context_window, Some(400_000));
+        assert_eq!(by_id["chatgpt-gpt-5.4"].context_window, Some(400_000));
+        assert_eq!(by_id["chatgpt-gpt-5.4-mini"].context_window, Some(400_000));
     }
 
     // removed obsolete codex app-server test
 
     #[test]
     #[serial_test::serial]
-    fn codex_models_enter_and_leave_picker_with_verified_login_cache() {
+    fn chatgpt_models_enter_and_leave_picker_with_oauth_tokens() {
         let home = tempfile::tempdir().unwrap();
         set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
         let config = super::super::config::Config::default();
 
         assert!(
             !super::super::config::resolve_model_list(&config, None)
-                .contains_key("codex-subscription")
+                .contains_key("chatgpt-gpt-5.6-sol")
         );
-
-        save_codex_catalog_cache(home.path(), &static_codex_presets()).unwrap();
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: None,
+                email: None,
+            },
+        )
+        .unwrap();
         assert!(
             super::super::config::resolve_model_list(&config, None)
-                .contains_key("codex-subscription")
+                .contains_key("chatgpt-gpt-5.6-sol")
         );
 
-        clear_codex_catalog_cache(home.path()).unwrap();
+        crate::auth::chatgpt_oauth::clear_tokens(home.path()).unwrap();
         assert!(
             !super::super::config::resolve_model_list(&config, None)
-                .contains_key("codex-subscription")
+                .contains_key("chatgpt-gpt-5.6-sol")
         );
         set_stored_key_home_for_tests(None);
     }
@@ -2759,53 +2919,39 @@ mod tests {
         set_stored_key_home_for_tests(None);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn codex_actions_use_official_subcommands_without_tui_stdio() {
-        use std::os::unix::fs::PermissionsExt;
-
+    async fn chatgpt_oauth_status_and_logout_use_native_store() {
         let home = tempfile::tempdir().unwrap();
-        let script = home.path().join("fake-codex");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\ncase \"$1:$2\" in --version:) echo 'codex-cli 0.145.0'; exit 0 ;; login:status|login:|logout:) exit 0 ;; *) exit 1 ;; esac\n",
+        let manager = ProviderManager::new(home.path());
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: None,
+                email: None,
+            },
         )
         .unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&script, permissions).unwrap();
-        let manager = ProviderManager::new(home.path());
 
         assert_eq!(
             manager.codex_status().await.unwrap().state,
             ProviderConnectionState::Connected
         );
-        manager.codex_login().await.unwrap();
         manager.codex_logout().await.unwrap();
+        assert_eq!(
+            manager.codex_status().await.unwrap().state,
+            ProviderConnectionState::NotConfigured
+        );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn unsupported_codex_version_cannot_leave_models_in_the_picker_cache() {
-        use std::os::unix::fs::PermissionsExt;
-
+    async fn disconnected_chatgpt_removes_stale_oauth_catalog_cache() {
         let home = tempfile::tempdir().unwrap();
-        let script = home.path().join("old-codex");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.144.0'; exit 0; fi\nexit 0\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&script, permissions).unwrap();
-        save_codex_catalog_cache(home.path(), &static_codex_presets()).unwrap();
+        save_codex_catalog_cache(home.path(), &static_chatgpt_oauth_presets()).unwrap();
         let manager = ProviderManager::new(home.path());
 
-        assert!(matches!(
-            manager.codex_status().await,
-            Err(ProviderError::CodexTooOld)
-        ));
         manager.refresh_configured_catalogs().await;
         assert!(!home.path().join(CODEX_CACHE_FILE).exists());
     }

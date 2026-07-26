@@ -40,6 +40,7 @@ pub enum SettingCategory {
     Agent,
     Privacy,
     Models,
+    Compaction,
     Session,
     Advanced,
 }
@@ -53,6 +54,7 @@ impl SettingCategory {
         Self::Agent,
         Self::Privacy,
         Self::Models,
+        Self::Compaction,
         Self::Session,
         Self::Advanced,
     ];
@@ -66,6 +68,7 @@ impl SettingCategory {
             Self::Agent => "Agent & Approval",
             Self::Privacy => "Privacy",
             Self::Models => "Models",
+            Self::Compaction => "Compaction",
             Self::Session => "Session",
             Self::Advanced => "Advanced",
         }
@@ -101,15 +104,40 @@ pub enum DynamicEnumSource {
     /// Models from the active session's catalog. Prepends a
     /// `"(no override)"` sentinel so the user can clear the setting.
     ActiveModelCatalog,
+    /// Compaction primary route. Prepends the explicit `@session` route.
+    CompactionPrimaryModelCatalog,
+    /// Optional compaction fallback route. Prepends `No fallback`, followed
+    /// by the explicit `@session` route.
+    CompactionFallbackModelCatalog,
 }
 
 /// Build the owned choice list for a `DynamicEnum` at picker-open time.
-/// `ActiveModelCatalog` prepends an empty-canonical "(no override)"
-/// choice at index 0 for clearing the setting.
+/// Catalog models always use stable model IDs as canonicals; display names are
+/// presentation only. Each source defines its own sentinel rows.
 pub fn dynamic_enum_choices(
     source: DynamicEnumSource,
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<OwnedEnumChoice> {
+    let append_catalog = |out: &mut Vec<OwnedEnumChoice>, excluded: Option<&str>| {
+        for (name, id) in &snapshot.available_models {
+            if excluded.is_some_and(|excluded| id.0.as_ref() == excluded) {
+                continue;
+            }
+            let id_string = id.0.to_string();
+            let description = if snapshot.external_model_ids.contains(&id_string) {
+                format!(
+                    "{id_string} · External provider: selected conversation history is sent to this provider."
+                )
+            } else {
+                id_string.clone()
+            };
+            out.push(OwnedEnumChoice {
+                canonical: id_string,
+                display: name.clone(),
+                description,
+            });
+        }
+    };
     match source {
         DynamicEnumSource::ActiveModelCatalog => {
             let mut out = Vec::with_capacity(snapshot.available_models.len() + 1);
@@ -118,14 +146,116 @@ pub fn dynamic_enum_choices(
                 display: "(no override)".to_string(),
                 description: "Inherit the default model (no per-user override).".to_string(),
             });
-            for (name, _id) in &snapshot.available_models {
+            append_catalog(&mut out, None);
+            out
+        }
+        DynamicEnumSource::CompactionPrimaryModelCatalog => {
+            let mut out = Vec::with_capacity(snapshot.available_models.len() + 1);
+            if snapshot.compaction_fallback_model != "@session" {
                 out.push(OwnedEnumChoice {
-                    canonical: name.clone(),
-                    display: name.clone(),
-                    description: String::new(),
+                    canonical: "@session".to_string(),
+                    display: "Session model".to_string(),
+                    description: "Use the active session's model for compaction.".to_string(),
                 });
             }
+            append_catalog(
+                &mut out,
+                (!snapshot.compaction_fallback_model.is_empty())
+                    .then_some(snapshot.compaction_fallback_model.as_str()),
+            );
             out
+        }
+        DynamicEnumSource::CompactionFallbackModelCatalog => {
+            let mut out = Vec::with_capacity(snapshot.available_models.len() + 2);
+            out.push(OwnedEnumChoice {
+                canonical: String::new(),
+                display: "No fallback".to_string(),
+                description: "Do not try a second compaction route.".to_string(),
+            });
+            if snapshot.compaction_primary_model != "@session" {
+                out.push(OwnedEnumChoice {
+                    canonical: "@session".to_string(),
+                    display: "Session model".to_string(),
+                    description: "Use the active session's model as the fallback route."
+                        .to_string(),
+                });
+            }
+            append_catalog(&mut out, Some(snapshot.compaction_primary_model.as_str()));
+            out
+        }
+    }
+}
+
+#[cfg(test)]
+mod compaction_choice_tests {
+    use super::*;
+
+    fn model(display: &str, id: &str) -> (String, acp::ModelId) {
+        (display.to_owned(), acp::ModelId::new(id.to_owned()))
+    }
+
+    #[test]
+    fn compaction_choices_use_stable_ids_and_exclude_the_other_route() {
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![
+                model("Laguna XS 2.1", "openrouter:poolside/laguna-xs-2.1"),
+                model("Custom Summarizer", "custom:summary"),
+            ],
+            compaction_primary_model: "@session".to_owned(),
+            compaction_fallback_model: "custom:summary".to_owned(),
+            ..PagerLocalSnapshot::default()
+        };
+
+        let primary =
+            dynamic_enum_choices(DynamicEnumSource::CompactionPrimaryModelCatalog, &snapshot);
+        assert!(primary.iter().any(|choice| {
+            choice.canonical == "openrouter:poolside/laguna-xs-2.1"
+                && choice.display == "Laguna XS 2.1"
+        }));
+        assert!(
+            !primary
+                .iter()
+                .any(|choice| choice.canonical == "custom:summary")
+        );
+
+        let fallback =
+            dynamic_enum_choices(DynamicEnumSource::CompactionFallbackModelCatalog, &snapshot);
+        assert_eq!(fallback[0].canonical, "");
+        assert_eq!(fallback[0].display, "No fallback");
+        assert!(!fallback.iter().any(|choice| choice.canonical == "@session"));
+    }
+
+    #[test]
+    fn external_compaction_choice_has_visible_privacy_warning() {
+        let external_id = "openrouter:poolside/laguna-xs-2.1";
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![model("Laguna XS 2.1", external_id)],
+            external_model_ids: std::collections::HashSet::from([external_id.to_owned()]),
+            ..PagerLocalSnapshot::default()
+        };
+
+        let choices =
+            dynamic_enum_choices(DynamicEnumSource::CompactionPrimaryModelCatalog, &snapshot);
+        let external = choices
+            .iter()
+            .find(|choice| choice.canonical == external_id)
+            .expect("external model choice");
+        assert!(external.description.contains("External provider"));
+        assert!(external.description.contains("conversation history"));
+    }
+
+    #[test]
+    fn compaction_status_reflects_live_activity_snapshot() {
+        let ui = UiConfig::default();
+        for (in_progress, expected) in [(false, "Idle"), (true, "Compacting")] {
+            let snapshot = PagerLocalSnapshot {
+                compaction_in_progress: in_progress,
+                ..PagerLocalSnapshot::default()
+            };
+            assert_eq!(
+                current_value_for("compaction_status", &ui, &snapshot),
+                Some(SettingValue::String(expected.to_owned()))
+            );
         }
     }
 }
@@ -181,6 +311,9 @@ pub enum SettingKind {
         source: DynamicEnumSource,
         supports_preview: bool,
     },
+    /// Read-only runtime information. Renders as a scalar row but never opens
+    /// an editor or produces an action.
+    Status,
     /// A navigational row that opens a sub-sheet of `children` (other
     /// registered settings, by key). Carries no scalar value of its own:
     /// `current_value_for`/`default_value_for` skip it and the modal renders
@@ -247,6 +380,9 @@ pub struct PagerLocalSnapshot {
     /// Cloned into the snapshot so the modal's validator/resolver is
     /// self-contained (the modal outlives the borrow on `app.agents`).
     pub available_models: Vec<(String, acp::ModelId)>,
+    /// Stable model IDs whose provider is external to xAI. Selecting one for
+    /// compaction sends the selected conversation range to that provider.
+    pub external_model_ids: std::collections::HashSet<String>,
     /// Whether the user has opted OUT of coding data sharing.
     /// Lives in auth metadata (no `UiConfig` field). Inverted mapping:
     /// `opt_out == false` → canonical "opt-in". Snapshot default is
@@ -280,6 +416,18 @@ pub struct PagerLocalSnapshot {
     /// language actually in effect when `[ui].voice_stt_language` is unset but
     /// an explicit `[voice].language` applies.
     pub voice_stt_language: String,
+    /// Current compaction strategy (auto/rolling/full_replace).
+    pub compaction_strategy: String,
+    /// Current compaction trigger policy (fixed/dynamic).
+    pub compaction_trigger_policy: String,
+    /// Current rolling compaction band count (3-8).
+    pub compaction_band_count: i64,
+    /// Stable primary compaction route ID. `@session` uses the active model.
+    pub compaction_primary_model: String,
+    /// Stable fallback route ID. Empty means no fallback configured.
+    pub compaction_fallback_model: String,
+    /// Whether compaction is currently in progress for the active session.
+    pub compaction_in_progress: bool,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -290,6 +438,7 @@ impl Default for PagerLocalSnapshot {
             auto_mode: false,
             current_model_name: None,
             available_models: Vec::new(),
+            external_model_ids: std::collections::HashSet::new(),
             coding_data_sharing_opt_out: true,
             plan_mode_active: false,
             show_tips: None,
@@ -303,6 +452,13 @@ impl Default for PagerLocalSnapshot {
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
+            // Compaction config defaults - match registry defaults in defs.rs
+            compaction_strategy: "auto".to_string(),
+            compaction_trigger_policy: "fixed".to_string(),
+            compaction_band_count: 4,
+            compaction_primary_model: "@session".to_string(),
+            compaction_fallback_model: String::new(),
+            compaction_in_progress: false,
         }
     }
 }
@@ -357,13 +513,10 @@ impl PagerLocalSnapshot {
         self.available_models.iter().map(|(name, _)| name.as_str())
     }
 
-    /// Resolve a user-supplied name to a `ModelId` via the snapshot.
-    /// Case-insensitive ASCII match against display names only (ids
-    /// aren't carried in the snapshot's primary key — callers needing
-    /// id-based resolution should reach for `ModelState::resolve_by_name_or_id`).
+    /// Resolve a user-supplied display name or stable model ID.
     pub fn resolve_model_name(&self, query: &str) -> Option<acp::ModelId> {
         self.available_models.iter().find_map(|(name, id)| {
-            if name.eq_ignore_ascii_case(query) {
+            if name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
                 Some(id.clone())
             } else {
                 None
@@ -674,6 +827,34 @@ pub fn current_value_for(
                 ui.fork_secondary_model.clone()
             }
         })),
+        // Compaction settings live in the pager's dedicated `[compaction]`
+        // snapshot rather than `UiConfig`.
+        "compaction_strategy" => Some(SettingValue::Enum(
+            match pager.compaction_strategy.as_str() {
+                "rolling" => "rolling",
+                "full_replace" => "full_replace",
+                _ => "auto",
+            },
+        )),
+        "compaction_trigger_policy" => Some(SettingValue::Enum(
+            if pager.compaction_trigger_policy == "dynamic" {
+                "dynamic"
+            } else {
+                "fixed"
+            },
+        )),
+        "compaction_band_count" => Some(SettingValue::Int(pager.compaction_band_count)),
+        "compaction_primary_model" => {
+            Some(SettingValue::String(pager.compaction_primary_model.clone()))
+        }
+        "compaction_fallback_model" => Some(SettingValue::String(
+            pager.compaction_fallback_model.clone(),
+        )),
+        "compaction_status" => Some(SettingValue::String(if pager.compaction_in_progress {
+            "Compacting".to_string()
+        } else {
+            "Idle".to_string()
+        })),
 
         _ => None,
     }
@@ -688,6 +869,7 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
         SettingKind::Int { default, .. } => SettingValue::Int(*default),
         // `DynamicEnum` widens to `String` for runtime catalog values.
         SettingKind::DynamicEnum { default, .. } => SettingValue::String((*default).to_string()),
+        SettingKind::Status => SettingValue::String(String::new()),
         // Group rows carry no scalar value; the render/reset paths special-case
         // them before calling this, so the returned value is never observed.
         SettingKind::Group { .. } => SettingValue::Bool(false),
@@ -1124,6 +1306,39 @@ mod tests {
                          models::default_model() — drift here breaks the empty-fold contract",
                     );
                 }
+                // Compaction settings: SHELL-owned, no UiConfig mirror.
+                // Defaults match PagerLocalSnapshot::default().
+                ("compaction_strategy", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "auto",
+                        "compaction_strategy registry default must be 'auto'"
+                    );
+                }
+                ("compaction_trigger_policy", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "fixed",
+                        "compaction_trigger_policy registry default must be 'fixed'"
+                    );
+                }
+                ("compaction_band_count", SettingKind::Int { default, .. }) => {
+                    assert_eq!(
+                        *default, 4,
+                        "compaction_band_count registry default must be 4"
+                    );
+                }
+                ("compaction_primary_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "@session",
+                        "compaction_primary_model registry default must be @session"
+                    );
+                }
+                ("compaction_fallback_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "compaction_fallback_model registry default must be empty string"
+                    );
+                }
+                ("compaction_status", SettingKind::Status) => {}
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1207,8 +1422,9 @@ mod tests {
                     | (SettingKind::String { .. }, SettingValue::String(_))
                     | (SettingKind::Enum { .. }, SettingValue::Enum(_))
                     | (SettingKind::Int { .. }, SettingValue::Int(_))
-                    // `DynamicEnum` uses `SettingValue::String`.
+                    // `DynamicEnum` and read-only `Status` rows use strings.
                     | (SettingKind::DynamicEnum { .. }, SettingValue::String(_))
+                    | (SettingKind::Status, SettingValue::String(_))
             );
             assert!(
                 kind_matches,
@@ -1486,8 +1702,8 @@ mod tests {
     fn default_value_for_returns_kind_default() {
         let reg = SettingsRegistry::defaults();
         for meta in reg.all() {
-            // Group rows have no meaningful scalar default (sentinel only).
-            if matches!(meta.kind, SettingKind::Group { .. }) {
+            // Group/status rows have no meaningful configurable default.
+            if matches!(meta.kind, SettingKind::Group { .. } | SettingKind::Status) {
                 continue;
             }
             let v = default_value_for(meta);

@@ -1280,6 +1280,7 @@ pub(crate) async fn run(
     // Seed app state from disk once at the I/O boundary so dispatch
     // stays sans-IO.
     app.current_ui = load_initial_ui_config();
+    app.compaction_config = load_initial_compaction_config();
     // Field-tolerant: a whole-`UiConfig` default (malformed unrelated `[ui]`
     // field) must not wipe a valid `show_timeline` or leave appearance /
     // cache / `current_ui` disagreeing — `/timeline` and the rail all read
@@ -1731,6 +1732,23 @@ pub(crate) async fn run(
         && process_effects(vec![effect], &mut tasks, &mut app, &progress_tx)
     {
         return Ok(make_run_result(&app));
+    }
+
+    // An authenticated, access-allowed, full-screen welcome with no overriding
+    // startup intent lands on the grouped session picker automatically, so the
+    // user sees recent sessions by project folder and can resume one. The
+    // eligibility guard is a no-op when a startup intent already opened a
+    // session / dashboard (active view isn't Welcome) or gates are unresolved
+    // (in which case the picker is deferred to the auth / trust completion).
+    {
+        let effs = dispatch::maybe_open_welcome_session_picker(&mut app);
+        let picker_opened = !effs.is_empty();
+        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            return Ok(make_run_result(&app));
+        }
+        if picker_opened {
+            presenter.request_presentation(&mut app, terminal, false);
+        }
     }
 
     // Schedule the first animation tick so live updates start immediately
@@ -2759,6 +2777,22 @@ pub(crate) fn load_initial_ui_config() -> xai_grok_shell::agent::config::UiConfi
         return UiConfig::default();
     };
     ui_value.try_into::<UiConfig>().unwrap_or_default()
+}
+
+/// Load the shell-owned `[compaction]` section for the settings snapshot.
+pub(crate) fn load_initial_compaction_config() -> xai_grok_shell::agent::config::CompactionConfig {
+    use xai_grok_shell::agent::config::CompactionConfig;
+    let Ok(root) = xai_grok_shell::config::load_effective_config() else {
+        return CompactionConfig::default();
+    };
+    let Some(value) = root.get("compaction").cloned() else {
+        return CompactionConfig::default();
+    };
+    value
+        .try_into::<CompactionConfig>()
+        .ok()
+        .filter(|config| config.normalize_validate().is_ok())
+        .unwrap_or_default()
 }
 
 /// Config `Option<bool>` mirrors seeded once at startup. `None` = no

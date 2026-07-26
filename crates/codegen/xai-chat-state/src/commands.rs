@@ -9,8 +9,8 @@ use xai_grok_inference_types::{
 };
 
 use crate::types::{
-    AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
-    TurnCapture,
+    AutoCompactTrigger, ChatStateSnapshot, CompactSourceIdentity, ConversationCounts, Credentials,
+    NotificationMeta, TurnCapture,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -18,6 +18,43 @@ pub struct ModelMetadata {
     pub resolved_model_id: Option<String>,
     pub model_fingerprint: Option<String>,
 }
+
+/// Result of a CAS splice operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasSpliceResult {
+    /// The splice was applied successfully.
+    Applied,
+    /// The epoch, range, or fingerprint did not match the current state.
+    Stale,
+    /// The source range was invalid (e.g., out of bounds, start >= end).
+    InvalidRange,
+    /// The marker-last persistence transaction was definitely not committed.
+    PersistenceFailed,
+    /// Marker durability or rollback could not be determined. The host must
+    /// stop the live session and let startup recovery reconcile the journal.
+    PersistenceIndeterminate,
+}
+
+impl std::fmt::Display for CasSpliceResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CasSpliceResult::Applied => write!(f, "splice applied"),
+            CasSpliceResult::Stale => write!(
+                f,
+                "splice rejected: stale state (epoch/range/fingerprint mismatch)"
+            ),
+            CasSpliceResult::InvalidRange => write!(f, "splice rejected: invalid source range"),
+            CasSpliceResult::PersistenceFailed => {
+                write!(f, "splice rejected: persistence commit failed")
+            }
+            CasSpliceResult::PersistenceIndeterminate => {
+                write!(f, "splice rejected: persistence state is indeterminate")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CasSpliceResult {}
 
 /// Refusal reply for [`ChatStateCommand::RepairHistory`]: a turn was in
 /// flight, and in-flight tool calls must not be treated as dangling.
@@ -201,6 +238,29 @@ pub enum ChatStateCommand {
     /// Repair dangling tool calls after a harness-initiated halt.
     RepairDanglingAfterHarnessHalt { class: &'static str },
 
+    /// Atomically apply a conversation replacement only when the expected
+    /// epoch, range, and fingerprint match the current state.
+    ///
+    /// This is the core API for rolling compaction: it prevents stale compaction
+    /// jobs from modifying state by requiring the source to match expectations.
+    ///
+    /// # Arguments
+    /// - `identity`: The expected source identity (epoch, range, fingerprint)
+    /// - `items`: The replacement conversation items
+    ///
+    /// # Returns
+    /// - `CasSpliceResult::Applied` if the replacement was applied
+    /// - `CasSpliceResult::Stale` if epoch, range, or fingerprint mismatch
+    /// - `CasSpliceResult::InvalidRange` if the source range was invalid
+    /// - `CasSpliceResult::PersistenceFailed` for a definite non-commit
+    /// - `CasSpliceResult::PersistenceIndeterminate` when startup recovery is required
+    CasSpliceConversation {
+        identity: CompactSourceIdentity,
+        items: Vec<ConversationItem>,
+        persistence: Option<crate::persistence::CompactionPersistenceMetadata>,
+        reply: oneshot::Sender<CasSpliceResult>,
+    },
+
     // ═══ Queries (request/response via oneshot) ═══
     /// Build a ConversationRequest ready to send to the API.
     /// Clones the conversation, prunes old tool results, repairs dangling
@@ -368,6 +428,13 @@ pub enum ChatStateCommand {
     GetSystemMessage {
         reply: oneshot::Sender<Option<ConversationItem>>,
     },
+
+    /// Get the current structural epoch.
+    ///
+    /// The structural epoch is incremented on each mutation that changes
+    /// the conversation item sequence or content. Used for CAS operations
+    /// to detect stale state.
+    GetStructuralEpoch { reply: oneshot::Sender<u64> },
 }
 
 #[cfg(test)]
@@ -522,5 +589,21 @@ mod tests {
 
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetEstimatedMessagesTokens { reply: tx };
+
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::GetStructuralEpoch { reply: tx };
+
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::CasSpliceConversation {
+            identity: crate::types::CompactSourceIdentity {
+                expected_epoch: 0,
+                source_start: 0,
+                source_end: 1,
+                source_fingerprint: [0; 32],
+            },
+            items: vec![],
+            persistence: None,
+            reply: tx,
+        };
     }
 }

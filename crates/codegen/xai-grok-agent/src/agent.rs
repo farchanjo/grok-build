@@ -128,6 +128,11 @@ impl Agent {
         &self.compaction_policy
     }
 
+    /// Replace the live routing and strategy policy after a validated config reload.
+    pub fn set_compaction_policy(&mut self, policy: CompactionPolicy) {
+        self.compaction_policy = policy;
+    }
+
     /// Reminder policy.
     pub fn reminder_policy(&self) -> &ReminderPolicy {
         &self.reminder_policy

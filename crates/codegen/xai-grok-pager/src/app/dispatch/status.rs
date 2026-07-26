@@ -456,6 +456,7 @@ pub(super) fn handle_coding_data_sharing_updated(
         app.privacy_banner_accept_inflight = false;
         if opted_in {
             effects.extend(ack_privacy_banner(app));
+            effects.extend(super::ctx::maybe_open_welcome_session_picker(app));
         }
     }
     effects

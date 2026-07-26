@@ -2179,3 +2179,126 @@ fn session_id_resolver_round_trip_subagent() {
     let back = resolver.to_persisted(&live).expect("must reverse");
     assert_eq!(back, pid);
 }
+
+// ===========================================================================
+// Welcome session picker auto-open
+// ===========================================================================
+
+#[test]
+fn welcome_picker_opens_for_ready_welcome() {
+    let mut app = test_app();
+    app.session_picker_grouped = true;
+
+    let effects = maybe_open_welcome_session_picker(&mut app);
+
+    assert!(app.session_picker_loading);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSessionList { query: None, .. }))
+    );
+}
+
+#[test]
+fn welcome_picker_waits_for_startup_precedence() {
+    let mut app = test_app();
+    app.deferred_startup.prompt = Some("continue startup".into());
+    assert!(maybe_open_welcome_session_picker(&mut app).is_empty());
+
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    assert!(maybe_open_welcome_session_picker(&mut app).is_empty());
+
+    let mut app = test_app();
+    app.trust_state = TrustState::Pending {
+        workspace: PathBuf::from("/workspace"),
+    };
+    assert!(maybe_open_welcome_session_picker(&mut app).is_empty());
+
+    let mut app = test_app();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    assert!(maybe_open_welcome_session_picker(&mut app).is_empty());
+
+    let mut app = test_app();
+    app.privacy_notice_rollout = true;
+    app.coding_data_retention_opt_out = true;
+    assert!(app.privacy_banner_should_show());
+    assert!(maybe_open_welcome_session_picker(&mut app).is_empty());
+
+    let mut app = test_app_with_agent();
+    assert!(maybe_open_welcome_session_picker(&mut app).is_empty());
+}
+
+#[test]
+fn exit_session_returns_to_loading_welcome_picker() {
+    let mut app = test_app_with_agent();
+
+    let effects = dispatch(Action::ExitSession, &mut app);
+
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    assert!(app.session_picker_loading);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSessionList { .. }))
+    );
+}
+
+#[test]
+fn finish_trust_opens_picker_only_without_deferred_session() {
+    let mut app = test_app();
+    app.trust_state = TrustState::Pending {
+        workspace: PathBuf::from("/workspace"),
+    };
+    let effects = finish_trust(&mut app);
+    assert!(app.session_picker_loading);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSessionList { .. }))
+    );
+
+    let mut app = test_app();
+    app.trust_state = TrustState::Pending {
+        workspace: PathBuf::from("/workspace"),
+    };
+    app.deferred_startup.session =
+        Some(crate::app::session_startup::DeferredSessionStartup::Load {
+            session_id: "deferred".into(),
+            session_cwd: None,
+            chat_kind: false,
+        });
+    let effects = finish_trust(&mut app);
+    assert!(!app.session_picker_loading);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSessionList { .. }))
+    );
+}
+
+#[test]
+fn loading_welcome_picker_consumes_enter_and_closes_on_escape() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app();
+    let _ = maybe_open_welcome_session_picker(&mut app);
+
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let enter_outcome = app.handle_input(&enter);
+    assert!(
+        !matches!(
+            enter_outcome,
+            crate::app::app_view::InputOutcome::Action(Action::NewSession)
+        ),
+        "Enter during loading must belong to the picker, got {enter_outcome:?}"
+    );
+
+    let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let escape_outcome = app.handle_input(&escape);
+    assert!(matches!(
+        escape_outcome,
+        crate::app::app_view::InputOutcome::Action(Action::SessionPickerClosed)
+    ));
+    assert!(!app.session_picker_loading);
+}

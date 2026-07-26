@@ -19,7 +19,7 @@ pub mod timing;
 
 pub use agent::Agent;
 pub use builder::AgentBuilder;
-pub use compaction::CompactionPolicy;
+pub use compaction::{CompactionPolicy, CompactionStrategy, CompactionTriggerPolicy};
 pub use config::AgentDefinition;
 pub use config::preset_names;
 pub use config::toolset_for_preset;

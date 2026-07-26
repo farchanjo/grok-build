@@ -116,6 +116,14 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
+        if self
+            .compaction
+            .rolling_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::debug!("prompt promotion paused for rolling compaction safe point");
+            return;
+        }
         // Fast path under the lock: nothing to promote.
         let may_combine;
         {

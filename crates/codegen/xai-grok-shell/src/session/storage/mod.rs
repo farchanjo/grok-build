@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crate::extensions::notification::SessionNotification;
+use crate::extensions::notification::{
+    CompactionCheckpointFile, CompactionCheckpointInfo, SessionNotification,
+};
 use crate::inference::ConversationItem;
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
@@ -33,19 +35,120 @@ pub(crate) const GOAL_STATE_FILE: &str = "goal/state.json";
 pub(crate) const ANNOUNCEMENT_STATE_FILE: &str = "announcement_state.json";
 pub(crate) const CHAT_HISTORY_FILE: &str = "chat_history.jsonl";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
+pub(crate) const COMPACTION_PENDING_FILE: &str = "compaction_pending.json";
+pub(crate) const MAX_SUPPORTED_COMPACTION_CHECKPOINT_SCHEMA: u32 = 2;
+
+pub(crate) fn validate_compaction_checkpoint_id(checkpoint_id: &str) -> io::Result<()> {
+    if !checkpoint_id.is_empty()
+        && checkpoint_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "compaction checkpoint id must contain only ASCII letters, digits, '-' or '_'",
+    ))
+}
+
+/// Load a checkpoint referenced by a durable compaction marker without allowing
+/// the marker to escape the session's checkpoint directory or substitute a
+/// different checkpoint. Replay and cache reconstruction share this validator
+/// so both recovery paths fail closed in exactly the same way.
+pub(crate) fn load_validated_compaction_checkpoint(
+    session_dir: &Path,
+    info: &CompactionCheckpointInfo,
+) -> io::Result<CompactionCheckpointFile> {
+    validate_compaction_checkpoint_id(&info.checkpoint_id)?;
+    let relative = Path::new(&info.checkpoint_file);
+    let expected_name = format!("{}.json", info.checkpoint_id);
+    let mut components = relative.components();
+    let valid_path = matches!(components.next(), Some(std::path::Component::Normal(name)) if name == "compaction_checkpoints")
+        && matches!(components.next(), Some(std::path::Component::Normal(name)) if name == expected_name.as_str())
+        && components.next().is_none();
+    if !valid_path {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid compaction checkpoint path for committed marker: {}",
+                info.checkpoint_file
+            ),
+        ));
+    }
+
+    let checkpoint_dir = session_dir.join("compaction_checkpoints");
+    let checkpoint_dir_metadata = std::fs::symlink_metadata(&checkpoint_dir)?;
+    if checkpoint_dir_metadata.file_type().is_symlink() || !checkpoint_dir_metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compaction checkpoint directory must be a real directory",
+        ));
+    }
+
+    let path = session_dir.join(relative);
+    let checkpoint_metadata = std::fs::symlink_metadata(&path)?;
+    if checkpoint_metadata.file_type().is_symlink() || !checkpoint_metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "compaction checkpoint must be a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    let bytes = std::fs::read(&path)?;
+    let checkpoint: CompactionCheckpointFile = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !(1..=MAX_SUPPORTED_COMPACTION_CHECKPOINT_SCHEMA).contains(&checkpoint.schema_version) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Unsupported checkpoint schema version {}. Cannot safely rewind past the compaction point.",
+                checkpoint.schema_version
+            ),
+        ));
+    }
+    if checkpoint.checkpoint_id != info.checkpoint_id
+        || checkpoint.prompt_index_at_compaction != info.prompt_index_at_compaction
+        || checkpoint.schema_version != info.schema_version
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "compaction checkpoint does not match committed marker: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(checkpoint)
+}
 
 /// Write `bytes` to `path` by writing a uniquely named sibling temp file and
 /// renaming it over the target, so a crash or a concurrent writer never leaves a
 /// torn file. The temp is removed on failure.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = temp_sibling(path);
-    match std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let mut file = options.open(&tmp)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        sync_file_durable(&file)?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        sync_parent_directory(path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -78,17 +181,33 @@ pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
     ))
 }
 
+#[cfg(unix)]
+pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(windows)]
+pub(crate) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable directory sync is unsupported on this platform",
+    ))
+}
+
 /// Async sibling of [`write_bytes_atomic`].
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
-    let tmp = temp_sibling(path);
-    let result = match tokio::fs::write(&tmp, bytes).await {
-        Ok(()) => tokio::fs::rename(&tmp, path).await,
-        Err(e) => Err(e),
-    };
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    result
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_bytes_atomic(&path, &bytes))
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// Serialize `items` to newline-delimited JSON bytes.
@@ -133,11 +252,15 @@ pub(crate) mod chat_rebuild {
     use agent_client_protocol as acp;
 
     use super::{CHAT_HISTORY_FILE, SessionUpdate, UPDATES_FILE, UpdatesIterator};
+    use crate::extensions::notification::{
+        CompactionCheckpointInfo, SessionUpdate as XaiSessionUpdate,
+    };
     use crate::inference::{AssistantItem, ContentPart, ConversationItem, ToolCall};
 
-    /// Rebuild `chat_history.jsonl` from `updates.jsonl` alone. Builds a temp file and
-    /// renames it over the target, so a failed rebuild leaves the existing cache intact
-    /// rather than a truncated partial that load would trust.
+    /// Rebuild `chat_history.jsonl` from `updates.jsonl` and its committed
+    /// compaction checkpoints. Builds a temp file and renames it over the target,
+    /// so a failed rebuild leaves the existing cache intact rather than a
+    /// truncated partial that load would trust.
     pub(crate) fn rebuild_chat_history(dir: &Path) -> io::Result<usize> {
         use std::io::{Seek, Write};
 
@@ -158,18 +281,26 @@ pub(crate) mod chat_rebuild {
                 Err(_) => continue,
             };
 
-            for item in reducer.process(&update) {
-                if let Ok(line) = serde_json::to_string(&item) {
-                    let _ = writer.write_all(line.as_bytes());
-                    let _ = writer.write_all(b"\n");
+            if let Some(info) = checkpoint_info(&update) {
+                // The durable marker is authoritative. Replace everything rebuilt
+                // before it with the exact compacted model view, then continue
+                // reducing updates appended after the marker.
+                let checkpoint = load_committed_checkpoint(dir, info)?;
+                reducer.reset_for_checkpoint(checkpoint.compacted_history.len());
+                writer.seek(std::io::SeekFrom::Start(0))?;
+                writer.get_mut().set_len(0)?;
+                for item in checkpoint.compacted_history {
+                    serde_json::to_writer(&mut writer, &item)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    writer.write_all(b"\n")?;
                 }
+                continue;
             }
 
-            // CompactionCheckpoint: truncate file and reset
-            if reducer.should_truncate() {
-                reducer.clear_truncate_flag();
-                let _ = writer.seek(std::io::SeekFrom::Start(0));
-                let _ = writer.get_mut().set_len(0);
+            for item in reducer.process(&update) {
+                serde_json::to_writer(&mut writer, &item)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                writer.write_all(b"\n")?;
             }
         }
 
@@ -192,6 +323,23 @@ pub(crate) mod chat_rebuild {
         Ok(reducer.count())
     }
 
+    fn checkpoint_info(update: &SessionUpdate) -> Option<&CompactionCheckpointInfo> {
+        let SessionUpdate::Xai(notification) = update else {
+            return None;
+        };
+        let XaiSessionUpdate::CompactionCheckpoint(info) = &notification.update else {
+            return None;
+        };
+        Some(info)
+    }
+
+    fn load_committed_checkpoint(
+        dir: &Path,
+        info: &CompactionCheckpointInfo,
+    ) -> io::Result<super::CompactionCheckpointFile> {
+        super::load_validated_compaction_checkpoint(dir, info)
+    }
+
     /// Reduces ACP session updates into conversation items.
     ///
     /// Turn boundaries: User→Agent flushes user, Agent→User flushes agent,
@@ -203,7 +351,6 @@ pub(crate) mod chat_rebuild {
 
         in_user_turn: bool,
         has_agent_content: bool,
-        needs_truncate: bool,
 
         tool_args: HashMap<String, String>,
         emitted_tool_results: HashSet<String>,
@@ -218,7 +365,6 @@ pub(crate) mod chat_rebuild {
                 agent_tool_calls: Vec::new(),
                 in_user_turn: false,
                 has_agent_content: false,
-                needs_truncate: false,
                 tool_args: HashMap::new(),
                 emitted_tool_results: HashSet::new(),
                 item_count: 0,
@@ -249,11 +395,9 @@ pub(crate) mod chat_rebuild {
             use crate::extensions::notification::SessionUpdate as XaiUpdate;
 
             match update {
-                XaiUpdate::CompactionCheckpoint(_) => {
-                    self.reset();
-                    self.needs_truncate = true;
-                    Vec::new()
-                }
+                // Handled by `rebuild_chat_history` before reducer dispatch so
+                // it can load the referenced checkpoint from disk.
+                XaiUpdate::CompactionCheckpoint(_) => Vec::new(),
                 _ => Vec::new(), // DiffReview, MemoryFlush, etc. not needed
             }
         }
@@ -420,7 +564,7 @@ pub(crate) mod chat_rebuild {
             out
         }
 
-        fn reset(&mut self) {
+        fn reset_for_checkpoint(&mut self, compacted_item_count: usize) {
             self.user_parts.clear();
             self.agent_text.clear();
             self.agent_tool_calls.clear();
@@ -428,15 +572,7 @@ pub(crate) mod chat_rebuild {
             self.emitted_tool_results.clear();
             self.in_user_turn = false;
             self.has_agent_content = false;
-            self.item_count = 0;
-        }
-
-        fn should_truncate(&self) -> bool {
-            self.needs_truncate
-        }
-
-        fn clear_truncate_flag(&mut self) {
-            self.needs_truncate = false;
+            self.item_count = compacted_item_count;
         }
 
         fn count(&self) -> usize {
@@ -962,7 +1098,21 @@ pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_inde
 #[derive(Debug)]
 pub enum AppendUpdateError {
     NotCommitted(io::Error),
+    /// The complete update line was written, but a later flush/barrier failed.
+    /// The marker may or may not survive a crash, so callers must not roll back
+    /// durable state solely from this result.
+    Indeterminate(io::Error),
     Committed(io::Error),
+}
+
+/// Commit-aware result of replacing chat history behind a durable pending
+/// compaction journal. A failed rollback is indeterminate even though the
+/// checkpoint marker has not been appended: the derived history may already
+/// contain the compacted base.
+#[derive(Debug)]
+pub enum ReplaceCompactionHistoryError {
+    NotCommitted(io::Error),
+    Indeterminate(io::Error),
 }
 
 #[derive(Debug)]
@@ -977,7 +1127,9 @@ pub enum AppendCwdSwitchError {
 impl AppendUpdateError {
     pub fn into_io_error(self) -> io::Error {
         match self {
-            Self::NotCommitted(error) | Self::Committed(error) => error,
+            Self::NotCommitted(error) | Self::Indeterminate(error) | Self::Committed(error) => {
+                error
+            }
         }
     }
 }
@@ -985,7 +1137,9 @@ impl AppendUpdateError {
 impl std::fmt::Display for AppendUpdateError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotCommitted(error) | Self::Committed(error) => error.fmt(formatter),
+            Self::NotCommitted(error) | Self::Indeterminate(error) | Self::Committed(error) => {
+                error.fmt(formatter)
+            }
         }
     }
 }
@@ -1173,12 +1327,37 @@ pub trait StorageAdapter: Send + Sync {
     /// loaded) in-memory tracker, so historical points can't be lost.
     async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()>;
 
-    /// Replace the entire chat history (used for compaction and rewind)
+    /// Replace the entire chat history (used for compaction and rewind).
     async fn replace_chat_history(
         &self,
         info: &Info,
         messages: &[ConversationItem],
     ) -> io::Result<()>;
+
+    /// Atomically replace history while durably recording the previous view in
+    /// a pending marker. The marker lets startup repair a process crash that
+    /// lands after this replacement but before the durable compaction commit.
+    async fn replace_chat_history_with_compaction_pending(
+        &self,
+        _info: &Info,
+        _checkpoint_id: &str,
+        _previous_history: &[ConversationItem],
+        _compacted_history: &[ConversationItem],
+    ) -> Result<(), ReplaceCompactionHistoryError> {
+        Err(ReplaceCompactionHistoryError::NotCommitted(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "pending compaction history replacement is unsupported",
+        )))
+    }
+
+    /// Remove the durable pending compaction marker after either commit or
+    /// rollback. Missing markers are treated as already cleared.
+    async fn clear_compaction_pending(&self, _info: &Info) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "pending compaction cleanup is unsupported",
+        ))
+    }
 
     /// Copy session data from source to target, transforming session IDs
     /// The `options` parameter allows setting parent session tracking and model overrides.
@@ -2313,6 +2492,81 @@ mod tests {
         format!(
             r#"{{"timestamp":1,"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
         )
+    }
+
+    #[test]
+    fn chat_rebuild_restores_committed_checkpoint_before_post_marker_updates() {
+        use crate::extensions::notification::CompactionCheckpointFile;
+        use crate::inference::ConversationItem;
+
+        let dir = tempfile::tempdir().unwrap();
+        let checkpoints = dir.path().join("compaction_checkpoints");
+        std::fs::create_dir_all(&checkpoints).unwrap();
+        let checkpoint = CompactionCheckpointFile {
+            checkpoint_id: "checkpoint-1".to_owned(),
+            prompt_index_at_compaction: 1,
+            compacted_history: vec![
+                ConversationItem::system("system"),
+                ConversationItem::compaction_summary("committed summary"),
+            ],
+            schema_version: 2,
+            created_at: "2026-07-26T00:00:00Z".to_owned(),
+            original_user_info: None,
+            reread_file_paths: Vec::new(),
+        };
+        std::fs::write(
+            checkpoints.join("checkpoint-1.json"),
+            serde_json::to_vec(&checkpoint).unwrap(),
+        )
+        .unwrap();
+
+        let pre_user = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"old"}}"#,
+        );
+        let pre_agent = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"discarded"}}"#,
+        );
+        let marker = xai_envelope(
+            r#"{"sessionUpdate":"compaction_checkpoint","checkpoint_id":"checkpoint-1","prompt_index_at_compaction":1,"checkpoint_file":"compaction_checkpoints/checkpoint-1.json","auto_continue":null,"schema_version":2,"created_at":"2026-07-26T00:00:00Z"}"#,
+        );
+        let post_user = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"new"}}"#,
+        );
+        let post_agent = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer"}}"#,
+        );
+        std::fs::write(
+            dir.path().join(UPDATES_FILE),
+            format!("{pre_user}\n{pre_agent}\n{marker}\n{post_user}\n{post_agent}\n"),
+        )
+        .unwrap();
+
+        assert_eq!(chat_rebuild::rebuild_chat_history(dir.path()).unwrap(), 4);
+        let rebuilt = std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE)).unwrap();
+        let items = rebuilt
+            .lines()
+            .map(|line| serde_json::from_str::<ConversationItem>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            items
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            vec!["system", "committed summary", "new", "answer"]
+        );
+    }
+
+    #[test]
+    fn chat_rebuild_rejects_checkpoint_path_outside_checkpoint_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = xai_envelope(
+            r#"{"sessionUpdate":"compaction_checkpoint","checkpoint_id":"checkpoint-1","prompt_index_at_compaction":1,"checkpoint_file":"../outside.json","auto_continue":null,"schema_version":2,"created_at":"2026-07-26T00:00:00Z"}"#,
+        );
+        std::fs::write(dir.path().join(UPDATES_FILE), format!("{marker}\n")).unwrap();
+
+        let error = chat_rebuild::rebuild_chat_history(dir.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!dir.path().join(CHAT_HISTORY_FILE).exists());
     }
 
     // ── parse_prompt_extract_event unit tests ─────────────────────────────────

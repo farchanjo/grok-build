@@ -9,10 +9,12 @@ description = "Actor-based chat state management for xAI agents"
 default-bazel = []
 
 [dependencies]
+hex = "0.4"
 indexmap = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 strum = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tokio-util = { workspace = true }

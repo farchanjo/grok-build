@@ -40,15 +40,24 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
         })
         .collect()
 }
-/// Drops every `ConversationItem::Reasoning(_)` sibling.
+/// Drops provider-specific reasoning payloads from conversation history.
 ///
-/// Required before sending to backends that reject the structured reasoning
-/// shape (signed `Thinking` blocks after text mutation; some Chat Completions
-/// providers entirely) and before summarization.
+/// This removes both top-level `ConversationItem::Reasoning` siblings and
+/// OpenRouter's `AssistantItem::reasoning_details`. Both are opaque replay
+/// artifacts tied to the provider/model that produced them, so carrying them
+/// into summarization after a route switch can trigger schema or signature
+/// validation failures on the active provider.
 pub fn strip_reasoning_blocks(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
     conversation
         .into_iter()
-        .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
+        .filter_map(|item| match item {
+            ConversationItem::Reasoning(_) => None,
+            ConversationItem::Assistant(mut assistant) => {
+                assistant.reasoning_details.clear();
+                Some(ConversationItem::Assistant(assistant))
+            }
+            other => Some(other),
+        })
         .collect()
 }
 /// Replace `ContentPart::Image` entries with `"[image]"` so downstream
@@ -3097,7 +3106,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         assert!(matches!(result[1], ConversationItem::Reasoning(_)));
     }
     #[test]
-    fn strip_reasoning_blocks_drops_reasoning_siblings() {
+    fn strip_reasoning_blocks_drops_all_provider_specific_reasoning() {
         use xai_grok_inference_types::{AssistantItem, rs};
         let result = strip_reasoning_blocks(vec![
             ConversationItem::Reasoning(rs::ReasoningItem {
@@ -3115,11 +3124,19 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
-                reasoning_details: Vec::new(),
+                reasoning_details: vec![
+                    serde_json::json!({"type": "reasoning.text", "text": "private"}),
+                ],
             }),
         ]);
         assert_eq!(result.len(), 1, "reasoning sibling must be dropped");
-        assert!(matches!(result[0], ConversationItem::Assistant(_)));
+        let ConversationItem::Assistant(assistant) = &result[0] else {
+            panic!("non-reasoning item must be preserved");
+        };
+        assert!(
+            assistant.reasoning_details.is_empty(),
+            "provider-specific reasoning details must be dropped"
+        );
     }
     #[test]
     fn strip_reasoning_blocks_passes_other_items_through() {

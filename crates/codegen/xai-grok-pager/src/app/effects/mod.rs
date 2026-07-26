@@ -4645,6 +4645,80 @@ fn build_interject_params(
     params
 }
 
+fn display_provider_status(
+    status: xai_grok_shell::agent::providers::ProviderStatus,
+) -> crate::views::providers_modal::ProviderStatus {
+    use crate::views::providers_modal::ProviderStatus;
+    use xai_grok_shell::agent::providers::{
+        ProviderAuthenticationKind, ProviderConnectionState, ProviderCredentialSource, ProviderId,
+    };
+
+    let method_available = |kind| {
+        status
+            .authentication
+            .iter()
+            .find(|entry| entry.kind == kind)
+            .is_some_and(|entry| {
+                matches!(
+                    entry.state,
+                    ProviderConnectionState::Connected | ProviderConnectionState::Configured
+                )
+            })
+    };
+    let detail = match status.provider {
+        ProviderId::Xai => match (
+            method_available(ProviderAuthenticationKind::OAuth),
+            method_available(ProviderAuthenticationKind::ApiKey),
+        ) {
+            (true, true) => Some("OAuth and API key available"),
+            (true, false) => Some("Connected with OAuth"),
+            (false, true) => Some("Connected with API key"),
+            (false, false) => None,
+        },
+        ProviderId::OpenAi => match (
+            method_available(ProviderAuthenticationKind::ChatGpt),
+            method_available(ProviderAuthenticationKind::ApiKey),
+        ) {
+            (true, true) => Some("ChatGPT OAuth and API key available"),
+            (true, false) => Some("Connected with ChatGPT OAuth"),
+            (false, true) => Some("Connected with API key"),
+            (false, false) => None,
+        },
+        ProviderId::OpenRouter => None,
+    };
+    if let Some(detail) = detail {
+        return ProviderStatus::Connected {
+            detail: Some(detail.to_owned()),
+        };
+    }
+    match status.state {
+        ProviderConnectionState::Connected => ProviderStatus::Connected {
+            detail: Some("Connected".to_owned()),
+        },
+        ProviderConnectionState::Configured => {
+            let detail = match status.credential_source {
+                Some(ProviderCredentialSource::SecureStore) => {
+                    "Configured in the owner-only local credential store"
+                }
+                Some(ProviderCredentialSource::Environment) => {
+                    "Configured by environment variable"
+                }
+                None => "Configured",
+            };
+            ProviderStatus::Connected {
+                detail: Some(detail.to_owned()),
+            }
+        }
+        ProviderConnectionState::NotConfigured => ProviderStatus::Missing,
+        ProviderConnectionState::Unavailable => {
+            ProviderStatus::Error("Provider is unavailable".to_owned())
+        }
+        ProviderConnectionState::StoreUnavailable => {
+            ProviderStatus::Error("Credential store is unavailable".to_owned())
+        }
+    }
+}
+
 async fn run_provider_operation(
     agent_id: agent::AgentId,
     operation: actions::ProviderOperation,
@@ -4654,8 +4728,7 @@ async fn run_provider_operation(
     use crate::views::providers_modal::{ProviderKind, ProviderStatus};
     use actions::ProviderOperation;
     use xai_grok_shell::agent::providers::{
-        ProviderAuthenticationKind, ProviderConnectionState, ProviderConnectionTest,
-        ProviderCredentialSource, ProviderId, ProviderManager,
+        ProviderConnectionState, ProviderConnectionTest, ProviderId, ProviderManager,
     };
 
     fn backend_id(provider: &ProviderKind) -> Option<ProviderId> {
@@ -4664,72 +4737,6 @@ async fn run_provider_operation(
             ProviderKind::OpenAi => Some(ProviderId::OpenAi),
             ProviderKind::OpenRouter => Some(ProviderId::OpenRouter),
             ProviderKind::Configured(_) => None,
-        }
-    }
-
-    fn display_status(
-        status: xai_grok_shell::agent::providers::ProviderStatus,
-    ) -> ProviderStatus {
-        if status.provider == ProviderId::Xai {
-            let state_label = |kind| {
-                status
-                    .authentication
-                    .iter()
-                    .find(|entry| entry.kind == kind)
-                    .is_some_and(|entry| {
-                        matches!(
-                            entry.state,
-                            ProviderConnectionState::Connected
-                                | ProviderConnectionState::Configured
-                        )
-                    })
-            };
-            let oauth = if state_label(ProviderAuthenticationKind::OAuth) {
-                "connected"
-            } else {
-                "missing"
-            };
-            let api_key = if state_label(ProviderAuthenticationKind::ApiKey) {
-                "configured"
-            } else {
-                "missing"
-            };
-            return if matches!(
-                status.state,
-                ProviderConnectionState::Connected | ProviderConnectionState::Configured
-            ) {
-                ProviderStatus::Connected {
-                    detail: Some(format!("OAuth: {oauth} · API key: {api_key}")),
-                }
-            } else {
-                ProviderStatus::Missing
-            };
-        }
-        match status.state {
-            ProviderConnectionState::Connected => ProviderStatus::Connected {
-                detail: Some("Signed in with the official Codex CLI".to_owned()),
-            },
-            ProviderConnectionState::Configured => {
-                let detail = match status.credential_source {
-                    Some(ProviderCredentialSource::SecureStore) => {
-                        "Configured in the owner-only local credential store"
-                    }
-                    Some(ProviderCredentialSource::Environment) => {
-                        "Configured by environment variable"
-                    }
-                    None => "Configured",
-                };
-                ProviderStatus::Connected {
-                    detail: Some(detail.to_owned()),
-                }
-            }
-            ProviderConnectionState::NotConfigured => ProviderStatus::Missing,
-            ProviderConnectionState::Unavailable => {
-                ProviderStatus::Error("Official Codex CLI is unavailable".to_owned())
-            }
-            ProviderConnectionState::StoreUnavailable => {
-                ProviderStatus::Error("Credential store is unavailable".to_owned())
-            }
         }
     }
 
@@ -4766,12 +4773,7 @@ async fn run_provider_operation(
     let manager = ProviderManager::default();
     let (provider, status) = match operation {
         ProviderOperation::Refresh(provider) => {
-            let status = if provider == ProviderKind::OpenAi /* ChatGPT oauth */ {
-                match manager.codex_status().await {
-                    Ok(status) => display_status(status),
-                    Err(error) => ProviderStatus::Error(error.to_string()),
-                }
-            } else if matches!(
+            let status = if matches!(
                 provider,
                 ProviderKind::OpenAi | ProviderKind::OpenRouter
             ) {
@@ -4794,11 +4796,28 @@ async fn run_provider_operation(
                         ProviderKind::Xai | ProviderKind::Configured(_) => unreachable!(),
                     }
                 }
-                display_status(manager.status(backend))
+                display_provider_status(manager.status(backend))
             } else if let Some(backend) = backend_id(&provider) {
-                display_status(manager.status(backend))
+                display_provider_status(manager.status(backend))
+            } else if let ProviderKind::Configured(id) = &provider {
+                use xai_grok_shell::provider_registry::id::ProviderId as ConfiguredProviderId;
+                use xai_grok_shell::provider_registry::secrets::{
+                    application_key_scope, read_provider_secret,
+                };
+                match ConfiguredProviderId::new(id) {
+                    Ok(id) => match read_provider_secret(
+                        &xai_grok_config::grok_home(),
+                        &application_key_scope(&id),
+                    ) {
+                        Ok(Some(_)) => ProviderStatus::Connected {
+                            detail: Some("Connected with API key".into()),
+                        },
+                        Ok(None) => ProviderStatus::Missing,
+                        Err(error) => ProviderStatus::Error(error.to_string()),
+                    },
+                    Err(error) => ProviderStatus::Error(error.to_string()),
+                }
             } else {
-                // Configured providers: connection state is driven by scoped secrets.
                 ProviderStatus::Missing
             };
             (provider, status)
@@ -4809,6 +4828,9 @@ async fn run_provider_operation(
                 let result = manager.set_api_key(backend, &key);
                 match result {
                     Ok(()) => match manager.test_connection(backend).await {
+                        Ok(ProviderConnectionTest::Connected { .. }) => {
+                            display_provider_status(manager.status(backend))
+                        }
                         Ok(test) => connection_test_status(test, true),
                         Err(error) => ProviderStatus::Error(error.to_string()),
                     },
@@ -4820,24 +4842,18 @@ async fn run_provider_operation(
                 use xai_grok_shell::provider_registry::secrets::{
                     application_key_scope, store_provider_secret,
                 };
-                let home = std::env::var("GROK_HOME").unwrap_or_else(|_| {
-                    dirs::home_dir()
-                        .map(|h| h.join(".grokdev").display().to_string())
-                        .unwrap_or_else(|| ".".into())
-                });
+                let home = xai_grok_config::grok_home();
                 match CfgId::new(id) {
-                    Ok(pid) => {
-                        match store_provider_secret(
-                            std::path::Path::new(&home),
-                            &application_key_scope(&pid),
-                            &key,
-                        ) {
-                            Ok(()) => ProviderStatus::Connected {
-                                detail: Some("API key saved securely".into()),
-                            },
-                            Err(e) => ProviderStatus::Error(e.to_string()),
-                        }
-                    }
+                    Ok(pid) => match store_provider_secret(
+                        &home,
+                        &application_key_scope(&pid),
+                        &key,
+                    ) {
+                        Ok(()) => ProviderStatus::Connected {
+                            detail: Some("Connected with API key".into()),
+                        },
+                        Err(e) => ProviderStatus::Error(e.to_string()),
+                    },
                     Err(e) => ProviderStatus::Error(e.to_string()),
                 }
             } else {
@@ -4848,6 +4864,9 @@ async fn run_provider_operation(
         ProviderOperation::Test(provider) => {
             let status = if let Some(backend) = backend_id(&provider) {
                 match manager.test_connection(backend).await {
+                    Ok(ProviderConnectionTest::Connected { .. }) => {
+                        display_provider_status(manager.status(backend))
+                    }
                     Ok(test) => connection_test_status(test, false),
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
@@ -4864,7 +4883,7 @@ async fn run_provider_operation(
         ProviderOperation::Disconnect(provider) => {
             let status = if let Some(backend) = backend_id(&provider) {
                 match manager.remove_api_key(backend) {
-                    Ok(()) => display_status(manager.status(backend)),
+                    Ok(()) => display_provider_status(manager.status(backend)),
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
             } else if let ProviderKind::Configured(id) = &provider {
@@ -4872,20 +4891,10 @@ async fn run_provider_operation(
                 use xai_grok_shell::provider_registry::secrets::{
                     admin_key_scope, application_key_scope, clear_provider_secret,
                 };
-                let home = std::env::var("GROK_HOME").unwrap_or_else(|_| {
-                    dirs::home_dir()
-                        .map(|h| h.join(".grokdev").display().to_string())
-                        .unwrap_or_else(|| ".".into())
-                });
+                let home = xai_grok_config::grok_home();
                 if let Ok(pid) = CfgId::new(id) {
-                    let _ = clear_provider_secret(
-                        std::path::Path::new(&home),
-                        &application_key_scope(&pid),
-                    );
-                    let _ = clear_provider_secret(
-                        std::path::Path::new(&home),
-                        &admin_key_scope(&pid),
-                    );
+                    let _ = clear_provider_secret(&home, &application_key_scope(&pid));
+                    let _ = clear_provider_secret(&home, &admin_key_scope(&pid));
                 }
                 ProviderStatus::Missing
             } else {
@@ -4895,21 +4904,18 @@ async fn run_provider_operation(
         }
         ProviderOperation::LoginCodex => {
             let status = match manager.codex_login().await {
-                Ok(()) => match manager.codex_status().await {
-                    Ok(status) => display_status(status),
-                    Err(error) => ProviderStatus::Error(error.to_string()),
-                },
+                Ok(()) => display_provider_status(manager.status(ProviderId::OpenAi)),
                 Err(error) => ProviderStatus::Error(error.to_string()),
             };
             (ProviderKind::OpenAi, status)
         }
         ProviderOperation::LogoutCodex => {
-            // Clear ChatGPT OAuth and any OpenAI API key (one-or-another policy).
+            // Disconnect OpenAI completely: clear both independently stored methods.
             let oauth = manager.codex_logout().await;
             let key = manager.remove_api_key(ProviderId::OpenAi);
             let status = match (oauth, key) {
                 (Ok(()), Ok(())) | (Ok(()), Err(_)) | (Err(_), Ok(())) => {
-                    display_status(manager.status(ProviderId::OpenAi))
+                    display_provider_status(manager.status(ProviderId::OpenAi))
                 }
                 (Err(error), Err(_)) => ProviderStatus::Error(error.to_string()),
             };
@@ -4935,6 +4941,96 @@ async fn run_provider_operation(
         provider,
         status,
         repair,
+    }
+}
+
+#[cfg(test)]
+mod provider_status_tests {
+    use super::display_provider_status;
+    use crate::views::providers_modal::ProviderStatus as DisplayStatus;
+    use xai_grok_shell::agent::providers::{
+        ProviderAuthenticationKind, ProviderAuthenticationStatus, ProviderConnectionState,
+        ProviderId, ProviderStatus,
+    };
+
+    fn status(
+        provider: ProviderId,
+        methods: &[(ProviderAuthenticationKind, ProviderConnectionState)],
+    ) -> ProviderStatus {
+        ProviderStatus {
+            provider,
+            display_name: provider.display_name().to_owned(),
+            state: if methods.is_empty() {
+                ProviderConnectionState::NotConfigured
+            } else {
+                ProviderConnectionState::Connected
+            },
+            credential_source: None,
+            can_test_connection: !methods.is_empty(),
+            authentication: methods
+                .iter()
+                .map(|(kind, state)| ProviderAuthenticationStatus {
+                    kind: *kind,
+                    state: state.clone(),
+                    credential_source: None,
+                })
+                .collect(),
+            presets: Vec::new(),
+        }
+    }
+
+    fn detail(status: DisplayStatus) -> Option<String> {
+        match status {
+            DisplayStatus::Connected { detail } => detail,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn xai_status_only_describes_available_methods() {
+        assert_eq!(
+            detail(display_provider_status(status(
+                ProviderId::Xai,
+                &[(
+                    ProviderAuthenticationKind::OAuth,
+                    ProviderConnectionState::Connected,
+                )],
+            )))
+            .as_deref(),
+            Some("Connected with OAuth")
+        );
+        assert_eq!(
+            detail(display_provider_status(status(
+                ProviderId::Xai,
+                &[(
+                    ProviderAuthenticationKind::ApiKey,
+                    ProviderConnectionState::Configured,
+                )],
+            )))
+            .as_deref(),
+            Some("Connected with API key")
+        );
+    }
+
+    #[test]
+    fn status_describes_both_openai_methods_when_available() {
+        assert_eq!(
+            detail(display_provider_status(status(
+                ProviderId::OpenAi,
+                &[
+                    (
+                        ProviderAuthenticationKind::ChatGpt,
+                        ProviderConnectionState::Connected,
+                    ),
+                    (
+                        ProviderAuthenticationKind::ApiKey,
+                        ProviderConnectionState::Configured,
+                    ),
+                ],
+            )))
+            .as_deref(),
+            Some("ChatGPT OAuth and API key available")
+        );
     }
 }
 

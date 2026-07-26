@@ -432,6 +432,7 @@ pub(crate) async fn spawn_session_actor(
         hard_clear_age_turns: session_pruning_config.hard_clear_age_turns,
     };
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
+    let chat_state_cancellation = tokio_util::sync::CancellationToken::new();
     let chat_state_handle = xai_chat_state::ChatStateActor::spawn_with_pruning(
         conversation.clone(),
         chat_state_inference_settings,
@@ -440,7 +441,7 @@ pub(crate) async fn spawn_session_actor(
             persistence.tx.clone(),
         )),
         chat_state_event_tx,
-        tokio_util::sync::CancellationToken::new(),
+        chat_state_cancellation.clone(),
     );
     if (!initial_prompt_texts.is_empty()
         || initial_total_tokens > 0
@@ -653,9 +654,38 @@ pub(crate) async fn spawn_session_actor(
     } else {
         None
     };
+    let resolved_compaction = models_manager.compaction_config().map_err(|error| {
+        xai_grok_agent::AgentBuildError::InvalidConfig(format!(
+            "invalid [compaction] configuration: {error}"
+        ))
+    })?;
     let compaction_policy = xai_grok_agent::CompactionPolicy {
         auto_compact_threshold_percent: auto_compact_threshold_percent as u32,
-        compact_model: None,
+        compact_models: resolved_compaction
+            .models
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        strategy: match resolved_compaction.strategy {
+            crate::agent::config::CompactionStrategy::Auto => {
+                xai_grok_agent::CompactionStrategy::Auto
+            }
+            crate::agent::config::CompactionStrategy::Rolling => {
+                xai_grok_agent::CompactionStrategy::Rolling
+            }
+            crate::agent::config::CompactionStrategy::FullReplace => {
+                xai_grok_agent::CompactionStrategy::FullReplace
+            }
+        },
+        trigger_policy: match resolved_compaction.trigger_policy {
+            crate::agent::config::CompactionTriggerPolicy::Fixed => {
+                xai_grok_agent::CompactionTriggerPolicy::Fixed
+            }
+            crate::agent::config::CompactionTriggerPolicy::Dynamic => {
+                xai_grok_agent::CompactionTriggerPolicy::Dynamic
+            }
+        },
+        rolling_band_count: resolved_compaction.rolling_band_count,
         memory_flush_enabled: memory_config.as_ref().is_some_and(|mc| mc.flush.enabled),
         wall_clock_budget_secs: crate::util::config::resolve_compaction_wall_clock_budget_secs(
             remote_settings
@@ -1462,6 +1492,7 @@ pub(crate) async fn spawn_session_actor(
             tool_choice: compaction_tool_choice,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: super::memory_state::SessionMemory {
             flush_config: memory_config.as_ref().map_or_else(
@@ -1946,6 +1977,7 @@ pub(crate) async fn spawn_session_actor(
                 session,
                 cmd_rx,
                 chat_state_event_rx,
+                chat_state_cancellation,
                 event_rx,
                 fs_notify_config,
                 codebase_indexes,

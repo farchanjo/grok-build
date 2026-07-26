@@ -8,7 +8,7 @@ use xai_grok_inference_types::{
 use super::ChatStateActor;
 use super::request_builder::HARD_CLEAR_PLACEHOLDER;
 use crate::events::ChatStateEvent;
-use crate::types::ChatStateSnapshot;
+use crate::types::{ChatStateSnapshot, fingerprint_conversation_items};
 
 /// Static string label for tracing on `ConversationItem` (avoids pulling
 /// the `Role` enum into the format string).
@@ -24,6 +24,17 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
 }
 
 impl ChatStateActor {
+    /// Increment the structural epoch counter.
+    ///
+    /// Uses wrapping semantics to prevent overflow panics in long-running
+    /// sessions. The epoch is used for CAS operations to detect stale state —
+    /// wrapping is acceptable because the probability of wraparound in a
+    /// practical session lifetime is astronomically low (u64::MAX operations
+    /// at 1000 ops/sec would take ~584 million years).
+    pub(super) fn bump_structural_epoch(&mut self) {
+        self.state.structural_epoch = self.state.structural_epoch.wrapping_add(1);
+    }
+
     /// Repair any dangling tool calls in the conversation and persist the fix.
     ///
     /// A "dangling" tool call is an assistant message with tool call IDs that
@@ -66,6 +77,7 @@ impl ChatStateActor {
                 "Repaired dangling tool calls in conversation"
             );
             self.persistence.replace_history(&self.state.conversation);
+            self.bump_structural_epoch();
         }
         self.rebase_turn_capture_offset();
     }
@@ -115,12 +127,24 @@ impl ChatStateActor {
         generation: u64,
         authoritative: ConversationItem,
     ) {
-        let existing = self
+        if let Some(index) = self
             .state
             .conversation
-            .iter_mut()
-            .find(|item| item.working_directory_switch_generation() == Some(generation));
-        if let Some(existing) = existing {
+            .iter()
+            .position(|item| item.working_directory_switch_generation() == Some(generation))
+        {
+            let existing = &self.state.conversation[index];
+            let unchanged = match (
+                serde_json::to_vec(existing),
+                serde_json::to_vec(&authoritative),
+            ) {
+                (Ok(existing), Ok(authoritative)) => existing == authoritative,
+                _ => false,
+            };
+            if unchanged {
+                return;
+            }
+
             let old_tokens = super::state::estimate_item_tokens(existing);
             let new_tokens = super::state::estimate_item_tokens(&authoritative);
             self.state.estimated_tokens_since_model = if new_tokens >= old_tokens {
@@ -132,12 +156,13 @@ impl ChatStateActor {
                     .estimated_tokens_since_model
                     .saturating_sub(old_tokens - new_tokens)
             };
-            *existing = authoritative;
+            self.state.conversation[index] = authoritative;
         } else {
             self.state.estimated_tokens_since_model +=
                 super::state::estimate_item_tokens(&authoritative);
             self.state.conversation.push(authoritative);
         }
+        self.bump_structural_epoch();
     }
 
     /// Push any conversation item (user, assistant, or tool result) and persist it.
@@ -156,6 +181,7 @@ impl ChatStateActor {
         }
         self.persistence.persist_message(&item);
         self.state.conversation.push(item);
+        self.bump_structural_epoch();
     }
 
     /// Push a user message, ensuring conversation integrity first.
@@ -190,6 +216,7 @@ impl ChatStateActor {
         );
         self.persistence.persist_message(&item);
         self.state.conversation.push(item);
+        self.bump_structural_epoch();
         self.prune_retained_conversation();
     }
 
@@ -303,6 +330,8 @@ impl ChatStateActor {
                 "ChatState: in-memory tool-result prune"
             );
             self.persistence.replace_history(&self.state.conversation);
+            // Bump epoch for structural change (in-place content modification)
+            self.bump_structural_epoch();
         }
 
         cleared
@@ -429,10 +458,21 @@ impl ChatStateActor {
     /// capped at the pre-compaction total; `base_estimate` when that estimate is
     /// 0) so the reseed neither springs back nor over-counts (see
     /// `COMPACTION.md`).
+    ///
+    /// Increments the structural epoch to invalidate any stale snapshots.
     pub(super) fn replace_conversation(
         &mut self,
         items: Vec<ConversationItem>,
         is_compaction: bool,
+    ) {
+        self.apply_conversation_replacement(items, is_compaction, true);
+    }
+
+    fn apply_conversation_replacement(
+        &mut self,
+        items: Vec<ConversationItem>,
+        is_compaction: bool,
+        persist_history: bool,
     ) {
         self.snapshot_turn_slice();
         if is_compaction && let Some(cap) = &mut self.state.turn_capture {
@@ -442,7 +482,9 @@ impl ChatStateActor {
         // `harness_trace_buffer` / `harness_trace_turns` intentionally untouched:
         // the planner/verifier subagents ran, so their sealed trace turns survive
         // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
-        self.persistence.replace_history(&items);
+        if persist_history {
+            self.persistence.replace_history(&items);
+        }
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let mut estimated_tokens =
             if is_compaction && pre_replace_total > 0 && self.state.estimate_at_last_response > 0 {
@@ -461,6 +503,8 @@ impl ChatStateActor {
         self.state.estimate_at_last_response =
             super::state::estimate_conversation_tokens(&self.state.conversation);
         self.rebase_turn_capture_offset();
+        // Bump epoch for structural change
+        self.bump_structural_epoch();
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.conversation.len(),
         });
@@ -493,6 +537,9 @@ impl ChatStateActor {
     }
 
     /// Restore all state fields from a snapshot.
+    ///
+    /// Increments the structural epoch to invalidate any stale snapshots that
+    /// were taken before this restore.
     pub(super) fn restore_snapshot(&mut self, snap: ChatStateSnapshot) {
         self.snapshot_turn_slice();
         // Harness trace buffers are transient (not part of the snapshot) and
@@ -516,6 +563,8 @@ impl ChatStateActor {
         self.state.credentials = snap.credentials;
         // Drop abandoned prompt billing; session ledger is lifetime.
         self.state.prompt_usage = None;
+        // Bump epoch for structural change (restore replaces the entire conversation)
+        self.bump_structural_epoch();
     }
 
     /// If turn capture is active, append the current turn's tail items into
@@ -559,5 +608,101 @@ impl ChatStateActor {
             );
             &[]
         })
+    }
+
+    /// Atomically apply a rolling-compaction replacement when the source still
+    /// matches the epoch, range, and fingerprint captured by the worker.
+    ///
+    /// Only the selected range is changed. In particular, this path does not run
+    /// whole-history repair or sanitization, because doing so would mutate items
+    /// outside the CAS identity. Atomic-group validation belongs to the rolling
+    /// planner before the job is launched.
+    pub(super) async fn cas_splice_conversation(
+        &mut self,
+        identity: crate::types::CompactSourceIdentity,
+        items: Vec<ConversationItem>,
+        persistence: Option<crate::persistence::CompactionPersistenceMetadata>,
+    ) -> crate::commands::CasSpliceResult {
+        if identity.source_start >= identity.source_end
+            || identity.source_end > self.state.conversation.len()
+        {
+            return crate::commands::CasSpliceResult::InvalidRange;
+        }
+
+        if self.state.structural_epoch != identity.expected_epoch {
+            tracing::debug!(
+                expected_epoch = identity.expected_epoch,
+                current_epoch = self.state.structural_epoch,
+                "CAS splice rejected: epoch mismatch"
+            );
+            return crate::commands::CasSpliceResult::Stale;
+        }
+
+        let source_items = &self.state.conversation[identity.source_start..identity.source_end];
+        let actual_fingerprint = match fingerprint_conversation_items(source_items) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                tracing::error!(?error, "CAS splice rejected: source fingerprint failed");
+                return crate::commands::CasSpliceResult::Stale;
+            }
+        };
+        if actual_fingerprint != identity.source_fingerprint {
+            tracing::debug!(
+                expected_fingerprint = %hex::encode(identity.source_fingerprint),
+                actual_fingerprint = %hex::encode(actual_fingerprint),
+                "CAS splice rejected: fingerprint mismatch"
+            );
+            return crate::commands::CasSpliceResult::Stale;
+        }
+
+        let mut new_conversation = Vec::with_capacity(
+            identity.source_start
+                + items.len()
+                + (self.state.conversation.len() - identity.source_end),
+        );
+        new_conversation.extend_from_slice(&self.state.conversation[..identity.source_start]);
+        new_conversation.extend(items);
+        new_conversation.extend_from_slice(&self.state.conversation[identity.source_end..]);
+
+        if let Some(metadata) = persistence {
+            let request = crate::persistence::CompactionPersistenceRequest {
+                metadata,
+                previous_history: self.state.conversation.clone(),
+                compacted_history: new_conversation.clone(),
+            };
+            match self.persistence.commit_compaction_and_ack(request).await {
+                Ok(Ok(())) => {}
+                Ok(Err(crate::persistence::CompactionPersistenceError::Committed(error))) => {
+                    tracing::warn!(%error, "CAS splice marker committed with a later persistence error");
+                }
+                Ok(Err(crate::persistence::CompactionPersistenceError::Indeterminate(error))) => {
+                    tracing::error!(%error, "CAS splice persistence state is indeterminate");
+                    // Fail-stop before the actor can consume another queued mutation.
+                    // The shell shares this token with its session loop and tears the
+                    // session down while startup recovery reconciles the journal.
+                    self.cancellation_token.cancel();
+                    return crate::commands::CasSpliceResult::PersistenceIndeterminate;
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "CAS splice persistence commit failed");
+                    return crate::commands::CasSpliceResult::PersistenceFailed;
+                }
+                Err(_) => {
+                    tracing::error!("CAS splice persistence acknowledgement dropped");
+                    // Once persistence accepted the transaction, a dropped reply
+                    // cannot prove whether the marker committed. Treat it exactly
+                    // like every other indeterminate outcome.
+                    self.cancellation_token.cancel();
+                    return crate::commands::CasSpliceResult::PersistenceIndeterminate;
+                }
+            }
+            self.apply_conversation_replacement(new_conversation, true, false);
+        } else {
+            // Reuse the established compaction replacement path so token
+            // overhead, turn capture, persistence, epoch updates, and events
+            // stay consistent for legacy/test callers.
+            self.replace_conversation(new_conversation, true);
+        }
+        crate::commands::CasSpliceResult::Applied
     }
 }

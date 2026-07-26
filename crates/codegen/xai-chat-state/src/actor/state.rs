@@ -173,6 +173,9 @@ pub(crate) struct ChatState {
     /// discover harness subagents via their `<subagent_result>` footer.
     /// Drained by `TakeHarnessTraceTurns` at the end of the user-facing turn.
     pub(super) harness_trace_turns: Vec<Vec<ConversationItem>>,
+    /// Epoch counter incremented on each structural change (replace_conversation).
+    /// Used to detect stale snapshots; initialized to 0 on new state.
+    pub structural_epoch: u64,
 }
 
 /// Tracks which conversation items belong to the current turn without
@@ -248,6 +251,7 @@ impl ChatState {
             turn_capture: None,
             harness_trace_buffer: Vec::new(),
             harness_trace_turns: Vec::new(),
+            structural_epoch: 0,
         }
     }
 

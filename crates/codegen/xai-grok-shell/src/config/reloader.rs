@@ -76,6 +76,10 @@ pub enum ConfigUpdate {
         yolo: bool,
         fork_secondary_model: Option<String>,
     },
+    /// Updated compaction configuration — strategy, trigger policy,
+    /// band count, and model routes. Broadcasts to all sessions for
+    /// live policy mutation.
+    Compaction(Box<crate::agent::config::CompactionConfig>),
 }
 
 /// Runs on `tokio::spawn` (`Send`). Receives raw [`ConfigChangeEvent`]s from
@@ -88,6 +92,8 @@ pub struct ConfigReloader {
     /// to diff (the dedup lives in `ModelsManager::reload_from_disk_cache`),
     /// mtime-only touches (see `hash_project_mcp_config`).
     last_project_mcp_hashes: HashMap<PathBuf, u64>,
+    /// Content hash of the `[compaction]` section for dedup.
+    last_compaction_hash: u64,
     grok_home: PathBuf,
     auth_scope: String,
     remote_settings: Option<crate::util::config::RemoteSettings>,
@@ -109,10 +115,13 @@ impl ConfigReloader {
         experimental_memory: bool,
         no_memory: bool,
     ) -> Self {
+        // Compute initial compaction hash from the initial config
+        let initial_compaction_hash = hash_compaction_config(&initial_config);
         Self {
             last_auth_key_hash: initial_auth_key_hash,
             last_global_config: initial_config,
             last_project_mcp_hashes: HashMap::new(),
+            last_compaction_hash: initial_compaction_hash,
             grok_home,
             auth_scope,
             remote_settings,
@@ -410,8 +419,37 @@ impl ConfigReloader {
             });
         }
 
+        self.maybe_reload_compaction(&new_global);
+
         self.last_global_config = new_global;
         Ok(())
+    }
+
+    /// Apply a changed `[compaction]` section only after both deserialization
+    /// and semantic validation succeed. The hash tracks the last accepted
+    /// value, not merely the last observed bytes, preserving last-known-good.
+    fn maybe_reload_compaction(&mut self, config: &toml::Value) {
+        let new_hash = hash_compaction_config(config);
+        if self.last_compaction_hash == new_hash {
+            return;
+        }
+        match parse_compaction_config(config) {
+            Ok(compaction) => {
+                info!("compaction config change detected");
+                let _ = self
+                    .config_update_tx
+                    .send(ConfigUpdate::Compaction(Box::new(compaction)));
+                self.last_compaction_hash = new_hash;
+            }
+            Err(error) => {
+                error!(
+                    %error,
+                    "invalid compaction config, keeping last-known-good"
+                );
+                // Do not update the accepted hash. A corrected write with the
+                // same prior good value must still be reconsidered.
+            }
+        }
     }
 }
 
@@ -536,6 +574,42 @@ fn extract_ui_fields(config: &toml::Value) -> (Option<String>, bool, Option<Stri
         .and_then(|v| v.as_str())
         .map(String::from);
     (theme, yolo, fork)
+}
+
+fn parse_compaction_config(
+    config: &toml::Value,
+) -> anyhow::Result<crate::agent::config::CompactionConfig> {
+    let parsed = match config.get("compaction") {
+        Some(value) => {
+            let parsed: crate::agent::config::CompactionConfig = value
+                .clone()
+                .try_into()
+                .map_err(|error| anyhow::anyhow!("could not deserialize [compaction]: {error}"))?;
+            parsed
+        }
+        None => crate::agent::config::CompactionConfig::default(),
+    };
+    parsed
+        .normalize_validate()
+        .map_err(|error| anyhow::anyhow!("could not validate [compaction]: {error}"))?;
+    Ok(parsed)
+}
+
+/// Hash the `[compaction]` section for change detection.
+/// Uses the table's byte representation for stable hashing.
+fn hash_compaction_config(config: &toml::Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    config
+        .get("compaction")
+        .map(|v| {
+            let bytes = toml::to_string(v).unwrap_or_default();
+            bytes.hash(&mut hasher);
+        })
+        .unwrap_or_else(|| {
+            // No compaction section → hash of empty
+            0u8.hash(&mut hasher);
+        });
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -851,6 +925,83 @@ mod tests {
         assert_ne!(
             h2, h3,
             "ancestor .grok/config.toml create must change the hash"
+        );
+    }
+
+    #[test]
+    fn compaction_reload_dedupes_last_accepted_value() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let initial = toml::Value::Table(toml::map::Map::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_owned(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let rolling: toml::Value = toml::from_str(
+            r#"
+[compaction]
+strategy = "rolling"
+trigger_policy = "dynamic"
+rolling_band_count = 6
+models = ["@session", "custom:summarizer"]
+"#,
+        )
+        .unwrap();
+
+        reloader.maybe_reload_compaction(&rolling);
+        let update = rx.try_recv().expect("changed valid config should dispatch");
+        let ConfigUpdate::Compaction(config) = update else {
+            panic!("expected compaction update");
+        };
+        let resolved = config.normalize_validate().unwrap();
+        assert_eq!(
+            resolved.strategy,
+            crate::agent::config::CompactionStrategy::Rolling
+        );
+        assert_eq!(resolved.rolling_band_count, 6);
+        assert_eq!(resolved.models[1].model_id(), "custom:summarizer");
+
+        reloader.maybe_reload_compaction(&rolling);
+        assert!(
+            rx.try_recv().is_err(),
+            "unchanged accepted config must not dispatch twice"
+        );
+    }
+
+    #[test]
+    fn invalid_compaction_reload_keeps_last_known_good() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let initial: toml::Value = toml::from_str("[compaction]\nstrategy = \"rolling\"").unwrap();
+        let accepted_hash = hash_compaction_config(&initial);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_owned(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let invalid_enum: toml::Value =
+            toml::from_str("[compaction]\nstrategy = \"unknown\"").unwrap();
+        let invalid_band: toml::Value =
+            toml::from_str("[compaction]\nrolling_band_count = 9").unwrap();
+
+        reloader.maybe_reload_compaction(&invalid_enum);
+        reloader.maybe_reload_compaction(&invalid_band);
+
+        assert!(rx.try_recv().is_err(), "invalid config must not dispatch");
+        assert_eq!(
+            reloader.last_compaction_hash, accepted_hash,
+            "invalid observations must not replace the accepted hash"
         );
     }
 

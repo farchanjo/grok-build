@@ -2190,6 +2190,32 @@ fn welcome_esc_drops_in_flight_fetch_response() {
         "in-flight fetch must not repopulate the closed welcome picker"
     );
 }
+/// Build-mode welcome close cannot use the chat search sequence to invalidate
+/// its plain fetch, so the completion handler must still honor the closed
+/// loading/entries state and keep the welcome menu visible.
+#[test]
+fn build_mode_welcome_close_drops_in_flight_plain_fetch() {
+    let mut app = test_app();
+    assert!(!app.chat_mode);
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let seq = app.session_picker_list_seq;
+    app.session_picker_loading = false;
+    let _ = dispatch(Action::SessionPickerClosed, &mut app);
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("build-late-welcome", "/tmp/repo")],
+            partial: None,
+            seq,
+            query: None,
+        }),
+        &mut app,
+    );
+
+    assert!(app.session_picker_entries.is_none());
+    assert!(!app.session_picker_loading);
+}
 /// Build-mode canary: modal close must not bump the list seq — an in-flight
 /// plain fetch keeps its pre-existing land-after-close behavior.
 #[test]

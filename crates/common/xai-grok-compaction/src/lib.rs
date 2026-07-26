@@ -44,6 +44,7 @@ pub mod intra_compaction;
 pub mod item;
 pub mod prompt;
 pub mod reminder;
+pub mod rolling;
 pub mod sampler;
 pub mod select;
 pub mod steps;
@@ -81,3 +82,11 @@ pub use sampler::{CompactionSampleError, CompactionSampler, LlmCompactionOutput}
 pub use select::{SplitPlan, select_turns_to_compact};
 pub use steps::format_compaction_prompt;
 pub use token::ItemTokenCounter;
+
+// Rolling compaction planning types and functions
+pub use rolling::{
+    AtomicGroup, DEFAULT_ROLLING_BAND_COUNT, MAX_ROLLING_BAND_COUNT, MIN_ROLLING_BAND_COUNT,
+    RollingBisect, RollingBudgetError, RollingBudgetInput, RollingBudgetPlan, RollingSourceError,
+    RollingSourcePlan, RollingSubchunk, plan_protected_tail_count, plan_rolling_bisect,
+    plan_rolling_budget, plan_rolling_source, plan_rolling_subchunks,
+};

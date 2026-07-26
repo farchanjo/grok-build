@@ -52,3 +52,4 @@ Automate, script, and integrate Grok Build with other systems.
 | 22 | [Permissions and Safety Controls](22-permissions-and-safety.md) | `dontAsk` mode, auto-approved tools, the safe-bash list, and restrictive PreToolUse hooks (such as git/gh-only) |
 | 23 | [Agent Dashboard](23-dashboard.md) | Central overview of local sessions and forks |
 | 24 | [Monitoring Usage (External OpenTelemetry)](24-monitoring-usage.md) | Customer OTEL export |
+| 25 | [Compaction Settings](25-compaction.md) | Strategy, trigger policy, band count, and model selection for history summarization |

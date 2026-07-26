@@ -1162,6 +1162,46 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "compaction_strategy" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("compaction_strategy", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_compaction_strategy(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "compaction_trigger_policy" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("compaction_trigger_policy", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_compaction_trigger_policy(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "compaction_band_count" => {
+            let SettingValue::Int(count) = value else {
+                return Err(kind_mismatch("compaction_band_count", "Int", &value));
+            };
+            xai_grok_shell::util::config::set_compaction_band_count(count)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "compaction_primary_model" => {
+            let SettingValue::String(model) = value else {
+                return Err(kind_mismatch("compaction_primary_model", "String", &value));
+            };
+            xai_grok_shell::util::config::set_compaction_primary_model(model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "compaction_fallback_model" => {
+            let SettingValue::String(model) = value else {
+                return Err(kind_mismatch("compaction_fallback_model", "String", &value));
+            };
+            xai_grok_shell::util::config::set_compaction_fallback_model(model)
+                .await
+                .map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }

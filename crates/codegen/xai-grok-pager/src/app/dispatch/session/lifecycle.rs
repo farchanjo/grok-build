@@ -9,7 +9,8 @@ use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
 use crate::app::agent_view::{ActivePane, AgentView, McpInitProgress};
 use crate::app::app_view::{ActiveView, AppView, TrustState};
 use crate::app::dispatch::ctx::{
-    SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
+    SwitchCause, get_active_agent, maybe_open_welcome_session_picker, reseed_tip_for_new_session,
+    show_welcome, switch_to_agent,
 };
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::{consume_chat_kind, dispatch_initial_prompt};
@@ -391,6 +392,11 @@ pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<
     app.session_picker_content_results = None;
     app.session_picker_content_loading = false;
     app.exit_session_pending = None;
+    // Returning to the welcome screen should land on the grouped session
+    // picker so it is easy to resume a previous project session. The helper
+    // is a no-op while authentication, trust, or access gates are unresolved.
+    let mut effects = effects;
+    effects.extend(maybe_open_welcome_session_picker(app));
     effects
 }
 /// Handle the user accepting the folder-trust question: persist the grant for
@@ -411,7 +417,12 @@ pub(in crate::app::dispatch) fn finish_trust(app: &mut AppView) -> Vec<Effect> {
     app.trust_state = TrustState::Done;
     app.welcome_prompt_focused = !app.is_access_blocked();
     if app.session_startup_allowed() {
-        drain_startup_actions(app)
+        let mut effects = drain_startup_actions(app);
+        // Trust was the last startup gate. If no deferred intent opened a
+        // session (the welcome view is still active), land on the grouped
+        // session picker so the user can resume a previous session.
+        effects.extend(maybe_open_welcome_session_picker(app));
+        effects
     } else {
         vec![]
     }

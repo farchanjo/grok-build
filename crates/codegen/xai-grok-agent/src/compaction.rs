@@ -1,4 +1,27 @@
-//! Compaction policy — threshold, model, and memory flush configuration.
+//! Compaction policy — threshold, routing, strategy, and memory flush configuration.
+
+/// Runtime compaction strategy selected by shell configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompactionStrategy {
+    /// Prefer rolling compaction when its prerequisites are available, otherwise
+    /// retain the compatible full-replace path.
+    #[default]
+    Auto,
+    /// Compact the oldest logical band and preserve the recent raw tail.
+    Rolling,
+    /// Replace the full mutable history with one summary.
+    FullReplace,
+}
+
+/// Policy used to decide when automatic compaction should start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompactionTriggerPolicy {
+    /// Preserve the existing percentage threshold behavior.
+    #[default]
+    Fixed,
+    /// Account for output, safety, prefix, and compactor capacity reserves.
+    Dynamic,
+}
 
 /// Session-level compaction policy.
 ///
@@ -11,9 +34,19 @@ pub struct CompactionPolicy {
     /// E.g., 85 means compact when 85% of the context window is used.
     pub auto_compact_threshold_percent: u32,
 
-    /// Model to use for generating the compaction summary.
-    /// None = use the session's current model.
-    pub compact_model: Option<String>,
+    /// Ordered compaction routes. `@session` uses the active session model;
+    /// otherwise the value is a stable catalog model ID. At most two routes
+    /// are admitted by shell configuration validation.
+    pub compact_models: Vec<String>,
+
+    /// Automatic compaction strategy.
+    pub strategy: CompactionStrategy,
+
+    /// Automatic compaction trigger policy.
+    pub trigger_policy: CompactionTriggerPolicy,
+
+    /// Number of logical bands used by rolling compaction.
+    pub rolling_band_count: usize,
 
     /// Whether to run a memory flush turn before each compaction.
     /// When enabled, the session actor asks the model to summarize
@@ -37,7 +70,10 @@ impl Default for CompactionPolicy {
     fn default() -> Self {
         Self {
             auto_compact_threshold_percent: 85,
-            compact_model: None,
+            compact_models: vec!["@session".to_owned()],
+            strategy: CompactionStrategy::Auto,
+            trigger_policy: CompactionTriggerPolicy::Fixed,
+            rolling_band_count: 4,
             memory_flush_enabled: false,
             wall_clock_budget_secs: 300,
             two_pass_enabled: false,

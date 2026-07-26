@@ -977,11 +977,204 @@ pub struct FeedbackUserConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Compaction model reference: either `@session` or a non-blank catalog model ID.
+/// Whitespace is trimmed; blank values are rejected.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CompactionModelRef(String);
+
+impl Serialize for CompactionModelRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactionModelRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::new(s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl CompactionModelRef {
+    /// Creates a new model reference from a string.
+    /// Trims outer whitespace and rejects blank values.
+    pub fn new(s: String) -> Result<Self, CompactionConfigError> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            Err(CompactionConfigError::BlankModelRef)
+        } else {
+            Ok(Self(trimmed.to_owned()))
+        }
+    }
+
+    /// Returns true if this references the session model (`@session`).
+    pub fn is_session(&self) -> bool {
+        self.0 == "@session"
+    }
+
+    /// Returns the model ID string (for non-`@session` references).
+    pub fn model_id(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<CompactionModelRef> for String {
+    fn from(val: CompactionModelRef) -> Self {
+        val.0
+    }
+}
+
+impl TryFrom<String> for CompactionModelRef {
+    type Error = CompactionConfigError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl std::fmt::Display for CompactionModelRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Compaction strategy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStrategy {
+    /// Automatic strategy selection (default).
+    #[default]
+    Auto,
+    /// Rolling compaction into bands.
+    Rolling,
+    /// Full replacement compaction.
+    FullReplace,
+}
+
+/// Compaction trigger policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTriggerPolicy {
+    /// Fixed threshold trigger (default).
+    #[default]
+    Fixed,
+    /// Dynamic threshold trigger.
+    Dynamic,
+}
+
+/// Error type for compaction configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompactionConfigError {
+    /// Blank (whitespace-only or empty) model reference after trimming.
+    BlankModelRef,
+    /// Too many models (> 2).
+    TooManyModels,
+    /// Duplicate model reference detected.
+    DuplicateModel,
+    /// Invalid band count (not in 3..=8).
+    InvalidBand(usize),
+}
+
+impl std::fmt::Display for CompactionConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BlankModelRef => write!(f, "compaction model reference cannot be blank"),
+            Self::TooManyModels => write!(f, "compaction models cannot exceed 2"),
+            Self::DuplicateModel => write!(f, "compaction models cannot contain duplicates"),
+            Self::InvalidBand(n) => write!(f, "compaction band must be between 3 and 8, got {n}"),
+        }
+    }
+}
+
+impl std::error::Error for CompactionConfigError {}
+
+/// Configuration for compaction.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompactionConfig {
     pub memory_flush: Option<crate::config::MemoryFlushConfig>,
     pub pruning: Option<crate::config::PruningConfig>,
+    /// Ordered list of compaction model references (max 2).
+    /// `@session` uses the session model; otherwise a non-blank catalog model ID.
+    /// Empty/absent resolves to one `@session` model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<CompactionModelRef>,
+    /// Optional compaction strategy. Default: `Auto`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<CompactionStrategy>,
+    /// Optional compaction trigger policy. Default: `Fixed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_policy: Option<CompactionTriggerPolicy>,
+    /// For `rolling` strategy: number of bands for rolling compaction.
+    /// Default: 4. Validated range: 3..=8.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolling_band_count: Option<usize>,
+}
+
+impl CompactionConfig {
+    /// Normalizes and validates the compaction configuration.
+    ///
+    /// Returns a resolved config with defaults applied:
+    /// - empty/absent models => one `@session`
+    /// - max two models
+    /// - duplicate models rejected
+    /// - default band 4, validated 3..=8
+    pub fn normalize_validate(&self) -> Result<ResolvedCompactionConfig, CompactionConfigError> {
+        // Validate models: max 2, no duplicates
+        if self.models.len() > 2 {
+            return Err(CompactionConfigError::TooManyModels);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for model in &self.models {
+            if !seen.insert(model.clone()) {
+                return Err(CompactionConfigError::DuplicateModel);
+            }
+        }
+
+        // Resolve models: empty/absent defaults to @session
+        let models = if self.models.is_empty() {
+            vec![CompactionModelRef("@session".to_owned())]
+        } else {
+            self.models.clone()
+        };
+
+        let strategy = self.strategy.unwrap_or(CompactionStrategy::Auto);
+        let trigger_policy = self
+            .trigger_policy
+            .unwrap_or(CompactionTriggerPolicy::Fixed);
+
+        // Validate rolling_band_count directly: 3..=8, default 4
+        let rolling_band_count = self.rolling_band_count.unwrap_or(4);
+        if !(3..=8).contains(&rolling_band_count) {
+            return Err(CompactionConfigError::InvalidBand(rolling_band_count));
+        }
+
+        Ok(ResolvedCompactionConfig {
+            models,
+            strategy,
+            trigger_policy,
+            rolling_band_count,
+        })
+    }
+}
+
+/// Resolved compaction configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedCompactionConfig {
+    /// Ordered list of compaction model references.
+    pub models: Vec<CompactionModelRef>,
+    /// The compaction strategy.
+    pub strategy: CompactionStrategy,
+    /// The trigger policy.
+    pub trigger_policy: CompactionTriggerPolicy,
+    /// Rolling band count (validated 3..=8).
+    pub rolling_band_count: usize,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -4403,7 +4596,7 @@ impl ModelEntry {
     }
 
     /// `true` when the entry is governed by a provider-scoped credential
-    /// (OpenRouter API key, official OpenAI API key, or ChatGPT OAuth), even
+    /// (configured providers, OpenRouter, OpenAI API key, or ChatGPT OAuth), even
     /// when the key lives in the provider vault rather than inline on the
     /// model entry.
     ///
@@ -4413,12 +4606,9 @@ impl ModelEntry {
     /// (refresh only its own credential via `auth_provider`); it is still
     /// `Byok` from the session-token gate's perspective.
     pub fn is_provider_scoped_byok(&self) -> bool {
-        self.model_provider.as_ref().is_some_and(|provider| {
-            matches!(
-                provider.kind,
-                ModelProviderKind::OpenAi | ModelProviderKind::OpenRouter
-            )
-        })
+        self.model_provider
+            .as_ref()
+            .is_some_and(|provider| provider.kind != ModelProviderKind::Xai || provider.id != "xai")
     }
 }
 impl std::ops::Deref for ModelEntry {
@@ -4808,11 +4998,9 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
-    } else if let Some(creds) = model
-        .model_provider
-        .as_ref()
-        .and_then(|provider| crate::agent::providers::stored_openai_credentials(provider.kind))
-    {
+    } else if let Some(creds) = model.model_provider.as_ref().and_then(|provider| {
+        crate::agent::providers::stored_openai_credentials(provider, &info.base_url)
+    }) {
         // Deliberately re-read the provider-scoped vault for every turn. This
         // makes a key/oauth token saved by the TUI effective without retaining
         // secrets in the model catalog. OAuth uses the ChatGPT Codex Responses
@@ -4825,7 +5013,7 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
     } else if let Some(key) = model
         .model_provider
         .as_ref()
-        .and_then(|provider| crate::agent::providers::stored_api_key(provider.kind))
+        .and_then(crate::agent::providers::stored_api_key)
     {
         // Deliberately re-read the provider-scoped vault for every turn. This
         // makes a key saved/removed by the separate TUI process effective in
@@ -4843,16 +5031,14 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
-    } else if model.model_provider.as_ref().is_some_and(|provider| {
-        matches!(
-            provider.kind,
-            crate::agent::model_providers::ModelProviderKind::OpenAi
-                | crate::agent::model_providers::ModelProviderKind::OpenRouter
-        )
-    }) {
-        // Named OpenAI/OpenRouter models are always BYOK. If no scoped API
-        // credential exists, fail closed rather than borrowing the xAI session
-        // or XAI_API_KEY for a third-party endpoint.
+    } else if model
+        .model_provider
+        .as_ref()
+        .is_some_and(|provider| provider.kind != ModelProviderKind::Xai || provider.id != "xai")
+    {
+        // Every named third-party provider is BYOK. If no scoped credential
+        // exists, fail closed rather than borrowing the xAI session or
+        // XAI_API_KEY for that endpoint.
         (
             None,
             info.base_url.clone(),
@@ -5013,8 +5199,8 @@ pub fn resolve_model_auth_facts_and_provider(
 fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
     match lookup {
         ModelLookup::ConfigUnavailable => ModelByok::Unknown,
-        // Inline keys, named auth providers, and OpenRouter/OpenAI vault
-        // routes are all non-session credentials — never xAI token refresh.
+        // Inline keys, named auth providers, and provider-vault routes are all
+        // non-session credentials — never xAI token refresh.
         ModelLookup::Loaded(Some(e)) if e.has_own_credentials() || e.is_provider_scoped_byok() => {
             ModelByok::Byok
         }
@@ -5540,6 +5726,32 @@ pub fn to_acp_model_info(
                 map.insert(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
+                );
+                let provider_identity = model.model_provider.as_ref().map_or_else(
+                    || {
+                        if model
+                            .api_base_url
+                            .as_deref()
+                            .is_some_and(crate::util::is_xai_api_url)
+                        {
+                            "xai"
+                        } else {
+                            "custom"
+                        }
+                    },
+                    |provider| match provider.kind {
+                        crate::agent::model_providers::ModelProviderKind::OpenRouter => {
+                            "openrouter"
+                        }
+                        crate::agent::model_providers::ModelProviderKind::OpenAi => "openai",
+                        crate::agent::model_providers::ModelProviderKind::Xai => "xai",
+                        crate::agent::model_providers::ModelProviderKind::OpenAiCompatible
+                        | crate::agent::model_providers::ModelProviderKind::Zai => "custom",
+                    },
+                );
+                map.insert(
+                    "providerIdentity".to_string(),
+                    serde_json::Value::String(provider_identity.to_string()),
                 );
                 if info.supports_reasoning_effort_ui() {
                     map.insert(
@@ -7261,7 +7473,7 @@ reasoning_effort = "low"
             byok_from_lookup(&ModelLookup::Loaded(Some(&openai))),
             ModelByok::Byok,
         );
-        // Custom provider without credentials is NotByok.
+        // Custom provider credentials are provider-scoped even when absent.
         let mut custom = test_model_entry("local", "http://127.0.0.1:8000/v1", None, None, None);
         custom.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
             id: "local".to_string(),
@@ -7272,10 +7484,10 @@ reasoning_effort = "low"
             openrouter_pacing: false,
             command: Vec::new(),
         });
-        assert!(!custom.is_provider_scoped_byok());
+        assert!(custom.is_provider_scoped_byok());
         assert_eq!(
             byok_from_lookup(&ModelLookup::Loaded(Some(&custom))),
-            ModelByok::NotByok,
+            ModelByok::Byok,
         );
     }
 
@@ -7349,8 +7561,8 @@ reasoning_effort = "low"
             ModelByok::Byok
         );
 
-        // Custom provider without credentials: NotByok (may share session if
-        // first-party host; otherwise host-based gates apply elsewhere).
+        // Custom providers are always provider-scoped BYOK. A missing key
+        // fails closed instead of sharing an xAI session credential.
         let mut custom = test_model_entry("local", "http://127.0.0.1:8000/v1", None, None, None);
         custom.model_provider = Some(crate::agent::model_providers::ResolvedModelProvider {
             id: "local".into(),
@@ -7361,10 +7573,10 @@ reasoning_effort = "low"
             openrouter_pacing: false,
             command: Vec::new(),
         });
-        assert!(!custom.is_provider_scoped_byok());
+        assert!(custom.is_provider_scoped_byok());
         assert_eq!(
             byok_from_lookup(&ModelLookup::Loaded(Some(&custom))),
-            ModelByok::NotByok
+            ModelByok::Byok
         );
 
         // Missing catalog entry → NotByok; config unavailable → Unknown.
@@ -12907,5 +13119,330 @@ default = "grok-4.5"
         let r = resolve_mcp_recursive_config_watch(None, None, None, None, Some(false));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // CompactionConfig tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    // --- CompactionModelRef tests ---
+
+    #[test]
+    fn compaction_model_ref_is_session_when_at_symbol() {
+        let r: CompactionModelRef = "@session".to_string().try_into().unwrap();
+        assert!(r.is_session());
+        assert_eq!(r.model_id(), "@session");
+    }
+
+    #[test]
+    fn compaction_model_ref_is_not_session_for_catalog_id() {
+        let r: CompactionModelRef = "openrouter:poolside/laguna-xs-2.1"
+            .to_string()
+            .try_into()
+            .unwrap();
+        assert!(!r.is_session());
+        assert_eq!(r.model_id(), "openrouter:poolside/laguna-xs-2.1");
+    }
+
+    #[test]
+    fn compaction_model_ref_rejects_blank_after_trim() {
+        let result: Result<CompactionModelRef, _> = "   ".to_string().try_into();
+        assert!(matches!(result, Err(CompactionConfigError::BlankModelRef)));
+    }
+
+    #[test]
+    fn compaction_model_ref_trims_whitespace() {
+        let r: CompactionModelRef = "  @session  ".to_string().try_into().unwrap();
+        assert!(r.is_session());
+        assert_eq!(r.model_id(), "@session");
+    }
+
+    #[test]
+    fn compaction_model_ref_rejects_empty_string() {
+        let result: Result<CompactionModelRef, _> = "".to_string().try_into();
+        assert!(matches!(result, Err(CompactionConfigError::BlankModelRef)));
+    }
+
+    // --- CompactionConfig::normalize_validate tests ---
+
+    #[test]
+    fn normalize_validate_absent_models_returns_session() {
+        let cfg = CompactionConfig::default();
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.models.len(), 1);
+        assert!(resolved.models[0].is_session());
+    }
+
+    #[test]
+    fn normalize_validate_empty_models_returns_session() {
+        let cfg = CompactionConfig {
+            models: vec![],
+            ..Default::default()
+        };
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.models.len(), 1);
+        assert!(resolved.models[0].is_session());
+    }
+
+    #[test]
+    fn normalize_validate_single_model() {
+        let cfg = CompactionConfig {
+            models: vec![
+                CompactionModelRef::new("openrouter:poolside/laguna-xs-2.1".to_string()).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.models.len(), 1);
+        assert_eq!(
+            resolved.models[0].model_id(),
+            "openrouter:poolside/laguna-xs-2.1"
+        );
+    }
+
+    #[test]
+    fn normalize_validate_max_two_models() {
+        let cfg = CompactionConfig {
+            models: vec![
+                CompactionModelRef::new("@session".to_string()).unwrap(),
+                CompactionModelRef::new("openrouter:poolside/laguna-xs-2.1".to_string()).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.models.len(), 2);
+        assert!(resolved.models[0].is_session());
+        assert_eq!(
+            resolved.models[1].model_id(),
+            "openrouter:poolside/laguna-xs-2.1"
+        );
+    }
+
+    #[test]
+    fn normalize_validate_rejects_duplicate_models() {
+        let cfg = CompactionConfig {
+            models: vec![
+                CompactionModelRef::new("@session".to_string()).unwrap(),
+                CompactionModelRef::new("@session".to_string()).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let result = cfg.normalize_validate();
+        assert!(matches!(result, Err(CompactionConfigError::DuplicateModel)));
+    }
+
+    #[test]
+    fn normalize_validate_rejects_too_many_models() {
+        let cfg = CompactionConfig {
+            models: vec![
+                CompactionModelRef::new("@session".to_string()).unwrap(),
+                CompactionModelRef::new("model-1".to_string()).unwrap(),
+                CompactionModelRef::new("model-2".to_string()).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let result = cfg.normalize_validate();
+        assert!(matches!(result, Err(CompactionConfigError::TooManyModels)));
+    }
+
+    // --- rolling_band_count validation tests ---
+
+    #[test]
+    fn normalize_validate_default_band_is_4() {
+        let cfg = CompactionConfig::default();
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.rolling_band_count, 4);
+    }
+
+    #[test]
+    fn normalize_validate_accepts_band_3_to_8() {
+        for band in 3..=8 {
+            let cfg = CompactionConfig {
+                rolling_band_count: Some(band),
+                ..Default::default()
+            };
+            let resolved = cfg.normalize_validate().unwrap();
+            assert_eq!(resolved.rolling_band_count, band);
+        }
+    }
+
+    #[test]
+    fn normalize_validate_rejects_invalid_band() {
+        let cfg = CompactionConfig {
+            rolling_band_count: Some(2),
+            ..Default::default()
+        };
+        let result = cfg.normalize_validate();
+        assert!(matches!(result, Err(CompactionConfigError::InvalidBand(2))));
+
+        let cfg = CompactionConfig {
+            rolling_band_count: Some(9),
+            ..Default::default()
+        };
+        let result = cfg.normalize_validate();
+        assert!(matches!(result, Err(CompactionConfigError::InvalidBand(9))));
+    }
+
+    // --- Strategy and trigger policy tests ---
+
+    #[test]
+    fn compaction_strategy_defaults_to_auto() {
+        let cfg = CompactionConfig::default();
+        assert_eq!(cfg.strategy, None);
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.strategy, CompactionStrategy::Auto);
+    }
+
+    #[test]
+    fn compaction_strategy_serde_round_trip() {
+        for (strategy, json) in [
+            (CompactionStrategy::Auto, r#""auto""#),
+            (CompactionStrategy::Rolling, r#""rolling""#),
+            (CompactionStrategy::FullReplace, r#""full_replace""#),
+        ] {
+            let serialized = serde_json::to_string(&strategy).unwrap();
+            assert_eq!(serialized, json);
+            let deserialized: CompactionStrategy = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, strategy);
+        }
+    }
+
+    #[test]
+    fn compaction_trigger_policy_defaults_to_fixed() {
+        let cfg = CompactionConfig::default();
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.trigger_policy, CompactionTriggerPolicy::Fixed);
+    }
+
+    #[test]
+    fn compaction_trigger_policy_serde_round_trip() {
+        for (policy, json) in [
+            (CompactionTriggerPolicy::Fixed, r#""fixed""#),
+            (CompactionTriggerPolicy::Dynamic, r#""dynamic""#),
+        ] {
+            let serialized = serde_json::to_string(&policy).unwrap();
+            assert_eq!(serialized, json);
+            let deserialized: CompactionTriggerPolicy = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, policy);
+        }
+    }
+
+    // --- CompactionConfig field tests ---
+
+    #[test]
+    fn compaction_config_default_values() {
+        let cfg = CompactionConfig::default();
+        assert!(cfg.memory_flush.is_none());
+        assert!(cfg.pruning.is_none());
+        assert!(cfg.models.is_empty());
+        assert!(cfg.strategy.is_none());
+        assert!(cfg.trigger_policy.is_none());
+        assert!(cfg.rolling_band_count.is_none());
+    }
+
+    #[test]
+    fn compaction_config_with_optional_fields() {
+        let cfg = CompactionConfig {
+            models: vec![CompactionModelRef::new("grok-4.5".to_string()).unwrap()],
+            strategy: Some(CompactionStrategy::Rolling),
+            trigger_policy: Some(CompactionTriggerPolicy::Dynamic),
+            rolling_band_count: Some(8),
+            ..Default::default()
+        };
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.models.len(), 1);
+        assert_eq!(resolved.models[0].model_id(), "grok-4.5");
+        assert_eq!(resolved.strategy, CompactionStrategy::Rolling);
+        assert_eq!(resolved.trigger_policy, CompactionTriggerPolicy::Dynamic);
+        assert_eq!(resolved.rolling_band_count, 8);
+    }
+
+    // --- Error type tests ---
+
+    #[test]
+    fn compaction_config_error_display() {
+        assert_eq!(
+            format!("{}", CompactionConfigError::BlankModelRef),
+            "compaction model reference cannot be blank"
+        );
+        assert_eq!(
+            format!("{}", CompactionConfigError::TooManyModels),
+            "compaction models cannot exceed 2"
+        );
+        assert_eq!(
+            format!("{}", CompactionConfigError::DuplicateModel),
+            "compaction models cannot contain duplicates"
+        );
+        assert_eq!(
+            format!("{}", CompactionConfigError::InvalidBand(5)),
+            "compaction band must be between 3 and 8, got 5"
+        );
+    }
+
+    #[test]
+    fn compaction_config_error_is_error() {
+        let err: Box<dyn std::error::Error> = Box::new(CompactionConfigError::BlankModelRef);
+        assert!(err.to_string().contains("blank"));
+    }
+
+    // --- ResolvedCompactionConfig tests ---
+
+    #[test]
+    fn resolved_compaction_config_eq() {
+        let resolved1 = ResolvedCompactionConfig {
+            models: vec![CompactionModelRef::new("@session".to_string()).unwrap()],
+            strategy: CompactionStrategy::Auto,
+            trigger_policy: CompactionTriggerPolicy::Fixed,
+            rolling_band_count: 4,
+        };
+        let resolved2 = ResolvedCompactionConfig {
+            models: vec![CompactionModelRef::new("@session".to_string()).unwrap()],
+            strategy: CompactionStrategy::Auto,
+            trigger_policy: CompactionTriggerPolicy::Fixed,
+            rolling_band_count: 4,
+        };
+        assert_eq!(resolved1, resolved2);
+    }
+
+    // --- TOML deserialization tests ---
+
+    #[test]
+    fn compaction_models_from_toml() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [compaction]
+            models = ["@session", "openrouter:poolside/laguna-xs-2.1"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert_eq!(cfg.compaction.models.len(), 2);
+        assert!(cfg.compaction.models[0].is_session());
+        assert_eq!(
+            cfg.compaction.models[1].model_id(),
+            "openrouter:poolside/laguna-xs-2.1"
+        );
+    }
+
+    #[test]
+    fn compaction_models_serde_round_trip() {
+        let cfg = CompactionConfig {
+            models: vec![
+                CompactionModelRef::new("@session".to_string()).unwrap(),
+                CompactionModelRef::new("grok-4.5".to_string()).unwrap(),
+            ],
+            strategy: Some(CompactionStrategy::Rolling),
+            trigger_policy: Some(CompactionTriggerPolicy::Dynamic),
+            rolling_band_count: Some(6),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        let back: CompactionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.models.len(), 2);
+        assert!(back.models[0].is_session());
+        assert_eq!(back.models[1].model_id(), "grok-4.5");
+        assert_eq!(back.strategy, Some(CompactionStrategy::Rolling));
+        assert_eq!(back.trigger_policy, Some(CompactionTriggerPolicy::Dynamic));
+        assert_eq!(back.rolling_band_count, Some(6));
     }
 }

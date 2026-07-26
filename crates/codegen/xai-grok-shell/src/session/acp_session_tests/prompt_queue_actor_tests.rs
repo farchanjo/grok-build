@@ -1783,6 +1783,49 @@ async fn stale_completion_does_not_clear_promoted_turns_running_task() {
 }
 
 #[tokio::test]
+async fn rolling_compaction_pauses_and_then_resumes_prompt_promotion() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("p1", "alice"));
+            }
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            actor
+                .compaction
+                .rolling_in_flight
+                .store(true, std::sync::atomic::Ordering::Release);
+            actor
+                .clone()
+                .maybe_start_running_task(completion_tx.clone())
+                .await;
+            {
+                let state = actor.state.lock().await;
+                assert!(state.running_task.is_none());
+                assert_eq!(state.pending_inputs.len(), 1);
+            }
+            assert!(actor.current_prompt_id.lock().unwrap().is_none());
+
+            actor
+                .compaction
+                .rolling_in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
+            actor.clone().maybe_start_running_task(completion_tx).await;
+            let state = actor.state.lock().await;
+            assert!(state.running_task.is_some());
+            assert_eq!(state.pending_inputs.front().unwrap().prompt_id, "p1");
+            assert_eq!(
+                actor.current_prompt_id.lock().unwrap().as_deref(),
+                Some("p1")
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn tool_overrides_update_applies_at_promotion_never_at_enqueue() {
     let local = tokio::task::LocalSet::new();
     local

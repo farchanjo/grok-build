@@ -73,10 +73,12 @@ use super::session::load::{
 };
 use super::session::modal::dispatch_rename_session;
 use super::settings::setters::{
-    clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
-    preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
-    set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_collapsed_edit_blocks,
-    set_combine_queued_prompts, set_compact_mode, set_contextual_hint_image_input,
+    clear_compaction_fallback_model, clear_compaction_primary_model, clear_default_model,
+    clear_fork_secondary_model, preview_auto_dark_theme, preview_auto_light_theme, preview_theme,
+    set_ask_user_question_timeout_enabled, set_auto_dark_theme, set_auto_light_theme,
+    set_auto_update, set_collapsed_edit_blocks, set_combine_queued_prompts, set_compact_mode,
+    set_compaction_band_count, set_compaction_fallback_model, set_compaction_primary_model,
+    set_compaction_strategy, set_compaction_trigger_policy, set_contextual_hint_image_input,
     set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
     set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
     set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
@@ -1004,6 +1006,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetForkSecondaryModel(v) => set_fork_secondary_model(app, v),
         Action::ClearForkSecondaryModel => clear_fork_secondary_model(app),
         Action::SetMaxThoughtsWidth(v) => set_max_thoughts_width(app, v),
+        // Compaction settings actions.
+        Action::SetCompactionStrategy(v) => set_compaction_strategy(app, v),
+        Action::SetCompactionTriggerPolicy(v) => set_compaction_trigger_policy(app, v),
+        Action::SetCompactionBandCount(v) => set_compaction_band_count(app, v),
+        Action::SetCompactionPrimaryModel(v) => set_compaction_primary_model(app, v),
+        Action::ClearCompactionPrimaryModel => clear_compaction_primary_model(app),
+        Action::SetCompactionFallbackModel(v) => set_compaction_fallback_model(app, v),
+        Action::ClearCompactionFallbackModel => clear_compaction_fallback_model(app),
         Action::SetShowTips(v) => set_show_tips(app, v),
         Action::SetAutoUpdate(v) => set_auto_update(app, v),
         Action::SetDisplayRefreshAutoCadence(v) => set_display_refresh_auto_cadence(app, v),

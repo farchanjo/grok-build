@@ -1677,6 +1677,27 @@ pub async fn run_leader(
                             });
                             let _ = ipc_tx_for_config.send(notification.to_string());
                         }
+                        ConfigUpdate::Compaction(compaction) => {
+                            info!("Compaction config change detected — updating active sessions");
+                            let line = internal_reload_request_line(
+                                "config-reload-compaction",
+                                "x.ai/internal/reload_compaction",
+                                serde_json::to_value(&*compaction).unwrap_or_default(),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(error) = tx.write_all(line.as_bytes()).await {
+                                warn!(%error, "failed to inject compaction reload into ACP stream");
+                            }
+                            let notification = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "x.ai/config_changed",
+                                "params": {
+                                    "section": "compaction",
+                                    "changes": serde_json::to_value(&*compaction).unwrap_or_default(),
+                                }
+                            });
+                            let _ = ipc_tx_for_config.send(notification.to_string());
+                        }
                     }
                 }
             });

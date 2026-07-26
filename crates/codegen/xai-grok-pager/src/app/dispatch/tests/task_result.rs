@@ -2075,6 +2075,30 @@ fn verify_check_with_meta_resolves_pending_gate() {
     assert!(app.pending_gate_verification.is_none());
 }
 
+#[test]
+fn restored_access_opens_welcome_session_picker() {
+    let mut app = test_app();
+    app.gate = Some(test_gate());
+    assert!(!app.has_access());
+
+    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
+    let effects = dispatch_task_result(
+        TaskResult::CheckSubscriptionComplete {
+            verify: None,
+            meta: Some(meta),
+        },
+        &mut app,
+    );
+
+    assert!(app.has_access());
+    assert!(app.session_picker_loading);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSessionList { .. }))
+    );
+}
+
 /// The live check confirmed the block (meta WITH a gate): the paywall
 /// shows with the authoritative gate.
 #[test]

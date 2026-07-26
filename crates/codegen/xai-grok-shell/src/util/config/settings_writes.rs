@@ -1,4 +1,4 @@
-use super::persist::update_config;
+use super::persist::{update_config, update_config_checked};
 use anyhow::Result;
 
 // ---------------------------------------------------------------------------
@@ -301,4 +301,91 @@ pub async fn set_show_tips(value: bool) -> Result<()> {
 /// Restart-required: auto-update check fires once on startup.
 pub async fn set_auto_update(value: bool) -> Result<()> {
     update_config(|cfg| cfg.cli.auto_update = Some(value)).await
+}
+
+/// Persist `[compaction].strategy` after validating its canonical value.
+pub async fn set_compaction_strategy(value: String) -> Result<()> {
+    let strategy = match value.as_str() {
+        "auto" => crate::agent::config::CompactionStrategy::Auto,
+        "rolling" => crate::agent::config::CompactionStrategy::Rolling,
+        "full_replace" => crate::agent::config::CompactionStrategy::FullReplace,
+        _ => anyhow::bail!("invalid compaction strategy `{value}`"),
+    };
+    update_config_checked(|cfg| {
+        cfg.compaction.strategy = Some(strategy);
+        cfg.compaction.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist `[compaction].trigger_policy` after validating its canonical value.
+pub async fn set_compaction_trigger_policy(value: String) -> Result<()> {
+    let trigger = match value.as_str() {
+        "fixed" => crate::agent::config::CompactionTriggerPolicy::Fixed,
+        "dynamic" => crate::agent::config::CompactionTriggerPolicy::Dynamic,
+        _ => anyhow::bail!("invalid compaction trigger policy `{value}`"),
+    };
+    update_config_checked(|cfg| {
+        cfg.compaction.trigger_policy = Some(trigger);
+        cfg.compaction.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist `[compaction].rolling_band_count`; valid values are 3 through 8.
+pub async fn set_compaction_band_count(value: i64) -> Result<()> {
+    let count =
+        usize::try_from(value).map_err(|_| anyhow::anyhow!("invalid band count {value}"))?;
+    if !(3..=8).contains(&count) {
+        anyhow::bail!("compaction band count must be between 3 and 8, got {value}");
+    }
+    update_config_checked(|cfg| {
+        cfg.compaction.rolling_band_count = Some(count);
+        cfg.compaction.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+async fn set_compaction_model_at(index: usize, value: String) -> Result<()> {
+    let model = if value.is_empty() {
+        None
+    } else {
+        Some(crate::agent::config::CompactionModelRef::new(value)?)
+    };
+    update_config_checked(move |cfg| {
+        let mut models = cfg.compaction.normalize_validate()?.models;
+        if index == 0 {
+            models[0] = model.unwrap_or_else(|| {
+                crate::agent::config::CompactionModelRef::new("@session".to_owned())
+                    .expect("@session is valid")
+            });
+        } else if let Some(model) = model {
+            if models.len() == 1 {
+                models.push(model);
+            } else {
+                models[1] = model;
+            }
+        } else {
+            models.truncate(1);
+        }
+        let mut candidate = cfg.compaction.clone();
+        candidate.models = models;
+        candidate.normalize_validate()?;
+        cfg.compaction = candidate;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist the primary compaction route. Empty restores `@session`.
+pub async fn set_compaction_primary_model(value: String) -> Result<()> {
+    set_compaction_model_at(0, value).await
+}
+
+/// Persist or clear the optional fallback compaction route.
+pub async fn set_compaction_fallback_model(value: String) -> Result<()> {
+    set_compaction_model_at(1, value).await
 }

@@ -598,6 +598,7 @@ pub(super) fn dispatch_send_prompt_inner(
                     auto_mode_gate: auto_mode_gate_from_app,
                     ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                     voice_stt_language: voice_stt_language_from_app,
+                    ..Default::default()
                 },
             };
 
@@ -1677,7 +1678,7 @@ pub(super) fn handle_compact_complete(
                 tracing::error!(agent = ?agent_id, error = %err, "Compaction failed");
                 agent.scrollback.push_block(RenderBlock::session_event(
                     SessionEvent::CompactionFailed {
-                        error: String::new(),
+                        error: crate::scrollback::blocks::user_facing_error_detail(err),
                     },
                 ));
             }

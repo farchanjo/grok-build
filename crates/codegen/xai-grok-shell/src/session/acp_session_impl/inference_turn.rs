@@ -120,19 +120,7 @@ where
 /// `chatgpt.com.evil`). Used to scope ChatGPT OAuth pre-turn refresh to the
 /// active model route.
 pub(crate) fn is_chatgpt_codex_base_url(base_url: &str) -> bool {
-    use crate::extensions::notification::host_from_base_url;
-    let Some(host) = host_from_base_url(base_url) else {
-        return false;
-    };
-    if host != "chatgpt.com" && host != "www.chatgpt.com" {
-        return false;
-    }
-    // Path must include the Codex backend segment.
-    let path = url::Url::parse(base_url)
-        .ok()
-        .map(|u| u.path().to_ascii_lowercase())
-        .unwrap_or_default();
-    path.contains("/backend-api/codex")
+    crate::auth::chatgpt_oauth::is_codex_base_url(base_url)
 }
 
 /// Whether ChatGPT OAuth pre-turn refresh may update credentials for the
@@ -825,6 +813,78 @@ impl SessionActor {
             creds.client_version.clone(),
         )
     }
+    /// Resolve the ordered primary/fallback compaction routes.
+    ///
+    /// Every route is catalog-backed except `@session`, which clones the active
+    /// session route. Hidden OpenRouter wire fallbacks are always cleared so the
+    /// configured two-route order is the complete failover graph. Compaction is
+    /// text-only and portable, so provider-specific reasoning and backend-search
+    /// settings are removed from these auxiliary requests.
+    pub(super) async fn prepare_compaction_routes(
+        &self,
+    ) -> Result<Vec<crate::session::helpers::full_replace_compaction::CompactionRoute>, acp::Error>
+    {
+        self.refresh_token_if_expired().await;
+        let active = self.reconstruct_full_config().await;
+        let configured = self
+            .agent
+            .borrow()
+            .compaction_policy()
+            .compact_models
+            .clone();
+        let mut routes = Vec::with_capacity(configured.len());
+
+        for model_ref in configured {
+            let mut config = if model_ref == "@session" {
+                active.clone()
+            } else {
+                let mut resolved = self
+                    .resolve_aux_inference_config(&model_ref)
+                    .await
+                    .ok_or_else(|| {
+                        acp::Error::invalid_params().data(format!(
+                            "configured compaction model '{model_ref}' is unavailable or has no credentials"
+                        ))
+                    })?;
+                crate::agent::config::stamp_session_local_sampler_fields(
+                    &mut resolved,
+                    &active,
+                    self.client_identifier.clone(),
+                    Some(self.max_retries),
+                );
+                resolved
+            };
+
+            config.openrouter_fallback_models.clear();
+            config.openrouter_provider_preferences = None;
+            config.openrouter_plugins.clear();
+            config.openrouter_pacing = false;
+            config.reasoning_effort = None;
+            config.supports_backend_search = false;
+            config.compactions_remaining = None;
+            config.compaction_at_tokens = None;
+            config.doom_loop_recovery = None;
+            let client = xai_grok_inference::InferenceClient::new(config.clone())
+                .map_err(|error| {
+                    acp::Error::invalid_params().data(format!(
+                        "configured compaction model '{model_ref}' could not be initialized: {error}"
+                    ))
+                })?;
+            routes.push(
+                crate::session::helpers::full_replace_compaction::CompactionRoute {
+                    client,
+                    inference_config: config,
+                },
+            );
+        }
+
+        if routes.is_empty() {
+            return Err(acp::Error::invalid_params()
+                .data("at least one compaction model route is required"));
+        }
+        Ok(routes)
+    }
+
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
     /// stamping session-local auth/attribution like image-describe (which relies
     /// on the resolver, not a config override, for `base_url`/`api_backend` so
@@ -1188,13 +1248,13 @@ impl SessionActor {
             return None;
         }
 
-        let (default_id, default_name) = match identity {
-            ProviderIdentity::OpenRouter => ("openrouter", "OpenRouter"),
-            ProviderIdentity::OpenAi => ("openai", "OpenAI"),
+        let default_id = match identity {
+            ProviderIdentity::OpenRouter => "openrouter",
+            ProviderIdentity::OpenAi => "openai",
             ProviderIdentity::Xai => return None,
             ProviderIdentity::Custom => {
                 provider_id.as_ref()?;
-                ("custom", "Custom")
+                "custom"
             }
         };
         let provider_id = provider_id.unwrap_or_else(|| default_id.to_owned());
@@ -1203,7 +1263,7 @@ impl SessionActor {
             ModelProviderKind::OpenAi => "OpenAI".to_owned(),
             ModelProviderKind::Xai => return None,
             ModelProviderKind::Zai => "Z.ai".to_owned(),
-            ModelProviderKind::OpenAiCompatible => default_name.to_owned(),
+            ModelProviderKind::OpenAiCompatible => provider_id.clone(),
         };
 
         let (credential_kind, recommended_action) =

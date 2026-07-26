@@ -152,6 +152,10 @@ pub struct CompactionConfig {
     pub prefire: PrefireState,
     /// Sticky once a forked session releases its inherited prefix under compaction pressure (see `run_compact_inner`), so it stops re-pinning it.
     pub prefix_released: AtomicBool,
+    /// True from admission of a rolling job until its result is applied or
+    /// discarded. Prompt promotion pauses while this is set, making the CAS
+    /// application an idle safe point rather than racing an in-flight sample.
+    pub rolling_in_flight: AtomicBool,
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@
 //! - `x.ai/internal/reload_skills`          skills file watcher fan-out
 //! - `x.ai/internal/reload_models`          model list hot-reload from config.toml
 //! - `x.ai/internal/reload_models_cache`    model catalog hot-reload from disk cache
+//! - `x.ai/internal/reload_compaction`      compaction policy fan-out
 //! - `x.ai/internal/auth_cleared`           auth hot-clear cleanup
 //! - `x.ai/plugins/reload`                  rebuild shared plugin registry
 //! - `x.ai/commands/list`                   list slash commands
@@ -48,6 +49,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/internal/reload_workflows" => handle_reload_workflows(agent),
         "x.ai/internal/reload_models" => handle_reload_models(agent),
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
+        "x.ai/internal/reload_compaction" => handle_reload_compaction(agent, args),
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
         "x.ai/commands/list" => handle_commands_list(agent, args).await,
@@ -617,6 +619,41 @@ fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
+fn fan_out_compaction_config<'a>(
+    command_senders: impl Iterator<Item = &'a tokio::sync::mpsc::UnboundedSender<SessionCommand>>,
+    config: &crate::agent::config::CompactionConfig,
+) -> usize {
+    command_senders
+        .filter(|sender| {
+            sender
+                .send(SessionCommand::UpdateCompactionConfig {
+                    compaction: Box::new(config.clone()),
+                })
+                .is_ok()
+        })
+        .count()
+}
+
+fn handle_reload_compaction(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let config: crate::agent::config::CompactionConfig = parse_params(args)?;
+    config
+        .normalize_validate()
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    agent.cfg.borrow_mut().compaction = config.clone();
+    let sessions = agent.sessions.borrow();
+    let total = sessions.len();
+    let updated =
+        fan_out_compaction_config(sessions.values().map(|session| &session.cmd_tx), &config);
+    tracing::info!(
+        updated,
+        total,
+        "reloaded compaction policy for active sessions"
+    );
+    ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
+        .to_ext_response()
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))
+}
+
 fn handle_auth_cleared(agent: &MvpAgent) -> ExtResult {
     agent.disable_managed_gateway_tools_and_refresh_sessions();
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
@@ -744,4 +781,59 @@ async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
     to_raw_response(&response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fan_out_compaction_config;
+    use crate::session::SessionCommand;
+
+    #[test]
+    fn compaction_reload_fans_out_to_every_live_session() {
+        let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = crate::agent::config::CompactionConfig {
+            models: vec![
+                crate::agent::config::CompactionModelRef::new("@session".to_owned()).unwrap(),
+                crate::agent::config::CompactionModelRef::new("custom-compactor".to_owned())
+                    .unwrap(),
+            ],
+            strategy: Some(crate::agent::config::CompactionStrategy::Rolling),
+            trigger_policy: Some(crate::agent::config::CompactionTriggerPolicy::Dynamic),
+            rolling_band_count: Some(6),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            fan_out_compaction_config([&first_tx, &second_tx].into_iter(), &config),
+            2
+        );
+        for receiver in [&mut first_rx, &mut second_rx] {
+            let SessionCommand::UpdateCompactionConfig { compaction } = receiver
+                .try_recv()
+                .expect("each session receives one update")
+            else {
+                panic!("expected compaction config update");
+            };
+            assert_eq!(*compaction, config);
+            assert!(receiver.try_recv().is_err(), "must send exactly one update");
+        }
+    }
+
+    #[test]
+    fn compaction_reload_ignores_closed_session_mailboxes() {
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(closed_rx);
+        let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = crate::agent::config::CompactionConfig::default();
+
+        assert_eq!(
+            fan_out_compaction_config([&closed_tx, &live_tx].into_iter(), &config),
+            1
+        );
+        assert!(matches!(
+            live_rx.try_recv(),
+            Ok(SessionCommand::UpdateCompactionConfig { .. })
+        ));
+    }
 }

@@ -12,9 +12,8 @@ the providers you need from `/providers` (or the command palette):
 | Provider | How to connect |
 |----------|----------------|
 | **xAI** | Browser OAuth and/or an xAI API key (separate choices) |
-| **OpenAI API** | API key stored in the owner-only vault |
+| **OpenAI / ChatGPT** | Browser OAuth and/or an OpenAI API key; model routes select the appropriate method |
 | **OpenRouter** | API key stored in the owner-only vault |
-| **Codex / ChatGPT** | Official Codex CLI login |
 
 You can also set `XAI_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY` in the
 environment. Missing credentials for a model surface when you use that model —
@@ -80,7 +79,9 @@ Grok uses the API key as a fallback when no session token is active. If you have
 
 Stored API keys occupy distinct scopes in the owner-only `auth.json` vault.
 Disconnecting one API-key provider preserves the other providers and the xAI
-OAuth session. Environment variables (`XAI_API_KEY`, `OPENAI_API_KEY`, and
+OAuth session. OpenAI's ChatGPT OAuth tokens and Platform API key are also
+stored independently; ChatGPT Codex routes use OAuth and `api.openai.com`
+routes use the API key. Environment variables (`XAI_API_KEY`, `OPENAI_API_KEY`, and
 `OPENROUTER_API_KEY`) remain supported but cannot be removed by the TUI.
 
 When `GROK_HOME` is set, all Grok-owned credentials and provider catalog caches

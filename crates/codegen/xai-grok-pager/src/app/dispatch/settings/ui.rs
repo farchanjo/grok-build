@@ -4,13 +4,15 @@ use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
     set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
-    set_contextual_hint_inner, set_default_model_inner, set_default_selected_permission_inner,
-    set_display_refresh_auto_cadence_inner, set_fork_secondary_model_inner,
-    set_group_tool_verbs_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
-    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
-    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
-    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
-    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_compaction_band_count_inner, set_compaction_fallback_model_inner,
+    set_compaction_primary_model_inner, set_compaction_strategy_inner,
+    set_compaction_trigger_policy_inner, set_contextual_hint_inner, set_default_model_inner,
+    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
+    set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
+    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
+    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
+    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
+    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
     set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
     set_voice_capture_mode_inner, set_voice_stt_language_inner,
@@ -53,6 +55,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
+    let compaction_config_from_app = app.compaction_config.clone();
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -79,6 +82,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                     .iter()
                     .map(|(id, info)| (info.name.clone(), id.clone()))
                     .collect(),
+                external_model_ids: external_model_ids(&agent.session.models),
                 coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
                 // Prefer optimistic pending over confirmed active.
                 plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
@@ -90,6 +94,10 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
+                ..compaction_snapshot_fields(
+                    &compaction_config_from_app,
+                    agent.session.tracker.activity(),
+                )
             };
         }
     }
@@ -184,15 +192,13 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
     }
     let mut state = ProviderModalState::new();
     // Load configured provider rows from config.toml (best effort).
-    if let Ok(home) = std::env::var("GROK_HOME") {
-        let path = std::path::Path::new(&home).join("config.toml");
-        if let Ok(raw) = std::fs::read_to_string(path)
-            && let Ok(val) = raw.parse::<toml::Value>()
-            && let Some(table) = val.get("model_providers").and_then(|v| v.as_table())
-        {
-            let configured: Vec<String> = table.keys().cloned().collect();
-            state.set_configured_providers(configured);
-        }
+    let path = xai_grok_config::grok_home().join("config.toml");
+    if let Ok(raw) = std::fs::read_to_string(path)
+        && let Ok(val) = raw.parse::<toml::Value>()
+        && let Some(table) = val.get("model_providers").and_then(|v| v.as_table())
+    {
+        let configured: Vec<String> = table.keys().cloned().collect();
+        state.set_configured_providers(configured);
     }
     // Focus xAI row so connect/disconnect is one Enter away from welcome.
     state.selected = 0;
@@ -340,6 +346,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let auto_mode_gate_from_app = app.auto_mode_gate;
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
+    let compaction_config_from_app = app.compaction_config.clone();
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -386,6 +393,10 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
+        ..compaction_snapshot_fields(
+            &compaction_config_from_app,
+            agent.session.tracker.activity(),
+        )
     };
     let mut state = Box::new(SettingsModalState::new(
         registry,
@@ -845,6 +856,65 @@ fn agent_available_models(app: &AppView) -> Vec<(String, acp::ModelId)> {
     Vec::new()
 }
 
+fn external_model_ids(
+    models: &crate::acp::model_state::ModelState,
+) -> std::collections::HashSet<String> {
+    models
+        .available
+        .iter()
+        .filter_map(|(id, info)| {
+            let provider = info
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("providerIdentity"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("custom");
+            (provider != "xai").then(|| id.0.to_string())
+        })
+        .collect()
+}
+
+fn compaction_snapshot_fields(
+    config: &xai_grok_shell::agent::config::CompactionConfig,
+    activity: Option<crate::acp::tracker::TurnActivity>,
+) -> crate::settings::PagerLocalSnapshot {
+    use xai_grok_shell::agent::config::{CompactionStrategy, CompactionTriggerPolicy};
+    let resolved = config.normalize_validate().unwrap_or_else(|_| {
+        xai_grok_shell::agent::config::CompactionConfig::default()
+            .normalize_validate()
+            .expect("default compaction config is valid")
+    });
+    crate::settings::PagerLocalSnapshot {
+        compaction_strategy: match resolved.strategy {
+            CompactionStrategy::Auto => "auto",
+            CompactionStrategy::Rolling => "rolling",
+            CompactionStrategy::FullReplace => "full_replace",
+        }
+        .to_string(),
+        compaction_trigger_policy: match resolved.trigger_policy {
+            CompactionTriggerPolicy::Fixed => "fixed",
+            CompactionTriggerPolicy::Dynamic => "dynamic",
+        }
+        .to_string(),
+        compaction_band_count: resolved.rolling_band_count as i64,
+        compaction_primary_model: resolved
+            .models
+            .first()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "@session".to_string()),
+        compaction_fallback_model: resolved
+            .models
+            .get(1)
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        compaction_in_progress: matches!(
+            activity,
+            Some(crate::acp::tracker::TurnActivity::AutoCompacting)
+        ),
+        ..Default::default()
+    }
+}
+
 /// Build a `PagerLocalSnapshot` from the current `AppView`.
 pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocalSnapshot {
     crate::settings::PagerLocalSnapshot {
@@ -853,6 +923,14 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_mode: agent_auto_mode(app),
         current_model_name: agent_current_model_name(app),
         available_models: agent_available_models(app),
+        external_model_ids: match app.active_view {
+            ActiveView::Agent(id) => app
+                .agents
+                .get(&id)
+                .map(|agent| external_model_ids(&agent.session.models))
+                .unwrap_or_default(),
+            _ => Default::default(),
+        },
         coding_data_sharing_opt_out: app.coding_data_retention_opt_out,
         plan_mode_active: agent_plan_mode(app),
         show_tips: app.show_tips,
@@ -863,6 +941,16 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
+        ..compaction_snapshot_fields(
+            &app.compaction_config,
+            match app.active_view {
+                ActiveView::Agent(id) => app
+                    .agents
+                    .get(&id)
+                    .and_then(|agent| agent.session.tracker.activity()),
+                _ => None,
+            },
+        )
     }
 }
 
@@ -1042,6 +1130,37 @@ pub(in crate::app::dispatch) fn action_for_reset(
                      registry/dispatch skew (default should be empty string)",
                 );
                 None
+            }
+        }
+        // --- Compaction settings ---
+        // Strategy: enum round-trip.
+        ("compaction_strategy", SettingValue::Enum(s)) => {
+            Some(Action::SetCompactionStrategy(s.to_string()))
+        }
+        // Trigger policy: enum round-trip.
+        ("compaction_trigger_policy", SettingValue::Enum(s)) => {
+            Some(Action::SetCompactionTriggerPolicy(s.to_string()))
+        }
+        // Band count: int round-trip.
+        ("compaction_band_count", SettingValue::Int(i)) => Some(Action::SetCompactionBandCount(*i)),
+        // Primary model: blank or the explicit sentinel → active session route.
+        ("compaction_primary_model", SettingValue::String(s)) => {
+            if s.is_empty() || s == "@session" {
+                Some(Action::ClearCompactionPrimaryModel)
+            } else {
+                Some(Action::SetCompactionPrimaryModel(acp::ModelId::new(
+                    s.clone(),
+                )))
+            }
+        }
+        // Fallback model: empty → Clear, non-empty is model ID string.
+        ("compaction_fallback_model", SettingValue::String(s)) => {
+            if s.is_empty() {
+                Some(Action::ClearCompactionFallbackModel)
+            } else {
+                Some(Action::SetCompactionFallbackModel(acp::ModelId::new(
+                    s.clone(),
+                )))
             }
         }
 
@@ -1320,6 +1439,22 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
                 s.clone()
             };
             set_fork_secondary_model_inner(app, restored);
+        }
+        // --- Compaction settings rollback ---
+        ("compaction_strategy", SettingValue::Enum(s)) => {
+            set_compaction_strategy_inner(app, s);
+        }
+        ("compaction_trigger_policy", SettingValue::Enum(s)) => {
+            set_compaction_trigger_policy_inner(app, s);
+        }
+        ("compaction_band_count", SettingValue::Int(i)) => {
+            set_compaction_band_count_inner(app, *i);
+        }
+        ("compaction_primary_model", SettingValue::String(s)) => {
+            set_compaction_primary_model_inner(app, s.clone());
+        }
+        ("compaction_fallback_model", SettingValue::String(s)) => {
+            set_compaction_fallback_model_inner(app, s.clone());
         }
 
         _ => {

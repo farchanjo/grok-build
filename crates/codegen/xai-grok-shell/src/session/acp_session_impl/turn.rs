@@ -2000,7 +2000,12 @@ impl SessionActor {
             if self.tool_context.task_output_token_budget.is_none() {
                 self.refresh_token_if_expired().await;
             }
+            let compaction_strategy = self.agent.borrow().compaction_policy().strategy;
             if self.tool_context.task_output_token_budget.is_none()
+                && matches!(
+                    compaction_strategy,
+                    xai_grok_agent::CompactionStrategy::FullReplace
+                )
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
                 && let Err(e) = self.run_compact_only(trigger_info).await
             {

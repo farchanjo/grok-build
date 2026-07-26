@@ -524,7 +524,12 @@ pub(super) fn handle_auth_complete(
         // handlers use, so the deferred startup runs exactly once after
         // whichever gate resolves last.
         if app.session_startup_allowed() {
-            effects.extend(drain_startup_actions(app));
+            let mut drained = drain_startup_actions(app);
+            // Auth was the last startup gate (or trust was already resolved).
+            // If no deferred intent opened a session / dashboard, land on the
+            // grouped session picker so the user can resume a previous session.
+            drained.extend(super::ctx::maybe_open_welcome_session_picker(app));
+            effects.extend(drained);
         }
         return effects;
     }

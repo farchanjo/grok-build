@@ -611,6 +611,10 @@ pub struct AppView {
     /// startup; updated synchronously by `set_X_inner` so dispatch
     /// stays sans-IO.
     pub current_ui: xai_grok_shell::agent::config::UiConfig,
+    /// In-memory snapshot of the shell-owned `[compaction]` section. Kept
+    /// separate from `UiConfig` so the two configuration namespaces cannot
+    /// drift or serialize into the wrong TOML table.
+    pub compaction_config: xai_grok_shell::agent::config::CompactionConfig,
     /// Working directory.
     pub cwd: PathBuf,
     /// Whether the project picker question has already been shown this session.
@@ -1357,6 +1361,7 @@ impl AppView {
             registry: ActionRegistry::defaults(),
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+            compaction_config: xai_grok_shell::agent::config::CompactionConfig::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             project_picker_shown: false,
             project_picker_disabled: false,
@@ -2406,6 +2411,7 @@ impl AppView {
                     has_access,
                     is_zdr_blocked: zdr_blocked,
                     sp_entries: &mut self.session_picker_entries,
+                    sp_loading: &mut self.session_picker_loading,
                     sp_state: &mut self.session_picker_state,
                     sp_content_results: &self.session_picker_content_results,
                     sp_content_loading: self.session_picker_content_loading,
@@ -2999,6 +3005,7 @@ struct WelcomeInputCtx<'a> {
     has_access: bool,
     is_zdr_blocked: bool,
     sp_entries: &'a mut Option<Vec<SessionPickerEntry>>,
+    sp_loading: &'a mut bool,
     sp_state: &'a mut crate::views::picker::PickerState,
     sp_content_results:
         &'a Option<Vec<xai_grok_shell::extensions::session_search::SearchSessionHit>>,
@@ -3162,7 +3169,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         }
         return InputOutcome::Unchanged;
     }
-    if ctx.sp_entries.is_some() && matches!(ctx.auth_state, AuthState::Done) {
+    if (ctx.sp_entries.is_some() || *ctx.sp_loading) && matches!(ctx.auth_state, AuthState::Done) {
         use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
         let source_filter = *ctx.sp_source_filter;
         let current_repo =
@@ -3257,6 +3264,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             PickerOutcome::Closed => {
                 *ctx.sp_entries = None;
+                *ctx.sp_loading = false;
                 ctx.sp_state.reset();
                 *ctx.sp_source_filter = crate::views::session_picker::SourceFilter::default();
                 return InputOutcome::Action(Action::SessionPickerClosed);
@@ -5486,6 +5494,7 @@ pub(crate) mod tests {
             registry: ActionRegistry::defaults(),
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+            compaction_config: xai_grok_shell::agent::config::CompactionConfig::default(),
             cwd: std::path::PathBuf::from("/tmp"),
             project_picker_shown: true,
             project_picker_disabled: false,

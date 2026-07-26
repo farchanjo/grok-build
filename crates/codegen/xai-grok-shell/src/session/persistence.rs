@@ -295,8 +295,15 @@ pub enum PersistenceMsg {
             Result<xai_chat_state::StrictAppendAck, xai_chat_state::StrictAppendError>,
         >,
     },
-    /// Replace the entire chat history (used for compaction)
+    /// Replace the entire chat history (used for repair and rewind).
     ReplaceChatHistory(Vec<ConversationItem>),
+    /// Atomically persist one marker-last compaction transaction and acknowledge
+    /// whether the durable marker committed.
+    CommitCompactionAndAck {
+        request: xai_chat_state::CompactionPersistenceRequest,
+        respond_to:
+            tokio::sync::oneshot::Sender<Result<(), xai_chat_state::CompactionPersistenceError>>,
+    },
     CurrentModel {
         model_id: acp::ModelId,
         /// The active agent definition name (e.g. `"grok-build"`).
@@ -1498,6 +1505,7 @@ impl From<crate::session::storage::AppendUpdateError> for DurableAppendError {
         use crate::session::storage::AppendUpdateError;
         match error {
             AppendUpdateError::NotCommitted(error) => Self::NotCommitted(error),
+            AppendUpdateError::Indeterminate(error) => Self::AcknowledgementLost(error),
             AppendUpdateError::Committed(error) => Self::Committed(error),
         }
     }
@@ -1557,6 +1565,7 @@ impl PersistenceHandle {
 enum PendingAppendOutcome {
     CommittedOk(acp::SessionNotification),
     CommittedErr(acp::SessionNotification, io::Error),
+    IndeterminateErr(acp::SessionNotification, io::Error),
     NotCommittedErr(acp::SessionNotification, io::Error),
 }
 
@@ -1695,6 +1704,9 @@ impl SessionPersistence {
             Err(crate::session::storage::AppendUpdateError::NotCommitted(error)) => {
                 PendingAppendOutcome::NotCommittedErr(notification, error)
             }
+            Err(crate::session::storage::AppendUpdateError::Indeterminate(error)) => {
+                PendingAppendOutcome::IndeterminateErr(notification, error)
+            }
             Err(crate::session::storage::AppendUpdateError::Committed(error)) => {
                 PendingAppendOutcome::CommittedErr(notification, error)
             }
@@ -1714,6 +1726,12 @@ impl SessionPersistence {
                 PendingAppendOutcome::CommittedErr(notification, error) => {
                     self.queue_acp_sync(notification);
                     return Err(crate::session::storage::AppendUpdateError::Committed(error));
+                }
+                PendingAppendOutcome::IndeterminateErr(notification, error) => {
+                    self.pending_notification = Some(notification);
+                    return Err(crate::session::storage::AppendUpdateError::Indeterminate(
+                        error,
+                    ));
                 }
                 PendingAppendOutcome::NotCommittedErr(notification, error) => {
                     self.pending_notification = Some(notification);
@@ -1744,6 +1762,123 @@ impl SessionPersistence {
             _ => {}
         }
         result
+    }
+
+    async fn commit_compaction(
+        &mut self,
+        request: xai_chat_state::CompactionPersistenceRequest,
+    ) -> Result<(), xai_chat_state::CompactionPersistenceError> {
+        use crate::extensions::notification::{
+            AutoContinueInfo, CompactionCheckpointFile, CompactionCheckpointInfo,
+            SessionNotification as XaiSessionNotification, SessionUpdate as XaiSessionUpdate,
+        };
+        use crate::session::storage::SessionUpdate;
+        use xai_chat_state::CompactionPersistenceError;
+
+        // Serialize after every update already queued before the compaction.
+        self.drain_pending()
+            .await
+            .map_err(|error| CompactionPersistenceError::NotCommitted(error.into_io_error()))?;
+
+        let checkpoint_id = request.metadata.checkpoint_id;
+        crate::session::storage::validate_compaction_checkpoint_id(&checkpoint_id)
+            .map_err(CompactionPersistenceError::NotCommitted)?;
+        let checkpoint_file = format!("compaction_checkpoints/{checkpoint_id}.json");
+        let checkpoint = CompactionCheckpointFile {
+            checkpoint_id: checkpoint_id.clone(),
+            prompt_index_at_compaction: request.metadata.prompt_index,
+            compacted_history: request.compacted_history.clone(),
+            schema_version: 2,
+            created_at: request.metadata.created_at.clone(),
+            original_user_info: request.metadata.original_user_info,
+            reread_file_paths: vec![],
+        };
+        self.storage
+            .write_compaction_checkpoint(&self.info, &checkpoint)
+            .await
+            .map_err(CompactionPersistenceError::NotCommitted)?;
+
+        // The chat history may lead the marker, but never the checkpoint. If the
+        // marker append fails, restore the previous history before reporting a
+        // non-commit so restart behavior remains deterministic.
+        match self
+            .storage
+            .replace_chat_history_with_compaction_pending(
+                &self.info,
+                &checkpoint_id,
+                &request.previous_history,
+                &request.compacted_history,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(crate::session::storage::ReplaceCompactionHistoryError::NotCommitted(error)) => {
+                return Err(CompactionPersistenceError::NotCommitted(error));
+            }
+            Err(crate::session::storage::ReplaceCompactionHistoryError::Indeterminate(error)) => {
+                return Err(CompactionPersistenceError::Indeterminate(error));
+            }
+        }
+
+        let marker = CompactionCheckpointInfo {
+            checkpoint_id,
+            prompt_index_at_compaction: request.metadata.prompt_index,
+            checkpoint_file,
+            auto_continue: request
+                .metadata
+                .auto_continue_prompt
+                .map(|prompt_text| AutoContinueInfo { prompt_text }),
+            schema_version: 2,
+            created_at: request.metadata.created_at,
+        };
+        let update = SessionUpdate::Xai(Box::new(XaiSessionNotification {
+            session_id: self.info.id.clone(),
+            update: XaiSessionUpdate::CompactionCheckpoint(Box::new(marker)),
+            meta: None,
+        }));
+        match self.handle_durable_append(update).await {
+            Ok(()) => self
+                .storage
+                .clear_compaction_pending(&self.info)
+                .await
+                .map_err(CompactionPersistenceError::Committed),
+            Err(crate::session::storage::AppendUpdateError::Committed(error)) => {
+                match self.storage.clear_compaction_pending(&self.info).await {
+                    Ok(()) => Err(CompactionPersistenceError::Committed(error)),
+                    Err(clear_error) => Err(CompactionPersistenceError::Committed(
+                        io::Error::other(format!(
+                            "marker committed with bookkeeping error ({error}); pending compaction cleanup failed ({clear_error})"
+                        )),
+                    )),
+                }
+            }
+            Err(crate::session::storage::AppendUpdateError::Indeterminate(error)) => Err(
+                CompactionPersistenceError::Indeterminate(io::Error::other(format!(
+                    "compaction marker durability is indeterminate ({error}); pending recovery marker retained"
+                ))),
+            ),
+            Err(crate::session::storage::AppendUpdateError::NotCommitted(error)) => {
+                match self
+                    .storage
+                    .replace_chat_history(&self.info, &request.previous_history)
+                    .await
+                {
+                    Ok(()) => match self.storage.clear_compaction_pending(&self.info).await {
+                        Ok(()) => Err(CompactionPersistenceError::NotCommitted(error)),
+                        Err(clear_error) => Err(CompactionPersistenceError::Indeterminate(
+                            io::Error::other(format!(
+                                "marker append failed ({error}); history restored but pending compaction cleanup failed ({clear_error})"
+                            )),
+                        )),
+                    },
+                    Err(restore_error) => Err(CompactionPersistenceError::Indeterminate(
+                        io::Error::other(format!(
+                            "marker append failed ({error}); history rollback failed ({restore_error})"
+                        )),
+                    )),
+                }
+            }
+        }
     }
 
     /// Flush any pending merged ACP notification to disk and remote sync.
@@ -1849,10 +1984,7 @@ impl SessionPersistence {
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::ReplaceChatHistory(messages) => {
-                    tracing::info!(
-                        num_messages = messages.len(),
-                        "Replacing chat history (compaction)"
-                    );
+                    tracing::info!(num_messages = messages.len(), "Replacing chat history");
                     if let Err(e) = self
                         .storage
                         .replace_chat_history(&self.info, &messages)
@@ -1860,6 +1992,13 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to replace chat history");
                     }
+                }
+                PersistenceMsg::CommitCompactionAndAck {
+                    request,
+                    respond_to,
+                } => {
+                    let result = self.commit_compaction(request).await;
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CurrentModel {
                     model_id,

@@ -228,7 +228,7 @@ impl SessionEvent {
                 if error.trim().is_empty() {
                     "Compaction failed.".to_string()
                 } else {
-                    format!("Compaction failed: {error}")
+                    format!("Compaction failed: {}", user_facing_error_detail(error))
                 }
             }
             SessionEvent::CompactionCancelled => "Compaction cancelled.".to_string(),
@@ -1113,6 +1113,17 @@ mod tests {
         assert_eq!(
             event.message(),
             "Compaction failed: out of credits or over your spending limit. Add credits and retry."
+        );
+    }
+
+    #[test]
+    fn compaction_failed_provider_error_is_sanitized() {
+        let event = SessionEvent::CompactionFailed {
+            error: "Internal error: {\"message\":\"API error (status 400 Bad Request): Unsupported parameter: temperature\"}".into(),
+        };
+        assert_eq!(
+            event.message(),
+            "Compaction failed: Unsupported parameter: temperature"
         );
     }
 

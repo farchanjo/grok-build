@@ -63,6 +63,31 @@ impl ChatPersistence for ChannelChatPersistence {
             .send(PersistenceMsg::ReplaceChatHistory(items.to_vec()));
     }
 
+    fn commit_compaction_and_ack(
+        &mut self,
+        request: xai_chat_state::CompactionPersistenceRequest,
+    ) -> oneshot::Receiver<Result<(), xai_chat_state::CompactionPersistenceError>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .tx
+            .send(PersistenceMsg::CommitCompactionAndAck {
+                request,
+                respond_to: reply,
+            })
+            .is_err()
+        {
+            let (reply, receiver) = oneshot::channel();
+            let _ = reply.send(Err(
+                xai_chat_state::CompactionPersistenceError::NotCommitted(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "session persistence actor unavailable",
+                )),
+            ));
+            return receiver;
+        }
+        receiver
+    }
+
     fn flush(&mut self) {
         let _ = self.tx.send(PersistenceMsg::Flush);
     }

@@ -870,6 +870,12 @@ fn privacy_banner_accept_success_acks() {
             .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
         "success must persist ack: {ack_effects:?}"
     );
+    assert!(app.session_picker_loading);
+    assert!(
+        ack_effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchSessionList { .. }))
+    );
 }
 
 /// Accept failure: no ack; welcome toast carries the error.

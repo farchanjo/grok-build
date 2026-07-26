@@ -49,38 +49,39 @@ pub(crate) enum CompactFailure {
 pub(crate) use xai_grok_inference_types::is_context_length_error;
 /// Classify an upstream `InferenceError` for the compaction retry loop.
 ///
-/// `Auth`, `InvalidConfiguration`, `Serialization` and
-/// `IdleTimeout` are all deterministic by construction (re-issuing the same
-/// request cannot change the outcome — auth state, config, payload shape,
-/// and stuck-model conditions all persist). 4xx API responses other than
-/// 408 (timeout) and 429 (rate limit) are likewise deterministic. Network
-/// transport errors, stream-level blips, and 5xx responses are transient.
-fn classify_sampling_error(err: InferenceError) -> CompactFailure {
+/// `Auth`, `InvalidConfiguration`, and `Serialization` are deterministic by
+/// construction. Only recognized transport/provider failures, 408, 429, 5xx,
+/// timeouts, empty output, and model-output degeneracy may advance to the
+/// explicitly configured fallback route. Unknown errors fail closed.
+pub(super) fn classify_sampling_error(err: InferenceError) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(format!("compact failed: {err}"));
-    let deterministic = match &err {
+    let retryable = match &err {
         InferenceError::Auth(_)
         | InferenceError::InvalidConfiguration(_)
         | InferenceError::Serialization(_)
-        | InferenceError::IdleTimeout { .. } => true,
+        | InferenceError::MaxTokensTruncation => false,
+        InferenceError::IdleTimeout { .. }
+        | InferenceError::EventStreamError(_)
+        | InferenceError::EmptyResponse { .. }
+        | InferenceError::DoomLoopDetected { .. } => true,
+        InferenceError::Http(error) => xai_grok_inference_types::error::is_retryable_reqwest(error),
         InferenceError::Api {
             status, message, ..
         } => {
-            is_context_length_error(message)
-                || (status.is_client_error()
-                    && *status != StatusCode::REQUEST_TIMEOUT
-                    && *status != StatusCode::TOO_MANY_REQUESTS)
+            !is_context_length_error(message)
+                && (*status == StatusCode::REQUEST_TIMEOUT
+                    || *status == StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error())
         }
-        InferenceError::MaxTokensTruncation => true,
-        InferenceError::Http(_)
-        | InferenceError::EventStreamError(_)
-        | InferenceError::StreamError { .. }
-        | InferenceError::EmptyResponse { .. }
-        | InferenceError::DoomLoopDetected { .. } => false,
+        InferenceError::StreamError {
+            error_type,
+            message,
+        } => response_event_error_is_retryable(Some(error_type), message),
     };
-    if deterministic {
-        CompactFailure::Deterministic(acp_err)
-    } else {
+    if retryable {
         CompactFailure::Transient(acp_err)
+    } else {
+        CompactFailure::Deterministic(acp_err)
     }
 }
 /// Classify a Anthropic-style stream error event (`ResponseError` /
@@ -94,25 +95,41 @@ fn classify_sampling_error(err: InferenceError) -> CompactFailure {
 /// `invalid_request_error` marker, which can appear in either field, always
 /// maps to `Deterministic` (schema violations cannot be fixed by re-sending
 /// the same payload).
+fn response_event_error_is_retryable(code: Option<&str>, message: &str) -> bool {
+    if is_context_length_error(message) {
+        return false;
+    }
+    let Some(code) = code.map(str::trim).map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if let Ok(status) = code.parse::<u16>() {
+        return status == 408 || status == 429 || (500..600).contains(&status);
+    }
+    matches!(
+        code.as_str(),
+        "overloaded_error"
+            | "rate_limit_error"
+            | "rate_limit_exceeded"
+            | "insufficient_quota"
+            | "request_timeout"
+            | "timeout_error"
+            | "server_error"
+            | "service_unavailable"
+            | "temporarily_unavailable"
+            | "internal_server_error"
+    )
+}
+
 fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(match code {
         Some(c) => format!("compact failed: {c}: {message}"),
         None => format!("compact failed: {message}"),
     });
-    if matches!(code, Some("invalid_request_error")) || message.contains("invalid_request_error") {
-        return CompactFailure::Deterministic(acp_err);
+    if response_event_error_is_retryable(code, message) {
+        CompactFailure::Transient(acp_err)
+    } else {
+        CompactFailure::Deterministic(acp_err)
     }
-    if let Some(status_code) = code.and_then(|c| c.parse::<u16>().ok())
-        && (400..500).contains(&status_code)
-        && status_code != 408
-        && status_code != 429
-    {
-        return CompactFailure::Deterministic(acp_err);
-    }
-    if is_context_length_error(message) {
-        return CompactFailure::Deterministic(acp_err);
-    }
-    CompactFailure::Transient(acp_err)
 }
 /// Build the chat history that will be sent to the compaction model.
 ///
@@ -326,20 +343,20 @@ where
     }
 }
 /// Generates a summary of the conversation for compaction.
-/// Accepts `Vec<ConversationItem>` so the Responses path can preserve
-/// encrypted reasoning. ChatCompletions converts at point of use.
+/// Accepts `Vec<ConversationItem>` so each backend can retain the native
+/// conversation shape. Callers strip provider-specific reasoning artifacts
+/// before this boundary; ChatCompletions converts at point of use.
 ///
 /// `chat_history` must already include the summarization prompt as its final
 /// user message — use [`build_compaction_chat_history`] to construct it. The
 /// split lets callers persist the exact request payload before issuing it.
 ///
-/// `tools` / `hosted_tools` are the SAME effective definitions the turn loop
-/// attaches to normal requests. Tool definitions are serialized into the
-/// prompt prefix by every backend, so omitting them would shift the entire
-/// prefix and force a full prefill on the summarizer call — attaching them
-/// keeps the request prefix byte-identical to the turn requests so the
-/// engine reuses the session's KV cache (the whole point of the verbatim
-/// input path).
+/// `tools` / `hosted_tools` are the effective definitions from the turn loop.
+/// When compaction tool choice is `Auto`, they are attached only for first-party
+/// xAI prefix-cache compatibility. Third-party routes and the portable `None`
+/// default omit definitions entirely because several OpenAI-compatible and
+/// Messages providers either reject a disabled tool choice or call an advertised
+/// tool, while compaction only accepts summary text and cannot execute calls.
 ///
 /// Errors carry a [`CompactFailure`] classification so the caller can
 /// short-circuit retries on deterministic failures (4xx schema violations,
@@ -347,8 +364,8 @@ where
 /// network blips, rate limits).
 pub(crate) async fn generate_session_compact(
     chat_history: Vec<ConversationItem>,
-    tools: Vec<ToolSpec>,
-    hosted_tools: Vec<HostedTool>,
+    mut tools: Vec<ToolSpec>,
+    mut hosted_tools: Vec<HostedTool>,
     client: OaiCompatClient,
     session_id: acp::SessionId,
     inference_config: &InferenceConfig,
@@ -357,21 +374,26 @@ pub(crate) async fn generate_session_compact(
     tool_choice: crate::util::config::CompactionToolChoice,
 ) -> Result<CompactOutput, CompactFailure> {
     let num_messages = chat_history.len();
-    let wire_tool_choice = match tool_choice {
-        crate::util::config::CompactionToolChoice::Auto => ToolChoice::auto(),
-        crate::util::config::CompactionToolChoice::None => ToolChoice::none(),
-    };
-    let conversation_tool_choice = match tool_choice {
-        crate::util::config::CompactionToolChoice::Auto => ConversationToolChoice::Auto,
-        crate::util::config::CompactionToolChoice::None => ConversationToolChoice::None,
-    };
+    // Tool-enabled compaction is a first-party xAI cache optimization, not a
+    // portable model capability. Third-party routes always omit tool metadata,
+    // even if an old local/managed setting still requests `auto`.
+    let tools_enabled = matches!(tool_choice, crate::util::config::CompactionToolChoice::Auto)
+        && inference_config.provider_identity.is_first_party();
+    if !tools_enabled {
+        // Summarization is a text-only operation. Omitting definitions entirely
+        // works across providers that reject `tool_choice: "none"` and prevents
+        // tool-trained models from returning a tool call instead of a summary.
+        tools.clear();
+        hosted_tools.clear();
+    }
+    let wire_tool_choice = ToolChoice::auto();
+    let conversation_tool_choice = ConversationToolChoice::Auto;
     let output = match inference_config.api_backend {
         ApiBackend::ChatCompletions => {
             let chat_messages: Vec<ChatRequestMessage> =
                 conversation_to_chat_messages(chat_history);
             let mut message =
-                ChatCompletionRequest::new(inference_config.model.to_owned(), chat_messages)
-                    .with_temperature(1.0);
+                ChatCompletionRequest::new(inference_config.model.to_owned(), chat_messages);
             if !tools.is_empty() {
                 message = message
                     .with_tools(
@@ -479,7 +501,7 @@ pub(crate) async fn generate_session_compact(
                 tools,
                 hosted_tools,
                 model: Some(inference_config.model.to_owned()),
-                temperature: Some(1.0),
+                temperature: None,
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
                 x_grok_session_id: Some(session_id.to_string()),
@@ -604,7 +626,7 @@ pub(crate) async fn generate_session_compact(
                 tools,
                 hosted_tools,
                 model: Some(inference_config.model.to_owned()),
-                temperature: Some(1.0),
+                temperature: None,
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
                 x_grok_session_id: Some(session_id.to_string()),
@@ -669,6 +691,19 @@ pub(crate) async fn generate_session_compact(
                             } => {
                                 timing.record_delta();
                                 content.push_str(&text);
+                            }
+                            xai_grok_inference_types::messages::MessageStreamEvent::Error {
+                                error,
+                            } => {
+                                tracing::warn!(
+                                    code = %error.r#type,
+                                    message = %error.message,
+                                    "compact: Messages stream error event"
+                                );
+                                return Err(classify_response_event_error(
+                                    Some(&error.r#type),
+                                    &error.message,
+                                ));
                             }
                             xai_grok_inference_types::messages::MessageStreamEvent::MessageDelta {
                                 delta,
@@ -737,9 +772,9 @@ pub(crate) async fn generate_session_compact(
 }
 /// Tests for `classify_sampling_error` and `classify_response_event_error`.
 /// Pin the deterministic-vs-transient mapping for every `InferenceError`
-/// variant and for the meaningful branches of the response-event classifier
-/// (numeric code, `invalid_request_error` marker in code or message, and
-/// the default-to-transient fallback for unknown / missing codes).
+/// variant and for the meaningful branches of the response-event classifier.
+/// Unknown or missing stream codes fail closed rather than becoming an
+/// implicit route-fallback class.
 /// Also covers `StreamTiming` boundaries and `CompactionOutcome::as_str`.
 #[cfg(test)]
 mod classify_tests {
@@ -778,7 +813,7 @@ mod classify_tests {
         assert!(is_det(&classify_sampling_error(
             InferenceError::InvalidConfiguration("missing key")
         )));
-        assert!(is_det(&classify_sampling_error(
+        assert!(!is_det(&classify_sampling_error(
             InferenceError::IdleTimeout { elapsed_secs: 60 }
         )));
         assert!(!is_det(&classify_sampling_error(
@@ -790,13 +825,40 @@ mod classify_tests {
                 message: "try again".into(),
             }
         )));
+        assert!(is_det(&classify_sampling_error(
+            InferenceError::StreamError {
+                error_type: "invalid_request_error".into(),
+                message: "request schema rejected".into(),
+            }
+        )));
+        assert!(is_det(&classify_sampling_error(
+            InferenceError::StreamError {
+                error_type: "error".into(),
+                message: "The prompt is too long for this model's context window.".into(),
+            }
+        )));
     }
     #[test]
-    fn response_event_invalid_request_error_marker_is_deterministic() {
-        assert!(is_det(&classify_response_event_error(
-            Some("invalid_request_error"),
-            "messages.27.content.1: ..."
-        )));
+    fn response_event_deterministic_symbolic_errors_do_not_fallback() {
+        for code in [
+            "invalid_request_error",
+            "authentication_error",
+            "permission_error",
+            "billing_error",
+            "not_found_error",
+            "request_too_large",
+            "content_policy_violation",
+            "policy_violation",
+            "invalid_api_key",
+        ] {
+            assert!(
+                is_det(&classify_response_event_error(
+                    Some(code),
+                    "request rejected"
+                )),
+                "{code} must not advance to another compaction route"
+            );
+        }
         assert!(is_det(&classify_response_event_error(
             Some("400"),
             "Provider returned invalid_request_error: messages.X..."
@@ -815,16 +877,26 @@ mod classify_tests {
         assert!(!det("503"));
     }
     #[test]
-    fn response_event_unknown_code_defaults_to_transient() {
-        assert!(!is_det(&classify_response_event_error(None, "msg")));
-        assert!(!is_det(&classify_response_event_error(
-            Some("error"),
-            "msg"
-        )));
-        assert!(!is_det(&classify_response_event_error(
-            Some("overloaded_error"),
-            "msg"
-        )));
+    fn response_event_only_allowlisted_symbolic_codes_are_retryable() {
+        assert!(is_det(&classify_response_event_error(None, "msg")));
+        assert!(is_det(&classify_response_event_error(Some("error"), "msg")));
+        for code in [
+            "overloaded_error",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "insufficient_quota",
+            "request_timeout",
+            "timeout_error",
+            "server_error",
+            "service_unavailable",
+            "temporarily_unavailable",
+            "internal_server_error",
+        ] {
+            assert!(
+                !is_det(&classify_response_event_error(Some(code), "retryable")),
+                "{code} should permit the configured fallback route"
+            );
+        }
     }
     #[test]
     fn response_event_marker_in_message_with_no_code_is_deterministic() {
@@ -854,7 +926,7 @@ mod classify_tests {
         })));
     }
     #[test]
-    fn sampling_http_is_transient() {
+    fn sampling_retryable_http_transport_is_transient() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -862,6 +934,9 @@ mod classify_tests {
         let http_err = rt
             .block_on(reqwest::get("http://127.0.0.1:0"))
             .expect_err("connecting to port 0 must fail");
+        assert!(xai_grok_inference_types::error::is_retryable_reqwest(
+            &http_err
+        ));
         assert!(!is_det(&classify_sampling_error(InferenceError::Http(
             http_err
         ))));
@@ -1731,7 +1806,7 @@ mod reasoning_compaction_regression_tests {
         let _ = shutdown_tx.send(());
     }
     #[tokio::test]
-    async fn chat_completions_compaction_attaches_tools_with_tool_choice_auto() {
+    async fn chat_completions_compaction_does_not_force_sampling_knobs() {
         use std::sync::{Arc, Mutex};
         let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let cap = captured.clone();
@@ -1763,6 +1838,200 @@ mod reasoning_compaction_regression_tests {
         });
         let base_url = format!("http://{addr}/v1");
         let config = test_config(&base_url);
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            vec![
+                ConversationItem::system("You are a helpful assistant."),
+                ConversationItem::user("Summarize the conversation so far."),
+            ],
+            vec![],
+            vec![],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::Auto,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("compaction must succeed"));
+        let bodies = captured.lock().unwrap();
+        let body = bodies.first().expect("one compact request");
+        assert_eq!(
+            body.get("temperature"),
+            Some(&json!(0.7)),
+            "compaction must inherit the model's configured temperature instead of forcing 1.0: {body:?}"
+        );
+        assert!(
+            body.get("top_p").is_none(),
+            "compaction must not force top_p: {body:?}"
+        );
+        let _ = shutdown_tx.send(());
+    }
+    #[tokio::test]
+    async fn chat_completions_compaction_default_none_omits_tools() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config(&base_url);
+        let tools = vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("Reads a file".to_string()),
+            parameters: json!({"type": "object", "properties": {}}),
+        }];
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            vec![
+                ConversationItem::system("You are a helpful assistant."),
+                ConversationItem::user("Summarize the conversation so far."),
+            ],
+            tools,
+            vec![HostedTool::WebSearch { options: None }],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("tool-free compaction must succeed"));
+        let bodies = captured.lock().unwrap();
+        let body = bodies.first().expect("one compact request");
+        assert!(
+            body.get("tools").is_none(),
+            "tools must be omitted: {body:?}"
+        );
+        assert!(
+            body.get("tool_choice").is_none(),
+            "tool_choice must be omitted with tools: {body:?}"
+        );
+        let _ = shutdown_tx.send(());
+    }
+    #[tokio::test]
+    async fn third_party_chat_completions_ignores_auto_and_omits_tools() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config(&base_url);
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            vec![
+                ConversationItem::system("You are a helpful assistant."),
+                ConversationItem::user("Summarize the conversation so far."),
+            ],
+            vec![ToolSpec {
+                name: "read_file".to_string(),
+                description: Some("Reads a file".to_string()),
+                parameters: json!({"type": "object", "properties": {}}),
+            }],
+            vec![],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::Auto,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("third-party tool-free compaction must succeed"));
+        let bodies = captured.lock().unwrap();
+        let body = bodies.first().expect("one compact request");
+        assert!(
+            body.get("tools").is_none(),
+            "tools must be omitted: {body:?}"
+        );
+        assert!(body.get("tool_choice").is_none(), "tool choice: {body:?}");
+        let _ = shutdown_tx.send(());
+    }
+    #[tokio::test]
+    async fn chat_completions_compaction_attaches_tools_with_tool_choice_auto() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let mut config = test_config(&base_url);
+        config.provider_identity = xai_grok_inference::config::ProviderIdentity::Xai;
         let chat_history = vec![
             ConversationItem::system("You are a helpful assistant."),
             ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
@@ -1808,7 +2077,7 @@ mod reasoning_compaction_regression_tests {
         assert_eq!(
             with_tools["tool_choice"],
             json!("auto"),
-            "default compaction tool_choice is auto"
+            "explicit auto compaction tool_choice must be preserved"
         );
         let sent_tools = with_tools["tools"]
             .as_array()
@@ -1877,7 +2146,7 @@ mod reasoning_compaction_regression_tests {
         config
     }
     #[tokio::test]
-    async fn responses_compaction_attaches_tools_with_tool_choice_auto() {
+    async fn responses_compaction_default_none_omits_tools_and_sampling_knobs() {
         use std::sync::{Arc, Mutex};
         let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let cap = captured.clone();
@@ -1909,6 +2178,252 @@ mod reasoning_compaction_regression_tests {
         });
         let base_url = format!("http://{addr}/v1");
         let config = test_config_responses(&base_url);
+        let tools = vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("Reads a file".to_string()),
+            parameters: json!({"type": "object", "properties": {}}),
+        }];
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            vec![
+                ConversationItem::system("You are a helpful assistant."),
+                ConversationItem::user("Summarize the conversation so far."),
+            ],
+            tools,
+            vec![HostedTool::WebSearch { options: None }],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("tool-free Responses compaction must succeed"));
+        let bodies = captured.lock().unwrap();
+        let body = bodies.first().expect("one compact request");
+        assert!(
+            body.get("tools")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty),
+            "tools must be omitted: {body:?}"
+        );
+        assert!(body.get("tool_choice").is_none(), "tool choice: {body:?}");
+        let temperature = body
+            .get("temperature")
+            .and_then(serde_json::Value::as_f64)
+            .expect("configured temperature must be inherited");
+        assert!(
+            (temperature - 0.7).abs() < 0.000_001,
+            "compaction must inherit the configured temperature: {body:?}"
+        );
+        assert!(body.get("top_p").is_none(), "top_p: {body:?}");
+        let _ = shutdown_tx.send(());
+    }
+    fn messages_summary_stream() -> Vec<Event> {
+        vec![
+            Event::default().data(
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_test",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": "test-model",
+                        "stop_reason": null,
+                        "usage": {"input_tokens": 10, "output_tokens": 0}
+                    }
+                })
+                .to_string(),
+            ),
+            Event::default().data(
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "<summary>ok</summary>"}
+                })
+                .to_string(),
+            ),
+            Event::default().data(
+                json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 5}
+                })
+                .to_string(),
+            ),
+            Event::default().data(json!({"type": "message_stop"}).to_string()),
+        ]
+    }
+    fn test_config_messages(base_url: &str) -> InferenceConfig {
+        let mut config = test_config(base_url);
+        config.api_backend = ApiBackend::Messages;
+        config
+    }
+    #[tokio::test]
+    async fn messages_compaction_default_none_omits_tools() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        messages_summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config_messages(&base_url);
+        let tools = vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("Reads a file".to_string()),
+            parameters: json!({"type": "object", "properties": {}}),
+        }];
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            vec![
+                ConversationItem::system("You are a helpful assistant."),
+                ConversationItem::user("Summarize the conversation so far."),
+            ],
+            tools,
+            vec![HostedTool::WebSearch { options: None }],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("tool-free Messages compaction must succeed"));
+        let bodies = captured.lock().unwrap();
+        let body = bodies.first().expect("one compact request");
+        assert!(
+            body.get("tools").is_none(),
+            "tools must be omitted: {body:?}"
+        );
+        assert!(body.get("tool_choice").is_none(), "tool choice: {body:?}");
+        let _ = shutdown_tx.send(());
+    }
+    #[tokio::test]
+    async fn third_party_responses_ignores_auto_and_omits_tools() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        responses_summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config_responses(&base_url);
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            vec![
+                ConversationItem::system("You are a helpful assistant."),
+                ConversationItem::user("Summarize the conversation so far."),
+            ],
+            vec![ToolSpec {
+                name: "read_file".to_string(),
+                description: Some("Reads a file".to_string()),
+                parameters: json!({"type": "object", "properties": {}}),
+            }],
+            vec![],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::Auto,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("third-party Responses compaction must succeed"));
+        let bodies = captured.lock().unwrap();
+        let body = bodies.first().expect("one compact request");
+        assert!(
+            body.get("tools")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty),
+            "tools must be omitted: {body:?}"
+        );
+        assert!(body.get("tool_choice").is_none(), "tool choice: {body:?}");
+        let _ = shutdown_tx.send(());
+    }
+    #[tokio::test]
+    async fn responses_compaction_attaches_tools_with_tool_choice_auto() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        responses_summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let mut config = test_config_responses(&base_url);
+        config.provider_identity = xai_grok_inference::config::ProviderIdentity::Xai;
         let chat_history = vec![
             ConversationItem::system("You are a helpful assistant."),
             ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
@@ -1955,7 +2470,7 @@ mod reasoning_compaction_regression_tests {
         assert_eq!(
             with_tools["tool_choice"],
             json!("auto"),
-            "default Responses compaction tool_choice is auto"
+            "explicit auto Responses compaction tool_choice must be preserved"
         );
         let sent_tools = with_tools["tools"]
             .as_array()

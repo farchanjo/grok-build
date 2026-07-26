@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use xai_grok_inference_types::{ConversationItem, InferenceSettings};
 
 /// Canonical marker for an injected memory-context block. Shared by the
@@ -15,6 +16,57 @@ pub const MEMORY_CONTEXT_OPEN_TAG: &str = "<memory-context>";
 
 /// Closing tag paired with [`MEMORY_CONTEXT_OPEN_TAG`].
 pub const MEMORY_CONTEXT_CLOSE_TAG: &str = "</memory-context>";
+
+/// Identity of the exact conversation range submitted to a background compactor.
+///
+/// The actor verifies all fields before applying a rolling replacement. The epoch
+/// rejects any intervening conversation mutation, while the fingerprint protects
+/// against an incorrectly constructed or corrupted source identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactSourceIdentity {
+    /// The structural epoch that must match for the splice to succeed.
+    pub expected_epoch: u64,
+    /// The starting index (inclusive) of the source range in the conversation.
+    pub source_start: usize,
+    /// The ending index (exclusive) of the source range in the conversation.
+    pub source_end: usize,
+    /// SHA-256 of the length-delimited JSON encoding of the source items.
+    pub source_fingerprint: [u8; 32],
+}
+
+impl CompactSourceIdentity {
+    /// Construct an identity for `items` at the given epoch and source range.
+    pub fn new(
+        expected_epoch: u64,
+        source_start: usize,
+        source_end: usize,
+        items: &[ConversationItem],
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            expected_epoch,
+            source_start,
+            source_end,
+            source_fingerprint: fingerprint_conversation_items(items)?,
+        })
+    }
+}
+
+/// Compute a deterministic, unambiguous fingerprint for conversation items.
+///
+/// Each serialized item is prefixed with its byte length so adjacent JSON values
+/// cannot produce an ambiguous concatenation. Serialization errors are returned
+/// rather than panicking inside the chat-state actor.
+pub fn fingerprint_conversation_items(
+    items: &[ConversationItem],
+) -> Result<[u8; 32], serde_json::Error> {
+    let mut hasher = Sha256::new();
+    for item in items {
+        let encoded = serde_json::to_vec(item)?;
+        hasher.update((encoded.len() as u64).to_le_bytes());
+        hasher.update(encoded);
+    }
+    Ok(hasher.finalize().into())
+}
 
 /// Configuration for the ChatStateActor at spawn time.
 #[derive(Debug, Clone)]
@@ -54,6 +106,10 @@ pub struct ChatStateSnapshot {
     /// Opaque credential secrets (API key, optional extra auth, client version).
     #[serde(default)]
     pub credentials: Credentials,
+    /// Epoch counter incremented on each structural change (replace_conversation).
+    /// Used to detect stale snapshots; starts at 0 with serde default.
+    #[serde(default)]
+    pub structural_epoch: u64,
 }
 
 /// Metadata for session notifications (timing info).
@@ -195,6 +251,7 @@ mod tests {
             turn_start_ms: None,
             last_compaction_prompt_index: None,
             credentials: Credentials::default(),
+            structural_epoch: 0,
         };
 
         let json = serde_json::to_string(&snapshot).expect("serialize");
@@ -205,6 +262,7 @@ mod tests {
         assert!(deserialized.conversation.is_empty());
         assert!(deserialized.agent_edited_paths.is_empty());
         assert!(deserialized.last_compaction_prompt_index.is_none());
+        assert_eq!(deserialized.structural_epoch, 0);
     }
 
     #[test]
@@ -241,6 +299,7 @@ mod tests {
             turn_start_ms: Some(1234567800),
             last_compaction_prompt_index: Some(2),
             credentials: Credentials::default(),
+            structural_epoch: 42,
         };
 
         let json = serde_json::to_string(&snapshot).expect("serialize");
@@ -254,5 +313,54 @@ mod tests {
         assert_eq!(deserialized.stream_start_ms, Some(1234567890));
         assert_eq!(deserialized.turn_start_ms, Some(1234567800));
         assert_eq!(deserialized.last_compaction_prompt_index, Some(2));
+        assert_eq!(deserialized.structural_epoch, 42);
+    }
+
+    #[test]
+    fn snapshot_structural_epoch_defaults_to_zero_for_legacy() {
+        // Simulate a legacy snapshot without structural_epoch field
+        let legacy_json = r#"{
+            "conversation": [],
+            "sampling_config": {
+                "base_url": "https://api.example.com",
+                "model": "test-model",
+                "context_window": 128000
+            },
+            "prompt_index": 0,
+            "total_tokens": 0,
+            "agent_edited_paths": [],
+            "prompt_texts": []
+        }"#;
+        let deserialized: ChatStateSnapshot =
+            serde_json::from_str(legacy_json).expect("deserialize");
+        assert_eq!(
+            deserialized.structural_epoch, 0,
+            "legacy snapshots should default to 0"
+        );
+    }
+
+    #[test]
+    fn compact_source_identity_fingerprints_source_items() {
+        let items = [ConversationItem::user("hello")];
+        let identity = CompactSourceIdentity::new(5, 1, 2, &items).expect("fingerprint");
+
+        assert_eq!(identity.expected_epoch, 5);
+        assert_eq!(identity.source_start, 1);
+        assert_eq!(identity.source_end, 2);
+        assert_eq!(
+            identity.source_fingerprint,
+            fingerprint_conversation_items(&items).expect("fingerprint")
+        );
+    }
+
+    #[test]
+    fn item_boundaries_contribute_to_fingerprint() {
+        let split = [ConversationItem::user("a"), ConversationItem::user("b")];
+        let joined = [ConversationItem::user("ab")];
+
+        assert_ne!(
+            fingerprint_conversation_items(&split).expect("fingerprint"),
+            fingerprint_conversation_items(&joined).expect("fingerprint")
+        );
     }
 }

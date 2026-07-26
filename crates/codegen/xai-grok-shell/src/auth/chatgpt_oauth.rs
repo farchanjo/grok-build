@@ -6,8 +6,9 @@
 //! - Browser authorization-code + PKCE, or headless device auth
 //! - Tokens stored under [`OPENAI_OAUTH_SCOPE`] in `auth.json`
 //!
-//! Mutual exclusion with [`super::storage::OPENAI_API_KEY_SCOPE`]: storing OAuth
-//! clears the API key and vice versa (enforced by the store helpers).
+//! ChatGPT OAuth and the OpenAI Platform API key use separate credential scopes.
+//! They may coexist: the active model route selects OAuth for the ChatGPT Codex
+//! endpoint and the API key for `api.openai.com`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -32,6 +33,19 @@ pub const ISSUER: &str = "https://auth.openai.com";
 pub const CODEX_RESPONSES_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// Wire headers must match OpenCode/Codex subscription clients (not Grok-branded).
 pub const ORIGINATOR: &str = "opencode";
+
+/// Return whether a model route is the ChatGPT Codex subscription endpoint.
+///
+/// Matching uses the parsed host and path, so a lookalike hostname cannot make
+/// an OpenAI API key or another provider route receive a ChatGPT OAuth token.
+pub fn is_codex_base_url(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return false;
+    };
+    matches!(url.host_str(), Some("chatgpt.com" | "www.chatgpt.com"))
+        && url.path().contains("/backend-api/codex")
+}
+
 const OAUTH_PORT: u16 = 1455;
 const OAUTH_CALLBACK_PATH: &str = "/auth/callback";
 const TOKEN_SKEW_SECS: i64 = 60;
@@ -311,7 +325,7 @@ fn tokens_to_auth(tokens: &ChatGptOAuthTokens) -> GrokAuth {
     }
 }
 
-/// Persist OAuth tokens and clear any OpenAI API key (mutual exclusion).
+/// Persist OAuth tokens without changing the separately scoped OpenAI API key.
 pub fn store_tokens(
     grok_home: &Path,
     tokens: &ChatGptOAuthTokens,
@@ -323,7 +337,6 @@ pub fn store_tokens(
         return Err(ChatGptOAuthError::Store);
     }
     let mut store = read_auth_json_or_empty(&path).map_err(|_| ChatGptOAuthError::Store)?;
-    store.remove(OPENAI_API_KEY_SCOPE);
     store.insert(OPENAI_OAUTH_SCOPE.to_owned(), tokens_to_auth(tokens));
     if !lock.still_live(&path) {
         return Err(ChatGptOAuthError::Store);
@@ -403,10 +416,8 @@ pub async fn valid_access_token(
     Ok(Some((refreshed.access_token, refreshed.account_id)))
 }
 
-/// OpenAI API key store path that also clears OAuth (mutual exclusion).
-pub fn store_api_key_exclusive(grok_home: &Path, api_key: &str) -> Result<(), ChatGptOAuthError> {
-    // Clear OAuth first, then store key via normal helper.
-    let _ = clear_tokens(grok_home);
+/// Store an OpenAI Platform API key without changing ChatGPT OAuth tokens.
+pub fn store_api_key(grok_home: &Path, api_key: &str) -> Result<(), ChatGptOAuthError> {
     crate::auth::store_provider_api_key(grok_home, OPENAI_API_KEY_SCOPE, api_key)
         .map_err(|_| ChatGptOAuthError::Store)
 }
@@ -772,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_store_clears_api_key() {
+    fn oauth_store_preserves_api_key() {
         let dir = tempfile::tempdir().unwrap();
         crate::auth::store_provider_api_key(dir.path(), OPENAI_API_KEY_SCOPE, "sk-test").unwrap();
         let tokens = ChatGptOAuthTokens {
@@ -783,15 +794,16 @@ mod tests {
             email: None,
         };
         store_tokens(dir.path(), &tokens).unwrap();
-        assert!(
+        assert_eq!(
             crate::auth::read_provider_api_key(dir.path(), OPENAI_API_KEY_SCOPE)
                 .unwrap()
-                .is_none()
+                .as_deref(),
+            Some("sk-test")
         );
     }
 
     #[test]
-    fn api_key_exclusive_clears_oauth() {
+    fn api_key_store_preserves_oauth() {
         let dir = tempfile::tempdir().unwrap();
         let tokens = ChatGptOAuthTokens {
             access_token: "access".into(),
@@ -801,8 +813,8 @@ mod tests {
             email: None,
         };
         store_tokens(dir.path(), &tokens).unwrap();
-        store_api_key_exclusive(dir.path(), "sk-new").unwrap();
-        assert!(read_tokens(dir.path()).unwrap().is_none());
+        store_api_key(dir.path(), "sk-new").unwrap();
+        assert!(read_tokens(dir.path()).unwrap().is_some());
         assert_eq!(
             crate::auth::read_provider_api_key(dir.path(), OPENAI_API_KEY_SCOPE)
                 .unwrap()

@@ -55,6 +55,7 @@ pub(crate) use turn::reconcile_overdue_turn_ends;
 
 // Test-only consumers (cfg(test) mods elsewhere in the crate); a plain
 // re-export trips -D unused-imports in the lib build.
+pub(in crate::app) use ctx::maybe_open_welcome_session_picker;
 #[cfg(test)]
 pub(crate) use ctx::{SwitchCause, switch_to_agent};
 #[cfg(test)]

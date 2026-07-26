@@ -12881,10 +12881,12 @@ dependencies = [
 name = "xai-chat-state"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "indexmap",
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "strum 0.27.2",
  "tokio",
  "tokio-util",

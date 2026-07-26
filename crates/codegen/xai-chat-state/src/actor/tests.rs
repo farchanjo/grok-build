@@ -6,10 +6,13 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use xai_grok_inference_types::{ConversationItem, InferenceSettings};
 
-use crate::StrictAppendAck;
 use crate::actor::ChatStateActor;
 use crate::events::ChatStateEvent;
-use crate::persistence::{MockChatPersistence, MockPersistenceReceiver, PersistenceRecord};
+use crate::persistence::{
+    CompactionPersistenceError, CompactionPersistenceMetadata, MockChatPersistence,
+    MockPersistenceReceiver, PersistenceRecord,
+};
+use crate::{ChatStateSnapshot, StrictAppendAck};
 
 /// Helper to build a `InferenceSettings` for tests.
 fn test_config() -> InferenceSettings {
@@ -37,7 +40,7 @@ struct TestHarness {
     handle: crate::handle::ChatStateHandle,
     event_rx: mpsc::UnboundedReceiver<ChatStateEvent>,
     persistence_rx: MockPersistenceReceiver,
-    _cancellation_token: tokio_util::sync::CancellationToken,
+    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl TestHarness {
@@ -76,7 +79,7 @@ impl TestHarness {
             handle,
             event_rx,
             persistence_rx,
-            _cancellation_token: token,
+            cancellation_token: token,
         }
     }
 
@@ -4714,4 +4717,605 @@ async fn repair_history_command_refused_while_turn_active() {
         .unwrap()
         .unwrap();
     assert_eq!(report.stripped_tool_result_ids, vec!["call_ORPHAN"]);
+}
+
+// ============================================================================
+// Structural Epoch Tests
+// ============================================================================
+
+fn source_identity(
+    expected_epoch: u64,
+    source_start: usize,
+    source_end: usize,
+    conversation: &[ConversationItem],
+) -> crate::types::CompactSourceIdentity {
+    crate::types::CompactSourceIdentity::new(
+        expected_epoch,
+        source_start,
+        source_end,
+        &conversation[source_start..source_end],
+    )
+    .expect("source fingerprint")
+}
+
+/// Snapshot starts with structural epoch 0.
+#[tokio::test]
+async fn snapshot_epoch_is_zero_initially() {
+    let h = TestHarness::new();
+    let snap = h.handle.snapshot().await.unwrap();
+    assert_eq!(snap.structural_epoch, 0);
+}
+
+/// Legacy snapshots without structural_epoch field deserialize with default 0.
+#[test]
+fn legacy_snapshot_defaults_epoch_to_zero() {
+    let legacy_json = r#"{
+        "conversation": [],
+        "sampling_config": {
+            "base_url": "https://api.example.com",
+            "model": "test-model",
+            "context_window": 128000
+        },
+        "prompt_index": 0,
+        "total_tokens": 0,
+        "agent_edited_paths": [],
+        "prompt_texts": []
+    }"#;
+    let deserialized: ChatStateSnapshot = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(deserialized.structural_epoch, 0);
+}
+
+/// Every appended conversation item invalidates a background compaction job.
+#[tokio::test]
+async fn append_user_message_increments_epoch() {
+    let h = TestHarness::new();
+
+    assert_eq!(h.handle.get_structural_epoch().await, 0);
+    h.handle.push_user_message(ConversationItem::user("hello"));
+
+    assert_eq!(h.handle.get_structural_epoch().await, 1);
+}
+
+/// Replace conversation increments structural epoch.
+#[tokio::test]
+async fn replace_conversation_increments_epoch() {
+    let h = TestHarness::new();
+
+    h.handle.push_user_message(ConversationItem::user("q1"));
+    let epoch_before = h.handle.get_structural_epoch().await;
+    assert_eq!(epoch_before, 1);
+
+    h.handle.replace_conversation(vec![
+        ConversationItem::system("compacted"),
+        ConversationItem::user("summary"),
+    ]);
+    let epoch_after = h.handle.get_structural_epoch().await;
+
+    assert_eq!(epoch_after, 2, "replace must bump epoch");
+}
+
+/// Truncate to prompt index increments structural epoch.
+#[tokio::test]
+async fn truncate_increments_epoch() {
+    let h = TestHarness::new();
+
+    h.handle.increment_prompt_index();
+    h.handle.push_user_message(ConversationItem::user("q1"));
+    h.handle.increment_prompt_index();
+    h.handle.push_user_message(ConversationItem::user("q2"));
+    h.handle.record_token_usage(100);
+
+    let epoch_before = h.handle.get_structural_epoch().await;
+    assert_eq!(epoch_before, 2);
+
+    h.handle.truncate_to_prompt_index(0).await;
+
+    let epoch_after = h.handle.get_structural_epoch().await;
+    assert_eq!(epoch_after, 3, "truncate must bump epoch");
+}
+
+/// Restore snapshot increments structural epoch.
+#[tokio::test]
+async fn restore_snapshot_increments_epoch() {
+    let h = TestHarness::new();
+
+    h.handle.push_user_message(ConversationItem::user("q1"));
+    let snap = h.handle.snapshot().await.unwrap();
+
+    let epoch_before = h.handle.get_structural_epoch().await;
+    assert_eq!(epoch_before, 1);
+
+    h.handle.replace_conversation(vec![]);
+
+    let epoch_after_replace = h.handle.get_structural_epoch().await;
+    assert_eq!(epoch_after_replace, 2);
+
+    h.handle.restore_snapshot(snap);
+
+    let epoch_after_restore = h.handle.get_structural_epoch().await;
+    assert_eq!(epoch_after_restore, 3, "restore must bump epoch");
+}
+
+/// Non-structural mutations (record_token_usage, increment_prompt_index)
+/// do NOT increment structural epoch.
+#[tokio::test]
+async fn non_structural_mutations_do_not_increment_epoch() {
+    let h = TestHarness::new();
+
+    h.handle.record_token_usage(1000);
+    assert_eq!(h.handle.get_structural_epoch().await, 0);
+
+    h.handle.increment_prompt_index();
+    assert_eq!(h.handle.get_structural_epoch().await, 0);
+
+    h.handle.record_stream_start(12345);
+    assert_eq!(h.handle.get_structural_epoch().await, 0);
+
+    h.handle.record_turn_start(12346);
+    assert_eq!(h.handle.get_structural_epoch().await, 0);
+
+    h.handle.update_inference_settings(test_config());
+    assert_eq!(h.handle.get_structural_epoch().await, 0);
+
+    h.handle.record_agent_edited_path("src/main.rs".to_string());
+    assert_eq!(h.handle.get_structural_epoch().await, 0);
+}
+
+/// CAS splice with matching epoch, range, and fingerprint succeeds.
+#[tokio::test]
+async fn cas_splice_succeeds_with_matching_identity() {
+    let h = TestHarness::new();
+
+    // Build initial conversation
+    h.handle.push_user_message(ConversationItem::system("sys"));
+    h.handle.push_user_message(ConversationItem::user("q1"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("a1"));
+    h.handle.push_user_message(ConversationItem::user("q2"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("a2"));
+
+    // Sync
+    let _ = h.handle.get_conversation().await;
+
+    let epoch = h.handle.get_structural_epoch().await;
+    assert_eq!(epoch, 5);
+
+    // Replace items [1..4] (q1, a1, q2).
+    let conv = h.handle.get_conversation().await;
+    let identity = source_identity(epoch, 1, 4, &conv);
+
+    // New items to splice in
+    let new_items = vec![
+        ConversationItem::user("new q1"),
+        ConversationItem::assistant("new a1"),
+        ConversationItem::user("new q2"),
+    ];
+
+    // Perform CAS splice
+    let result = h.handle.cas_splice_conversation(identity, new_items).await;
+    assert_eq!(result, crate::CasSpliceResult::Applied);
+
+    // Verify conversation was updated
+    let conv = h.handle.get_conversation().await;
+    assert_eq!(conv.len(), 5); // sys + 3 new items + untouched a2
+    assert!(matches!(&conv[0], ConversationItem::System(_)));
+    assert_eq!(conv[1].text_content(), "new q1");
+
+    // Verify epoch was bumped from the captured value.
+    assert_eq!(conv[4].text_content(), "a2");
+    assert_eq!(h.handle.get_structural_epoch().await, epoch + 1);
+}
+
+/// Any append after planning makes the source identity stale.
+#[tokio::test]
+async fn cas_splice_is_invalidated_by_append() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("source"));
+    let conversation = h.handle.get_conversation().await;
+    let identity = source_identity(h.handle.get_structural_epoch().await, 0, 1, &conversation);
+
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("new item"));
+    assert_eq!(
+        h.handle
+            .cas_splice_conversation(
+                identity,
+                vec![ConversationItem::compaction_summary("summary")]
+            )
+            .await,
+        crate::CasSpliceResult::Stale
+    );
+    assert_eq!(h.handle.get_conversation().await.len(), 2);
+}
+
+/// CAS splice with epoch mismatch fails with Stale.
+#[tokio::test]
+async fn cas_splice_epoch_mismatch_returns_stale() {
+    let h = TestHarness::new();
+
+    h.handle.push_user_message(ConversationItem::user("q1"));
+
+    let conv = h.handle.get_conversation().await;
+    let identity = source_identity(0, 0, 1, &conv);
+
+    let result = h.handle.cas_splice_conversation(identity, vec![]).await;
+    assert_eq!(result, crate::CasSpliceResult::Stale);
+
+    // Conversation unchanged
+    assert_eq!(h.handle.get_conversation().await.len(), 1);
+}
+
+/// CAS splice with range/fingerprint mismatch returns Stale.
+#[tokio::test]
+async fn cas_splice_fingerprint_mismatch_returns_stale() {
+    let h = TestHarness::new();
+
+    h.handle.push_user_message(ConversationItem::user("q1"));
+    h.handle.push_user_message(ConversationItem::user("q2"));
+
+    let identity = crate::types::CompactSourceIdentity {
+        expected_epoch: h.handle.get_structural_epoch().await,
+        source_start: 0,
+        source_end: 2,
+        source_fingerprint: [0; 32],
+    };
+
+    let result = h.handle.cas_splice_conversation(identity, vec![]).await;
+    assert_eq!(result, crate::CasSpliceResult::Stale);
+
+    // Conversation unchanged
+    assert_eq!(h.handle.get_conversation().await.len(), 2);
+}
+
+/// CAS splice with invalid range (start > end) returns InvalidRange.
+#[tokio::test]
+async fn cas_splice_invalid_range_returns_invalid() {
+    let h = TestHarness::new();
+
+    let identity = crate::types::CompactSourceIdentity {
+        expected_epoch: 0,
+        source_start: 5,
+        source_end: 3,
+        source_fingerprint: [0; 32],
+    };
+
+    let result = h.handle.cas_splice_conversation(identity, vec![]).await;
+    assert_eq!(result, crate::CasSpliceResult::InvalidRange);
+}
+
+/// CAS splice with range exceeding conversation length returns InvalidRange.
+#[tokio::test]
+async fn cas_splice_range_out_of_bounds_returns_invalid() {
+    let h = TestHarness::new();
+
+    h.handle.push_user_message(ConversationItem::user("q1"));
+
+    let identity = crate::types::CompactSourceIdentity {
+        expected_epoch: h.handle.get_structural_epoch().await,
+        source_start: 0,
+        source_end: 100,
+        source_fingerprint: [0; 32],
+    };
+
+    let result = h.handle.cas_splice_conversation(identity, vec![]).await;
+    assert_eq!(result, crate::CasSpliceResult::InvalidRange);
+}
+
+/// CAS splice can replace a complete assistant/tool-result group without
+/// modifying items outside the selected range.
+#[tokio::test]
+async fn cas_splice_replaces_only_selected_group() {
+    use xai_grok_inference_types::ToolCall;
+
+    let h = TestHarness::new();
+
+    // Build conversation with orphaned tool result
+    h.handle.push_user_message(ConversationItem::system("sys"));
+    h.handle
+        .push_user_message(ConversationItem::user("do things"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call_1".into(),
+            name: "read_file".to_string(),
+            arguments: "{}".into(),
+        }]));
+    // Orphaned tool result (no matching assistant call in new conversation)
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("orphan", "orphaned result"));
+
+    // Sync
+    let _ = h.handle.get_conversation().await;
+
+    let epoch = h.handle.get_structural_epoch().await;
+    let conv = h.handle.get_conversation().await;
+    let identity = source_identity(epoch, 1, 4, &conv);
+
+    // New items without the orphaned tool result
+    let new_items = vec![
+        ConversationItem::user("q1"),
+        ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call_1".into(),
+            name: "read_file".to_string(),
+            arguments: "{}".into(),
+        }]),
+        ConversationItem::tool_result("call_1", "file contents"),
+    ];
+
+    let result = h.handle.cas_splice_conversation(identity, new_items).await;
+    assert_eq!(result, crate::CasSpliceResult::Applied);
+
+    // Verify orphan was removed
+    let conv = h.handle.get_conversation().await;
+    assert!(
+        !conv.iter().any(|i| {
+            matches!(i, ConversationItem::ToolResult(tr) if tr.tool_call_id == "orphan")
+        })
+    );
+}
+
+/// CAS splice updates turn capture consistently.
+#[tokio::test]
+async fn cas_splice_updates_turn_capture() {
+    let h = TestHarness::new();
+
+    h.handle.push_user_message(ConversationItem::user("q1"));
+
+    // Start turn capture
+    h.handle.begin_turn_capture();
+    h.handle
+        .push_user_message(ConversationItem::user("in-flight"));
+
+    let epoch = h.handle.get_structural_epoch().await;
+    let conv = h.handle.get_conversation().await;
+    let identity = source_identity(epoch, 1, conv.len(), &conv);
+
+    let new_items = vec![
+        ConversationItem::user("new q1"),
+        ConversationItem::assistant("new a1"),
+    ];
+
+    let result = h.handle.cas_splice_conversation(identity, new_items).await;
+    assert_eq!(result, crate::CasSpliceResult::Applied);
+
+    let capture = h
+        .handle
+        .take_turn_messages()
+        .await
+        .expect("capture should be rebased, not lost");
+    assert!(capture.compaction_occurred);
+}
+
+/// CAS splice emits ConversationReset and TokensUpdated events.
+#[tokio::test]
+async fn cas_splice_emits_events() {
+    let mut h = TestHarness::new();
+
+    h.handle.push_user_message(ConversationItem::system("sys"));
+    h.handle.push_user_message(ConversationItem::user("q1"));
+    h.handle.record_token_usage(100);
+
+    let epoch = h.handle.get_structural_epoch().await;
+    let conv = h.handle.get_conversation().await;
+    let identity = source_identity(epoch, 1, conv.len(), &conv);
+
+    h.handle
+        .cas_splice_conversation(
+            identity,
+            vec![
+                ConversationItem::user("new q"),
+                ConversationItem::assistant("new a"),
+            ],
+        )
+        .await;
+
+    // Drain events
+    let events = h.drain_events();
+
+    // Should have ConversationReset and TokensUpdated
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatStateEvent::ConversationReset { .. })),
+        "should emit ConversationReset"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatStateEvent::TokensUpdated { .. })),
+        "should emit TokensUpdated"
+    );
+}
+
+fn test_compaction_metadata() -> CompactionPersistenceMetadata {
+    CompactionPersistenceMetadata {
+        checkpoint_id: "checkpoint-test".to_owned(),
+        prompt_index: 1,
+        auto_continue_prompt: None,
+        original_user_info: Some("<user_info>test</user_info>".to_owned()),
+        created_at: "2026-07-26T00:00:00Z".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn persisted_cas_waits_for_ack_before_mutating_memory() {
+    let mut h = TestHarness::with_manual_persistence_ack(vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("source"),
+        ConversationItem::assistant("tail"),
+    ]);
+    let conversation = h.handle.get_conversation().await;
+    let identity = source_identity(h.handle.get_structural_epoch().await, 1, 2, &conversation);
+    let handle = h.handle.clone();
+    let task = tokio::spawn(async move {
+        handle
+            .cas_splice_conversation_with_persistence(
+                identity,
+                vec![ConversationItem::compaction_summary("summary")],
+                Some(test_compaction_metadata()),
+            )
+            .await
+    });
+
+    let ack = h
+        .persistence_rx
+        .next_compaction_ack()
+        .await
+        .expect("compaction acknowledgement sender");
+    // Verify the actor is blocked waiting for the persistence ack by checking
+    // the task is not yet finished. Querying the actor would deadlock because
+    // it's blocked on the await, so we use task state as proof.
+    assert!(!task.is_finished(), "actor must wait for persistence ack");
+    ack.send(Ok(())).unwrap();
+    assert_eq!(task.await.unwrap(), crate::CasSpliceResult::Applied);
+    assert_eq!(
+        h.handle.get_conversation().await[1].text_content(),
+        "summary"
+    );
+}
+
+#[tokio::test]
+async fn persisted_cas_not_committed_keeps_memory_unchanged() {
+    let mut h = TestHarness::with_manual_persistence_ack(vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("source"),
+        ConversationItem::assistant("tail"),
+    ]);
+    let before = h.handle.get_conversation().await;
+    let identity = source_identity(h.handle.get_structural_epoch().await, 1, 2, &before);
+    let handle = h.handle.clone();
+    let task = tokio::spawn(async move {
+        handle
+            .cas_splice_conversation_with_persistence(
+                identity,
+                vec![ConversationItem::compaction_summary("summary")],
+                Some(test_compaction_metadata()),
+            )
+            .await
+    });
+    let ack = h.persistence_rx.next_compaction_ack().await.unwrap();
+    ack.send(Err(CompactionPersistenceError::NotCommitted(
+        std::io::Error::other("checkpoint write failed"),
+    )))
+    .unwrap();
+
+    assert_eq!(
+        task.await.unwrap(),
+        crate::CasSpliceResult::PersistenceFailed
+    );
+    let after = h.handle.get_conversation().await;
+    assert_eq!(
+        serde_json::to_vec(&after).unwrap(),
+        serde_json::to_vec(&before).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn persisted_cas_committed_error_still_applies_memory() {
+    let mut h = TestHarness::with_manual_persistence_ack(vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("source"),
+        ConversationItem::assistant("tail"),
+    ]);
+    let conversation = h.handle.get_conversation().await;
+    let identity = source_identity(h.handle.get_structural_epoch().await, 1, 2, &conversation);
+    let handle = h.handle.clone();
+    let task = tokio::spawn(async move {
+        handle
+            .cas_splice_conversation_with_persistence(
+                identity,
+                vec![ConversationItem::compaction_summary("summary")],
+                Some(test_compaction_metadata()),
+            )
+            .await
+    });
+    let ack = h.persistence_rx.next_compaction_ack().await.unwrap();
+    ack.send(Err(CompactionPersistenceError::Committed(
+        std::io::Error::other("summary bookkeeping failed after marker commit"),
+    )))
+    .unwrap();
+
+    assert_eq!(task.await.unwrap(), crate::CasSpliceResult::Applied);
+    assert_eq!(
+        h.handle.get_conversation().await[1].text_content(),
+        "summary"
+    );
+}
+
+#[tokio::test]
+async fn persisted_cas_indeterminate_keeps_memory_unchanged() {
+    let mut h = TestHarness::with_manual_persistence_ack(vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("source"),
+        ConversationItem::assistant("tail"),
+    ]);
+    let before = h.handle.get_conversation().await;
+    let identity = source_identity(h.handle.get_structural_epoch().await, 1, 2, &before);
+    let handle = h.handle.clone();
+    let task = tokio::spawn(async move {
+        handle
+            .cas_splice_conversation_with_persistence(
+                identity,
+                vec![ConversationItem::compaction_summary("summary")],
+                Some(test_compaction_metadata()),
+            )
+            .await
+    });
+    let ack = h.persistence_rx.next_compaction_ack().await.unwrap();
+    // Queue a later mutation while the actor is blocked on persistence. The
+    // fail-stop must win before this command can append to either memory or disk.
+    h.handle
+        .push_user_message(ConversationItem::user("must not be accepted"));
+    ack.send(Err(CompactionPersistenceError::Indeterminate(
+        std::io::Error::other("marker failed and rollback failed"),
+    )))
+    .unwrap();
+
+    assert_eq!(
+        task.await.unwrap(),
+        crate::CasSpliceResult::PersistenceIndeterminate
+    );
+    assert!(
+        h.cancellation_token.is_cancelled(),
+        "indeterminate persistence must fail-stop the authoritative actor"
+    );
+    // The actor cancels itself before accepting another command. Its local
+    // memory was never replaced; startup recovery decides the durable base.
+    assert!(h.handle.get_conversation().await.is_empty());
+    assert!(
+        h.drain_persistence()
+            .iter()
+            .all(|record| !matches!(record, PersistenceRecord::Message(_))),
+        "queued mutations must not reach persistence after an indeterminate commit"
+    );
+}
+
+#[tokio::test]
+async fn dropped_persisted_cas_ack_is_indeterminate_and_fail_stops_actor() {
+    let mut h = TestHarness::with_manual_persistence_ack(vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("source"),
+        ConversationItem::assistant("tail"),
+    ]);
+    let conversation = h.handle.get_conversation().await;
+    let identity = source_identity(h.handle.get_structural_epoch().await, 1, 2, &conversation);
+    let handle = h.handle.clone();
+    let task = tokio::spawn(async move {
+        handle
+            .cas_splice_conversation_with_persistence(
+                identity,
+                vec![ConversationItem::compaction_summary("summary")],
+                Some(test_compaction_metadata()),
+            )
+            .await
+    });
+    let ack = h.persistence_rx.next_compaction_ack().await.unwrap();
+    drop(ack);
+
+    assert_eq!(
+        task.await.unwrap(),
+        crate::CasSpliceResult::PersistenceIndeterminate
+    );
+    assert!(h.cancellation_token.is_cancelled());
+    assert!(h.handle.get_conversation().await.is_empty());
 }

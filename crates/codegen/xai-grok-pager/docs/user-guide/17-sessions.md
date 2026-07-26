@@ -92,7 +92,7 @@ Run `grok --resume` without an ID to resume the most recent session for the curr
 
 ### From the Welcome Screen
 
-When you launch `grok`, the welcome screen lists recent sessions for the current directory. Select one to resume it.
+When you launch `grok`, the welcome screen automatically opens the recent-session picker. Sessions are grouped by project folder, with the current project first. Select a session to resume it, or press `Esc` to return to the welcome menu; press `Ctrl+S` to reopen the picker.
 
 ---
 

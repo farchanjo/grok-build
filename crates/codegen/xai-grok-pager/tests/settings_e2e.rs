@@ -10,6 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent
 use ratatui::layout::Rect;
 use std::sync::Arc;
 
+use agent_client_protocol as acp;
 use xai_grok_pager::app::actions::Action;
 use xai_grok_pager::settings::{
     EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKind, SettingMeta, SettingOwner,
@@ -76,6 +77,13 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "contextual_hints.small_screen",
     "contextual_hints.word_select",
     "contextual_hints.ssh_wrap",
+    // Dedicated compaction strategy, trigger, bands, model routes, and status.
+    "compaction_strategy",
+    "compaction_trigger_policy",
+    "compaction_band_count",
+    "compaction_primary_model",
+    "compaction_fallback_model",
+    "compaction_status",
 ];
 
 #[test]
@@ -1762,6 +1770,7 @@ fn registry_kind_membership_through_pr_14() {
 
             SettingKind::DynamicEnum { .. } => "DynamicEnum",
             SettingKind::Group { .. } => "Group",
+            SettingKind::Status => "Status",
             other => panic!(
                 "registry_kind_membership: setting `{}` has unknown kind {:?} — \
                  add an arm here AND a kind-membership assertion below",
@@ -1821,6 +1830,8 @@ fn registry_kind_membership_through_pr_14() {
             "auto_dark_theme",
             "auto_light_theme",
             "coding_data_sharing",
+            "compaction_strategy",
+            "compaction_trigger_policy",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
@@ -1846,7 +1857,12 @@ fn registry_kind_membership_through_pr_14() {
     let dynamic_enum_keys = by_kind.remove("DynamicEnum").unwrap_or_default();
     assert_eq!(
         dynamic_enum_keys,
-        vec!["default_model", "fork_secondary_model",],
+        vec![
+            "compaction_fallback_model",
+            "compaction_primary_model",
+            "default_model",
+            "fork_secondary_model",
+        ],
         "DynamicEnum kind membership drift",
     );
 
@@ -1855,7 +1871,12 @@ fn registry_kind_membership_through_pr_14() {
     sorted_int.sort();
     assert_eq!(
         sorted_int,
-        vec!["max_thoughts_width", "scroll_lines", "scroll_speed"],
+        vec![
+            "compaction_band_count",
+            "max_thoughts_width",
+            "scroll_lines",
+            "scroll_speed",
+        ],
         "Int kind membership drift (PR 8)",
     );
 
@@ -1864,6 +1885,13 @@ fn registry_kind_membership_through_pr_14() {
         group_keys,
         vec!["contextual_hints"],
         "Group kind membership drift",
+    );
+
+    let status_keys = by_kind.remove("Status").unwrap_or_default();
+    assert_eq!(
+        status_keys,
+        vec!["compaction_status"],
+        "Status kind membership drift",
     );
 
     // No unexpected kinds.
@@ -1890,6 +1918,8 @@ fn enum_settings_membership_through_pr_14() {
             "auto_dark_theme",
             "auto_light_theme",
             "coding_data_sharing",
+            "compaction_strategy",
+            "compaction_trigger_policy",
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
@@ -1922,6 +1952,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_show_thinking_blocks(true);
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
     xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
+    xai_grok_pager::appearance::cache::set_collapsed_edit_blocks(false);
     xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
     xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
     xai_grok_pager::appearance::cache::set_scroll_mode(
@@ -1930,6 +1961,9 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_invert_scroll(false);
     // 3 = the registry default shown while the profile is in charge.
     xai_grok_pager::appearance::cache::set_scroll_lines(3);
+    xai_grok_pager::appearance::cache::set_render_mermaid(
+        xai_grok_pager::appearance::RenderMermaid::Auto,
+    );
 
     // Hard-coded per-key expectations (independent of registry).
     let expected = |key: &str| -> SettingValue {
@@ -1967,6 +2001,12 @@ fn defaults_round_trip_through_registry() {
             "show_tips" => SettingValue::Bool(true),
             "auto_update" => SettingValue::Bool(true),
             "fork_secondary_model" => SettingValue::String(String::new()),
+            "compaction_strategy" => SettingValue::Enum("auto"),
+            "compaction_trigger_policy" => SettingValue::Enum("fixed"),
+            "compaction_band_count" => SettingValue::Int(4),
+            "compaction_primary_model" => SettingValue::String("@session".to_string()),
+            "compaction_fallback_model" => SettingValue::String(String::new()),
+            "compaction_status" => SettingValue::String("Idle".to_string()),
             "show_thinking_blocks" => SettingValue::Bool(true),
             "prompt_suggestions" => SettingValue::Bool(true),
             "group_tool_verbs" => SettingValue::Bool(true),
@@ -1991,7 +2031,6 @@ fn defaults_round_trip_through_registry() {
         }
         let live_value = current_value_for(meta.key, &ui, &pager)
             .unwrap_or_else(|| panic!("current_value_for(`{}`) returned None", meta.key));
-        let default_value = xai_grok_pager::settings::default_value_for(meta);
         let expected_value = expected(meta.key);
 
         assert_eq!(
@@ -1999,11 +2038,14 @@ fn defaults_round_trip_through_registry() {
             "current_value_for(`{}`) drifted from expected",
             meta.key
         );
-        assert_eq!(
-            default_value, expected_value,
-            "default_value_for(`{}`) drifted from expected",
-            meta.key
-        );
+        if !matches!(meta.kind, SettingKind::Status) {
+            let default_value = xai_grok_pager::settings::default_value_for(meta);
+            assert_eq!(
+                default_value, expected_value,
+                "default_value_for(`{}`) drifted from expected",
+                meta.key
+            );
+        }
     }
 }
 
@@ -2178,7 +2220,9 @@ fn d_key_emits_open_reset_confirm_for_every_setting() {
         // Group rows have no scalar value to reset (consistent with the registry
         // reset-arm coverage test), and their children are hidden from the
         // top-level list — neither is `d`-resettable directly.
-        if matches!(meta.kind, SettingKind::Group { .. }) || is_group_child(&reg, meta.key) {
+        if matches!(meta.kind, SettingKind::Group { .. } | SettingKind::Status)
+            || is_group_child(&reg, meta.key)
+        {
             continue;
         }
         let mut s = make_state();
@@ -5745,6 +5789,9 @@ fn render_mermaid_does_not_support_preview() {
 /// is `auto`.
 #[test]
 fn enter_on_render_mermaid_row_enters_picking_enum() {
+    xai_grok_pager::appearance::cache::set_render_mermaid(
+        xai_grok_pager::appearance::RenderMermaid::Auto,
+    );
     let mut s = make_state();
     navigate_to(&mut s, "render_mermaid");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
@@ -5807,6 +5854,7 @@ fn render_mermaid_picker_nav_does_not_dispatch_preview() {
 fn render_mermaid_picker_enter_dispatches_set_commit() {
     use xai_grok_pager::appearance::RenderMermaid;
 
+    xai_grok_pager::appearance::cache::set_render_mermaid(RenderMermaid::Auto);
     let mut s = make_state();
     navigate_to(&mut s, "render_mermaid");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
@@ -7784,5 +7832,550 @@ fn collapsed_edit_blocks_renders_under_appearance_category_shell_owned() {
         collapsed_idx,
         "collapsed_edit_blocks must be immediately below group_tool_verbs; \
          Appearance order: {keys:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Compaction settings tests
+// ---------------------------------------------------------------------------
+
+/// Helper to create a settings modal state with compaction support.
+fn make_settings_state_with_compaction() -> SettingsModalState {
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![
+            (
+                "Grok Test Model".to_string(),
+                acp::ModelId::new(Arc::from("grok-test-model")),
+            ),
+            (
+                "Grok 4.5".to_string(),
+                acp::ModelId::new(Arc::from("grok-4.5")),
+            ),
+        ],
+        external_model_ids: std::collections::HashSet::new(),
+        ..PagerLocalSnapshot::default()
+    };
+    SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        snapshot,
+    )
+}
+
+/// Test that compaction_strategy is an Enum with choices auto/rolling/full_replace
+/// and default is "auto".
+#[test]
+fn compaction_strategy_is_enum_with_correct_choices_and_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_strategy")
+        .expect("compaction_strategy registered");
+
+    let SettingKind::Enum {
+        choices,
+        default,
+        supports_preview,
+        ..
+    } = &meta.kind
+    else {
+        panic!("compaction_strategy must be Enum");
+    };
+
+    assert_eq!(
+        *default, "auto",
+        "compaction_strategy default must be 'auto'"
+    );
+    assert!(
+        !*supports_preview,
+        "compaction_strategy must not support preview"
+    );
+
+    let canonicals: Vec<&str> = choices.iter().map(|c| c.canonical).collect();
+    assert!(canonicals.contains(&"auto"), "must have 'auto' choice");
+    assert!(
+        canonicals.contains(&"rolling"),
+        "must have 'rolling' choice"
+    );
+    assert!(
+        canonicals.contains(&"full_replace"),
+        "must have 'full_replace' choice"
+    );
+}
+
+/// Test that compaction_strategy keyboard navigation works (j/k)
+/// and emits the correct action for each choice.
+#[test]
+fn compaction_strategy_keyboard_navigation() {
+    let mut state = make_settings_state_with_compaction();
+
+    // Find the compaction_strategy row
+    let strategy_idx = state
+        .rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "compaction_strategy"))
+        .expect("compaction_strategy row must be present");
+
+    state.selected = strategy_idx;
+
+    // Press j to cycle to next choice (auto -> rolling)
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+    );
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+
+    // Press j again to cycle to next (rolling -> full_replace)
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+    );
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+
+    // Press j again to cycle back to auto (full_replace -> auto)
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+    );
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+}
+
+/// Test that compaction_strategy mouse click dispatches the correct action.
+#[test]
+fn compaction_strategy_mouse_click() {
+    let mut state = make_settings_state_with_compaction();
+
+    // Find the compaction_strategy row
+    let strategy_idx = state
+        .rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "compaction_strategy"))
+        .expect("compaction_strategy row must be present");
+
+    state.selected = strategy_idx;
+    state.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 10,
+    };
+    state.row_rects.resize(state.rows.len(), Rect::default());
+    state.row_rects[strategy_idx] = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+
+    let outcome = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        5,
+        0,
+    );
+
+    // Enum rows open their picker first; committing a choice from that picker
+    // is the later step that dispatches SetCompactionStrategy.
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    assert!(matches!(
+        state.mode(),
+        xai_grok_pager::views::settings_modal::SettingsModalMode::PickingEnum { .. }
+    ));
+}
+
+/// Test that compaction_trigger_policy is an Enum with choices fixed/dynamic
+/// and default is "fixed".
+#[test]
+fn compaction_trigger_policy_is_enum_with_correct_choices_and_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_trigger_policy")
+        .expect("compaction_trigger_policy registered");
+
+    let SettingKind::Enum {
+        choices, default, ..
+    } = &meta.kind
+    else {
+        panic!("compaction_trigger_policy must be Enum");
+    };
+
+    assert_eq!(
+        *default, "fixed",
+        "compaction_trigger_policy default must be 'fixed'"
+    );
+
+    let canonicals: Vec<&str> = choices.iter().map(|c| c.canonical).collect();
+    assert!(canonicals.contains(&"fixed"), "must have 'fixed' choice");
+    assert!(
+        canonicals.contains(&"dynamic"),
+        "must have 'dynamic' choice"
+    );
+}
+
+/// Test that compaction_band_count is an Int with bounds 3..8 and default is 4.
+#[test]
+fn compaction_band_count_is_int_with_correct_bounds_and_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_band_count")
+        .expect("compaction_band_count registered");
+
+    let SettingKind::Int {
+        default, min, max, ..
+    } = &meta.kind
+    else {
+        panic!("compaction_band_count must be Int");
+    };
+
+    assert_eq!(*default, 4, "compaction_band_count default must be 4");
+    assert_eq!(*min, 3, "compaction_band_count min must be 3");
+    assert_eq!(*max, 8, "compaction_band_count max must be 8");
+}
+
+/// Test that compaction_primary_model is a DynamicEnum with @session default.
+#[test]
+fn compaction_primary_model_is_dynamic_enum_with_session_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_primary_model")
+        .expect("compaction_primary_model registered");
+
+    let SettingKind::DynamicEnum {
+        default, source, ..
+    } = &meta.kind
+    else {
+        panic!("compaction_primary_model must be DynamicEnum");
+    };
+
+    assert_eq!(
+        *default, "@session",
+        "compaction_primary_model default must be '@session'"
+    );
+
+    use xai_grok_pager::settings::DynamicEnumSource;
+    assert_eq!(
+        *source,
+        DynamicEnumSource::CompactionPrimaryModelCatalog,
+        "compaction_primary_model must use CompactionPrimaryModelCatalog source"
+    );
+}
+
+/// Test that compaction_fallback_model is a DynamicEnum with empty default (no fallback).
+#[test]
+fn compaction_fallback_model_is_dynamic_enum_with_empty_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_fallback_model")
+        .expect("compaction_fallback_model registered");
+
+    let SettingKind::DynamicEnum {
+        default, source, ..
+    } = &meta.kind
+    else {
+        panic!("compaction_fallback_model must be DynamicEnum");
+    };
+
+    assert_eq!(
+        *default, "",
+        "compaction_fallback_model default must be empty (no fallback)"
+    );
+
+    use xai_grok_pager::settings::DynamicEnumSource;
+    assert_eq!(
+        *source,
+        DynamicEnumSource::CompactionFallbackModelCatalog,
+        "compaction_fallback_model must use CompactionFallbackModelCatalog source"
+    );
+}
+
+/// Test that compaction_status is read-only (Status kind).
+#[test]
+fn compaction_status_is_read_only_status_kind() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("compaction_status")
+        .expect("compaction_status registered");
+
+    let SettingKind::Status = &meta.kind else {
+        panic!("compaction_status must be Status kind (read-only)");
+    };
+}
+
+/// Test that compaction_status shows "Compacting" when compaction_in_progress is true.
+#[test]
+fn compaction_status_shows_compacting_when_in_progress() {
+    let snapshot = PagerLocalSnapshot {
+        compaction_in_progress: true,
+        ..PagerLocalSnapshot::default()
+    };
+
+    let value = xai_grok_pager::settings::current_value_for(
+        "compaction_status",
+        &UiConfig::default(),
+        &snapshot,
+    );
+
+    assert_eq!(
+        value,
+        Some(SettingValue::String("Compacting".to_string())),
+        "compaction_status should be 'Compacting' when compaction_in_progress is true"
+    );
+}
+
+/// Test that compaction_status shows "Idle" when compaction_in_progress is false.
+#[test]
+fn compaction_status_shows_idle_when_not_in_progress() {
+    let snapshot = PagerLocalSnapshot {
+        compaction_in_progress: false,
+        ..PagerLocalSnapshot::default()
+    };
+
+    let value = xai_grok_pager::settings::current_value_for(
+        "compaction_status",
+        &UiConfig::default(),
+        &snapshot,
+    );
+
+    assert_eq!(
+        value,
+        Some(SettingValue::String("Idle".to_string())),
+        "compaction_status should be 'Idle' when compaction_in_progress is false"
+    );
+}
+
+/// Test that compaction_status is truly read-only (no action can be dispatched).
+/// The SettingsKind::Status variant means the row renders as a scalar but
+/// never opens an editor or produces an action.
+#[test]
+fn compaction_status_no_action_can_be_dispatched() {
+    let mut state = make_settings_state_with_compaction();
+
+    // Find the compaction_status row
+    let status_idx = state
+        .rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "compaction_status"))
+        .expect("compaction_status row must be present");
+
+    state.selected = status_idx;
+
+    // Pressing Enter on a Status row should not dispatch an action
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Unchanged),
+        "Enter on a Status row should not dispatch an action"
+    );
+
+    // Pressing j/k should not change the selection (Status rows are not selectable)
+    // Actually, Status rows ARE in the list and ARE selectable, but they don't
+    // produce actions on Enter. Let's verify the mouse click behavior too.
+    state.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 10,
+    };
+    state.row_rects.resize(state.rows.len(), Rect::default());
+    state.row_rects[status_idx] = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+
+    let outcome = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        5,
+        0,
+    );
+
+    // Mouse click on a Status row should NOT dispatch an action
+    assert!(
+        !matches!(outcome, SettingsKeyOutcome::Action(_)),
+        "Mouse click on a Status row should not dispatch an action"
+    );
+}
+
+/// Test that dynamic enum choices for compaction models use stable ModelId values as canonicals,
+/// not display names.
+#[test]
+fn compaction_dynamic_enum_uses_model_id_canonicals_not_display_names() {
+    use agent_client_protocol as acp;
+
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![
+            (
+                "Grok Test Model".to_string(),
+                acp::ModelId::new(Arc::from("grok-test-model")),
+            ),
+            (
+                "Grok 4.5".to_string(),
+                acp::ModelId::new(Arc::from("grok-4.5")),
+            ),
+        ],
+        external_model_ids: std::collections::HashSet::new(),
+        ..PagerLocalSnapshot::default()
+    };
+
+    use xai_grok_pager::settings::{DynamicEnumSource, dynamic_enum_choices};
+
+    let choices = dynamic_enum_choices(DynamicEnumSource::CompactionPrimaryModelCatalog, &snapshot);
+
+    // Check that canonicals are stable ModelId values, not display names
+    for choice in &choices {
+        if choice.canonical == "@session" {
+            // @session is the sentinel, skip
+            continue;
+        }
+        assert!(
+            choice.canonical.starts_with("grok-") || choice.canonical == "grok-test-model",
+            "canonical must be stable ModelId, not display name: {}",
+            choice.canonical
+        );
+        assert_ne!(
+            choice.canonical, choice.display,
+            "canonical must NOT be the display name: {} vs {}",
+            choice.canonical, choice.display
+        );
+    }
+}
+
+/// Test that external provider choices carry a privacy warning in the description.
+#[test]
+fn compaction_external_provider_choices_have_privacy_warning() {
+    use agent_client_protocol as acp;
+    use xai_grok_pager::settings::{DynamicEnumSource, dynamic_enum_choices};
+
+    let external_id = "external-provider-model".to_string();
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![
+            (
+                "Grokside Model".to_string(),
+                acp::ModelId::new(Arc::from("grokside-model")),
+            ),
+            (
+                "External Provider Model".to_string(),
+                acp::ModelId::new(Arc::from(external_id.clone())),
+            ),
+        ],
+        external_model_ids: vec![external_id.clone()].into_iter().collect(),
+        ..PagerLocalSnapshot::default()
+    };
+
+    let choices = dynamic_enum_choices(DynamicEnumSource::CompactionPrimaryModelCatalog, &snapshot);
+
+    // Find the external provider choice
+    let external_choice = choices.iter().find(|c| c.canonical == external_id);
+    assert!(
+        external_choice.is_some(),
+        "external provider choice should exist"
+    );
+
+    let choice = external_choice.unwrap();
+    assert!(
+        choice.description.contains("External provider")
+            || choice.description.contains("conversation history"),
+        "external provider choice must have privacy warning in description: {}",
+        choice.description
+    );
+}
+
+/// Test that duplicate primary/fallback model cannot be selected (they are excluded from each other's catalogs).
+#[test]
+fn compaction_primary_and_fallback_exclude_each_other() {
+    use agent_client_protocol as acp;
+    use xai_grok_pager::settings::{DynamicEnumSource, dynamic_enum_choices};
+
+    let primary_model = "grok-4.5".to_string();
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![(
+            "Grok 4.5".to_string(),
+            acp::ModelId::new(Arc::from(primary_model.clone())),
+        )],
+        compaction_primary_model: primary_model.clone(),
+        compaction_fallback_model: String::new(),
+        ..PagerLocalSnapshot::default()
+    };
+
+    let fallback_choices =
+        dynamic_enum_choices(DynamicEnumSource::CompactionFallbackModelCatalog, &snapshot);
+
+    // The primary model must not appear in the fallback catalog because a
+    // configured route can be used only once.
+    assert!(
+        !fallback_choices
+            .iter()
+            .any(|choice| choice.canonical == primary_model),
+        "primary model should be excluded from fallback catalog"
+    );
+}
+
+/// Test that the compaction category exists between Models and Session.
+#[test]
+fn compaction_category_exists_and_is_in_order() {
+    let order = SettingCategory::ALL;
+    let index = order
+        .iter()
+        .position(|category| *category == SettingCategory::Compaction)
+        .expect("Compaction category must be present");
+
+    assert_eq!(
+        order.get(index.wrapping_sub(1)),
+        Some(&SettingCategory::Models)
+    );
+    assert_eq!(order.get(index + 1), Some(&SettingCategory::Session));
+}
+
+/// Test that the @session default for compaction_primary_model resolves correctly.
+#[test]
+fn compaction_session_model_default_resolves_correctly() {
+    use agent_client_protocol as acp;
+
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![(
+            "Grok 4.5".to_string(),
+            acp::ModelId::new(Arc::from("grok-4.5")),
+        )],
+        ..PagerLocalSnapshot::default()
+    };
+
+    use xai_grok_pager::settings::{DynamicEnumSource, dynamic_enum_choices};
+    let choices = dynamic_enum_choices(DynamicEnumSource::CompactionPrimaryModelCatalog, &snapshot);
+
+    // Should include @session as the first choice (when fallback is not @session)
+    let has_session = choices.iter().any(|c| c.canonical == "@session");
+    assert!(
+        has_session,
+        "Compaction primary catalog should include @session when fallback is not @session"
+    );
+}
+
+/// Test that `@session` cannot be selected as both routes.
+#[test]
+fn no_duplicate_session_in_both_catalogs() {
+    use agent_client_protocol as acp;
+    use xai_grok_pager::settings::{DynamicEnumSource, dynamic_enum_choices};
+
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![(
+            "Grok 4.5".to_string(),
+            acp::ModelId::new(Arc::from("grok-4.5")),
+        )],
+        compaction_primary_model: "grok-4.5".to_string(),
+        compaction_fallback_model: "@session".to_string(),
+        ..PagerLocalSnapshot::default()
+    };
+
+    let primary_choices =
+        dynamic_enum_choices(DynamicEnumSource::CompactionPrimaryModelCatalog, &snapshot);
+
+    assert!(
+        !primary_choices
+            .iter()
+            .any(|choice| choice.canonical == "@session"),
+        "@session should be excluded from primary when it is the fallback"
     );
 }

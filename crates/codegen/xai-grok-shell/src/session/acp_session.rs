@@ -168,6 +168,8 @@ pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
 mod recap;
 #[path = "acp_session_impl/rewind.rs"]
 mod rewind;
+#[path = "acp_session_impl/rolling.rs"]
+mod rolling;
 #[path = "acp_session_impl/run_loop.rs"]
 mod run_loop;
 #[path = "acp_session_impl/session_setup.rs"]
@@ -1288,6 +1290,54 @@ impl SessionActor {
     /// did `self.agent.borrow_mut()`.
     fn tool_bridge_handle(&self) -> Arc<xai_grok_tools::bridge::ToolBridge> {
         Arc::clone(self.agent.borrow().tool_bridge())
+    }
+
+    /// Adopt validated routing, strategy, trigger, and band settings while
+    /// preserving the session's threshold, memory, timeout, and two-pass policy.
+    pub(crate) fn update_compaction_config(
+        &self,
+        new_config: crate::agent::config::CompactionConfig,
+    ) {
+        let resolved = match new_config.normalize_validate() {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!(%error, "invalid compaction config received, keeping live policy");
+                return;
+            }
+        };
+        let current = self.agent.borrow().compaction_policy().clone();
+        let updated = xai_grok_agent::CompactionPolicy {
+            compact_models: resolved.models.iter().map(ToString::to_string).collect(),
+            strategy: match resolved.strategy {
+                crate::agent::config::CompactionStrategy::Auto => {
+                    xai_grok_agent::CompactionStrategy::Auto
+                }
+                crate::agent::config::CompactionStrategy::Rolling => {
+                    xai_grok_agent::CompactionStrategy::Rolling
+                }
+                crate::agent::config::CompactionStrategy::FullReplace => {
+                    xai_grok_agent::CompactionStrategy::FullReplace
+                }
+            },
+            trigger_policy: match resolved.trigger_policy {
+                crate::agent::config::CompactionTriggerPolicy::Fixed => {
+                    xai_grok_agent::CompactionTriggerPolicy::Fixed
+                }
+                crate::agent::config::CompactionTriggerPolicy::Dynamic => {
+                    xai_grok_agent::CompactionTriggerPolicy::Dynamic
+                }
+            },
+            rolling_band_count: resolved.rolling_band_count,
+            ..current
+        };
+        self.agent.borrow_mut().set_compaction_policy(updated);
+        tracing::info!(
+            strategy = ?resolved.strategy,
+            trigger_policy = ?resolved.trigger_policy,
+            rolling_band_count = resolved.rolling_band_count,
+            models = ?resolved.models,
+            "updated live compaction policy",
+        );
     }
 }
 const PROMPT_CONTEXT_FILENAME: &str = "prompt_context.json";

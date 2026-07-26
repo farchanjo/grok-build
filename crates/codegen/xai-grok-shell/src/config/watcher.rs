@@ -96,6 +96,9 @@ pub enum ConfigChangeEvent {
     /// would silently skip sessions whose cwd doesn't sit under
     /// `$HOME`.
     HomeClaudeJsonChanged,
+    /// The `[compaction]` section in `config.toml` changed.
+    /// Broadcasts to all sessions for live policy mutation.
+    CompactionConfigChanged,
 }
 
 /// Watches `~/.grok/` for `auth.json`, `config.toml`, and `models_cache.json`

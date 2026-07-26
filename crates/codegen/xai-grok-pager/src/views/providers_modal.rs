@@ -477,7 +477,8 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
                 return ProviderModalOutcome::Changed;
             }
             state.set_status(&provider, ProviderStatus::Missing);
-            // OpenAI: clear ChatGPT OAuth and/or API key (mutual exclusion store).
+            // OpenAI currently disconnects both methods together; connecting
+            // or replacing either method preserves the other.
             ProviderModalOutcome::Command(if provider == ProviderKind::OpenAi {
                 ProviderCommand::LogoutCodex
             } else {
@@ -704,7 +705,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             buf,
             content.content,
             &mut y,
-            "Connect OpenAI (one method at a time):",
+            "Add an OpenAI credential (both may be stored):",
             Style::default().fg(theme.text_primary),
         );
         for (idx, label) in ["ChatGPT Pro/Plus (browser OAuth)", "OpenAI API key"]
@@ -728,7 +729,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             buf,
             content.content,
             &mut y,
-            "Switching methods clears the other credential.",
+            "The selected model route chooses OAuth or the API key.",
             Style::default().fg(theme.gray_dim),
         );
     } else {
@@ -736,7 +737,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             buf,
             content.content,
             &mut y,
-            "xAI: OAuth or API key. OpenAI: ChatGPT login or API key. OpenRouter: API key.",
+            "OAuth and API keys are independent options; model routes select the right method.",
             Style::default().fg(theme.gray_dim),
         );
     }

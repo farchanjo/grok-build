@@ -276,6 +276,18 @@ impl ChatStateActor {
                 self.repair_dangling_after_harness_halt(class);
             }
 
+            ChatStateCommand::CasSpliceConversation {
+                identity,
+                items,
+                persistence,
+                reply,
+            } => {
+                let result = self
+                    .cas_splice_conversation(identity, items, persistence)
+                    .await;
+                let _ = reply.send(result);
+            }
+
             // ═══ Queries ═══
             //
             // Read queries are pure reads — repair only at write boundaries:
@@ -424,6 +436,9 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetEstimatedMessagesTokens { reply } => {
                 let _ = reply.send(state::estimate_messages_tokens(&self.state.conversation));
+            }
+            ChatStateCommand::GetStructuralEpoch { reply } => {
+                let _ = reply.send(self.get_structural_epoch());
             }
         }
     }

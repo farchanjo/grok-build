@@ -997,9 +997,7 @@ pub(in crate::app::dispatch) fn set_simple_mode(app: &mut AppView, new: bool) ->
     set_simple_mode_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "simple_mode", value = new, "setting changed");
-    // Toast label mirrors the renamed registry label
-    // ("Disable vim input mode") so the user sees the same name in the
-    // modal and the toast.
+    // Toast label mirrors the renamed registry label ("Disable vim input mode") so the user sees the same name in the modal and the toast.
     app.show_toast(&save_success_toast("Disable vim input mode", new));
     vec![Effect::PersistSetting {
         key: "simple_mode",
@@ -1236,7 +1234,7 @@ fn auto_theme_setting_is_live(key: &str) -> bool {
 /// fails, we replay the inner with the prior value so both the
 /// snapshot and the visual revert. Unknown / unrecognised names log
 /// at `warn` (defensive — a malformed `rollback_value` is a softer
-/// failure mode than an unknown commit-time value) and no-op.
+/// failure mode than an unknown commit-time value).
 pub(super) fn set_theme_inner(app: &mut AppView, value: &str) {
     let Some(kind) = crate::theme::ThemeKind::from_name(value) else {
         tracing::warn!(
@@ -2021,11 +2019,6 @@ pub(in crate::app::dispatch) fn set_auto_update(app: &mut AppView, new: bool) ->
     }]
 }
 
-// ---------------------------------------------------------------------------
-// display_refresh_auto_cadence — SHELL-OWNED nested Option on
-// `[ui.display_refresh].auto_cadence_enabled`. Restart-required.
-// ---------------------------------------------------------------------------
-
 /// State-only mutation for `display_refresh_auto_cadence`.
 pub(super) fn set_display_refresh_auto_cadence_inner(app: &mut AppView, value: bool) {
     app.current_ui.display_refresh.auto_cadence_enabled = Some(value);
@@ -2057,5 +2050,352 @@ pub(in crate::app::dispatch) fn set_display_refresh_auto_cadence(
         key: "display_refresh_auto_cadence",
         value: crate::settings::SettingValue::Bool(new),
         rollback_value: crate::settings::SettingValue::Bool(prev_effective),
+    }]
+}
+
+// ---------------------------------------------------------------------------
+// Compaction settings setters.
+// SHELL-OWNED: persisted to `[compaction]` in config.toml.
+// ---------------------------------------------------------------------------
+
+fn resolved_compaction(app: &AppView) -> xai_grok_shell::agent::config::ResolvedCompactionConfig {
+    app.compaction_config
+        .normalize_validate()
+        .unwrap_or_else(|_| {
+            xai_grok_shell::agent::config::CompactionConfig::default()
+                .normalize_validate()
+                .expect("default compaction config is valid")
+        })
+}
+
+fn compaction_model_ref(value: String) -> xai_grok_shell::agent::config::CompactionModelRef {
+    xai_grok_shell::agent::config::CompactionModelRef::new(value)
+        .expect("pager emits non-blank compaction model IDs")
+}
+
+fn current_compaction_models(
+    app: &AppView,
+) -> Vec<xai_grok_shell::agent::config::CompactionModelRef> {
+    resolved_compaction(app).models
+}
+
+/// State-only mutation for `compaction_strategy` in the dedicated snapshot.
+pub(super) fn set_compaction_strategy_inner(app: &mut AppView, value: &str) {
+    app.compaction_config.strategy = Some(match value {
+        "rolling" => xai_grok_shell::agent::config::CompactionStrategy::Rolling,
+        "full_replace" => xai_grok_shell::agent::config::CompactionStrategy::FullReplace,
+        _ => xai_grok_shell::agent::config::CompactionStrategy::Auto,
+    });
+}
+
+/// Outer dispatcher for `Action::SetCompactionStrategy`.
+pub(in crate::app::dispatch) fn set_compaction_strategy(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let prev_str = match resolved_compaction(app).strategy {
+        xai_grok_shell::agent::config::CompactionStrategy::Auto => "auto",
+        xai_grok_shell::agent::config::CompactionStrategy::Rolling => "rolling",
+        xai_grok_shell::agent::config::CompactionStrategy::FullReplace => "full_replace",
+    };
+    let new_canonical = match new.as_str() {
+        "rolling" => "rolling",
+        "full_replace" => "full_replace",
+        _ => "auto",
+    };
+    if prev_str == new_canonical {
+        return vec![];
+    }
+    set_compaction_strategy_inner(app, new_canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "compaction_strategy",
+        value = new_canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Compaction strategy: {new_canonical}"));
+    vec![Effect::PersistSetting {
+        key: "compaction_strategy",
+        value: crate::settings::SettingValue::Enum(new_canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev_str),
+    }]
+}
+
+/// State-only mutation for `compaction_trigger_policy`.
+pub(super) fn set_compaction_trigger_policy_inner(app: &mut AppView, value: &str) {
+    app.compaction_config.trigger_policy = Some(if value == "dynamic" {
+        xai_grok_shell::agent::config::CompactionTriggerPolicy::Dynamic
+    } else {
+        xai_grok_shell::agent::config::CompactionTriggerPolicy::Fixed
+    });
+}
+
+/// Outer dispatcher for `Action::SetCompactionTriggerPolicy`.
+pub(in crate::app::dispatch) fn set_compaction_trigger_policy(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    let prev_str = match resolved_compaction(app).trigger_policy {
+        xai_grok_shell::agent::config::CompactionTriggerPolicy::Fixed => "fixed",
+        xai_grok_shell::agent::config::CompactionTriggerPolicy::Dynamic => "dynamic",
+    };
+    let new_canonical = if new == "dynamic" { "dynamic" } else { "fixed" };
+    if prev_str == new_canonical {
+        return vec![];
+    }
+    set_compaction_trigger_policy_inner(app, new_canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "compaction_trigger_policy",
+        value = new_canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Compaction trigger: {new_canonical}"));
+    vec![Effect::PersistSetting {
+        key: "compaction_trigger_policy",
+        value: crate::settings::SettingValue::Enum(new_canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev_str),
+    }]
+}
+
+/// State-only mutation for `compaction_band_count`.
+pub(super) fn set_compaction_band_count_inner(app: &mut AppView, value: i64) {
+    app.compaction_config.rolling_band_count = Some(value.clamp(3, 8) as usize);
+}
+
+/// Outer dispatcher for `Action::SetCompactionBandCount`.
+pub(in crate::app::dispatch) fn set_compaction_band_count(
+    app: &mut AppView,
+    new: i64,
+) -> Vec<Effect> {
+    let prev = resolved_compaction(app).rolling_band_count as i64;
+    let clamped = new.clamp(3, 8);
+    if prev == clamped {
+        return vec![];
+    }
+    set_compaction_band_count_inner(app, clamped);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "compaction_band_count",
+        value = clamped,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Rolling band count: {clamped}"));
+    vec![Effect::PersistSetting {
+        key: "compaction_band_count",
+        value: crate::settings::SettingValue::Int(clamped),
+        rollback_value: crate::settings::SettingValue::Int(prev),
+    }]
+}
+
+/// State-only mutation for `compaction_primary_model`.
+pub(super) fn set_compaction_primary_model_inner(app: &mut AppView, value: String) {
+    let mut models = current_compaction_models(app);
+    let value = if value.is_empty() {
+        "@session".to_string()
+    } else {
+        value
+    };
+    let model = compaction_model_ref(value);
+    if models.is_empty() {
+        models.push(model);
+    } else {
+        models[0] = model;
+    }
+    app.compaction_config.models = models;
+}
+
+/// Outer dispatcher for `Action::SetCompactionPrimaryModel`.
+/// Resolves model display name from catalog for toast.
+pub(in crate::app::dispatch) fn set_compaction_primary_model(
+    app: &mut AppView,
+    new_id: acp::ModelId,
+) -> Vec<Effect> {
+    let ActiveView::Agent(aid) = app.active_view else {
+        tracing::error!(
+            target: "settings",
+            key = "compaction_primary_model",
+            "Action::SetCompactionPrimaryModel dispatched with no active agent — no-op",
+        );
+        return vec![];
+    };
+    let (new_display, available_has_new) = {
+        let Some(agent) = app.agents.get(&aid) else {
+            tracing::error!(
+                target: "settings",
+                key = "compaction_primary_model",
+                "Action::SetCompactionPrimaryModel: active_view::Agent points to missing agent",
+            );
+            return vec![];
+        };
+        let display = agent.session.models.display_name_for(&new_id);
+        let has = agent.session.models.available.contains_key(&new_id);
+        (display, has)
+    };
+    if !available_has_new {
+        tracing::error!(
+            target: "settings",
+            key = "compaction_primary_model",
+            id = ?new_id,
+            "Action::SetCompactionPrimaryModel dispatched with id not in catalog — \
+             validator skew; no-op",
+        );
+        return vec![];
+    }
+    let new_id_str = new_id.0.to_string();
+    let prev = resolved_compaction(app)
+        .models
+        .first()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "@session".to_string());
+    if prev == new_id_str {
+        return vec![];
+    }
+    set_compaction_primary_model_inner(app, new_id_str.clone());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target = "settings",
+        key = "compaction_primary_model",
+        new = ?new_display,
+        new_id = %new_id_str,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Primary compaction model: {new_display}"));
+    vec![Effect::PersistSetting {
+        key: "compaction_primary_model",
+        value: crate::settings::SettingValue::String(new_id_str),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// Restore the primary route to the active session model.
+pub(in crate::app::dispatch) fn clear_compaction_primary_model(app: &mut AppView) -> Vec<Effect> {
+    let prev = resolved_compaction(app)
+        .models
+        .first()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "@session".to_string());
+    if prev == "@session" {
+        app.show_toast("\u{2713} Primary compaction model: already using session model");
+        return vec![];
+    }
+    set_compaction_primary_model_inner(app, "@session".to_string());
+    refresh_open_settings_modals(app);
+    app.show_toast("\u{2713} Primary compaction model: Session model");
+    vec![Effect::PersistSetting {
+        key: "compaction_primary_model",
+        value: crate::settings::SettingValue::String("@session".to_string()),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// State-only mutation for `compaction_fallback_model`.
+pub(super) fn set_compaction_fallback_model_inner(app: &mut AppView, value: String) {
+    let mut models = current_compaction_models(app);
+    if value.is_empty() {
+        models.truncate(1);
+    } else {
+        let model = compaction_model_ref(value);
+        if models.len() == 1 {
+            models.push(model);
+        } else {
+            models[1] = model;
+        }
+    }
+    app.compaction_config.models = models;
+}
+
+/// Outer dispatcher for `Action::SetCompactionFallbackModel`.
+pub(in crate::app::dispatch) fn set_compaction_fallback_model(
+    app: &mut AppView,
+    new_id: acp::ModelId,
+) -> Vec<Effect> {
+    let ActiveView::Agent(aid) = app.active_view else {
+        tracing::error!(
+            target: "settings",
+            key = "compaction_fallback_model",
+            "Action::SetCompactionFallbackModel dispatched with no active agent — no-op",
+        );
+        return vec![];
+    };
+    let (new_display, available_has_new) = {
+        let Some(agent) = app.agents.get(&aid) else {
+            tracing::error!(
+                target: "settings",
+                key = "compaction_fallback_model",
+                "Action::SetCompactionFallbackModel: active_view::Agent points to missing agent",
+            );
+            return vec![];
+        };
+        let display = agent.session.models.display_name_for(&new_id);
+        let has = agent.session.models.available.contains_key(&new_id);
+        (display, has)
+    };
+    if !available_has_new {
+        tracing::error!(
+            target: "settings",
+            key = "compaction_fallback_model",
+            id = ?new_id,
+            "Action::SetCompactionFallbackModel dispatched with id not in catalog — \
+             validator skew; no-op",
+        );
+        return vec![];
+    }
+    let new_id_str = new_id.0.to_string();
+    let resolved = resolved_compaction(app);
+    let prev = resolved
+        .models
+        .get(1)
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if prev == new_id_str {
+        return vec![];
+    }
+    set_compaction_fallback_model_inner(app, new_id_str.clone());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target = "settings",
+        key = "compaction_fallback_model",
+        new = ?new_display,
+        new_id = %new_id_str,
+        "setting changed",
+    );
+    app.show_toast(&format!(
+        "\u{2713} Fallback compaction model: {new_display}"
+    ));
+    vec![Effect::PersistSetting {
+        key: "compaction_fallback_model",
+        value: crate::settings::SettingValue::String(new_id_str),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// Clear the persisted fallback compaction model.
+pub(in crate::app::dispatch) fn clear_compaction_fallback_model(app: &mut AppView) -> Vec<Effect> {
+    let prev = resolved_compaction(app)
+        .models
+        .get(1)
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if prev.is_empty() {
+        app.show_toast("\u{2713} Fallback compaction model: already at default");
+        return vec![];
+    }
+    set_compaction_fallback_model_inner(app, String::new());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target = "settings",
+        key = "compaction_fallback_model",
+        value = "<cleared>",
+        "setting changed",
+    );
+    app.show_toast("\u{2713} Fallback compaction model: cleared");
+    vec![Effect::PersistSetting {
+        key: "compaction_fallback_model",
+        value: crate::settings::SettingValue::String(String::new()),
+        rollback_value: crate::settings::SettingValue::String(prev),
     }]
 }

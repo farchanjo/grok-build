@@ -167,6 +167,13 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
         session_notif.update,
         XaiSessionUpdate::WorkflowUpdated { .. }
     );
+    let compaction_modal_refresh_needed = matches!(
+        session_notif.update,
+        XaiSessionUpdate::AutoCompactStarted { .. }
+            | XaiSessionUpdate::AutoCompactCompleted { .. }
+            | XaiSessionUpdate::AutoCompactFailed { .. }
+            | XaiSessionUpdate::AutoCompactCancelled { .. }
+    );
     if !is_workflow_update
         && !meta.is_replay
         && meta.event_seq.is_some_and(|seq| {
@@ -1000,6 +1007,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             return false;
         }
     };
+    if compaction_modal_refresh_needed {
+        crate::app::dispatch::refresh_open_settings_modals(app);
+    }
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()

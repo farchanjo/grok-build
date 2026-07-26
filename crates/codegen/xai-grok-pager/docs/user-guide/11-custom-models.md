@@ -585,7 +585,7 @@ The exact balance never leaves the process except as a bucket label on the
 
 ### OpenAI: ChatGPT subscription (OAuth) or API key
 
-OpenAI is a **single provider** with two mutually exclusive credentials:
+OpenAI is a **single provider** with two independently stored credentials:
 
 1. **ChatGPT Pro/Plus (OAuth)** — browser or device login against
    `auth.openai.com` (same public Codex/OpenCode client flow). Tokens live in
@@ -597,15 +597,19 @@ OpenAI is a **single provider** with two mutually exclusive credentials:
 2. **OpenAI API key** — stored under `openai::api_key`. Requests use
    `https://api.openai.com/v1` as before.
 
-Connecting one method clears the other. In `/providers`, select **OpenAI**,
-press Enter, then choose **ChatGPT Pro/Plus (browser OAuth)** or **OpenAI API
-key**. Browser PKCE is the default on macOS, Windows, and graphical Linux.
+Both methods can coexist. The selected model route chooses the credential:
+ChatGPT Codex routes use OAuth, while `api.openai.com` routes use the API key.
+In `/providers`, select **OpenAI**, press Enter, then choose **ChatGPT Pro/Plus
+(browser OAuth)** or **OpenAI API key** to add or replace that method. Browser
+PKCE is the default on macOS, Windows, and graphical Linux.
 On headless Linux (no `DISPLAY`/`WAYLAND_DISPLAY`), or when
 `GROK_CHATGPT_DEVICE_AUTH=1` is set, login uses the device-code path and
 prints a one-time code on stderr for the OpenAI verification page.
 
-After ChatGPT OAuth succeeds, the model picker exposes real API slugs (for
-example `gpt-5.6-sol`, `gpt-5.4`) with reasoning-effort metadata. Turns run
+After ChatGPT OAuth succeeds, the model picker exposes namespaced subscription
+entries such as `chatgpt-gpt-5.6-sol` and `chatgpt-gpt-5.4` with
+reasoning-effort metadata. When an API key is also present, the separate
+`openai-*` Platform entries remain available. Turns run
 through Grok Build's normal inference runtime and host tools — there is no
 `codex app-server` process and no separate Codex agent identity.
 
@@ -626,7 +630,7 @@ keep the larger Platform windows.
 ```toml
 [model_providers.grok_build_openai]
 kind = "openai"
-# API-key mode default; OAuth overrides the base URL at runtime:
+# Platform API-key route. OAuth models use the Codex base URL instead:
 base_url = "https://api.openai.com/v1"
 api_backend = "responses"
 

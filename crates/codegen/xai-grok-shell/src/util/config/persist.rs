@@ -50,6 +50,11 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     } else {
         merge_section(table, "skills", &config.skills);
     }
+    if config.compaction == crate::agent::config::CompactionConfig::default() {
+        table.remove("compaction");
+    } else {
+        merge_section(table, "compaction", &config.compaction);
+    }
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -202,11 +207,24 @@ pub async fn update_config<F>(f: F) -> Result<()>
 where
     F: FnOnce(&mut Config),
 {
+    update_config_checked(|config| {
+        f(config);
+        Ok(())
+    })
+    .await
+}
+
+/// Validated read-modify-write variant. The closure runs while holding the
+/// process-wide config lock, and a validation error leaves the file unchanged.
+pub async fn update_config_checked<F>(f: F) -> Result<()>
+where
+    F: FnOnce(&mut Config) -> Result<()>,
+{
     let _guard = SAVE_LOCK.lock().await;
     let root: TomlValue =
         crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
     let mut cfg = load_config_from_toml(&root);
-    f(&mut cfg);
+    f(&mut cfg)?;
     save_config_locked(&cfg).await
 }
 #[cfg(test)]

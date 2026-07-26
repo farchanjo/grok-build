@@ -143,6 +143,24 @@ fn file_barrier_error_propagates() {
 }
 
 #[test]
+fn durable_update_barrier_failure_is_indeterminate_after_complete_line_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("updates.jsonl");
+    let error = JsonlStorageAdapter::append_durable_jsonl_line_commit_aware_with(
+        &path,
+        b"{\"record\":1}\n".to_vec(),
+        |_| Err(io::Error::other("file barrier failed")),
+        || Ok(()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::session::storage::AppendUpdateError::Indeterminate(_)
+    ));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "{\"record\":1}\n");
+}
+
+#[test]
 fn cwd_switch_retry_after_post_append_barrier_failure_is_already_present() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chat_history.jsonl");

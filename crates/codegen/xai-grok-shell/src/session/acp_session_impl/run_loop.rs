@@ -86,6 +86,85 @@ impl SessionActor {
         Some(fallback)
     }
 }
+async fn maybe_schedule_rolling_compaction(
+    session: &Arc<SessionActor>,
+    rolling_job_tx: &mpsc::Sender<crate::session::rolling_compaction::RollingCompactionJob>,
+    completion_tx: &mpsc::UnboundedSender<(String, PromptTurnResult)>,
+) {
+    let policy = session.agent.borrow().compaction_policy().clone();
+    if matches!(
+        policy.strategy,
+        xai_grok_agent::CompactionStrategy::FullReplace
+    ) || session
+        .compaction
+        .rolling_in_flight
+        .load(std::sync::atomic::Ordering::Acquire)
+        || rolling_job_tx.capacity() == 0
+    {
+        return;
+    }
+    if session.state.lock().await.running_task.is_some() {
+        return;
+    }
+    let Some(trigger_info) = session.check_auto_compact_needed().await else {
+        return;
+    };
+
+    match session.plan_rolling_compaction_job().await {
+        Ok(Some(job)) => match rolling_job_tx.try_send(job) {
+            Ok(()) => {
+                session
+                    .compaction
+                    .rolling_in_flight
+                    .store(true, std::sync::atomic::Ordering::Release);
+                session
+                    .send_xai_notification(
+                        crate::extensions::notification::SessionUpdate::AutoCompactStarted {
+                            tokens_used: trigger_info.tokens_used,
+                            context_window: trigger_info.context_window,
+                            percentage: trigger_info.percentage,
+                            reason: "Rolling compaction admitted at an idle safe point".to_string(),
+                        },
+                    )
+                    .await;
+            }
+            Err(error) => tracing::debug!(
+                %error,
+                "rolling compaction lane became unavailable before admission"
+            ),
+        },
+        Ok(None) if matches!(policy.strategy, xai_grok_agent::CompactionStrategy::Auto) => {
+            tracing::info!("rolling compaction is not eligible; using full replacement");
+            if let Err(error) = session.run_compact_only(trigger_info).await {
+                tracing::warn!(%error, "automatic full-replace fallback failed");
+            }
+            SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+        }
+        Ok(None) => tracing::debug!("rolling compaction found no eligible cold history"),
+        Err(error) => tracing::warn!(%error, "rolling compaction planning failed"),
+    }
+}
+
+async fn stop_after_indeterminate_compaction(session: &SessionActor) {
+    session
+        .cancel_running_task(
+            true,
+            true,
+            false,
+            Some("compaction_persistence_indeterminate".to_owned()),
+        )
+        .await;
+    shutdown_workflows(session).await;
+    if let Some(cancel) = &session.sync_loop_cancel {
+        cancel.cancel();
+    }
+    session
+        .feedback_manager
+        .shutdown(session.upload_queue.get())
+        .await;
+    cleanup_session_scratch(session);
+}
+
 async fn shutdown_workflows(session: &SessionActor) {
     if let Err(run_ids) = session
         .workflow_manager
@@ -121,6 +200,7 @@ pub(super) async fn run_session(
     session: Arc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
     mut chat_state_event_rx: mpsc::UnboundedReceiver<xai_chat_state::ChatStateEvent>,
+    chat_state_cancellation: tokio_util::sync::CancellationToken,
     mut event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     fs_notify_config: Option<ClientFsConfig>,
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
@@ -129,6 +209,22 @@ pub(super) async fn run_session(
 ) {
     let (completion_tx, mut completion_rx) =
         mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+    // Compaction-only lane. Capacity one bounds both pending work and completed
+    // results without perturbing the session's existing command/completion lanes.
+    let (rolling_job_tx, mut rolling_job_rx) =
+        mpsc::channel::<crate::session::rolling_compaction::RollingCompactionJob>(1);
+    let (rolling_result_tx, mut rolling_result_rx) =
+        mpsc::channel::<crate::session::rolling_compaction::RollingCompactionResult>(1);
+    let mut rolling_worker_live = true;
+    let rolling_session = session.clone();
+    let _rolling_worker = crate::util::AbortOnDrop(tokio::task::spawn_local(async move {
+        while let Some(job) = rolling_job_rx.recv().await {
+            let result = rolling_session.run_rolling_compaction_job(job).await;
+            if rolling_result_tx.send(result).await.is_err() {
+                break;
+            }
+        }
+    }));
     tracing::debug!("fs_notify_config: {:?}", fs_notify_config);
     let mut replay_buffer = ReplayBuffer::new(session.buffering_settings.clone());
     let event_tx_for_flush_timer = session.event_tx.clone();
@@ -317,6 +413,42 @@ pub(super) async fn run_session(
                         session.handle_model_switch_for_laziness(new_gen).await;
                     }
                 }
+                // The chat-state actor cancels this shared token before it can
+                // accept another mutation whenever compaction persistence becomes
+                // indeterminate. This covers rolling and full-replace compaction,
+                // including compaction running in a spawned turn task.
+                _ = chat_state_cancellation.cancelled() => {
+                    tracing::error!(
+                        session_id = %session.session_info.id.0,
+                        "stopping session after indeterminate compaction persistence; restart will recover the pending transaction"
+                    );
+                    stop_after_indeterminate_compaction(&session).await;
+                    return;
+                }
+                // Rolling compaction results are applied only while the main
+                // actor loop is between command/completion handlers. The shared
+                // fail-stop token above also covers any race after this call.
+                result = rolling_result_rx.recv(), if rolling_worker_live => {
+                    if let Some(result) = result {
+                        if session.apply_rolling_compaction_result(result).await
+                            == xai_chat_state::CasSpliceResult::PersistenceIndeterminate
+                        {
+                            stop_after_indeterminate_compaction(&session).await;
+                            return;
+                        }
+                    } else {
+                        tracing::warn!("rolling compaction worker exited");
+                        rolling_worker_live = false;
+                    }
+                    session.compaction.rolling_in_flight.store(
+                        false,
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    SessionActor::maybe_start_running_task(
+                        session.clone(),
+                        completion_tx.clone(),
+                    ).await;
+                }
                 // ChatStateActor events — coordination signals for session-level concerns.
                 event = chat_state_event_rx.recv() => {
                     match event {
@@ -422,6 +554,7 @@ pub(super) async fn run_session(
                     // Goal continuation (success) or back-off (non-success).
                     // Owns the streak-tracking and reminder-injection path.
                     session.handle_turn_end(turn_succeeded).await;
+                    maybe_schedule_rolling_compaction(&session, &rolling_job_tx, &completion_tx).await;
                     // Interjections that raced past the turn's final drain
                     // (arrived during turn-end bookkeeping) have no turn left
                     // to merge into — convert them to front-of-queue prompt
@@ -608,6 +741,7 @@ pub(super) async fn run_session(
                                 continue;
                             }
                             session.ensure_prefix_ready().await;
+                            maybe_schedule_rolling_compaction(&session, &rolling_job_tx, &completion_tx).await;
                             // Clear suppression -- user is re-engaging
                             // (skip for synthetic auto-wake prompts; the user hasn't
                             // actually re-engaged, so post-cancel suppression must hold)
@@ -2217,6 +2351,11 @@ pub(super) async fn run_session(
                             // Clean up scratch directory (pre-edit file copies).
                             cleanup_session_scratch(&session);
                             return;
+                        }
+                        SessionCommand::UpdateCompactionConfig { compaction } => {
+                            // Adopt the new compaction config at a safe actor mailbox point.
+                            // Preserves threshold/memory/timing/two-pass state.
+                            session.update_compaction_config(*compaction);
                         }
                     }
             }

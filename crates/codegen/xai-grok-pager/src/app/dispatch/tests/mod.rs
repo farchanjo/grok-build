@@ -25,7 +25,10 @@ use super::cta::{
     CTA_MCP_ABSENT_MAX_ATTEMPTS, CTA_MCP_POLL_MAX_ATTEMPTS, cta_impression_plugin_name,
     cta_install_error_category, cta_install_relative_path, plugin_cta_phase_for,
 };
-use super::ctx::{find_agent_by_session_id, get_active_agent, get_active_agent_mut};
+use super::ctx::{
+    find_agent_by_session_id, get_active_agent, get_active_agent_mut,
+    maybe_open_welcome_session_picker,
+};
 use super::dashboard::{
     apply_pending_dispatch_config, dispatch_dashboard_attach, dispatch_dashboard_begin_rename,
     dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
@@ -50,7 +53,6 @@ use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
 use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
-use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
 use super::status::scrub_error_for_toast;
 use super::task_result::dispatch_task_result;
@@ -84,6 +86,7 @@ fn test_app() -> AppView {
         registry: crate::actions::ActionRegistry::defaults(),
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+        compaction_config: xai_grok_shell::agent::config::CompactionConfig::default(),
         cwd: PathBuf::from("/tmp"),
         project_picker_shown: true,
         project_picker_disabled: false,

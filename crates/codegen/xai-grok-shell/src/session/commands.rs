@@ -790,4 +790,11 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+    /// Update compaction configuration for live sessions.
+    /// Broadcast to all sessions for live policy mutation.
+    /// The session adopts the new routing/strategy/trigger/bands
+    /// while preserving threshold/memory/timing/two-pass state.
+    UpdateCompactionConfig {
+        compaction: Box<crate::agent::config::CompactionConfig>,
+    },
 }
