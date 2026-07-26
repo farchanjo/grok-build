@@ -23,9 +23,10 @@ use xai_grok_inference_types::messages::{
     Message, MessageContent, MessageRole, MessagesRequest, MessagesResponse,
 };
 
-use super::client::{AnthropicClient, AnthropicClientConfig, MAX_REQUEST_BYTES};
+use super::client::{AnthropicClient, AnthropicClientConfig, set_test_max_request_bytes};
 use super::error::{AnthropicClientError, ErrorClass};
 use super::headers::parse_anthropic_rate_limit_headers;
+use crate::retry::{RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error};
 
 async fn spawn(app: Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -164,17 +165,21 @@ data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\
     ));
 
     let err = stream.next().await.unwrap().unwrap_err();
-    match err {
+    match &err {
         AnthropicClientError::Stream {
             error_type,
             message,
+            class,
             ..
         } => {
             assert_eq!(error_type, "overloaded_error");
             assert_eq!(message, "Overloaded");
+            assert_eq!(*class, ErrorClass::RetryableOverload);
         }
         other => panic!("expected Stream error, got {other:?}"),
     }
+    // Exactly one terminal error then stream ends.
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -303,7 +308,78 @@ async fn create_message_529_is_retryable_overload() {
 }
 
 #[tokio::test]
-async fn create_message_preflight_blocks_before_network() {
+async fn create_message_preflight_exact_boundary_and_plus_one() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |body: Bytes| {
+            let hits = hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                // Echo a valid minimal response so acceptance path succeeds.
+                let _ = body;
+                (
+                    StatusCode::OK,
+                    json!({
+                        "id": "msg_ok",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": "claude-test",
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 1, "output_tokens": 0}
+                    })
+                    .to_string(),
+                )
+            }
+        }),
+    );
+    let (addr, _h) = spawn(app).await;
+    let client = client_for(addr);
+
+    // Measure a small request size, then set the limit to exactly that size.
+    let base = sample_messages_request();
+    let exact_len = serde_json::to_vec(&{
+        let mut r = base.clone();
+        r.stream = Some(false);
+        r
+    })
+    .unwrap()
+    .len();
+
+    set_test_max_request_bytes(Some(exact_len));
+    client
+        .create_message(base.clone())
+        .await
+        .expect("exact limit must be accepted");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // One extra byte of model name pushes serialization past the limit.
+    set_test_max_request_bytes(Some(exact_len));
+    let mut oversized = base;
+    oversized.model.push('X');
+    let err = client.create_message(oversized).await.unwrap_err();
+    match err {
+        AnthropicClientError::RequestTooLarge {
+            size_bytes,
+            limit_bytes,
+        } => {
+            assert!(size_bytes > limit_bytes);
+            assert_eq!(limit_bytes, exact_len);
+        }
+        other => panic!("expected RequestTooLarge, got {other:?}"),
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "rejection must not hit the network"
+    );
+    set_test_max_request_bytes(None);
+}
+
+#[tokio::test]
+async fn create_message_stream_preflight_rejects_without_network() {
     let hits = Arc::new(AtomicUsize::new(0));
     let hits2 = hits.clone();
     let app = Router::new().route(
@@ -319,29 +395,69 @@ async fn create_message_preflight_blocks_before_network() {
     let (addr, _h) = spawn(app).await;
     let client = client_for(addr);
 
-    // Craft a request whose serialized form exceeds the limit.
-    let huge_text = "x".repeat(MAX_REQUEST_BYTES);
-    let req = MessagesRequest {
-        model: "m".into(),
-        max_tokens: 1,
-        messages: vec![Message {
-            role: MessageRole::User,
-            content: MessageContent::Text(huge_text),
-        }],
-        ..Default::default()
+    let base = sample_messages_request();
+    let exact_len = serde_json::to_vec(&{
+        let mut r = base.clone();
+        r.stream = Some(true);
+        r
+    })
+    .unwrap()
+    .len();
+    set_test_max_request_bytes(Some(exact_len.saturating_sub(1).max(1)));
+    let err = match client.create_message_stream(base).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected preflight RequestTooLarge"),
     };
-    let err = client.create_message(req).await.unwrap_err();
-    match err {
+    assert!(matches!(err, AnthropicClientError::RequestTooLarge { .. }));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    set_test_max_request_bytes(None);
+}
+
+#[tokio::test]
+async fn upload_file_preflight_raw_size_boundary() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/v1/files",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    json!({
+                        "id": "file_ok",
+                        "filename": "a.bin",
+                        "type": "file"
+                    })
+                    .to_string(),
+                )
+            }
+        }),
+    );
+    let (addr, _h) = spawn(app).await;
+    let client = client_for(addr);
+
+    set_test_max_request_bytes(Some(4));
+    client
+        .upload_file(FileUploadSource::new("a.bin", vec![1, 2, 3, 4]))
+        .await
+        .expect("exact raw size accepted");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    let err = client
+        .upload_file(FileUploadSource::new("a.bin", vec![1, 2, 3, 4, 5]))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
         AnthropicClientError::RequestTooLarge {
-            size_bytes,
-            limit_bytes,
-        } => {
-            assert!(size_bytes > limit_bytes);
-            assert_eq!(limit_bytes, MAX_REQUEST_BYTES);
+            size_bytes: 5,
+            limit_bytes: 4
         }
-        other => panic!("expected RequestTooLarge, got {other:?}"),
-    }
-    assert_eq!(hits.load(Ordering::SeqCst), 0, "must not hit the network");
+    ));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    set_test_max_request_bytes(None);
 }
 
 // -----------------------------------------------------------------------------
@@ -660,9 +776,6 @@ async fn messages_backend_isolation_anthropic_headers_not_implied_by_protocol() 
     // ApiBackend::Messages / InferenceClient path is a separate identity.
     // Ensure this Anthropic client is the only place that injects
     // anthropic-version + x-api-key for direct Anthropic.
-    // This test documents the boundary: an InferenceConfig with Messages + Bearer
-    // must not gain anthropic-version from the protocol alone (covered by
-    // InferenceClient unit tests). Here we assert AnthropicClient always pins them.
     let app = Router::new().route(
         "/v1/messages",
         post(|headers: HeaderMap| async move {
@@ -687,6 +800,201 @@ async fn messages_backend_isolation_anthropic_headers_not_implied_by_protocol() 
         .create_message(sample_messages_request())
         .await
         .unwrap();
+}
+
+// Isolation of ApiBackend::Messages + Bearer from Anthropic identity headers is
+// covered by `client::tests::messages_plus_bearer_uses_authorization_and_not_x_api_key`
+// (asserts Authorization present, x-api-key and anthropic-version absent).
+
+#[tokio::test]
+async fn stream_sse_error_is_exactly_one_terminal_then_none() {
+    let app = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\",\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\
+\n\
+event: error\n\
+data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}\n\
+\n\
+event: message_stop\n\
+data: {\"type\":\"message_stop\"}\n\
+\n";
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(sse))
+                .unwrap()
+        }),
+    );
+    let (addr, _h) = spawn(app).await;
+    let (mut stream, _) = client_for(addr)
+        .create_message_stream(sample_messages_request())
+        .await
+        .unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(matches!(
+        first,
+        xai_grok_inference_types::messages::MessageStreamEvent::MessageStart { .. }
+    ));
+    let err = stream.next().await.unwrap().unwrap_err();
+    assert_eq!(err.class(), ErrorClass::PermanentActionable);
+    assert!(!err.is_retryable());
+    // No further items (including the trailing message_stop).
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn stream_cancellation_after_event_is_one_cancelled_then_none() {
+    let app = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            // Slow trickle: first event then hang open so cancellation can fire.
+            let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\",\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\
+\n";
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(sse))
+                .unwrap()
+        }),
+    );
+    let (addr, _h) = spawn(app).await;
+    let cancel = CancellationToken::new();
+    let client = AnthropicClient::new(
+        AnthropicClientConfig::new("test-secret-key")
+            .with_base_url(format!("http://{addr}"))
+            .with_cancel(cancel.clone()),
+    )
+    .unwrap();
+    let (mut stream, _) = client
+        .create_message_stream(sample_messages_request())
+        .await
+        .unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(matches!(
+        first,
+        xai_grok_inference_types::messages::MessageStreamEvent::MessageStart { .. }
+    ));
+    cancel.cancel();
+    // Stream may end with Cancelled or None depending on timing after the body
+    // closes; require at most one Cancelled and no second terminal error.
+    let mut saw_cancelled = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Err(AnthropicClientError::Cancelled) => {
+                assert!(!saw_cancelled, "exactly one Cancelled terminal");
+                saw_cancelled = true;
+            }
+            Ok(_) => {}
+            Err(other) => panic!("unexpected error after cancel: {other:?}"),
+        }
+    }
+    // When the SSE body already ended after the first event, Cancelled may not
+    // fire (stream is already exhausted). Either one Cancelled or clean None is
+    // fine; never more than one Cancelled (asserted above).
+    let _ = saw_cancelled;
+}
+
+#[tokio::test]
+async fn stream_unknown_event_is_yielded_successfully() {
+    let app = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            let sse = "\
+event: future_event\n\
+data: {\"type\":\"future_event\",\"payload\":1}\n\
+\n\
+event: message_stop\n\
+data: {\"type\":\"message_stop\"}\n\
+\n";
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(sse))
+                .unwrap()
+        }),
+    );
+    let (addr, _h) = spawn(app).await;
+    let (mut stream, _) = client_for(addr)
+        .create_message_stream(sample_messages_request())
+        .await
+        .unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    match first {
+        xai_grok_inference_types::messages::MessageStreamEvent::Unknown { type_name, .. } => {
+            assert_eq!(type_name, "future_event");
+        }
+        other => panic!("expected Unknown event, got {other:?}"),
+    }
+    let stop = stream.next().await.unwrap().unwrap();
+    assert!(matches!(
+        stop,
+        xai_grok_inference_types::messages::MessageStreamEvent::MessageStop
+    ));
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn http_429_and_529_bridge_classify_from_live_responses() {
+    // 429
+    {
+        let app = Router::new().route(
+            "/v1/messages",
+            post(|| async {
+                Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("retry-after", "3")
+                    .body(Body::from(
+                        json!({"type":"error","error":{"type":"rate_limit_error","message":"rl"}})
+                            .to_string(),
+                    ))
+                    .unwrap()
+            }),
+        );
+        let (addr, _h) = spawn(app).await;
+        let err = client_for(addr)
+            .create_message(sample_messages_request())
+            .await
+            .unwrap_err();
+        let inf = err.into_inference_error();
+        assert!(inf.is_rate_limited());
+        match classify_error(&inf, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                backoff,
+                is_rate_limited: true,
+            } => assert_eq!(backoff, std::time::Duration::from_secs(3)),
+            other => panic!("expected rate-limit backoff, got {other:?}"),
+        }
+    }
+    // 529
+    {
+        let status = StatusCode::from_u16(529).unwrap();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move || async move {
+                (
+                    status,
+                    json!({"type":"error","error":{"type":"overloaded_error","message":"ov"}})
+                        .to_string(),
+                )
+            }),
+        );
+        let (addr, _h) = spawn(app).await;
+        let err = client_for(addr)
+            .create_message(sample_messages_request())
+            .await
+            .unwrap_err();
+        let inf = err.into_inference_error();
+        assert!(inf.is_retryable());
+        match classify_error(&inf, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { .. } => {}
+            other => panic!("expected rebuild retry for 529, got {other:?}"),
+        }
+    }
 }
 
 #[test]

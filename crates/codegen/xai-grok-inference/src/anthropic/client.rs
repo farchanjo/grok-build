@@ -16,7 +16,7 @@ use xai_grok_inference_types::anthropic::{
 use xai_grok_inference_types::error::try_parse_stream_error;
 use xai_grok_inference_types::messages::{MessageStreamEvent, MessagesRequest, MessagesResponse};
 
-use super::error::{AnthropicClientError, AnthropicResult, classify_stream_error_type};
+use super::error::{AnthropicClientError, AnthropicResult};
 use super::headers::{AnthropicResponseMeta, build_request_headers};
 
 /// Default Anthropic API origin (paths are `/v1/...`).
@@ -24,6 +24,31 @@ pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Maximum serialized request body size accepted before contacting the network.
 pub const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+
+/// Effective request size limit. Tests may override via [`set_test_max_request_bytes`].
+fn effective_max_request_bytes() -> usize {
+    #[cfg(test)]
+    {
+        TEST_MAX_REQUEST_BYTES
+            .with(|cell| cell.get())
+            .unwrap_or(MAX_REQUEST_BYTES)
+    }
+    #[cfg(not(test))]
+    {
+        MAX_REQUEST_BYTES
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MAX_REQUEST_BYTES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Override the preflight size limit for the current test thread (`None` restores default).
+#[cfg(test)]
+pub(super) fn set_test_max_request_bytes(limit: Option<usize>) {
+    TEST_MAX_REQUEST_BYTES.with(|cell| cell.set(limit));
+}
 
 /// Configuration for [`AnthropicClient`].
 #[derive(Clone)]
@@ -165,16 +190,23 @@ impl AnthropicClient {
         build_request_headers(&self.api_key, betas)
     }
 
-    /// Serialize `body` and reject if over [`MAX_REQUEST_BYTES`] before any network I/O.
+    /// Reject raw payload sizes that exceed the preflight limit (no network).
+    fn preflight_size(&self, size_bytes: usize) -> AnthropicResult<()> {
+        let limit = effective_max_request_bytes();
+        if size_bytes > limit {
+            return Err(AnthropicClientError::RequestTooLarge {
+                size_bytes,
+                limit_bytes: limit,
+            });
+        }
+        Ok(())
+    }
+
+    /// Serialize `body` and reject if over the size limit before any network I/O.
     fn preflight_json<T: Serialize>(&self, body: &T) -> AnthropicResult<Vec<u8>> {
         let bytes = serde_json::to_vec(body)
             .map_err(|e| AnthropicClientError::InvalidConfig(format!("serialize: {e}")))?;
-        if bytes.len() > MAX_REQUEST_BYTES {
-            return Err(AnthropicClientError::RequestTooLarge {
-                size_bytes: bytes.len(),
-                limit_bytes: MAX_REQUEST_BYTES,
-            });
-        }
+        self.preflight_size(bytes.len())?;
         Ok(bytes)
     }
 
@@ -184,13 +216,12 @@ impl AnthropicClient {
         path: &str,
         body: Option<Vec<u8>>,
         betas: &AnthropicBetaSet,
-        accept_sse: bool,
     ) -> AnthropicResult<(T, AnthropicResponseMeta)> {
         self.check_cancelled()?;
         let mut headers = self.headers_for(betas)?;
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if accept_sse {
-            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        // JSON content-type only when a body is present (GET/DELETE stay bare).
+        if body.is_some() {
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
 
         let mut builder = self.http.request(method, self.url(path)).headers(headers);
@@ -245,7 +276,6 @@ impl AnthropicClient {
                 "/v1/messages",
                 Some(body),
                 &self.betas,
-                false,
             )
             .await?;
         Ok(AnthropicMessagesOutcome { response, meta })
@@ -329,22 +359,20 @@ impl AnthropicClient {
                                 } => (error_type, message),
                                 other => ("stream_error".into(), other.to_string()),
                             };
-                            let _class = classify_stream_error_type(&error_type);
-                            yield Err(AnthropicClientError::Stream {
+                            yield Err(AnthropicClientError::stream_error(
                                 error_type,
                                 message,
-                                meta: Box::new(meta_for_stream.clone()),
-                            });
+                                meta_for_stream.clone(),
+                            ));
                             break;
                         }
                         match serde_json::from_str::<MessageStreamEvent>(&data) {
                             Ok(MessageStreamEvent::Error { error }) => {
-                                let _class = classify_stream_error_type(&error.r#type);
-                                yield Err(AnthropicClientError::Stream {
-                                    error_type: error.r#type,
-                                    message: error.message,
-                                    meta: Box::new(meta_for_stream.clone()),
-                                });
+                                yield Err(AnthropicClientError::stream_error(
+                                    error.r#type,
+                                    error.message,
+                                    meta_for_stream.clone(),
+                                ));
                                 break;
                             }
                             Ok(ev) => yield Ok(ev),
@@ -381,7 +409,7 @@ impl AnthropicClient {
             path.push_str(&qs);
         }
         let (page, meta) = self
-            .send_json::<ModelListPage>(reqwest::Method::GET, &path, None, &self.betas, false)
+            .send_json::<ModelListPage>(reqwest::Method::GET, &path, None, &self.betas)
             .await?;
         Ok(AnthropicPage { page, meta })
     }
@@ -398,7 +426,7 @@ impl AnthropicClient {
         }
         let path = format!("/v1/models/{}", urlencoding_path(model_id));
         let (info, meta) = self
-            .send_json::<ModelInfo>(reqwest::Method::GET, &path, None, &self.betas, false)
+            .send_json::<ModelInfo>(reqwest::Method::GET, &path, None, &self.betas)
             .await?;
         Ok(AnthropicPage { page: info, meta })
     }
@@ -419,7 +447,6 @@ impl AnthropicClient {
                 "/v1/messages/count_tokens",
                 Some(body),
                 &self.betas,
-                false,
             )
             .await?;
         Ok(AnthropicPage { page: resp, meta })
@@ -445,12 +472,7 @@ impl AnthropicClient {
                 "filename must not be empty".into(),
             ));
         }
-        if source.bytes.len() > MAX_REQUEST_BYTES {
-            return Err(AnthropicClientError::RequestTooLarge {
-                size_bytes: source.bytes.len(),
-                limit_bytes: MAX_REQUEST_BYTES,
-            });
-        }
+        self.preflight_size(source.bytes.len())?;
 
         let headers = self.headers_for(&self.files_betas())?;
         // reqwest sets multipart Content-Type with boundary.
@@ -509,13 +531,7 @@ impl AnthropicClient {
             path.push_str(&qs);
         }
         let (page, meta) = self
-            .send_json::<FileListPage>(
-                reqwest::Method::GET,
-                &path,
-                None,
-                &self.files_betas(),
-                false,
-            )
+            .send_json::<FileListPage>(reqwest::Method::GET, &path, None, &self.files_betas())
             .await?;
         Ok(AnthropicPage { page, meta })
     }
@@ -532,13 +548,7 @@ impl AnthropicClient {
         }
         let path = format!("/v1/files/{}", urlencoding_path(file_id));
         let (info, meta) = self
-            .send_json::<FileMetadata>(
-                reqwest::Method::GET,
-                &path,
-                None,
-                &self.files_betas(),
-                false,
-            )
+            .send_json::<FileMetadata>(reqwest::Method::GET, &path, None, &self.files_betas())
             .await?;
         Ok(AnthropicPage { page: info, meta })
     }
@@ -600,7 +610,6 @@ impl AnthropicClient {
                 &path,
                 None,
                 &self.files_betas(),
-                false,
             )
             .await?;
         Ok(AnthropicPage { page: resp, meta })
@@ -674,18 +683,21 @@ mod unit_tests {
     }
 
     #[test]
-    fn preflight_rejects_oversized_body() {
+    fn preflight_size_accepts_exact_limit_rejects_plus_one() {
         let client = AnthropicClient::new(AnthropicClientConfig::new("key")).unwrap();
-        // Build a payload that serializes larger than the limit without allocating 32MiB of real
-        // content in every test run: use a custom Serialize type is heavy; instead temporarily
-        // test the size check via a string that would exceed if limit were tiny — unit-tested
-        // with RequestTooLarge construction here and full preflight in integration tests.
-        let err = AnthropicClientError::RequestTooLarge {
-            size_bytes: MAX_REQUEST_BYTES + 1,
-            limit_bytes: MAX_REQUEST_BYTES,
-        };
-        assert!(!err.is_retryable());
-        assert!(err.safe_message().contains("exceeds limit"));
-        let _ = client; // silence
+        set_test_max_request_bytes(Some(64));
+        assert!(client.preflight_size(64).is_ok());
+        let err = client.preflight_size(65).unwrap_err();
+        match err {
+            AnthropicClientError::RequestTooLarge {
+                size_bytes,
+                limit_bytes,
+            } => {
+                assert_eq!(size_bytes, 65);
+                assert_eq!(limit_bytes, 64);
+            }
+            other => panic!("expected RequestTooLarge, got {other:?}"),
+        }
+        set_test_max_request_bytes(None);
     }
 }

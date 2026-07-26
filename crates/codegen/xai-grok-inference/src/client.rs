@@ -3161,7 +3161,17 @@ mod tests {
             client
                 .default_headers
                 .get(HeaderName::from_static("x-api-key"))
-                .is_none()
+                .is_none(),
+            "Messages protocol alone must not inject x-api-key"
+        );
+        // Direct Anthropic identity headers must not appear solely because the
+        // backend is Messages; only AnthropicClient pins anthropic-version.
+        assert!(
+            client
+                .default_headers
+                .get(HeaderName::from_static("anthropic-version"))
+                .is_none(),
+            "Messages protocol alone must not inject anthropic-version"
         );
     }
 
