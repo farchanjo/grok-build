@@ -63,15 +63,22 @@ impl ExternalRuntimeError {
         matches!(self.kind, ExternalRuntimeErrorKind::Auth)
     }
 
-    /// ACP error for turn/model paths. Never reported as an auth failure for
-    /// the unavailable stub.
+    /// ACP error for turn/model paths.
+    ///
+    /// Intentional unavailability (`Unavailable`) and other client-facing
+    /// rejections map to **InvalidRequest** with `EXTERNAL_RUNTIME_UNAVAILABLE`
+    /// (or the matching code) so the TUI does not treat them as infra pauses.
+    /// Transport/other failures stay InternalError. Auth never masquerades as
+    /// unavailability (`authError` is explicit in data).
     pub fn into_acp_error(self) -> agent_client_protocol::Error {
-        let code = if self.is_auth_error() {
-            // Keep auth as invalid request so clients surface credential UX;
-            // unavailable uses InvalidRequest with a distinct data.code.
-            agent_client_protocol::ErrorCode::InvalidRequest
-        } else {
-            agent_client_protocol::ErrorCode::InternalError
+        let code = match self.kind {
+            ExternalRuntimeErrorKind::Unavailable
+            | ExternalRuntimeErrorKind::InvalidRequest
+            | ExternalRuntimeErrorKind::Cancelled
+            | ExternalRuntimeErrorKind::Auth => agent_client_protocol::ErrorCode::InvalidRequest,
+            ExternalRuntimeErrorKind::Transport | ExternalRuntimeErrorKind::Other => {
+                agent_client_protocol::ErrorCode::InternalError
+            }
         };
         let data = serde_json::json!({
             "code": self.code(),

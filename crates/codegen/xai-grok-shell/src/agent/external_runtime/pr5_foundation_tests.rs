@@ -247,7 +247,7 @@ fn no_codex_magic_fields_on_execution_types() {
 }
 
 #[tokio::test]
-async fn unavailable_stub_deterministic_non_auth() {
+async fn unavailable_stub_deterministic_non_auth_invalid_request() {
     let runtime = UnavailableExternalRuntime::new(ExternalAgentKind::ClaudeCli);
     let err = runtime.probe().await.unwrap_err();
     assert_eq!(err.code(), EXTERNAL_RUNTIME_UNAVAILABLE);
@@ -255,12 +255,88 @@ async fn unavailable_stub_deterministic_non_auth() {
     assert_eq!(err.kind, ExternalRuntimeErrorKind::Unavailable);
 
     let acp_err = err.into_acp_error();
+    // Intentional unavailability is InvalidRequest, not InternalError/infra pause.
+    let expected = agent_client_protocol::Error::new(
+        agent_client_protocol::ErrorCode::InvalidRequest.into(),
+        "x",
+    );
+    assert_eq!(acp_err.code, expected.code);
     let data = acp_err.data.as_ref().expect("data");
     assert_eq!(
         data.get("code").and_then(|v| v.as_str()),
         Some(EXTERNAL_RUNTIME_UNAVAILABLE)
     );
     assert_eq!(data.get("authError").and_then(|v| v.as_bool()), Some(false));
+}
+
+#[test]
+fn catalog_visibility_hides_unselectable_claude_cli() {
+    use crate::agent::config::ModelEntry;
+    use indexmap::IndexMap;
+
+    let mut catalog = IndexMap::new();
+    let mut entry = ModelEntry::fallback("claude-cli-model", &Default::default());
+    entry.info.execution_backend = ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+    entry.info.hidden = false;
+    entry.info.user_selectable = true;
+    catalog.insert("claude-cli-model".into(), entry);
+
+    // Native Anthropic peer stays visible.
+    let mut native = ModelEntry::fallback("claude-sonnet-5", &Default::default());
+    native.info.execution_backend = ExecutionBackend::NativeInference;
+    native.info.hidden = false;
+    native.info.user_selectable = true;
+    catalog.insert("claude-sonnet-5".into(), native);
+
+    capability_matrix::apply_catalog_visibility(&mut catalog);
+
+    let cli = catalog.get("claude-cli-model").unwrap();
+    assert!(
+        cli.info.hidden,
+        "Claude CLI must be hidden when not selectable"
+    );
+    assert!(
+        !cli.info.user_selectable,
+        "Claude CLI must not be user-selectable when flag is false"
+    );
+
+    let api = catalog.get("claude-sonnet-5").unwrap();
+    assert!(!api.info.hidden);
+    assert!(api.info.user_selectable);
+}
+
+#[test]
+fn summary_execution_mode_survives_serde_with_envelope() {
+    let info = test_info("sess-resume", "/ws");
+    let mut summary = Summary::new(&info, acp::ModelId::new("claude-sonnet-5")).unwrap();
+    summary.execution_backend = ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+    let mut env = ExternalRuntimeEnvelope::for_kind(ExternalAgentKind::ClaudeCli);
+    env.session_pointer = Some("ext-resume-1".into());
+    env.selected_model = Some("claude-sonnet-5".into());
+    env.validate().unwrap();
+    summary.external_runtime = Some(env);
+
+    let json = serde_json::to_string(&summary).unwrap();
+    let back: Summary = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.execution_backend,
+        ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli)
+    );
+    assert_eq!(
+        back.external_runtime
+            .as_ref()
+            .and_then(|e| e.session_pointer.as_deref()),
+        Some("ext-resume-1")
+    );
+    // Catalog-native model id on the summary does not flip mode.
+    assert!(back.execution_backend.is_external());
+}
+
+#[test]
+fn envelope_rejects_ndjson_shaped_blobs() {
+    let mut env = ExternalRuntimeEnvelope::for_kind(ExternalAgentKind::ClaudeCli);
+    env.session_pointer = Some("line1\n{\"type\":\"event\"}\n".into());
+    assert!(env.validate().is_err());
 }
 
 #[test]

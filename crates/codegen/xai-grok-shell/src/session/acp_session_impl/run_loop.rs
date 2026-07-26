@@ -687,9 +687,65 @@ pub(super) async fn run_session(
                             external_runtime,
                             responds_to,
                         } => {
-                            session.execution_backend.set(execution_backend);
-                            *session.external_runtime.borrow_mut() = external_runtime;
-                            let _ = responds_to.send(());
+                            let result = match external_runtime {
+                                Some(env) => match env.validated() {
+                                    Ok(env) => {
+                                        session.execution_backend.set(execution_backend);
+                                        *session.external_runtime.borrow_mut() = Some(env);
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            session_id = %session.session_info.id.0,
+                                            error = %e,
+                                            "RestoreExecutionMode: envelope validation failed"
+                                        );
+                                        Err(e.to_string())
+                                    }
+                                },
+                                None => {
+                                    session.execution_backend.set(execution_backend);
+                                    *session.external_runtime.borrow_mut() = None;
+                                    Ok(())
+                                }
+                            };
+                            let _ = responds_to.send(result);
+                        }
+                        SessionCommand::PersistExecutionMode {
+                            execution_backend,
+                            external_runtime,
+                            responds_to,
+                        } => {
+                            let outcome = async {
+                                if let Some(ref env) = external_runtime {
+                                    env.validate().map_err(|e| e.to_string())?;
+                                }
+                                let model = session
+                                    .chat_state_handle
+                                    .get_inference_settings()
+                                    .await
+                                    .map(|c| c.model)
+                                    .unwrap_or_default();
+                                let model_id = acp::ModelId::new(model);
+                                let agent_name = session.agent.borrow().definition().name.clone();
+                                session
+                                    .notifications
+                                    .persistence_tx
+                                    .send(PersistenceMsg::CurrentModel {
+                                        model_id,
+                                        agent_name: Some(agent_name),
+                                        reasoning_effort: None,
+                                        execution_backend: Some(execution_backend),
+                                        external_runtime: Some(external_runtime),
+                                    })
+                                    .map_err(|_| {
+                                        "PersistExecutionMode: persistence channel closed"
+                                            .to_string()
+                                    })?;
+                                Ok::<_, String>(())
+                            }
+                            .await;
+                            let _ = responds_to.send(outcome);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;

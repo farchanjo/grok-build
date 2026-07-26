@@ -17,8 +17,13 @@ impl SessionActor {
             *self.external_runtime.borrow_mut() = None;
         } else if self.external_runtime.borrow().is_none() {
             if let Some(kind) = execution_backend.external_kind() {
-                *self.external_runtime.borrow_mut() =
-                    Some(crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind));
+                let envelope =
+                    crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind);
+                // Empty envelope always validates; keep the call for symmetry with restore.
+                if let Err(e) = envelope.validate() {
+                    return Err(acp::Error::invalid_params().data(e.to_string()));
+                }
+                *self.external_runtime.borrow_mut() = Some(envelope);
             }
         }
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
@@ -128,6 +133,12 @@ impl SessionActor {
             );
         }
         let agent_name = self.agent.borrow().definition().name.clone();
+        let envelope = self.external_runtime.borrow().clone();
+        if let Some(ref env) = envelope
+            && let Err(e) = env.validate()
+        {
+            return Err(acp::Error::invalid_params().data(e.to_string()));
+        }
         let _ = self
             .notifications
             .persistence_tx
@@ -136,7 +147,7 @@ impl SessionActor {
                 agent_name: Some(agent_name),
                 reasoning_effort: Some(inference_config.reasoning_effort),
                 execution_backend: Some(execution_backend),
-                external_runtime: Some(self.external_runtime.borrow().clone()),
+                external_runtime: Some(envelope),
             });
         Ok(model_id)
     }

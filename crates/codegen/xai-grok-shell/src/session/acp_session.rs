@@ -1416,6 +1416,9 @@ fn load_prompt_context_from_dir(
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/external_runtime_preflight_tests.rs"]
+mod external_runtime_preflight_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;
 #[cfg(test)]

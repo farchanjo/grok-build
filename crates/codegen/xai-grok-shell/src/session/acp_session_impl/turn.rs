@@ -1,6 +1,41 @@
 //! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
 //! sampling loop).
 use super::*;
+
+impl SessionActor {
+    /// Fail closed when the session's execution backend is an external agent
+    /// that is not available in this build (PR5 stub). Safe to call before any
+    /// turn mutation (`increment_turn`, history append).
+    pub(crate) async fn preflight_external_execution_backend(
+        &self,
+    ) -> Result<(), crate::agent::external_runtime::ExternalRuntimeError> {
+        let backend = self.execution_backend.get();
+        if backend.is_native() {
+            return Ok(());
+        }
+        let kind = backend.external_kind().ok_or_else(|| {
+            crate::agent::external_runtime::ExternalRuntimeError {
+                kind: crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                message: "external execution backend selected without a kind".into(),
+                agent_kind: None,
+            }
+        })?;
+        let runtime = crate::agent::external_runtime::default_registry()
+            .create(kind)
+            .ok_or_else(|| {
+                crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
+            })?;
+        match runtime.probe().await {
+            Err(e) => Err(e),
+            Ok(_) => {
+                // PR6 will implement turns; a successful probe without a turn
+                // path still fails closed here so we never invent process I/O.
+                Err(crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind))
+            }
+        }
+    }
+}
+
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that cannot constrain output natively (custom Messages, or
 /// Messages without model-level native-schema capability). Direct Anthropic
@@ -271,6 +306,18 @@ impl SessionActor {
                 "block_count": prompt_blocks.len(),
             })),
         );
+        // External-runtime preflight MUST run before turn_count increment and
+        // durable user history append. Unavailable CLI (PR5 stub) fails closed
+        // with InvalidRequest so the session remains switchable to native.
+        if let Err(err) = self.preflight_external_execution_backend().await {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                prompt_id = %prompt_id,
+                error = %err,
+                "handle_prompt: external execution preflight failed (no turn mutation)"
+            );
+            return Err(err.into_acp_error());
+        }
         let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         if let Some(completion_id) = origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
@@ -2104,30 +2151,9 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
-            // External execution backends branch before InferenceActor.
-            // PR5: Claude CLI is typed but fail-closed as unavailable (no process spawn).
-            if self.execution_backend.get().is_external() {
-                let backend = self.execution_backend.get();
-                let kind = backend
-                    .external_kind()
-                    .unwrap_or(crate::agent::execution_backend::ExternalAgentKind::ClaudeCli);
-                let runtime = crate::agent::external_runtime::default_registry()
-                    .create(kind)
-                    .expect("registry always returns a runtime for known kinds");
-                let err = match runtime.probe().await {
-                    Err(e) => e,
-                    Ok(_) => {
-                        // Real runtimes land in PR6; still fail closed here if a
-                        // probe somehow succeeds without a turn implementation.
-                        crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
-                    }
-                };
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    backend = %backend,
-                    error = %err,
-                    "external execution backend unavailable; not invoking InferenceActor"
-                );
+            // Defense-in-depth: preflight already ran at handle_prompt entry.
+            // Re-check so a mid-session mode restore cannot reach InferenceActor.
+            if let Err(err) = self.preflight_external_execution_backend().await {
                 self.tool_context.fail_task_output_usage_closed();
                 return Err(err.into_acp_error());
             }

@@ -53,14 +53,24 @@ pub(crate) async fn apply(
         // Cross-mode execution backend guard (NativeInference ↔ ClaudeCli, …).
         // Allowed only before the first established user turn; after that the
         // session must stay on its persisted mode (resume cannot silently switch).
+        // Fail closed if the actor channel drops — never default to native.
         {
             let (mode_tx, mode_rx) = oneshot::channel();
-            let _ = handle.cmd_tx.send(SessionCommand::GetExecutionBackend {
-                responds_to: mode_tx,
-            });
-            let active_backend = mode_rx
-                .await
-                .unwrap_or(crate::agent::execution_backend::ExecutionBackend::NativeInference);
+            if handle
+                .cmd_tx
+                .send(SessionCommand::GetExecutionBackend {
+                    responds_to: mode_tx,
+                })
+                .is_err()
+            {
+                return Err(acp::Error::internal_error().data(
+                    "set_session_model: session actor closed while reading execution backend",
+                ));
+            }
+            let active_backend = mode_rx.await.map_err(|_| {
+                acp::Error::internal_error()
+                    .data("set_session_model: failed to read execution backend (actor closed)")
+            })?;
             if active_backend.is_cross_mode_with(target_execution_backend) && turn_count > 0 {
                 tracing::warn!(
                     session_id = %session_id.0,

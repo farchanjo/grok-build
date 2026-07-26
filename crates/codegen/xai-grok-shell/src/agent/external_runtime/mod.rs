@@ -13,7 +13,10 @@ mod registry;
 mod stub;
 mod types;
 
-pub use envelope::{ExternalResultMetadata, ExternalRuntimeEnvelope, ExternalUsageMetadata};
+pub use envelope::{
+    EnvelopeValidationError, ExternalResultMetadata, ExternalRuntimeEnvelope,
+    ExternalUsageMetadata, MAX_ENVELOPE_JSON_BYTES, MAX_SESSION_POINTER_LEN,
+};
 pub use registry::{ExternalRuntimeFactory, ExternalRuntimeRegistry, default_registry};
 pub use stub::UnavailableExternalRuntime;
 pub use types::{
@@ -158,6 +161,25 @@ pub mod capability_matrix {
         descriptors()
             .iter()
             .filter(|d| d.experimental && d.provider_peer_id == Some("anthropic"))
+    }
+
+    /// Force `hidden` + `!user_selectable` on catalog entries whose execution
+    /// backend is not yet selectable (PR5: Claude CLI). Idempotent.
+    pub fn apply_catalog_visibility(
+        catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+    ) {
+        for entry in catalog.values_mut() {
+            if !entry.info.execution_backend.is_external() {
+                continue;
+            }
+            let selectable = for_backend(entry.info.execution_backend)
+                .map(|d| d.selectable)
+                .unwrap_or(false);
+            if !selectable {
+                entry.info.hidden = true;
+                entry.info.user_selectable = false;
+            }
+        }
     }
 }
 

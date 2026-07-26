@@ -1975,6 +1975,12 @@ pub fn resolve_model_catalog(
         }
     }
 
+    // PR5: external-agent execution modes that are not yet selectable (Claude
+    // Agent CLI) must not appear in the picker. Capability matrix is the gate;
+    // config/remote/catalog entries that set execution_backend=external still
+    // resolve for internal/resume use but stay hidden + non-selectable.
+    crate::agent::external_runtime::capability_matrix::apply_catalog_visibility(&mut catalog);
+
     // Persisted default first; CLI override below wins when set.
     // Only apply if the model supports reasoning effort.
     if let Some(effort) = cfg.models.default_reasoning_effort

@@ -98,16 +98,14 @@ impl ExecutionBackend {
 
     /// `true` when switching between native HTTP inference and an external
     /// agent (or between distinct external kinds).
-    pub const fn is_cross_mode_with(self, other: Self) -> bool {
+    ///
+    /// External kinds compare by [`PartialEq`] (`a != b`) so adding a new
+    /// [`ExternalAgentKind`] variant automatically participates without
+    /// updating this match.
+    pub fn is_cross_mode_with(self, other: Self) -> bool {
         match (self, other) {
             (Self::NativeInference, Self::NativeInference) => false,
-            (Self::ExternalAgent(a), Self::ExternalAgent(b)) => {
-                // Distinct external kinds are cross-mode; same kind is not.
-                !matches!(
-                    (a, b),
-                    (ExternalAgentKind::ClaudeCli, ExternalAgentKind::ClaudeCli)
-                )
-            }
+            (Self::ExternalAgent(a), Self::ExternalAgent(b)) => a != b,
             _ => true,
         }
     }
@@ -229,6 +227,25 @@ mod tests {
         assert!(claude.is_cross_mode_with(native));
         assert!(!native.is_cross_mode_with(native));
         assert!(!claude.is_cross_mode_with(claude));
+    }
+
+    /// Locks the external-kind equality rule used by [`ExecutionBackend::is_cross_mode_with`].
+    /// When a second production kind is added, same-kind pairs stay same-mode and
+    /// distinct kinds become cross-mode via `a != b` (no match-arm update needed).
+    #[test]
+    fn external_kind_equality_is_cross_mode_source_of_truth() {
+        let a = ExternalAgentKind::ClaudeCli;
+        let b = ExternalAgentKind::ClaudeCli;
+        assert_eq!(a, b);
+        assert!(
+            !ExecutionBackend::ExternalAgent(a)
+                .is_cross_mode_with(ExecutionBackend::ExternalAgent(b))
+        );
+        // Future kinds: `a != b` is the only check — document the contract.
+        fn kinds_differ(x: ExternalAgentKind, y: ExternalAgentKind) -> bool {
+            x != y
+        }
+        assert!(!kinds_differ(a, b));
     }
 
     #[test]

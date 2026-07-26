@@ -1754,17 +1754,6 @@ impl acp::Agent for MvpAgent {
                     },
                 )
                 .await?;
-            // Restore durable execution mode so resume cannot silently switch
-            // NativeInference ↔ external agent (or drop the envelope).
-            if let Some(handle) = self.sessions.borrow().get(&session_id) {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = handle.cmd_tx.send(crate::session::SessionCommand::RestoreExecutionMode {
-                    execution_backend: summary.execution_backend,
-                    external_runtime: summary.external_runtime.clone(),
-                    responds_to: tx,
-                });
-                let _ = rx.await;
-            }
             drop(spawn_timer);
         } else if !mcp_servers.is_empty() {
             tracing::info!(
@@ -2014,6 +2003,16 @@ impl acp::Agent for MvpAgent {
                         .meta(restore_meta),
                 )
                 .await;
+            // Summary execution mode is authoritative on resume. Re-apply after
+            // model_switch (which seeds from the catalog) so Native↔external
+            // cannot flip silently, including when turn_count > 0.
+            Self::restore_summary_execution_mode(
+                self,
+                &session_id,
+                summary.execution_backend,
+                summary.external_runtime.clone(),
+            )
+            .await?;
         }
         let mut response_meta_map = serde_json::Map::new();
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));

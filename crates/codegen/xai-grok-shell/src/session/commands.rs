@@ -216,12 +216,21 @@ pub enum SessionCommand {
     GetExecutionBackend {
         responds_to: oneshot::Sender<crate::agent::execution_backend::ExecutionBackend>,
     },
-    /// Restore execution backend + external envelope from a durable summary
-    /// (session resume). Does not rewrite sampling config.
+    /// Restore execution backend + external envelope into the live actor cells
+    /// (session resume / seed). Does not rewrite sampling config. Fails when
+    /// the envelope fails validation (caller must not ignore the error).
     RestoreExecutionMode {
         execution_backend: crate::agent::execution_backend::ExecutionBackend,
         external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
-        responds_to: oneshot::Sender<()>,
+        responds_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Persist execution backend + envelope onto the session Summary without
+    /// changing sampling / model id. Used after resume restore so disk matches
+    /// the authoritative summary mode.
+    PersistExecutionMode {
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
+        external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+        responds_to: oneshot::Sender<Result<(), String>>,
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,
