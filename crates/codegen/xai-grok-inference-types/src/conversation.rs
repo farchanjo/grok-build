@@ -2937,11 +2937,20 @@ pub fn transform_conversation_cwd(
             ConversationItem::BackendToolCall(_) => {
                 clear_next_assistant_payload = false;
             }
-            // Reasoning items rarely reference CWD paths, but they can —
-            // patch both summary parts and content blocks defensively.
-            // Mutations here mark the next assistant (same turn) so its
-            // signed Messages payload cannot be replayed stale.
+            // Reasoning CWD policy:
+            // - Signature-bound items (`encrypted_content.is_some()`) must not
+            //   be rewritten: Anthropic rejects thinking blocks whose summary
+            //   no longer matches the signature. Leave them byte-stable and
+            //   do not force a following-assistant payload clear.
+            // - Unsigned reasoning (no encrypted_content) may be rewritten.
+            //   If rewritten, clear the following assistant's Messages payload
+            //   so synthesis uses the new text rather than a stale payload.
             ConversationItem::Reasoning(r) => {
+                if r.encrypted_content.is_some() {
+                    // Signature-bound: leave summary/content/encrypted_content
+                    // untouched. Do not set clear_next_assistant_payload.
+                    continue;
+                }
                 let mut mutated = false;
                 for sp in r.summary.iter_mut() {
                     match sp {
@@ -6965,17 +6974,120 @@ mod tests {
         }
     }
 
-    /// Rewriting a preceding reasoning sibling also clears the following
-    /// assistant's Messages payload (same turn association).
+    /// Signature-bound reasoning (`encrypted_content` present) must remain
+    /// byte-stable under CWD rewrite so Anthropic signatures stay valid.
+    /// When only the signed reasoning would have been rewritten (assistant
+    /// projections unchanged), the assistant payload is also left alone so
+    /// exact wire replay remains valid.
     #[test]
-    fn transform_cwd_clears_payload_when_preceding_reasoning_mutated() {
-        use crate::messages::ContentBlock;
+    fn transform_cwd_leaves_signed_reasoning_byte_stable_and_payload_intact() {
+        use crate::messages::{ContentBlock, MessageContent};
 
         let source = "/old/path";
         let target = "/new/path";
-        let mut reasoning = synthesized_reasoning_item(format!("think about {source}/x.rs"));
-        // Keep encrypted signature so the arm still has content.
-        reasoning.encrypted_content = Some("sig".into());
+        let thinking_text = format!("think about {source}/x.rs");
+        let signature = "sig-bound-blob";
+        let mut reasoning = synthesized_reasoning_item(thinking_text.clone());
+        reasoning.encrypted_content = Some(signature.into());
+        let reasoning_before = reasoning.clone();
+
+        let payload = vec![
+            ContentBlock::Thinking {
+                thinking: thinking_text.clone(),
+                signature: signature.into(),
+            },
+            ContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ];
+
+        let mut items = vec![
+            ConversationItem::user("hi"),
+            ConversationItem::Reasoning(reasoning),
+            ConversationItem::Assistant(
+                AssistantItem {
+                    content: "done".into(),
+                    tool_calls: Vec::new(),
+                    model_id: None,
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                    reasoning_details: Vec::new(),
+                    provider_payload: None,
+                }
+                .with_messages_payload(payload.clone(), true),
+            ),
+        ];
+
+        transform_conversation_cwd(&mut items, source, target);
+
+        let ConversationItem::Reasoning(r) = &items[1] else {
+            panic!("expected reasoning");
+        };
+        // Full ReasoningItem remains byte-stable (summary, encrypted_content).
+        assert_eq!(
+            r, &reasoning_before,
+            "signed reasoning must not be rewritten under CWD transform"
+        );
+        assert_eq!(r.encrypted_content.as_deref(), Some(signature));
+        let rs::SummaryPart::SummaryText(t) = &r.summary[0];
+        assert!(
+            t.text.contains(source),
+            "signed summary keeps original path"
+        );
+        assert!(
+            !t.text.contains(target),
+            "signed summary must not be rewritten"
+        );
+
+        match &items[2] {
+            ConversationItem::Assistant(a) => {
+                assert!(
+                    a.provider_payload.is_some(),
+                    "payload must stay when only signature-bound reasoning is present"
+                );
+                assert!(a.replayable_messages_content().is_some());
+                assert_eq!(a.content.as_ref(), "done");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+
+        // Exact payload replay: thinking text + signature unchanged (valid).
+        let msg = build_messages_request(&ConversationRequest::from_items(items));
+        match &msg.messages[1].content {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks, &payload, "replayable payload must be exact");
+                match &blocks[0] {
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature: sig,
+                    } => {
+                        assert_eq!(thinking, &thinking_text);
+                        assert_eq!(sig, signature);
+                    }
+                    other => panic!("expected Thinking, got {other:?}"),
+                }
+            }
+            other => panic!("expected blocks, got {other:?}"),
+        }
+    }
+
+    /// Unsigned reasoning (no `encrypted_content`) may be rewritten; when it
+    /// is, the following assistant's Messages payload is cleared so synthesis
+    /// uses the rewritten reasoning text.
+    #[test]
+    fn transform_cwd_rewrites_unsigned_reasoning_and_clears_following_payload() {
+        use crate::messages::{ContentBlock, MessageContent};
+
+        let source = "/old/path";
+        let target = "/new/path";
+        // synthesized_reasoning_item has encrypted_content = None.
+        let reasoning = synthesized_reasoning_item(format!("think about {source}/x.rs"));
+        assert!(
+            reasoning.encrypted_content.is_none(),
+            "precondition: unsigned reasoning"
+        );
 
         let mut items = vec![
             ConversationItem::user("hi"),
@@ -6994,7 +7106,7 @@ mod tests {
                     vec![
                         ContentBlock::Thinking {
                             thinking: format!("think about {source}/x.rs"),
-                            signature: "sig".into(),
+                            signature: String::new(),
                         },
                         ContentBlock::Text {
                             text: "done".into(),
@@ -7009,36 +7121,40 @@ mod tests {
 
         transform_conversation_cwd(&mut items, source, target);
 
-        // Reasoning summary rewritten.
         let ConversationItem::Reasoning(r) = &items[1] else {
             panic!("expected reasoning");
         };
         let rs::SummaryPart::SummaryText(t) = &r.summary[0];
         assert!(t.text.contains(target));
         assert!(!t.text.contains(source));
+        assert!(r.encrypted_content.is_none());
 
         match &items[2] {
             ConversationItem::Assistant(a) => {
                 assert!(
                     a.provider_payload.is_none(),
-                    "assistant payload cleared after preceding reasoning CWD rewrite"
+                    "unsigned reasoning rewrite must clear following payload"
                 );
-                // Assistant text itself did not need a path rewrite.
                 assert_eq!(a.content.as_ref(), "done");
             }
             other => panic!("expected assistant, got {other:?}"),
         }
 
         let msg = build_messages_request(&ConversationRequest::from_items(items));
-        let json = serde_json::to_value(&msg.messages).unwrap().to_string();
-        assert!(
-            json.contains(target),
-            "rewritten reasoning must be used: {json}"
-        );
-        assert!(
-            !json.contains(source),
-            "source path must not come from stale payload: {json}"
-        );
+        match &msg.messages[1].content {
+            MessageContent::Blocks(blocks) => {
+                let json = serde_json::to_value(blocks).unwrap().to_string();
+                assert!(
+                    json.contains(target),
+                    "synthesized thinking uses rewritten path: {json}"
+                );
+                assert!(
+                    !json.contains(source),
+                    "stale source path must not appear: {json}"
+                );
+            }
+            other => panic!("expected blocks, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7185,10 +7301,9 @@ mod tests {
 
     #[test]
     fn test_transform_cwd_rewrites_reasoning_sibling() {
-        // Reasoning lives as a sibling now and IS subject to CWD rewriting
-        // via `transform_conversation_cwd` (see the `Reasoning(_)` arm),
-        // which is a behavior improvement over the pre-refactor state
-        // where it lived buried in AssistantItem.reasoning and was skipped.
+        // Unsigned reasoning (no encrypted_content) is subject to CWD
+        // rewriting. Signature-bound items are left byte-stable (see
+        // transform_cwd_leaves_signed_reasoning_byte_stable_and_payload_intact).
         let worktree = "/home/user/.grok/worktrees/project/ab-uuid-a";
         let root = "/home/user/project";
 
@@ -7225,7 +7340,7 @@ mod tests {
         let rs::SummaryPart::SummaryText(t) = &r.summary[0];
         assert!(
             !t.text.contains(worktree),
-            "reasoning sibling text should be rewritten"
+            "unsigned reasoning sibling text should be rewritten"
         );
         assert!(t.text.contains(root));
     }
