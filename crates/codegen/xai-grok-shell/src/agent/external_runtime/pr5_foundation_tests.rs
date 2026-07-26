@@ -270,6 +270,7 @@ async fn unavailable_stub_deterministic_non_auth_invalid_request() {
 }
 
 #[test]
+#[serial_test::serial(claude_cli_env)]
 fn catalog_visibility_hides_unselectable_claude_cli() {
     use crate::agent::config::ModelEntry;
     use indexmap::IndexMap;

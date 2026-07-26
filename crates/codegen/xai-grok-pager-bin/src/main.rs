@@ -1979,6 +1979,14 @@ fn main() {
     if let Some(code) = xai_grok_pager::voice::maybe_run_capture_subprocess() {
         std::process::exit(code);
     }
+    // PR7: Claude CLI permission-bridge MCP child (feature-gated).
+    #[cfg(feature = "claude-cli-runtime")]
+    if let Some(code) =
+        xai_grok_shell::agent::external_runtime::claude_cli::maybe_run_permission_bridge_subprocess(
+        )
+    {
+        std::process::exit(code);
+    }
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;

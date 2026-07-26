@@ -1,11 +1,16 @@
-//! Typed argv builder for one-process-per-Grok-turn Claude CLI invocations.
+//! Typed argv builder for Claude CLI invocations (PR6 one-shot + PR7 advanced).
 //!
 //! Official noninteractive safe profile: `--safe-mode`, `-p`, stream-json
 //! input/output, `--verbose`, `--include-partial-messages`,
-//! `--forward-subagent-text`. Never `--bare`. Never shell strings.
+//! `--forward-subagent-text`. PR7 adds `--strict-mcp-config`, generated
+//! `--mcp-config`, `--permission-prompt-tool`, and capability-mode
+//! `--tools` / `--disallowedTools`. Never `--bare`. Never
+//! `--dangerously-skip-permissions` / `bypassPermissions`. Never shell strings.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+
+use super::capability_mode::{ClaudeCapabilityMode, disallowed_tools_flag_value, tools_flag_value};
 
 /// Plan describing a single Claude CLI turn invocation.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +28,14 @@ pub struct ClaudeCliTurnArgv {
     pub resume_session: Option<String>,
     /// Working directory for the child.
     pub cwd: Option<PathBuf>,
+    /// PR7: path to generated strict MCP config (permission bridge only).
+    pub mcp_config: Option<PathBuf>,
+    /// PR7: `--permission-prompt-tool` value (e.g. mcp__grok-permission__…).
+    pub permission_prompt_tool: Option<String>,
+    /// PR7: capability mode → tools allow/deny lists.
+    pub capability_mode: Option<ClaudeCapabilityMode>,
+    /// PR7: when true, keep stdin open for multi-turn (persistent session).
+    pub persistent_input: bool,
 }
 
 /// Built argv + metadata (never includes secrets).
@@ -32,6 +45,9 @@ pub struct ClaudeCliArgvPlan {
     pub args: Vec<OsString>,
     /// When true, write a stream-json user message to stdin.
     pub write_stream_json_prompt: bool,
+    /// When true (default), close stdin after the first prompt (one-shot).
+    /// Persistent multi-turn keeps stdin open.
+    pub close_stdin_after_prompt: bool,
     pub prompt: String,
     pub cwd: Option<PathBuf>,
 }
@@ -43,12 +59,14 @@ impl ClaudeCliTurnArgv {
     /// - includes `--safe-mode`
     /// - includes `-p` / print mode
     /// - includes stream-json input + output formats
-    /// - never includes `--bare`
+    /// - never includes `--bare` or `--dangerously-skip-permissions`
     /// - model / effort / budget / session / resume are typed flags only
+    /// - PR7 MCP / permission / tools flags only when configured
     pub fn build_plan(&self) -> ClaudeCliArgvPlan {
-        let mut args: Vec<OsString> = Vec::with_capacity(24);
+        let mut args: Vec<OsString> = Vec::with_capacity(40);
 
         // Safe noninteractive profile (order matches common official examples).
+        // --safe-mode disables implicit project/user MCP/hooks/plugins/agents.
         args.push(OsString::from("--safe-mode"));
         args.push(OsString::from("-p"));
         args.push(OsString::from("--output-format"));
@@ -58,6 +76,34 @@ impl ClaudeCliTurnArgv {
         args.push(OsString::from("--verbose"));
         args.push(OsString::from("--include-partial-messages"));
         args.push(OsString::from("--forward-subagent-text"));
+
+        // PR7: strict MCP config — only generated bridge (+ explicit approved).
+        if let Some(mcp) = self.mcp_config.as_ref() {
+            args.push(OsString::from("--strict-mcp-config"));
+            args.push(OsString::from("--mcp-config"));
+            args.push(OsString::from(mcp.as_os_str()));
+        }
+        if let Some(tool) = self
+            .permission_prompt_tool
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            args.push(OsString::from("--permission-prompt-tool"));
+            args.push(OsString::from(tool));
+        }
+
+        // Capability-mode tool restriction (never bypassPermissions).
+        if let Some(mode) = self.capability_mode {
+            let tools = tools_flag_value(mode);
+            if !tools.is_empty() {
+                args.push(OsString::from("--tools"));
+                args.push(OsString::from(tools));
+            }
+            if let Some(dis) = disallowed_tools_flag_value(mode) {
+                args.push(OsString::from("--disallowedTools"));
+                args.push(OsString::from(dis));
+            }
+        }
 
         if let Some(model) = self.model.as_deref().filter(|s| !s.is_empty()) {
             args.push(OsString::from("--model"));
@@ -92,6 +138,8 @@ impl ClaudeCliTurnArgv {
             program: self.executable.clone(),
             args,
             write_stream_json_prompt: true,
+            // Persistent mode keeps stdin open after the first prompt write.
+            close_stdin_after_prompt: !self.persistent_input,
             prompt: self.prompt.clone(),
             cwd: self.cwd.clone(),
         }
@@ -134,7 +182,21 @@ pub fn plan_uses_safe_mode_not_bare(plan: &ClaudeCliArgvPlan) -> bool {
         .collect();
     args.iter().any(|a| a == "--safe-mode")
         && !args.iter().any(|a| a == "--bare")
+        && !args.iter().any(|a| a == "--dangerously-skip-permissions")
+        && !args.iter().any(|a| a == "bypassPermissions")
         && args.iter().any(|a| a == "-p")
+}
+
+/// True when plan includes strict MCP + permission-prompt-tool (PR7).
+pub fn plan_has_strict_permission_bridge(plan: &ClaudeCliArgvPlan) -> bool {
+    let args: Vec<String> = plan
+        .args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    args.iter().any(|a| a == "--strict-mcp-config")
+        && args.iter().any(|a| a == "--mcp-config")
+        && args.iter().any(|a| a == "--permission-prompt-tool")
 }
 
 #[cfg(test)]
@@ -152,6 +214,10 @@ mod tests {
             session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
             resume_session: None,
             cwd: Some(PathBuf::from("/tmp/ws")),
+            mcp_config: None,
+            permission_prompt_tool: None,
+            capability_mode: None,
+            persistent_input: false,
         }
     }
 
@@ -205,5 +271,36 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["content"], "hi\nthere");
+    }
+
+    #[test]
+    fn pr7_strict_mcp_and_tools_flags() {
+        let mut t = sample();
+        t.mcp_config = Some(PathBuf::from("/tmp/mcp.json"));
+        t.permission_prompt_tool = Some("mcp__grok-permission__permission_prompt".into());
+        t.capability_mode = Some(ClaudeCapabilityMode::ReadOnly);
+        let plan = t.build_plan();
+        assert!(plan_has_strict_permission_bridge(&plan));
+        assert!(plan_uses_safe_mode_not_bare(&plan));
+        let args: Vec<String> = plan
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--tools".into()));
+        assert!(args.contains(&"--disallowedTools".into()));
+        // Read-only denylist includes Edit/Bash
+        let dis_idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert!(args[dis_idx + 1].contains("Edit"));
+        assert!(args[dis_idx + 1].contains("Bash"));
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn persistent_keeps_stdin_open() {
+        let mut t = sample();
+        t.persistent_input = true;
+        let plan = t.build_plan();
+        assert!(!plan.close_stdin_after_prompt);
     }
 }

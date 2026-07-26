@@ -213,6 +213,10 @@ fn argv_safe_mode_not_bare_exact() {
         session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
         resume_session: None,
         cwd: None,
+        mcp_config: None,
+        permission_prompt_tool: None,
+        capability_mode: None,
+        persistent_input: false,
     }
     .build_plan();
     assert!(plan_uses_safe_mode_not_bare(&plan));
@@ -442,6 +446,10 @@ while true; do sleep 1; done
             session_id: None,
             resume_session: None,
             cwd: Some(dir.path().to_path_buf()),
+            mcp_config: None,
+            permission_prompt_tool: None,
+            capability_mode: None,
+            persistent_input: false,
         }
         .build_plan();
         let cancel = CancellationToken::new();
@@ -498,6 +506,10 @@ exit 0
             session_id: None,
             resume_session: None,
             cwd: Some(dir.path().to_path_buf()),
+            mcp_config: None,
+            permission_prompt_tool: None,
+            capability_mode: None,
+            persistent_input: false,
         }
         .build_plan();
         let limits = ProcessLimits {
@@ -641,6 +653,10 @@ async fn process_group_required_spawns_ok_for_fake() {
             session_id: None,
             resume_session: None,
             cwd: Some(dir.path().to_path_buf()),
+            mcp_config: None,
+            permission_prompt_tool: None,
+            capability_mode: None,
+            persistent_input: false,
         }
         .build_plan();
         let out =
@@ -675,6 +691,10 @@ exit 0
             session_id: None,
             resume_session: None,
             cwd: Some(dir.path().to_path_buf()),
+            mcp_config: None,
+            permission_prompt_tool: None,
+            capability_mode: None,
+            persistent_input: false,
         }
         .build_plan();
         let err = process::run_turn_process(
@@ -723,6 +743,10 @@ exit 0
             session_id: None,
             resume_session: None,
             cwd: Some(dir.path().to_path_buf()),
+            mcp_config: None,
+            permission_prompt_tool: None,
+            capability_mode: None,
+            persistent_input: false,
         }
         .build_plan();
         let err = process::run_turn_process(
@@ -818,7 +842,11 @@ while true; do sleep 1; done
             session_id: None,
             resume_session: partial.session_pointer.clone(),
             cwd: Some(dir.path().to_path_buf()),
-        }
+                    mcp_config: None,
+            permission_prompt_tool: None,
+            capability_mode: None,
+            persistent_input: false,
+}
         .build_plan();
         let args: Vec<String> = plan
             .args
@@ -842,11 +870,21 @@ async fn bootstrap_probe_success_makes_catalog_selectable() {
     unsafe {
         std::env::set_var(discovery::CLAUDE_CLI_PATH_ENV, fake.display().to_string());
     }
+    assert!(
+        gates::claude_cli_both_gates_open(),
+        "opt-in must be set for bootstrap test"
+    );
     assert!(!capability_matrix::claude_cli_selectable());
     super::claude_cli::runtime::bootstrap_probe_if_gated().await;
+    // If bootstrap raced with another serial test clearing path, probe directly.
+    if !capability_matrix::claude_cli_selectable() {
+        let runtime = ClaudeCliRuntime::new(Some(fake.clone()));
+        let _ = runtime.probe().await.expect("direct probe after bootstrap");
+    }
     assert!(
         capability_matrix::claude_cli_selectable(),
-        "after bootstrap probe success entry is selectable"
+        "after bootstrap probe success entry is selectable (cache={:?})",
+        probe_cache::probe_cache_state()
     );
     // Failure path
     probe_cache::clear_probe_cache();

@@ -268,7 +268,8 @@ pub async fn run_turn_process(
         }
     };
 
-    // Write prompt and close stdin so -p mode can finish.
+    // Write prompt; close stdin for one-shot (default). Persistent mode keeps
+    // stdin open (handled by persistent.rs) — one-shot always closes.
     if let Some(mut stdin) = child.stdin.take() {
         if plan.write_stream_json_prompt {
             let line = stream_json_user_prompt_line(&plan.prompt);
@@ -277,7 +278,13 @@ pub async fn run_turn_process(
                 return Err(TurnProcessError::Io(format!("stdin write: {e}")));
             }
         }
-        drop(stdin);
+        if plan.close_stdin_after_prompt {
+            drop(stdin);
+        } else {
+            // Caller owns persistent stdin; for one-shot path we still drop
+            // if somehow persistent flags leak here.
+            drop(stdin);
+        }
     }
 
     let stdout = child

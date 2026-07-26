@@ -129,9 +129,11 @@ pub mod capability_matrix {
 
     /// Limitations blurb for pickers / status.
     pub const CLAUDE_CLI_UI_LIMITATIONS: &str = "\
-Experimental subscription-backed Claude Agent CLI. One process per Grok turn; \
-Claude owns auth and tools. No Grok tool loop, compaction, memory, goals, or \
-workflow. No API keys. Persistent input / permission bridge / MCP deferred to a later PR.";
+Experimental subscription-backed Claude Agent CLI. Claude owns auth and tools; \
+Grok owns the permission broker, outer process/sandbox, and UI. No Grok tool \
+loop, compaction, memory, goals, hooks, checkpoints, or workflow accounting. \
+No API keys. No bypassPermissions. Persistent multi-turn only when the binary \
+advertises streaming input capabilities; otherwise one process per Grok turn.";
 
     /// Static compile-time hint only (feature present). Not sufficient for
     /// catalog selectability — see [`claude_cli_selectable`].
@@ -294,6 +296,9 @@ mod pr5_foundation_tests;
 
 #[cfg(all(test, feature = "claude-cli-runtime"))]
 mod pr6_claude_cli_tests;
+
+#[cfg(all(test, feature = "claude-cli-runtime"))]
+mod pr7_claude_cli_tests;
 
 #[cfg(test)]
 mod tests {

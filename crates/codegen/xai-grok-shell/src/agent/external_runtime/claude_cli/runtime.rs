@@ -1,4 +1,8 @@
 //! [`ClaudeCliRuntime`] — process-backed [`ExternalAgentRuntime`] for Claude CLI.
+//!
+//! PR6: one-process-per-turn MVP. PR7: permission bridge, strict MCP config,
+//! capability-mode tool restriction, resume hardening, optional persistent
+//! multi-turn when capabilities advertise streaming input.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,10 +13,19 @@ use tokio_util::sync::CancellationToken;
 
 use super::argv::ClaudeCliTurnArgv;
 use super::auth;
+use super::capability_mode::ClaudeCapabilityMode;
 use super::discovery::{self, ClaudeCliDiscovery, ClaudeCliDiscoveryError, MIN_CLAUDE_CLI_VERSION};
 use super::gates;
+use super::mcp_config::{self, ApprovedExternalMcpServer, GeneratedMcpConfig};
+use super::permission_bridge::{
+    ClaudePermissionBroker, PermissionBrokerServer, PolicyPermissionBroker,
+};
+use super::persistent::{self, PersistentClaudeSession};
 use super::process::{self, ProcessLimits, TurnProcessError};
 use super::protocol::{self, ProtocolError};
+use super::provider_status::{self, ClaudeCliProviderStatus};
+use super::resume_guard::{self, supports_persistent_input};
+use super::sandbox_probe;
 use crate::agent::execution_backend::ExternalAgentKind;
 use crate::agent::external_runtime::probe_cache;
 use crate::agent::external_runtime::{
@@ -29,6 +42,26 @@ pub struct ClaudeCliRuntime {
     discovery: Mutex<Option<ClaudeCliDiscovery>>,
     /// Cancel token for the in-flight turn (if any).
     inflight_cancel: Mutex<Option<CancellationToken>>,
+    /// PR7 capability mode (defaults ReadOnly for safety).
+    capability_mode: ClaudeCapabilityMode,
+    /// Explicit always-approve opt-in (still requires yolo PermissionHandle).
+    always_approve_opt_in: bool,
+    /// Optional Grok permission handle for the bridge.
+    permission_handle: Option<xai_grok_workspace::permission::PermissionHandle>,
+    /// Explicitly approved external MCP servers (never auto-discovered).
+    approved_mcp: Vec<ApprovedExternalMcpServer>,
+    /// Host executable for re-exec permission bridge child.
+    host_executable: Option<PathBuf>,
+    /// Runtime dir for sockets / temp MCP config.
+    runtime_dir: Mutex<Option<PathBuf>>,
+    /// Live permission broker server (if started).
+    broker_server: Mutex<Option<Arc<PermissionBrokerServer>>>,
+    /// Generated MCP config (cleaned on shutdown).
+    mcp_config: Mutex<Option<GeneratedMcpConfig>>,
+    /// Persistent multi-turn session (capability-gated).
+    persistent: Mutex<Option<PersistentClaudeSession>>,
+    /// Permission bridge readiness for provider status.
+    bridge_ready: Mutex<bool>,
 }
 
 impl ClaudeCliRuntime {
@@ -38,11 +71,49 @@ impl ClaudeCliRuntime {
             limits: ProcessLimits::default(),
             discovery: Mutex::new(None),
             inflight_cancel: Mutex::new(None),
+            capability_mode: ClaudeCapabilityMode::ReadOnly,
+            always_approve_opt_in: false,
+            permission_handle: None,
+            approved_mcp: Vec::new(),
+            host_executable: std::env::current_exe().ok(),
+            runtime_dir: Mutex::new(None),
+            broker_server: Mutex::new(None),
+            mcp_config: Mutex::new(None),
+            persistent: Mutex::new(None),
+            bridge_ready: Mutex::new(false),
         }
     }
 
     pub fn with_limits(mut self, limits: ProcessLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    pub fn with_capability_mode(mut self, mode: ClaudeCapabilityMode) -> Self {
+        self.capability_mode = mode;
+        self
+    }
+
+    pub fn with_always_approve_opt_in(mut self, enabled: bool) -> Self {
+        self.always_approve_opt_in = enabled;
+        self
+    }
+
+    pub fn with_permission_handle(
+        mut self,
+        handle: xai_grok_workspace::permission::PermissionHandle,
+    ) -> Self {
+        self.permission_handle = Some(handle);
+        self
+    }
+
+    pub fn with_approved_mcp(mut self, servers: Vec<ApprovedExternalMcpServer>) -> Self {
+        self.approved_mcp = servers;
+        self
+    }
+
+    pub fn with_host_executable(mut self, path: PathBuf) -> Self {
+        self.host_executable = Some(path);
         self
     }
 
@@ -115,6 +186,104 @@ impl ClaudeCliRuntime {
     pub async fn clear_discovery_cache(&self) {
         *self.discovery.lock().await = None;
         probe_cache::clear_probe_cache();
+    }
+
+    /// Ensure permission bridge + strict MCP config exist for this runtime.
+    async fn ensure_permission_bridge(&self) -> Result<(), ExternalRuntimeError> {
+        if *self.bridge_ready.lock().await && self.broker_server.lock().await.is_some() {
+            return Ok(());
+        }
+        let runtime_dir = {
+            let mut slot = self.runtime_dir.lock().await;
+            if slot.is_none() {
+                let base =
+                    std::env::temp_dir().join(format!("grok-claude-cli-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&base).map_err(|e| {
+                    ExternalRuntimeError::new(
+                        ExternalRuntimeErrorKind::Transport,
+                        format!("runtime dir: {e}"),
+                        Some(ExternalAgentKind::ClaudeCli),
+                    )
+                })?;
+                *slot = Some(base);
+            }
+            slot.clone().expect("just set")
+        };
+
+        let broker: Arc<dyn ClaudePermissionBroker> = match &self.permission_handle {
+            Some(h) => Arc::new(
+                PolicyPermissionBroker::new(self.capability_mode)
+                    .with_permission(h.clone())
+                    .with_always_approve_opt_in(self.always_approve_opt_in),
+            ),
+            None => {
+                // Still start the bridge so Claude has a tool; decisions fail closed.
+                Arc::new(PolicyPermissionBroker::new(self.capability_mode))
+            }
+        };
+        let cancel = CancellationToken::new();
+        let server = PermissionBrokerServer::start(&runtime_dir, broker, cancel).await?;
+        let host = self.host_executable.clone().ok_or_else(|| {
+            ExternalRuntimeError::new(
+                ExternalRuntimeErrorKind::Transport,
+                "host executable path unavailable for permission bridge child",
+                Some(ExternalAgentKind::ClaudeCli),
+            )
+        })?;
+        let mcp = mcp_config::write_strict_mcp_config(
+            &runtime_dir,
+            &host,
+            server.socket_path(),
+            &self.approved_mcp,
+        )?;
+        *self.broker_server.lock().await = Some(server);
+        *self.mcp_config.lock().await = Some(mcp);
+        *self.bridge_ready.lock().await = true;
+        Ok(())
+    }
+
+    fn build_turn_argv(
+        &self,
+        d: &ClaudeCliDiscovery,
+        envelope: &ExternalRuntimeEnvelope,
+        request: &ExternalTurnRequest,
+        session_id: Option<String>,
+        resume: Option<String>,
+        persistent: bool,
+        mcp_path: Option<PathBuf>,
+        permission_tool: Option<String>,
+    ) -> ClaudeCliTurnArgv {
+        ClaudeCliTurnArgv {
+            executable: d.executable.clone(),
+            prompt: request.prompt.clone(),
+            model: request
+                .selected_model
+                .clone()
+                .or_else(|| envelope.selected_model.clone()),
+            effort: request
+                .reasoning_effort
+                .clone()
+                .or_else(|| envelope.reasoning_effort.clone()),
+            max_budget_usd: None,
+            session_id,
+            resume_session: resume,
+            cwd: envelope.cwd.as_ref().map(PathBuf::from),
+            mcp_config: mcp_path,
+            permission_prompt_tool: permission_tool,
+            capability_mode: Some(self.capability_mode),
+            persistent_input: persistent,
+        }
+    }
+
+    /// Provider status for UI (binary / auth / bridge distinct from API key).
+    pub async fn provider_status(&self) -> ClaudeCliProviderStatus {
+        let binary = self.discovery.lock().await.clone();
+        let (binary_ready, ver, detail) = match binary {
+            Some(d) => (true, Some(d.version.to_string()), None),
+            None => (false, None, Some("not probed".into())),
+        };
+        let bridge = *self.bridge_ready.lock().await;
+        provider_status::build_status(binary_ready, ver, detail, None, bridge)
     }
 }
 
@@ -251,21 +420,26 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         envelope: &ExternalRuntimeEnvelope,
     ) -> Result<ExternalRuntimeEnvelope, ExternalRuntimeError> {
         let d = self.ensure_discovery().await?;
-        if envelope.kind != ExternalAgentKind::ClaudeCli {
-            return Err(ExternalRuntimeError::new(
-                ExternalRuntimeErrorKind::InvalidRequest,
-                "envelope kind is not claude_cli",
-                Some(ExternalAgentKind::ClaudeCli),
-            ));
-        }
+        // PR7 resume hardening: model/effort/cwd/worktree/version/caps.
+        resume_guard::validate_resume(
+            envelope,
+            &d,
+            envelope.selected_model.as_deref(),
+            envelope.reasoning_effort.as_deref(),
+            envelope.cwd.as_deref(),
+            envelope.worktree_identity.as_deref(),
+        )
+        .map_err(|e| e.into_runtime_error())?;
+
         let mut env = envelope.clone();
         env.observed_version = Some(d.version.to_string());
-        if env.session_pointer.as_ref().is_none_or(|s| s.is_empty()) {
-            return Err(ExternalRuntimeError::new(
-                ExternalRuntimeErrorKind::InvalidRequest,
-                "cannot resume Claude CLI session without a session pointer",
-                Some(ExternalAgentKind::ClaudeCli),
-            ));
+        // Merge live additive capabilities.
+        if !d.capabilities.is_empty() {
+            for c in &d.capabilities {
+                if !env.capabilities.iter().any(|x| x == c) {
+                    env.capabilities.push(c.clone());
+                }
+            }
         }
         env.validated().map_err(|e| {
             ExternalRuntimeError::new(
@@ -285,6 +459,54 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         // Revalidate immediately before spawn.
         discovery::revalidate_executable(&d.executable, &d).map_err(map_discovery_error)?;
 
+        // Resume identity checks when a pointer is present.
+        if envelope
+            .session_pointer
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
+        {
+            resume_guard::validate_resume(
+                envelope,
+                &d,
+                request
+                    .selected_model
+                    .as_deref()
+                    .or(envelope.selected_model.as_deref()),
+                request
+                    .reasoning_effort
+                    .as_deref()
+                    .or(envelope.reasoning_effort.as_deref()),
+                envelope.cwd.as_deref(),
+                envelope.worktree_identity.as_deref(),
+            )
+            .map_err(|e| e.into_runtime_error())?;
+        }
+
+        // Sandbox probe is observational — never weakens parent policy.
+        let _sandbox_obs = sandbox_probe::observe_child_sandbox(sandbox_probe::default_child_probe);
+        let _ = sandbox_probe::verify_child_posture(
+            &_sandbox_obs,
+            &sandbox_probe::ExpectedChildPosture::default(),
+            sandbox_probe::parent_sandbox_active(),
+        );
+
+        // Permission bridge + strict MCP (fail closed if cannot start).
+        self.ensure_permission_bridge().await?;
+        let (mcp_path, permission_tool) = {
+            let guard = self.mcp_config.lock().await;
+            let cfg = guard.as_ref().ok_or_else(|| {
+                ExternalRuntimeError::new(
+                    ExternalRuntimeErrorKind::Transport,
+                    "permission bridge MCP config missing",
+                    Some(ExternalAgentKind::ClaudeCli),
+                )
+            })?;
+            (
+                Some(cfg.path.clone()),
+                Some(cfg.permission_prompt_tool.clone()),
+            )
+        };
+
         let cancel = CancellationToken::new();
         {
             let mut slot = self.inflight_cancel.lock().await;
@@ -293,6 +515,14 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             }
             *slot = Some(cancel.clone());
         }
+
+        // Capability matrix for persistent multi-turn.
+        let caps_for_mode: Vec<String> = if !envelope.capabilities.is_empty() {
+            envelope.capabilities.clone()
+        } else {
+            d.capabilities.clone()
+        };
+        let want_persistent = supports_persistent_input(&caps_for_mode);
 
         let resume = envelope
             .session_pointer
@@ -305,23 +535,35 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             None
         };
 
-        // MVP: do not pass --max-budget-usd. token_budget is host tokens, not USD.
-        let argv = ClaudeCliTurnArgv {
-            executable: d.executable.clone(),
-            prompt: request.prompt.clone(),
-            model: request
-                .selected_model
-                .clone()
-                .or_else(|| envelope.selected_model.clone()),
-            effort: request
-                .reasoning_effort
-                .clone()
-                .or_else(|| envelope.reasoning_effort.clone()),
-            max_budget_usd: None,
-            session_id: session_id.clone(),
-            resume_session: resume.clone(),
-            cwd: envelope.cwd.as_ref().map(PathBuf::from),
-        };
+        // --- Persistent path (capability-gated) ---
+        if want_persistent {
+            let outcome = self
+                .turn_persistent(
+                    &d,
+                    envelope,
+                    &request,
+                    session_id.clone(),
+                    resume.clone(),
+                    mcp_path.clone(),
+                    permission_tool.clone(),
+                    cancel.clone(),
+                )
+                .await;
+            *self.inflight_cancel.lock().await = None;
+            return outcome;
+        }
+
+        // --- PR6 one-process-per-turn path ---
+        let argv = self.build_turn_argv(
+            &d,
+            envelope,
+            &request,
+            session_id.clone(),
+            resume.clone(),
+            false,
+            mcp_path,
+            permission_tool,
+        );
         let plan = argv.build_plan();
 
         let outcome = process::run_turn_process(&plan, &self.limits, cancel.clone()).await;
@@ -354,62 +596,7 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             ));
         }
 
-        let parsed = protocol::parse_turn_lines(&outcome.lines).map_err(map_protocol_error)?;
-
-        let mut env = envelope.clone();
-        if let Some(sid) = parsed.session_id.clone().or(session_id) {
-            env.session_pointer = Some(sid);
-        }
-        env.observed_version = Some(
-            parsed
-                .version
-                .clone()
-                .unwrap_or_else(|| d.version.to_string()),
-        );
-        if !parsed.capabilities.is_empty() {
-            env.capabilities = parsed.capabilities.clone();
-        }
-        if let Some(model) = parsed.model.clone() {
-            env.selected_model = Some(model);
-        }
-        env.result = parsed.result.clone();
-        env.usage = parsed.usage.clone();
-        let env = env.validated().map_err(|e| {
-            ExternalRuntimeError::new(
-                ExternalRuntimeErrorKind::InvalidRequest,
-                e.to_string(),
-                Some(ExternalAgentKind::ClaudeCli),
-            )
-        })?;
-
-        if let Some(code) = outcome.exit_code {
-            if code != 0
-                && parsed
-                    .result
-                    .as_ref()
-                    .is_some_and(|r| r.status == "error" || r.status == "error_during_execution")
-            {
-                return Err(ExternalRuntimeError::new(
-                    ExternalRuntimeErrorKind::Other,
-                    parsed
-                        .events
-                        .iter()
-                        .find_map(|e| match e {
-                            ExternalRuntimeTurnEvent::Error { message } => Some(message.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| format!("Claude CLI exited with status {code}")),
-                    Some(ExternalAgentKind::ClaudeCli),
-                ));
-            }
-        }
-
-        Ok(ExternalTurnOutcome {
-            events: parsed.events,
-            envelope: env,
-            result: parsed.result,
-            usage: parsed.usage,
-        })
+        finalize_turn_outcome(envelope, &d, session_id, &outcome.lines, false)
     }
 
     async fn cancel(
@@ -429,6 +616,20 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         if let Some(token) = self.inflight_cancel.lock().await.take() {
             token.cancel();
         }
+        // Tear down persistent child + permission bridge + temp config.
+        if let Some(mut sess) = self.persistent.lock().await.take() {
+            sess.shutdown().await;
+        }
+        if let Some(server) = self.broker_server.lock().await.take() {
+            server.shutdown().await;
+        }
+        if let Some(cfg) = self.mcp_config.lock().await.take() {
+            cfg.cleanup();
+        }
+        if let Some(dir) = self.runtime_dir.lock().await.take() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        *self.bridge_ready.lock().await = false;
         Ok(())
     }
 
@@ -442,6 +643,190 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             probe_cache::ClaudeCliProbeCacheState::Ok { .. } => ExternalRuntimeStatus::Idle,
         }
     }
+}
+
+impl ClaudeCliRuntime {
+    /// Persistent multi-turn path: one child, queue one turn at a time.
+    async fn turn_persistent(
+        &self,
+        d: &ClaudeCliDiscovery,
+        envelope: &ExternalRuntimeEnvelope,
+        request: &ExternalTurnRequest,
+        session_id: Option<String>,
+        resume: Option<String>,
+        mcp_path: Option<PathBuf>,
+        permission_tool: Option<String>,
+        cancel: CancellationToken,
+    ) -> Result<ExternalTurnOutcome, ExternalRuntimeError> {
+        // Reuse live session if still alive; else spawn (or fall back).
+        {
+            let mut slot = self.persistent.lock().await;
+            if let Some(sess) = slot.as_mut() {
+                if sess.is_alive() {
+                    let outcome = sess
+                        .run_turn(&request.prompt, cancel.clone())
+                        .await
+                        .map_err(map_process_error)?;
+                    if outcome.cancelled {
+                        return Err(cancelled_with_partial(
+                            "Claude Agent CLI persistent turn cancelled",
+                            envelope,
+                            d,
+                            sess.pointer_for_resume().or(session_id),
+                            &outcome.lines,
+                        ));
+                    }
+                    return finalize_turn_outcome(envelope, d, session_id, &outcome.lines, false);
+                }
+                // Child died: persist pointer then fall back if allowed.
+                let pointer = sess.pointer_for_resume().or(resume.clone());
+                let can_resume = sess.oneshot_resume_allowed() || pointer.is_some();
+                let _ = slot.take();
+                if can_resume {
+                    return self
+                        .turn_oneshot_resume(
+                            d,
+                            envelope,
+                            request,
+                            pointer,
+                            mcp_path,
+                            permission_tool,
+                            cancel,
+                        )
+                        .await;
+                }
+                return Err(ExternalRuntimeError::new(
+                    ExternalRuntimeErrorKind::Transport,
+                    "Claude CLI persistent child died without a resumable session pointer",
+                    Some(ExternalAgentKind::ClaudeCli),
+                ));
+            }
+        }
+
+        // Spawn new persistent child.
+        let argv = self.build_turn_argv(
+            d,
+            envelope,
+            request,
+            session_id.clone(),
+            resume.clone(),
+            true,
+            mcp_path.clone(),
+            permission_tool.clone(),
+        );
+        let plan = argv.build_plan();
+        let mut sess = PersistentClaudeSession::spawn(&plan, self.limits.clone())
+            .await
+            .map_err(map_process_error)?;
+        let outcome = sess
+            .run_turn(&request.prompt, cancel.clone())
+            .await
+            .map_err(map_process_error)?;
+        if outcome.cancelled {
+            let ptr = sess.pointer_for_resume().or(session_id.clone());
+            // Keep pointer on envelope even if we drop the child.
+            *self.persistent.lock().await = None;
+            sess.shutdown().await;
+            return Err(cancelled_with_partial(
+                "Claude Agent CLI persistent turn cancelled",
+                envelope,
+                d,
+                ptr,
+                &outcome.lines,
+            ));
+        }
+        if !sess.is_alive() {
+            // Died after result — OK; do not keep dead session.
+            let out = finalize_turn_outcome(envelope, d, session_id, &outcome.lines, false)?;
+            *self.persistent.lock().await = None;
+            return Ok(out);
+        }
+        *self.persistent.lock().await = Some(sess);
+        finalize_turn_outcome(envelope, d, session_id, &outcome.lines, false)
+    }
+
+    async fn turn_oneshot_resume(
+        &self,
+        d: &ClaudeCliDiscovery,
+        envelope: &ExternalRuntimeEnvelope,
+        request: &ExternalTurnRequest,
+        resume: Option<String>,
+        mcp_path: Option<PathBuf>,
+        permission_tool: Option<String>,
+        cancel: CancellationToken,
+    ) -> Result<ExternalTurnOutcome, ExternalRuntimeError> {
+        let argv = self.build_turn_argv(
+            d,
+            envelope,
+            request,
+            None,
+            resume,
+            false,
+            mcp_path,
+            permission_tool,
+        );
+        let plan = argv.build_plan();
+        let outcome = process::run_turn_process(&plan, &self.limits, cancel)
+            .await
+            .map_err(map_process_error)?;
+        if outcome.cancelled {
+            return Err(cancelled_with_partial(
+                "Claude Agent CLI resume turn cancelled",
+                envelope,
+                d,
+                None,
+                &outcome.lines,
+            ));
+        }
+        finalize_turn_outcome(envelope, d, None, &outcome.lines, false)
+    }
+}
+
+fn finalize_turn_outcome(
+    envelope: &ExternalRuntimeEnvelope,
+    d: &ClaudeCliDiscovery,
+    session_id: Option<String>,
+    lines: &[String],
+    allow_incomplete: bool,
+) -> Result<ExternalTurnOutcome, ExternalRuntimeError> {
+    let mut outcome = if allow_incomplete {
+        persistent::apply_outcome_to_envelope(envelope, lines, true).map_err(map_protocol_error)?
+    } else {
+        persistent::apply_outcome_to_envelope(envelope, lines, false).map_err(map_protocol_error)?
+    };
+    if outcome.envelope.session_pointer.is_none() {
+        if let Some(sid) = session_id {
+            outcome.envelope.session_pointer = Some(sid);
+        }
+    }
+    if outcome.envelope.observed_version.is_none() {
+        outcome.envelope.observed_version = Some(d.version.to_string());
+    }
+    // Claude-owned tool labeling (display only; no Grok hooks/dispatcher).
+    persistent::label_claude_owned_events(&mut outcome.events);
+    // Surface status that Claude tools are not Grok-native.
+    if outcome
+        .events
+        .iter()
+        .any(|e| matches!(e, ExternalRuntimeTurnEvent::ToolCall { .. }))
+    {
+        outcome.events.push(ExternalRuntimeTurnEvent::Status {
+            message: "Claude-owned tools (display only; not executed by Grok)".into(),
+        });
+    }
+    let env = outcome.envelope.validated().map_err(|e| {
+        ExternalRuntimeError::new(
+            ExternalRuntimeErrorKind::InvalidRequest,
+            e.to_string(),
+            Some(ExternalAgentKind::ClaudeCli),
+        )
+    })?;
+    Ok(ExternalTurnOutcome {
+        events: outcome.events,
+        envelope: env,
+        result: outcome.result,
+        usage: outcome.usage,
+    })
 }
 
 /// Factory registered for [`ExternalAgentKind::ClaudeCli`] when the feature
