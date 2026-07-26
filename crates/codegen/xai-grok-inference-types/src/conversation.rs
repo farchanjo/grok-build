@@ -275,6 +275,44 @@ pub struct AssistantItem {
     /// return it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_details: Vec<serde_json::Value>,
+    /// Optional provider-specific assistant payload for durable multi-turn
+    /// replay. Existing serialized sessions omit this field (`None`).
+    ///
+    /// Authoritative only for unmodified, `replayable` turns. Transformations
+    /// that strip reasoning or mutate assistant text/tool calls/block order
+    /// must clear it via [`AssistantItem::clear_provider_payload`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_payload: Option<AssistantProviderPayload>,
+}
+
+/// Provider-neutral container for backend-specific assistant payloads that
+/// must survive durable session storage and exact request replay.
+///
+/// Backends not listed here continue to synthesize from normalized projections
+/// (`content`, `tool_calls`, sibling `Reasoning` items).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AssistantProviderPayload {
+    /// Exact ordered Anthropic Messages assistant `content` for unmodified
+    /// multi-turn replay (thinking signatures, redacted thinking, server-tool
+    /// blocks, unknown blocks, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<MessagesAssistantPayload>,
+}
+
+/// Durable Anthropic Messages assistant content for exact history replay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessagesAssistantPayload {
+    /// Ordered wire content blocks from the assistant response.
+    pub content: Vec<crate::messages::ContentBlock>,
+    /// When true, [`build_messages_request`] may emit `content` as-is for this
+    /// turn instead of synthesizing from projections. Cleared/ignored after
+    /// any mutation that would invalidate signed thinking or block order.
+    #[serde(default = "default_true")]
+    pub replayable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Tool result message
@@ -1174,6 +1212,7 @@ impl ConversationItem {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })
     }
 
@@ -1190,6 +1229,7 @@ impl ConversationItem {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })
     }
 
@@ -1202,6 +1242,7 @@ impl ConversationItem {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })
     }
 
@@ -1617,12 +1658,51 @@ impl AssistantItem {
     /// Add a tool call to this assistant message
     pub fn add_tool_call(&mut self, call: ToolCall) {
         self.tool_calls.push(call);
+        // Tool-call mutation invalidates exact Messages wire replay.
+        self.clear_provider_payload();
     }
 
     /// Set the model ID for this assistant message
     pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
         self.model_id = Some(model_id.into());
         self
+    }
+
+    /// Drop any provider-specific replay payload. Call after mutations that
+    /// change assistant text, tool calls, reasoning, or block ordering so
+    /// subsequent Messages requests synthesize from projections instead of
+    /// replaying a stale signed payload.
+    pub fn clear_provider_payload(&mut self) {
+        self.provider_payload = None;
+    }
+
+    /// Attach a replayable Anthropic Messages content payload for durable
+    /// multi-turn fidelity. Normalized projections (`content`, `tool_calls`,
+    /// sibling reasoning) remain authoritative for non-Messages backends and
+    /// for any turn where `replayable` is later cleared.
+    pub fn with_messages_payload(
+        mut self,
+        content: Vec<crate::messages::ContentBlock>,
+        replayable: bool,
+    ) -> Self {
+        self.provider_payload = Some(AssistantProviderPayload {
+            messages: Some(MessagesAssistantPayload {
+                content,
+                replayable,
+            }),
+        });
+        self
+    }
+
+    /// Ordered Messages content for exact replay, if this turn is still
+    /// marked replayable. Returns `None` for missing/non-replayable payloads.
+    pub fn replayable_messages_content(&self) -> Option<&[crate::messages::ContentBlock]> {
+        let payload = self.provider_payload.as_ref()?.messages.as_ref()?;
+        if payload.replayable {
+            Some(payload.content.as_slice())
+        } else {
+            None
+        }
     }
 }
 
@@ -1712,6 +1792,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                     model_fingerprint: None,
                     reasoning_effort: None,
                     reasoning_details: Vec::new(),
+                    provider_payload: None,
                 })
             }
             Role::Tool => {
@@ -2027,6 +2108,7 @@ impl From<ChatResponseMessage> for ConversationItem {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: msg.reasoning_details,
+            provider_payload: None,
         })
     }
 }
@@ -2143,6 +2225,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         model_fingerprint,
         reasoning_effort,
         reasoning_details: Vec::new(),
+        provider_payload: None,
     }));
 
     items
@@ -3132,6 +3215,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                 ContentPart::Text { text } => ContentBlock::Text {
                     text: text.as_ref().to_owned(),
                     cache_control: None,
+                    citations: None,
                 },
                 ContentPart::Image { url } => {
                     // Parse data: URI vs HTTP(S) URL
@@ -3149,12 +3233,14 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     media_type,
                                     data: data.to_string(),
                                 },
+                                cache_control: None,
                             }
                         } else {
                             // Malformed data URI, treat as text
                             ContentBlock::Text {
                                 text: format!("[invalid image: {}]", url),
                                 cache_control: None,
+                                citations: None,
                             }
                         }
                     } else if url.starts_with("http://") || url.starts_with("https://") {
@@ -3162,12 +3248,14 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                             source: ImageSource::Url {
                                 url: url.as_ref().to_owned(),
                             },
+                            cache_control: None,
                         }
                     } else {
                         // Unknown format, treat as text
                         ContentBlock::Text {
                             text: format!("[image: {}]", url),
                             cache_control: None,
+                            citations: None,
                         }
                     }
                 }
@@ -3207,6 +3295,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     r#type: "text".to_string(),
                     text: s.content.as_ref().to_owned(),
                     cache_control: None,
+                    citations: None,
                 });
             }
             ConversationItem::User(u) => {
@@ -3221,27 +3310,41 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
             ConversationItem::Assistant(a) => {
                 flush_tool_results(&mut pending_tool_results, &mut messages);
 
-                // Reasoning is no longer carried inline on AssistantItem;
-                // it lives as preceding sibling `Reasoning` items which
-                // emit their own Thinking blocks via the arm below.
+                // Exact Messages wire replay for unmodified turns: the durable
+                // provider payload is authoritative and already includes
+                // thinking / redacted_thinking / tool_use order. Drop any
+                // projected pending blocks so we do not duplicate them, then
+                // flush immediately so a later projected assistant cannot
+                // append into the same wire message.
+                if let Some(blocks) = a.replayable_messages_content() {
+                    pending_assistant.clear();
+                    pending_assistant.extend(blocks.iter().cloned());
+                    flush_assistant(&mut pending_assistant, &mut messages);
+                } else {
+                    // Reasoning is no longer carried inline on AssistantItem;
+                    // it lives as preceding sibling `Reasoning` items which
+                    // emit their own Thinking blocks via the arm below.
 
-                // Text block from content (if non-empty)
-                if !a.content.is_empty() {
-                    pending_assistant.push(ContentBlock::Text {
-                        text: a.content.as_ref().to_owned(),
-                        cache_control: None,
-                    });
-                }
+                    // Text block from content (if non-empty)
+                    if !a.content.is_empty() {
+                        pending_assistant.push(ContentBlock::Text {
+                            text: a.content.as_ref().to_owned(),
+                            cache_control: None,
+                            citations: None,
+                        });
+                    }
 
-                // Tool use blocks from tool_calls
-                for tc in &a.tool_calls {
-                    let input =
-                        serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
-                    pending_assistant.push(ContentBlock::ToolUse {
-                        id: sanitize_tool_call_id(&tc.id),
-                        name: tc.name.clone(),
-                        input,
-                    });
+                    // Tool use blocks from tool_calls
+                    for tc in &a.tool_calls {
+                        let input =
+                            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
+                        pending_assistant.push(ContentBlock::ToolUse {
+                            id: sanitize_tool_call_id(&tc.id),
+                            name: tc.name.clone(),
+                            input,
+                            cache_control: None,
+                        });
+                    }
                 }
             }
             ConversationItem::ToolResult(t) => {
@@ -3252,6 +3355,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     let mut blocks = vec![ContentBlock::Text {
                         text: t.content.as_ref().to_owned(),
                         cache_control: None,
+                        citations: None,
                     }];
                     for img in &t.images {
                         if let ContentPart::Image { url } = img {
@@ -3271,7 +3375,10 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     url: url.as_ref().to_owned(),
                                 }
                             };
-                            blocks.push(ContentBlock::Image { source });
+                            blocks.push(ContentBlock::Image {
+                                source,
+                                cache_control: None,
+                            });
                         }
                     }
                     ToolResultContent::Blocks(blocks)
@@ -3279,6 +3386,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                 pending_tool_results.push(ContentBlock::ToolResult {
                     tool_use_id: sanitize_tool_call_id(&t.tool_call_id),
                     content,
+                    is_error: None,
                     cache_control: None,
                 });
             }
@@ -3290,11 +3398,15 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                 pending_assistant.push(ContentBlock::Text {
                     text: b.text_summary(),
                     cache_control: None,
+                    citations: None,
                 });
             }
             // Reasoning sibling — emit as Anthropic `thinking` block on the
             // pending assistant turn. `tco_*` encrypted blobs only set
             // `signature`; real model reasoning sets `thinking`.
+            // When the following assistant carries a replayable Messages
+            // payload, these projected blocks are discarded at assistant
+            // flush time so signatures are not duplicated.
             ConversationItem::Reasoning(r) => {
                 flush_tool_results(&mut pending_tool_results, &mut messages);
                 let thinking = reasoning_item_text(r);
@@ -3321,6 +3433,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     if let Some(last) = system_blocks.last_mut() {
         last.cache_control = Some(CacheControl {
             r#type: "ephemeral".to_string(),
+            ttl: None,
         });
     }
 
@@ -3345,6 +3458,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     name: t.name.clone(),
                     description: t.description.clone(),
                     input_schema: t.parameters.clone(),
+                    // Not opted in by the agent loop; omit so wire shape is
+                    // unchanged for existing tools.
+                    strict: None,
                 })
                 .collect(),
         )
@@ -3352,10 +3468,13 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
 
     // Build tool_choice
     let tool_choice: Option<ToolChoiceParam> = req.tool_choice.as_ref().map(|tc| match tc {
-        ConversationToolChoice::Auto => ToolChoiceParam::Auto,
-        ConversationToolChoice::Required => ToolChoiceParam::Any,
-        ConversationToolChoice::Function(name) => ToolChoiceParam::Tool { name: name.clone() },
-        ConversationToolChoice::None => ToolChoiceParam::Auto, // default
+        ConversationToolChoice::Auto => ToolChoiceParam::auto(),
+        ConversationToolChoice::Required => ToolChoiceParam::any(),
+        ConversationToolChoice::Function(name) => ToolChoiceParam::Tool {
+            name: name.clone(),
+            disable_parallel_tool_use: None,
+        },
+        ConversationToolChoice::None => ToolChoiceParam::auto(), // default
     });
 
     let effort = req
@@ -3406,51 +3525,113 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     }
 }
 
+/// Convert a Messages response into ordered conversation items.
+///
+/// Emits one `ConversationItem::Reasoning` sibling per thinking /
+/// redacted-thinking block (preserving order), then a trailing
+/// `Assistant` with normalized text/tool-call projections and a durable
+/// replayable Messages content payload.
+pub fn messages_response_to_conversation_items(
+    resp: crate::messages::MessagesResponse,
+) -> Vec<ConversationItem> {
+    use crate::messages::ContentBlock;
+
+    let ordered_content = resp.content.clone();
+    let mut items = Vec::new();
+    let mut content = String::new();
+    let mut tool_calls = Vec::new();
+
+    for block in &resp.content {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(text);
+            }
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                // Client-executable only. Server tools / unknown blocks never
+                // become Grok tool calls.
+                tool_calls.push(ToolCall {
+                    id: Arc::<str>::from(id.as_str()),
+                    name: name.clone(),
+                    arguments: Arc::<str>::from(serde_json::to_string(input).unwrap_or_default()),
+                });
+            }
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                let summary = if thinking.is_empty() {
+                    vec![]
+                } else {
+                    vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                        text: thinking.clone(),
+                    })]
+                };
+                let encrypted_content = if signature.is_empty() {
+                    None
+                } else {
+                    Some(signature.clone())
+                };
+                items.push(ConversationItem::Reasoning(rs::ReasoningItem {
+                    id: String::new(),
+                    summary,
+                    content: None,
+                    encrypted_content,
+                    status: None,
+                }));
+            }
+            ContentBlock::RedactedThinking { data } => {
+                // Preserve redacted blobs as reasoning siblings with empty
+                // summary text and the blob in encrypted_content so token
+                // estimation / display stay consistent with streaming.
+                items.push(ConversationItem::Reasoning(rs::ReasoningItem {
+                    id: String::new(),
+                    summary: vec![],
+                    content: None,
+                    encrypted_content: Some(data.clone()),
+                    status: None,
+                }));
+            }
+            // Server tools, documents, images, unknown blocks: kept only in
+            // the durable Messages payload for wire replay.
+            _ => {}
+        }
+    }
+
+    items.push(ConversationItem::Assistant(AssistantItem {
+        content: Arc::<str>::from(content),
+        tool_calls,
+        model_id: Some(resp.model),
+        model_fingerprint: None,
+        reasoning_effort: None,
+        reasoning_details: Vec::new(),
+        provider_payload: Some(AssistantProviderPayload {
+            messages: Some(MessagesAssistantPayload {
+                content: ordered_content,
+                replayable: true,
+            }),
+        }),
+    }));
+
+    items
+}
+
 /// Convert a MessagesResponse to a single Assistant `ConversationItem`.
 ///
-/// Note: Anthropic `Thinking` blocks are dropped here because this `From`
-/// can only return one item; the streaming Anthropic consumer
-/// ([crates/codegen/xai-grok-inference/src/stream/messages.rs]) instead
-/// emits a sibling `ConversationItem::Reasoning(_)` directly into the
-/// conversation so reasoning text survives display + token estimation.
+/// Prefer [`messages_response_to_conversation_items`] when thinking blocks
+/// must survive as siblings. This `From` keeps a single-item projection for
+/// legacy call sites and still attaches the durable Messages payload so
+/// subsequent turns can replay exact wire content.
 impl From<crate::messages::MessagesResponse> for ConversationItem {
     fn from(resp: crate::messages::MessagesResponse) -> Self {
-        use crate::messages::ContentBlock;
-
-        let mut content = String::new();
-        let mut tool_calls = Vec::new();
-
-        for block in resp.content {
-            match block {
-                ContentBlock::Text { text, .. } => {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&text);
-                }
-                ContentBlock::ToolUse { id, name, input } => {
-                    tool_calls.push(ToolCall {
-                        id: Arc::<str>::from(id),
-                        name,
-                        arguments: Arc::<str>::from(
-                            serde_json::to_string(&input).unwrap_or_default(),
-                        ),
-                    });
-                }
-                // Thinking dropped — see doc comment above.
-                ContentBlock::Thinking { .. } => {}
-                _ => {} // Image, ToolResult not expected in assistant responses
-            }
-        }
-
-        ConversationItem::Assistant(AssistantItem {
-            content: Arc::<str>::from(content),
-            tool_calls,
-            model_id: Some(resp.model),
-            model_fingerprint: None,
-            reasoning_effort: None,
-            reasoning_details: Vec::new(),
-        })
+        messages_response_to_conversation_items(resp)
+            .into_iter()
+            .find(|i| matches!(i, ConversationItem::Assistant(_)))
+            .expect("messages response always yields an assistant item")
     }
 }
 
@@ -4424,6 +4605,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         };
 
         let item = ConversationItem::Assistant(assistant.clone());
@@ -4880,6 +5062,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         });
 
         for item in [reasoning_item, assistant_item] {
@@ -4913,6 +5096,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             // New user message
             ConversationItem::user("Now what is 3+3?"),
@@ -4974,6 +5158,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
 
@@ -5424,6 +5609,167 @@ mod tests {
         }
     }
 
+    /// Replayable Messages provider payload is authoritative and must not be
+    /// duplicated with projected reasoning/text/tool blocks.
+    #[test]
+    fn messages_request_replays_provider_payload_without_projection_duplicates() {
+        use crate::messages::{ContentBlock, MessageContent};
+
+        let ordered = vec![
+            ContentBlock::Thinking {
+                thinking: "step 1".into(),
+                signature: "sig1".into(),
+            },
+            ContentBlock::RedactedThinking {
+                data: "redacted".into(),
+            },
+            ContentBlock::Text {
+                text: "hello".into(),
+                cache_control: None,
+                citations: None,
+            },
+            ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"path": "a.rs"}),
+                cache_control: None,
+            },
+        ];
+
+        // Sibling reasoning + projected assistant text would normally emit
+        // thinking+text; with a replayable payload those projections are
+        // ignored and the ordered payload is used once.
+        let items = vec![
+            ConversationItem::user("hi"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("should not appear")),
+            ConversationItem::Assistant(
+                AssistantItem {
+                    content: "projected text must not appear".into(),
+                    tool_calls: vec![ToolCall {
+                        id: "call_other".into(),
+                        name: "other".into(),
+                        arguments: "{}".into(),
+                    }],
+                    model_id: Some("m".into()),
+                    model_fingerprint: None,
+                    reasoning_effort: None,
+                    reasoning_details: Vec::new(),
+                    provider_payload: None,
+                }
+                .with_messages_payload(ordered.clone(), true),
+            ),
+        ];
+
+        let msg = build_messages_request(&ConversationRequest::from_items(items));
+        assert_eq!(msg.messages.len(), 2, "user + one replayed assistant");
+        match &msg.messages[1].content {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks, &ordered, "exact ordered payload replay");
+            }
+            other => panic!("expected blocks, got {other:?}"),
+        }
+    }
+
+    /// Non-replayable / cleared payloads fall back to projection synthesis.
+    #[test]
+    fn messages_request_ignores_non_replayable_payload() {
+        use crate::messages::{ContentBlock, MessageContent};
+
+        let payload_only = vec![ContentBlock::Text {
+            text: "from payload".into(),
+            cache_control: None,
+            citations: None,
+        }];
+        let mut assistant = AssistantItem {
+            content: "from projection".into(),
+            tool_calls: Vec::new(),
+            model_id: None,
+            model_fingerprint: None,
+            reasoning_effort: None,
+            reasoning_details: Vec::new(),
+            provider_payload: None,
+        }
+        .with_messages_payload(payload_only, false);
+
+        // Explicit clear path also disables replay.
+        assistant.clear_provider_payload();
+        assistant.content = "from projection".into();
+
+        let msg = build_messages_request(&ConversationRequest::from_items(vec![
+            ConversationItem::user("hi"),
+            ConversationItem::Assistant(assistant),
+        ]));
+        match &msg.messages[1].content {
+            MessageContent::Blocks(blocks) => {
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Text { text, .. } if text == "from projection"
+                ));
+            }
+            other => panic!("expected blocks, got {other:?}"),
+        }
+    }
+
+    /// Non-stream MessagesResponse conversion preserves all thinking blocks and
+    /// attaches a replayable ordered payload.
+    #[test]
+    fn messages_response_to_items_preserves_thinking_and_payload() {
+        use crate::messages::{ContentBlock, MessagesResponse, MessagesUsage};
+
+        let resp = MessagesResponse {
+            id: "msg".into(),
+            r#type: "message".into(),
+            role: "assistant".into(),
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "a".into(),
+                    signature: "sa".into(),
+                },
+                ContentBlock::Thinking {
+                    thinking: "b".into(),
+                    signature: "sb".into(),
+                },
+                ContentBlock::Text {
+                    text: "out".into(),
+                    cache_control: None,
+                    citations: None,
+                },
+            ],
+            model: "m".into(),
+            stop_reason: Some(crate::messages::StopReason::EndTurn),
+            stop_sequence: None,
+            usage: MessagesUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+                ..Default::default()
+            },
+        };
+        let items = messages_response_to_conversation_items(resp);
+        assert_eq!(items.len(), 3); // 2 reasoning + assistant
+        assert!(matches!(&items[0], ConversationItem::Reasoning(_)));
+        assert!(matches!(&items[1], ConversationItem::Reasoning(_)));
+        let ConversationItem::Assistant(a) = &items[2] else {
+            panic!("expected assistant");
+        };
+        assert_eq!(a.content.as_ref(), "out");
+        let payload = a.replayable_messages_content().expect("replayable");
+        assert_eq!(payload.len(), 3);
+    }
+
+    /// Old sessions without provider_payload still deserialize.
+    #[test]
+    fn assistant_item_without_provider_payload_deserializes() {
+        let raw = r#"{"content":"hi","tool_calls":[],"model_id":"m"}"#;
+        let item: AssistantItem = serde_json::from_str(raw).unwrap();
+        assert_eq!(item.content.as_ref(), "hi");
+        assert!(item.provider_payload.is_none());
+        let out = serde_json::to_value(&item).unwrap();
+        assert!(
+            out.get("provider_payload").is_none(),
+            "absent payload must not appear on wire"
+        );
+    }
+
     #[test]
     fn test_messages_request_wire_format_for_supported_variants() {
         for (variant, expected) in [
@@ -5616,6 +5962,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         });
 
         // Reasoning now lives as a sibling `ConversationItem::Reasoning`,
@@ -5813,6 +6160,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             // Completed tool pair
             ConversationItem::Assistant(AssistantItem {
@@ -5826,6 +6174,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("call_1", "fn main() {}"),
             ConversationItem::Assistant(AssistantItem {
@@ -5835,6 +6184,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             // Mid-turn: orphaned tool_use (no result yet)
             ConversationItem::Assistant(AssistantItem {
@@ -5848,6 +6198,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]
     }
@@ -6584,6 +6935,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })];
 
         transform_conversation_cwd(&mut items, worktree, root);
@@ -6651,6 +7003,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ];
 
@@ -6709,6 +7062,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
         ];
 
@@ -6761,6 +7115,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ];
 
@@ -6870,6 +7225,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })];
 
         transform_conversation_cwd(&mut items, "/old/path", "/new/path");
@@ -6989,6 +7345,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             })],
             stop_reason: Some(StopReason::Stop),
             usage: None,
@@ -7012,6 +7369,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             })],
             stop_reason: Some(StopReason::Stop),
             usage: None,
@@ -7039,6 +7397,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             })],
             stop_reason: Some(StopReason::ToolCalls),
             usage: None,
@@ -7270,6 +7629,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         }
         .with_model_id("grok-3");
 
@@ -7360,6 +7720,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         })
     }
 
@@ -8063,6 +8424,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result_with_images(
                 "call_1",
@@ -8114,7 +8476,7 @@ mod tests {
             matches!(&inner[0], crate::messages::ContentBlock::Text { text, .. } if text == "Read image file: photo.png")
         );
         assert!(
-            matches!(&inner[1], crate::messages::ContentBlock::Image { source: crate::messages::ImageSource::Base64 { media_type, data } } if media_type == "image/png" && data == "iVBOR")
+            matches!(&inner[1], crate::messages::ContentBlock::Image { source: crate::messages::ImageSource::Base64 { media_type, data }, .. } if media_type == "image/png" && data == "iVBOR")
         );
     }
 
@@ -8599,6 +8961,7 @@ mod tests {
                     model_fingerprint: None,
                     reasoning_effort: None,
                     reasoning_details: Vec::new(),
+                    provider_payload: None,
                 }),
             ],
             stop_reason: Some(StopReason::Stop),
@@ -9835,6 +10198,7 @@ mod tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("call_1", "file contents"),
         ]);

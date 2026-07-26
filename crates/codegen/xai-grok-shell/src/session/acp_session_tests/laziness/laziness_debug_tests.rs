@@ -32,6 +32,7 @@ fn assistant_text(text: &str) -> ConversationItem {
         model_fingerprint: None,
         reasoning_effort: None,
         reasoning_details: Vec::new(),
+        provider_payload: None,
     })
 }
 
@@ -47,6 +48,7 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
         model_fingerprint: None,
         reasoning_effort: None,
         reasoning_details: Vec::new(),
+        provider_payload: None,
     })
 }
 
@@ -89,6 +91,7 @@ fn assistant_with_reasoning_items(
         model_fingerprint: None,
         reasoning_effort: None,
         reasoning_details: Vec::new(),
+        provider_payload: None,
     }));
     out
 }
@@ -209,6 +212,7 @@ fn flatten_skips_reasoning_when_encrypted_only() {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         }),
     ];
     let out = flatten_transcript_for_classifier(&items, true);
@@ -242,6 +246,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
         }),
     ];
     let out = flatten_transcript_for_classifier(&items, true);
@@ -548,6 +553,7 @@ fn window_assistant_text_pin_skips_empty_assistant_turns() {
         model_fingerprint: None,
         reasoning_effort: None,
         reasoning_details: Vec::new(),
+        provider_payload: None,
     });
     // 5 real text turns at idxs 0..5, then 10 empty turns.
     let mut items: Vec<ConversationItem> =

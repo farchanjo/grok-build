@@ -407,6 +407,7 @@ pub(crate) mod chat_rebuild {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             });
             self.has_agent_content = false;
             self.item_count += 1;

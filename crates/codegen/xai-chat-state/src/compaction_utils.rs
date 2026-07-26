@@ -33,6 +33,8 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
                         std::sync::Arc::<str>::from(s)
                     };
                     a.tool_calls.clear();
+                    // Text/tool mutation invalidates signed Messages payloads.
+                    a.clear_provider_payload();
                 }
                 Some(ConversationItem::Assistant(a))
             }
@@ -45,10 +47,21 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
 /// Required before sending to backends that reject the structured reasoning
 /// shape (signed `Thinking` blocks after text mutation; some Chat Completions
 /// providers entirely) and before summarization.
+///
+/// Also clears any durable Messages provider payload on assistants so a later
+/// `build_messages_request` cannot replay stale signed thinking blocks after
+/// the reasoning siblings were stripped.
 pub fn strip_reasoning_blocks(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
     conversation
         .into_iter()
-        .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
+        .filter_map(|item| match item {
+            ConversationItem::Reasoning(_) => None,
+            ConversationItem::Assistant(mut a) => {
+                a.clear_provider_payload();
+                Some(ConversationItem::Assistant(a))
+            }
+            other => Some(other),
+        })
         .collect()
 }
 /// Replace `ContentPart::Image` entries with `"[image]"` so downstream
@@ -2714,6 +2727,7 @@ actual user question";
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             // [4] Tool result for call_1
             ConversationItem::tool_result(
@@ -2754,6 +2768,7 @@ actual user question";
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             // [9] Tool result for call_3
             ConversationItem::tool_result("call_3", "File edited successfully."),
@@ -3091,6 +3106,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
         assert_eq!(result.len(), 3);
@@ -3116,6 +3132,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
         assert_eq!(result.len(), 1, "reasoning sibling must be dropped");
@@ -3167,6 +3184,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "match found"),
         ]);
@@ -3211,6 +3229,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
         assert_eq!(result.len(), 1);
@@ -3248,6 +3267,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "match"),
             ConversationItem::user("second turn"),
@@ -3259,6 +3279,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc2", "stray"),
             ConversationItem::user("third turn"),
@@ -3269,6 +3290,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
         ]);
         assert_eq!(result.len(), 6);
@@ -3339,6 +3361,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "files"),
         ];

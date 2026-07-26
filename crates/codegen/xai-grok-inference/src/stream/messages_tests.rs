@@ -23,11 +23,13 @@ fn message_start() -> MessageStreamEvent {
             content: vec![],
             model: "messages-compatible-model".into(),
             stop_reason: None,
+            stop_sequence: None,
             usage: MessagesUsage {
                 input_tokens: 10,
                 output_tokens: 0,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
+                ..Default::default()
             },
         },
     }
@@ -39,6 +41,7 @@ fn text_block_start(index: u32) -> MessageStreamEvent {
         content_block: ContentBlock::Text {
             text: String::new(),
             cache_control: None,
+            citations: None,
         },
     }
 }
@@ -58,6 +61,7 @@ fn message_delta_with_stop(stop: messages::StopReason) -> MessageStreamEvent {
     MessageStreamEvent::MessageDelta {
         delta: MessageDeltaBody {
             stop_reason: Some(stop),
+            stop_sequence: None,
             stop_details: None,
         },
         usage: MessageDeltaUsage {
@@ -65,6 +69,7 @@ fn message_delta_with_stop(stop: messages::StopReason) -> MessageStreamEvent {
             input_tokens: Some(10),
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            ..Default::default()
         },
     }
 }
@@ -75,6 +80,7 @@ fn message_delta_refusal_with_explanation(explanation: &str) -> MessageStreamEve
     MessageStreamEvent::MessageDelta {
         delta: MessageDeltaBody {
             stop_reason: Some(messages::StopReason::Refusal),
+            stop_sequence: None,
             stop_details: Some(messages::StopDetails {
                 r#type: Some("refusal".to_string()),
                 category: Some("frontier_llm".to_string()),
@@ -86,6 +92,7 @@ fn message_delta_refusal_with_explanation(explanation: &str) -> MessageStreamEve
             input_tokens: Some(10),
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            ..Default::default()
         },
     }
 }
@@ -216,6 +223,7 @@ async fn tool_use_block_assembles_into_tool_call() {
             id: "call_xyz".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
+            cache_control: None,
         },
     };
     let arg_delta_1 = MessageStreamEvent::ContentBlockDelta {
@@ -416,6 +424,7 @@ async fn refusal_after_tool_use_blocks_keeps_tool_calls_stop_reason() {
             id: "call_refused".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
+            cache_control: None,
         },
     };
     let arg_delta = MessageStreamEvent::ContentBlockDelta {
@@ -552,11 +561,13 @@ fn message_start_with_cache(
             content: vec![],
             model: "messages-compatible-model".into(),
             stop_reason: None,
+            stop_sequence: None,
             usage: MessagesUsage {
                 input_tokens: input,
                 output_tokens: 0,
                 cache_creation_input_tokens: cache_creation,
                 cache_read_input_tokens: cache_read,
+                ..Default::default()
             },
         },
     }
@@ -571,6 +582,7 @@ fn message_delta_with_cache(
     MessageStreamEvent::MessageDelta {
         delta: MessageDeltaBody {
             stop_reason: Some(messages::StopReason::EndTurn),
+            stop_sequence: None,
             stop_details: None,
         },
         usage: MessageDeltaUsage {
@@ -578,6 +590,7 @@ fn message_delta_with_cache(
             input_tokens: input,
             cache_read_input_tokens: cache_read,
             cache_creation_input_tokens: cache_creation,
+            ..Default::default()
         },
     }
 }
@@ -652,4 +665,180 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
     assert_eq!(usage.prompt_tokens, 2500);
     assert_eq!(usage.cached_prompt_tokens, 2500);
     assert_eq!(usage.total_tokens, 2501);
+}
+
+/// Multiple thinking blocks must all survive as siblings — never last-write-wins.
+#[tokio::test]
+async fn multiple_thinking_blocks_all_preserved_with_ordered_payload() {
+    let events: Vec<Result<MessageStreamEvent, InferenceError>> = vec![
+        Ok(message_start()),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: String::new(),
+            },
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: StreamDelta::ThinkingDelta {
+                thinking: "first thought".into(),
+            },
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: StreamDelta::SignatureDelta {
+                signature: "sig_a".into(),
+            },
+        }),
+        Ok(block_stop(0)),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 1,
+            content_block: ContentBlock::RedactedThinking {
+                data: "redacted-blob".into(),
+            },
+        }),
+        Ok(block_stop(1)),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 2,
+            content_block: ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: String::new(),
+            },
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 2,
+            delta: StreamDelta::ThinkingDelta {
+                thinking: "second thought".into(),
+            },
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 2,
+            delta: StreamDelta::SignatureDelta {
+                signature: "sig_b".into(),
+            },
+        }),
+        Ok(block_stop(2)),
+        Ok(text_block_start(3)),
+        Ok(text_delta(3, "answer")),
+        Ok(block_stop(3)),
+        Ok(message_delta_with_stop(messages::StopReason::EndTurn)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        InferenceEvent::Completed { response, .. } => {
+            let reasoning: Vec<_> = response.reasoning_items().collect();
+            assert_eq!(
+                reasoning.len(),
+                3,
+                "all thinking/redacted blocks must be siblings, got {reasoning:?}"
+            );
+            let rs::SummaryPart::SummaryText(t0) = &reasoning[0].summary[0];
+            assert_eq!(t0.text, "first thought");
+            assert_eq!(reasoning[0].encrypted_content.as_deref(), Some("sig_a"));
+            assert!(reasoning[1].summary.is_empty());
+            assert_eq!(
+                reasoning[1].encrypted_content.as_deref(),
+                Some("redacted-blob")
+            );
+            let rs::SummaryPart::SummaryText(t2) = &reasoning[2].summary[0];
+            assert_eq!(t2.text, "second thought");
+            assert_eq!(reasoning[2].encrypted_content.as_deref(), Some("sig_b"));
+
+            let a = response.assistant().expect("assistant");
+            assert_eq!(a.content.as_ref(), "answer");
+            let payload = a
+                .provider_payload
+                .as_ref()
+                .and_then(|p| p.messages.as_ref())
+                .expect("messages provider payload");
+            assert!(payload.replayable);
+            assert_eq!(payload.content.len(), 4);
+            assert!(matches!(
+                &payload.content[0],
+                ContentBlock::Thinking {
+                    thinking,
+                    signature
+                } if thinking == "first thought" && signature == "sig_a"
+            ));
+            assert!(matches!(
+                &payload.content[1],
+                ContentBlock::RedactedThinking { data } if data == "redacted-blob"
+            ));
+            assert!(matches!(
+                &payload.content[2],
+                ContentBlock::Thinking {
+                    thinking,
+                    signature
+                } if thinking == "second thought" && signature == "sig_b"
+            ));
+            assert!(matches!(
+                &payload.content[3],
+                ContentBlock::Text { text, .. } if text == "answer"
+            ));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// Server tool use / unknown blocks must never become client tool calls.
+#[tokio::test]
+async fn server_tool_and_unknown_blocks_never_become_tool_calls() {
+    let events: Vec<Result<MessageStreamEvent, InferenceError>> = vec![
+        Ok(message_start()),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::ServerToolUse {
+                id: "srv_1".into(),
+                name: "web_search".into(),
+                input: serde_json::json!({"q": "x"}),
+                cache_control: None,
+            },
+        }),
+        Ok(block_stop(0)),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 1,
+            content_block: ContentBlock::Unknown {
+                type_name: "future_block".into(),
+                raw: serde_json::json!({"type":"future_block","x":1}),
+            },
+        }),
+        Ok(block_stop(1)),
+        Ok(text_block_start(2)),
+        Ok(text_delta(2, "done")),
+        Ok(block_stop(2)),
+        Ok(message_delta_with_stop(messages::StopReason::EndTurn)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().unwrap() {
+        InferenceEvent::Completed { response, .. } => {
+            assert!(
+                response.tool_calls().is_empty(),
+                "server/unknown blocks must not become tool calls"
+            );
+            let a = response.assistant().expect("assistant");
+            let payload = a
+                .provider_payload
+                .as_ref()
+                .and_then(|p| p.messages.as_ref())
+                .expect("payload preserved");
+            assert_eq!(payload.content.len(), 3);
+            assert!(matches!(
+                &payload.content[0],
+                ContentBlock::ServerToolUse { id, .. } if id == "srv_1"
+            ));
+            assert!(matches!(
+                &payload.content[1],
+                ContentBlock::Unknown { type_name, .. } if type_name == "future_block"
+            ));
+            assert_eq!(a.content.as_ref(), "done");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
 }

@@ -4175,6 +4175,7 @@ mod tests {
             model_fingerprint: None,
             reasoning_effort: None,
             reasoning_details: vec![detail.clone()],
+            provider_payload: None,
         });
         let items = vec![
             ConversationItem::user("use the tool"),

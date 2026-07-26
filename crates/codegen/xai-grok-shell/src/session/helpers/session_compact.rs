@@ -994,6 +994,7 @@ mod compacted_history_shape_tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "fn login() { /* buggy code */ }"),
             ConversationItem::Assistant(AssistantItem {
@@ -1007,6 +1008,7 @@ mod compacted_history_shape_tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
             reasoning_details: Vec::new(),
+            provider_payload: None,
             }),
             ConversationItem::tool_result("tc2", "Successfully replaced text."),
         ];
@@ -1173,6 +1175,7 @@ mod compacted_history_shape_tests {
                 model_fingerprint: None,
                 reasoning_effort: None,
                 reasoning_details: Vec::new(),
+                provider_payload: None,
             }),
             ConversationItem::tool_result("tc1", "fn login() { /* ... */ }"),
         ];
