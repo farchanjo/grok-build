@@ -3564,6 +3564,7 @@ mod tests {
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: config::LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         }
     }
 

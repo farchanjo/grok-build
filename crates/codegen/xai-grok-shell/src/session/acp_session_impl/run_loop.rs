@@ -675,9 +675,21 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
                             let _ = responds_to.send(updated_model_id);
+                        }
+                        SessionCommand::GetExecutionBackend { responds_to } => {
+                            let _ = responds_to.send(session.execution_backend.get());
+                        }
+                        SessionCommand::RestoreExecutionMode {
+                            execution_backend,
+                            external_runtime,
+                            responds_to,
+                        } => {
+                            session.execution_backend.set(execution_backend);
+                            *session.external_runtime.borrow_mut() = external_runtime;
+                            let _ = responds_to.send(());
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;

@@ -3793,6 +3793,8 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 show_model_fingerprint: m.show_model_fingerprint,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             };
             (key, config)
         })
@@ -3924,6 +3926,13 @@ pub struct ModelEntryConfig {
     /// [`ModelInfo::supports_strict_tools`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    /// How turns execute for this model. Defaults to native HTTP inference.
+    /// Distinct from [`ApiBackend`] (wire protocol) and from provider kind.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::execution_backend::ExecutionBackend::is_native"
+    )]
+    pub execution_backend: crate::agent::execution_backend::ExecutionBackend,
 }
 /// True when `cfg` equals the all-disabled default. Derives `PartialEq`
 /// on `f32`, which is fine for the current shape because both `f32`
@@ -4028,6 +4037,11 @@ pub struct ConfigModelOverride {
     /// Opt-in Anthropic strict tool definitions. See
     /// [`ModelInfo::supports_strict_tools`].
     pub supports_strict_tools: Option<bool>,
+    /// Optional execution backend override (`native_inference` /
+    /// `{ external_agent = "claude_cli" }`). Absent inherits base / default
+    /// native. Never confuses with `api_backend` or provider `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
 }
 impl ConfigModelOverride {
     pub(crate) fn apply(
@@ -4139,6 +4153,9 @@ impl ConfigModelOverride {
         }
         if let Some(v) = self.supports_strict_tools {
             entry.info.supports_strict_tools = Some(v);
+        }
+        if let Some(backend) = self.execution_backend {
+            entry.info.execution_backend = backend;
         }
         if self.api_key.is_some() {
             entry.api_key.clone_from(&self.api_key);
@@ -4267,6 +4284,13 @@ pub struct ModelInfo {
     /// (capped at 20). Default/`None`/`false` never mark Grok tools strict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    /// How turns execute for this model. Defaults to native HTTP inference.
+    /// Distinct from [`ApiBackend`] and provider identity.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::execution_backend::ExecutionBackend::is_native"
+    )]
+    pub execution_backend: crate::agent::execution_backend::ExecutionBackend,
 }
 impl ModelInfo {
     /// Minimal fallback descriptor for an unknown model slug.
@@ -4306,6 +4330,7 @@ impl ModelInfo {
             supports_tools: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         }
     }
     /// Extract shared model metadata from a flat config entry.
@@ -4347,6 +4372,7 @@ impl ModelInfo {
             supports_tools: None,
             supports_native_schema: entry.supports_native_schema,
             supports_strict_tools: entry.supports_strict_tools,
+            execution_backend: entry.execution_backend,
         }
     }
     /// Derive the legacy effort gate/default from `reasoning_efforts` so the
@@ -5181,6 +5207,8 @@ pub fn resolve_aux_model_inference_config(
                 supports_tools: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
             model_provider: None,
             api_key: Some(bearer),
@@ -5525,6 +5553,7 @@ fn resolve_hidden_default_web_search_inference_config(
             supports_tools: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
         api_key: None,
@@ -6674,6 +6703,8 @@ reasoning_effort = "low"
                 supports_tools: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
             model_provider: None,
             api_key: api_key.map(|s| s.to_string()),
@@ -8040,6 +8071,7 @@ reasoning_effort = "low"
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         };
         let info = ModelInfo::from_config(&entry);
         assert!(info.use_concise);
@@ -8201,6 +8233,7 @@ reasoning_effort = "low"
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
@@ -8654,6 +8687,7 @@ reasoning_effort = "low"
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
@@ -12388,6 +12422,8 @@ default = "grok-4.5"
                 system_prompt_label: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                execution_backend:
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
             model_provider: None,
             api_key: None,

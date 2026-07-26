@@ -9,8 +9,18 @@ impl SessionActor {
         apply_prompt_override: bool,
         skip_prompt_rewrite: bool,
         auto_compact_threshold_percent: u8,
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(inference_config.model.clone());
+        self.execution_backend.set(execution_backend);
+        if execution_backend.is_native() {
+            *self.external_runtime.borrow_mut() = None;
+        } else if self.external_runtime.borrow().is_none() {
+            if let Some(kind) = execution_backend.external_kind() {
+                *self.external_runtime.borrow_mut() =
+                    Some(crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind));
+            }
+        }
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(inference_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -125,6 +135,8 @@ impl SessionActor {
                 model_id: model_id.clone(),
                 agent_name: Some(agent_name),
                 reasoning_effort: Some(inference_config.reasoning_effort),
+                execution_backend: Some(execution_backend),
+                external_runtime: Some(self.external_runtime.borrow().clone()),
             });
         Ok(model_id)
     }

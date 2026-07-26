@@ -3625,6 +3625,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             supports_tools: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
         api_key: None,
@@ -3974,9 +3975,9 @@ fn test_inference_settings(model_slug: &str) -> xai_grok_inference_types::Infere
         context_window: NonZeroU64::new(256_000).expect("non-zero context window"),
         reasoning_effort: None,
         stream_tool_calls: None,
-    supports_native_schema: None,
-            supports_strict_tools: None,
-}
+        supports_native_schema: None,
+        supports_strict_tools: None,
+    }
 }
 fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHandle {
     let (mock, _persistence_rx) = xai_chat_state::MockChatPersistence::new();

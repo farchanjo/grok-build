@@ -2104,6 +2104,33 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
+            // External execution backends branch before InferenceActor.
+            // PR5: Claude CLI is typed but fail-closed as unavailable (no process spawn).
+            if self.execution_backend.get().is_external() {
+                let backend = self.execution_backend.get();
+                let kind = backend
+                    .external_kind()
+                    .unwrap_or(crate::agent::execution_backend::ExternalAgentKind::ClaudeCli);
+                let runtime = crate::agent::external_runtime::default_registry()
+                    .create(kind)
+                    .expect("registry always returns a runtime for known kinds");
+                let err = match runtime.probe().await {
+                    Err(e) => e,
+                    Ok(_) => {
+                        // Real runtimes land in PR6; still fail closed here if a
+                        // probe somehow succeeds without a turn implementation.
+                        crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind)
+                    }
+                };
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    backend = %backend,
+                    error = %err,
+                    "external execution backend unavailable; not invoking InferenceActor"
+                );
+                self.tool_context.fail_task_output_usage_closed();
+                return Err(err.into_acp_error());
+            }
             let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
                 Ok(InferenceTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {

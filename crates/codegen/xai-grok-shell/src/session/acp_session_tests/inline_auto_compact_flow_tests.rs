@@ -243,6 +243,10 @@ async fn create_test_actor(
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+        execution_backend: std::cell::Cell::new(
+            crate::agent::execution_backend::ExecutionBackend::NativeInference,
+        ),
+        external_runtime: std::cell::RefCell::new(None),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -714,6 +718,10 @@ async fn create_test_actor_with_memory(
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+        execution_backend: std::cell::Cell::new(
+            crate::agent::execution_backend::ExecutionBackend::NativeInference,
+        ),
+        external_runtime: std::cell::RefCell::new(None),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
@@ -1497,6 +1505,10 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 attribution_callback: None,
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
+                execution_backend: std::cell::Cell::new(
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                ),
+                external_runtime: std::cell::RefCell::new(None),
                 image_description_model: crate::test_support::TEST_MODEL.to_owned(),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),

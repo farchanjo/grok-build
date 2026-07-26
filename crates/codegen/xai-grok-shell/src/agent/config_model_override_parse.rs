@@ -714,6 +714,7 @@ mod tests {
             show_model_fingerprint: Some(true),
             stream_tool_calls: Some(false),
             supports_tools: Some(true),
+            execution_backend: None,
         }
     }
 

@@ -2508,6 +2508,8 @@ fn write_test_summary(
         agent_name: None,
         sandbox_profile: None,
         reasoning_effort: None,
+        execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+        external_runtime: None,
     };
     let json = serde_json::to_vec_pretty(&summary).unwrap();
     std::fs::write(session_dir.join("summary.json"), json).unwrap();

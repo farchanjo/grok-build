@@ -1165,7 +1165,14 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 provider_identity: Default::default(),
             };
             let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
+                .handle_set_session_model(
+                    cfg,
+                    false,
+                    false,
+                    true,
+                    85,
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                )
                 .await;
 
             assert!(
@@ -1267,7 +1274,14 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
             };
             let _ = actor
-                .handle_set_session_model(cfg, false, false, true, 85)
+                .handle_set_session_model(
+                    cfg,
+                    false,
+                    false,
+                    true,
+                    85,
+                    crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                )
                 .await;
 
             let creds = actor.chat_state_handle.get_credentials().await;

@@ -48,6 +48,11 @@ pub(crate) struct ModelPatch {
     pub model_id: acp::ModelId,
     pub agent_name: Option<String>,
     pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    /// When `Some`, overwrite `Summary::execution_backend`.
+    pub execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
+    /// When `Some`, overwrite `Summary::external_runtime` (including clearing
+    /// with `Some(None)`).
+    pub external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
 }
 
 /// Persisted git HEAD. `commit` and `branch` are last-writer-wins, including
@@ -148,6 +153,12 @@ impl Summary {
             }
             if let Some(reasoning_effort) = &model.reasoning_effort {
                 self.reasoning_effort = *reasoning_effort;
+            }
+            if let Some(backend) = model.execution_backend {
+                self.execution_backend = backend;
+            }
+            if let Some(envelope) = &model.external_runtime {
+                self.external_runtime = envelope.clone();
             }
         }
         if let Some(git_head) = &patch.git_head {

@@ -1754,6 +1754,17 @@ impl acp::Agent for MvpAgent {
                     },
                 )
                 .await?;
+            // Restore durable execution mode so resume cannot silently switch
+            // NativeInference ↔ external agent (or drop the envelope).
+            if let Some(handle) = self.sessions.borrow().get(&session_id) {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = handle.cmd_tx.send(crate::session::SessionCommand::RestoreExecutionMode {
+                    execution_backend: summary.execution_backend,
+                    external_runtime: summary.external_runtime.clone(),
+                    responds_to: tx,
+                });
+                let _ = rx.await;
+            }
             drop(spawn_timer);
         } else if !mcp_servers.is_empty() {
             tracing::info!(

@@ -2152,6 +2152,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             supports_tools: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
         api_key: None,

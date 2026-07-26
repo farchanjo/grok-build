@@ -3549,6 +3549,8 @@ impl MvpAgent {
                     model_id: session_model_id.clone(),
                     agent_name: Some(agent_definition.name.clone()),
                     reasoning_effort: initial_reasoning_effort,
+                    execution_backend: None,
+                    external_runtime: None,
                 });
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
                 session_meta,
