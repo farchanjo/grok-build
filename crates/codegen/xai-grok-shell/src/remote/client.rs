@@ -940,8 +940,16 @@ pub fn parse_remote_model_value(
                 }
             })
             .unwrap_or_default(),
-        supports_native_schema: None,
-        supports_strict_tools: None,
+        supports_native_schema: obj
+            .get("supportsNativeSchema")
+            .or_else(|| obj.get("supports_native_schema"))
+            .or_else(|| meta.and_then(|m| m.get("supportsNativeSchema")))
+            .and_then(|v| v.as_bool()),
+        supports_strict_tools: obj
+            .get("supportsStrictTools")
+            .or_else(|| obj.get("supports_strict_tools"))
+            .or_else(|| meta.and_then(|m| m.get("supportsStrictTools")))
+            .and_then(|v| v.as_bool()),
     })
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -1505,6 +1513,23 @@ mod tests {
         );
         assert_eq!(result.agent_type, "concise");
     }
+    #[test]
+    fn parse_remote_model_value_reads_supports_native_schema() {
+        let value = serde_json::json!({
+            "id": "m1",
+            "model": "claude-sonnet-5",
+            "apiBackend": "messages",
+            "supportsNativeSchema": true,
+            "supportsStrictTools": false,
+            "contextWindow": 200000
+        });
+        let entry = parse_remote_model_value(&value, "https://api.example.com/v1")
+            .expect("parse remote model");
+        assert_eq!(entry.api_backend, crate::inference::ApiBackend::Messages);
+        assert_eq!(entry.supports_native_schema, Some(true));
+        assert_eq!(entry.supports_strict_tools, Some(false));
+    }
+
     #[test]
     fn parse_remote_model_value_no_laziness_detector_block_yields_default() {
         let value = serde_json::json!({

@@ -3579,10 +3579,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
             name: name.clone(),
             disable_parallel_tool_use: disable_parallel,
         },
-        // "None" is not a first-class Messages tool_choice; fall back to auto.
-        ConversationToolChoice::None => ToolChoiceParam::Auto {
-            disable_parallel_tool_use: disable_parallel,
-        },
+        // Wire `{"type":"none"}` so compaction / no-tool-call routes cannot
+        // accidentally invite tool_use (must not fall back to auto).
+        ConversationToolChoice::None => ToolChoiceParam::None,
     });
 
     let effort = req
@@ -4432,6 +4431,80 @@ mod tests {
             }) => {}
             other => panic!("expected disable_parallel true, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn messages_tool_choice_none_wires_type_none() {
+        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("summarize")])
+            .with_tools(vec![ToolSpec {
+                name: "bash".into(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+            }]);
+        req.tool_choice = Some(ConversationToolChoice::None);
+        let msgs = build_messages_request(&req);
+        assert!(
+            matches!(
+                msgs.tool_choice,
+                Some(crate::messages::ToolChoiceParam::None)
+            ),
+            "None must map to ToolChoiceParam::None, not Auto"
+        );
+        let wire = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(
+            wire["tool_choice"],
+            serde_json::json!({"type": "none"}),
+            "exact wire shape for tool_choice none"
+        );
+        assert!(wire["tools"].as_array().is_some_and(|t| !t.is_empty()));
+    }
+
+    /// User cancel / reject style results omit `is_error`; real tool failures set it.
+    #[test]
+    fn messages_tool_result_classifies_error_vs_policy_outcome() {
+        // Execution / parse style failure.
+        let err_item = ConversationItem::tool_result_error("call_err", "boom");
+        let ok_item = ConversationItem::tool_result("call_ok", "User cancelled the execution");
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("hi"),
+            ConversationItem::assistant_tool_calls(vec![
+                ToolCall {
+                    id: Arc::<str>::from("call_err"),
+                    name: "bash".into(),
+                    arguments: Arc::<str>::from("{}"),
+                },
+                ToolCall {
+                    id: Arc::<str>::from("call_ok"),
+                    name: "bash".into(),
+                    arguments: Arc::<str>::from("{}"),
+                },
+            ]),
+            err_item,
+            ok_item,
+        ]);
+        let wire = serde_json::to_value(build_messages_request(&req)).unwrap();
+        let user_blocks = wire["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user" && m["content"].is_array())
+            .unwrap()["content"]
+            .as_array()
+            .unwrap();
+        let by_id = |id: &str| {
+            user_blocks
+                .iter()
+                .find(|b| b.get("tool_use_id").and_then(|v| v.as_str()) == Some(id))
+                .unwrap()
+        };
+        assert_eq!(by_id("call_err")["is_error"], true);
+        assert!(
+            by_id("call_ok").get("is_error").is_none(),
+            "policy cancel must omit is_error; got {}",
+            by_id("call_ok")
+        );
     }
 
     #[test]

@@ -720,6 +720,65 @@ async fn messages_unparseable_event_is_fatal_without_retry() {
     assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one attempt");
 }
 
+/// `stop_reason: max_tokens` must never surface as a successful Completed
+/// turn — the actor converts Length into MaxTokensTruncation so partial
+/// JSON cannot be accepted as structured output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn messages_max_tokens_is_failed_truncation_not_completed() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Partial JSON that would parse if accepted — must still fail.
+                let events = sse::messages_api_events(
+                    r#"{"name":"partial""#,
+                    "messages-compatible-model",
+                    "max_tokens",
+                );
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = InferenceActor::spawn(
+        messages_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    handle.submit(RequestId::from("req-max-tokens"), user_request("schema me"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
+    server.shutdown();
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, InferenceEvent::Retrying { .. })),
+        "max_tokens truncation must not retry"
+    );
+    match events.last().unwrap() {
+        InferenceEvent::Failed { error, .. } => {
+            assert_eq!(error.kind, InferenceErrorKind::MaxTokensTruncation);
+            assert!(!error.is_retryable);
+        }
+        InferenceEvent::Completed { response, .. } => {
+            panic!(
+                "Length/max_tokens must not complete (would risk accepting partial JSON); got {:?}",
+                response.assistant().map(|a| a.content.as_ref())
+            );
+        }
+        other => panic!("expected Failed(MaxTokensTruncation), got {other:?}"),
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one attempt");
+}
+
 // ---------------------------------------------------------------------------
 // UpdateConfig invalidates cache + applies to subsequent requests
 // ---------------------------------------------------------------------------

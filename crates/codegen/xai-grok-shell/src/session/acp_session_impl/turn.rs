@@ -2429,8 +2429,13 @@ impl SessionActor {
                     );
                     continue;
                 }
-                // Refusal / max_tokens must never be treated as valid schema
-                // output even when partial text happens to parse.
+                // Refusal must never be treated as valid schema output.
+                //
+                // `StopReason::Length` is converted by the sampler actor into
+                // `InferenceError::MaxTokensTruncation` before a Completed
+                // outcome is delivered, so partial JSON from truncation never
+                // reaches this branch on the normal InferenceClient path. The
+                // Length arm below is defense-in-depth only.
                 let structured_output = match (
                     structured_output_validator.as_ref(),
                     final_answer_text.as_ref(),

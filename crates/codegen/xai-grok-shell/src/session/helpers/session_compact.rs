@@ -599,8 +599,11 @@ pub(crate) async fn generate_session_compact(
             }
         }
         ApiBackend::Messages => {
+            // Mirror Responses: only attach tool_choice when tools are present
+            // so compaction can force `{"type":"none"}` and block tool_use.
             let request = ConversationRequest {
                 items: chat_history,
+                tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
                 tools,
                 hosted_tools,
                 model: Some(inference_config.model.to_owned()),
@@ -1995,6 +1998,128 @@ mod reasoning_compaction_regression_tests {
         );
         let _ = shutdown_tx.send(());
     }
+
+    fn test_config_messages(base_url: &str) -> InferenceConfig {
+        let mut config = test_config(base_url);
+        config.api_backend = ApiBackend::Messages;
+        config
+    }
+
+    fn messages_summary_stream() -> Vec<Event> {
+        xai_grok_test_support::sse::messages_api_events(
+            "<summary>ok</summary>",
+            "test-model",
+            "end_turn",
+        )
+    }
+
+    /// Messages compaction with tools must propagate tool_choice like
+    /// Responses, including `{"type":"none"}` so the model cannot tool_use.
+    #[tokio::test]
+    async fn messages_compaction_tool_choice_none_wires_type_none() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        messages_summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config_messages(&base_url);
+        let chat_history = vec![
+            ConversationItem::system("You are a helpful assistant."),
+            ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
+            ConversationItem::assistant("I fixed it."),
+            ConversationItem::user("Summarize the conversation so far."),
+        ];
+        let tools = vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("Reads a file".to_string()),
+            parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
+        }];
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            chat_history.clone(),
+            tools,
+            vec![],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("Messages compaction with tool_choice none must succeed"));
+
+        // Without tools, tool_choice must be omitted.
+        let client = Client::new(config.clone()).unwrap();
+        generate_session_compact(
+            chat_history,
+            vec![],
+            vec![],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("Messages compaction without tools must succeed"));
+
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "mock must have served both requests");
+        let with_tools = &bodies[0];
+        assert_eq!(
+            with_tools["tool_choice"],
+            json!({"type": "none"}),
+            "Messages compaction tool_choice none must wire type:none"
+        );
+        let sent_tools = with_tools["tools"]
+            .as_array()
+            .expect("tools must be attached");
+        assert!(
+            sent_tools
+                .iter()
+                .any(|t| t.get("name") == Some(&json!("read_file"))),
+            "client tool present: {sent_tools:?}"
+        );
+        // No server tools / MCP / compaction request fields.
+        assert!(with_tools.get("mcp_servers").is_none());
+        assert!(with_tools.get("container").is_none());
+        assert!(with_tools.get("context_management").is_none());
+        let without_tools = &bodies[1];
+        assert!(
+            without_tools.get("tool_choice").is_none(),
+            "tool_choice without tools must be omitted"
+        );
+        let _ = shutdown_tx.send(());
+    }
+
     #[tokio::test]
     async fn stalled_compaction_stream_times_out_as_transient() {
         let app = Router::new().route(

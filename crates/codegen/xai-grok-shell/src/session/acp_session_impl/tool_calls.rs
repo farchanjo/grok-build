@@ -2742,7 +2742,10 @@ impl SessionActor {
         );
         self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
             .await;
-        let tool_chat = ConversationItem::tool_result_error(model_call_id.to_owned(), reason);
+        // User cancel / reject / follow-up-not-run are policy outcomes, not
+        // tool execution failures — emit a normal tool_result without
+        // `is_error` so the model does not treat them as hard tool errors.
+        let tool_chat = ConversationItem::tool_result(model_call_id.to_owned(), reason);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }

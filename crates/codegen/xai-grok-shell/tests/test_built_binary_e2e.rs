@@ -690,10 +690,9 @@ async fn headless_json_schema_responses_uses_text_format() {
     );
 }
 
-/// Messages backend (Anthropic-style) can't constrain output natively, so the
-/// model returns its answer by calling the synthetic `StructuredOutput` tool.
-/// Verifies the tool reaches the wire and its validated args surface as
-/// `structuredOutput`.
+/// Messages backend without native-schema capability uses the synthetic
+/// `StructuredOutput` tool. Verifies the tool reaches the wire and its
+/// validated args surface as `structuredOutput`.
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
 async fn headless_json_schema_messages_backend_uses_structured_output_tool() {
@@ -733,6 +732,89 @@ async fn headless_json_schema_messages_backend_uses_structured_output_tool() {
     assert!(
         any_request_advertises_structured_output_tool(&server),
         "StructuredOutput tool must reach the wire\n{}",
+        server.request_log_summary()
+    );
+}
+
+/// Messages backend with `supportsNativeSchema=true`: native
+/// `output_config.format` json_schema is present, ordinary agent tools remain,
+/// and the synthetic StructuredOutput tool is absent.
+#[tokio::test]
+#[ignore] // requires pre-built binary; run with --ignored
+async fn headless_json_schema_messages_native_schema_capability_uses_output_config() {
+    let server = MockInferenceServer::start_with_models(vec![
+        MockModelEntry::new("messages-native-schema-model")
+            .with_api_backend("messages")
+            .with_supports_native_schema(true),
+    ])
+    .await
+    .expect("start mock server");
+    // Native path streams the final JSON as assistant text (not StructuredOutput tool).
+    server.set_response(r#"{"name":"Eve","age":7}"#);
+
+    let workdir = git_workdir();
+    let result = run_headless(
+        &server,
+        &[
+            "-p",
+            "extract name and age",
+            "--yolo",
+            "--model",
+            "messages-native-schema-model",
+            "--json-schema",
+            NAME_AGE_SCHEMA,
+            "--max-turns",
+            "2",
+        ],
+        workdir.workspace(),
+    )
+    .await;
+
+    assert_headless_success(
+        &result,
+        "grok -p --json-schema (messages native schema)",
+        Some(&server),
+    );
+    assert_no_crashes(&result.stderr);
+
+    let output = parse_stdout_json(&result);
+    assert_eq!(output["structuredOutput"]["name"], "Eve");
+    assert_eq!(output["structuredOutput"]["age"], 7);
+    assert!(output.get("structuredOutputError").is_none());
+
+    let format_on_wire = server.requests().iter().any(|r| {
+        r.body.as_ref().is_some_and(|body| {
+            body.pointer("/output_config/format/type")
+                .and_then(|v| v.as_str())
+                == Some("json_schema")
+        })
+    });
+    assert!(
+        format_on_wire,
+        "output_config.format json_schema must reach the wire\n{}",
+        server.request_log_summary()
+    );
+    assert!(
+        !any_request_advertises_structured_output_tool(&server),
+        "native schema capability must NOT advertise StructuredOutput tool\n{}",
+        server.request_log_summary()
+    );
+    // Ordinary agent tools should still be present alongside the schema.
+    let has_ordinary_tools = server.requests().iter().any(|r| {
+        r.body.as_ref().is_some_and(|body| {
+            body.pointer("/tools")
+                .and_then(|t| t.as_array())
+                .is_some_and(|tools| {
+                    !tools.is_empty()
+                        && tools.iter().all(|t| {
+                            t.get("name").and_then(|n| n.as_str()) != Some("StructuredOutput")
+                        })
+                })
+        })
+    });
+    assert!(
+        has_ordinary_tools,
+        "ordinary agent tools must remain with native schema\n{}",
         server.request_log_summary()
     );
 }

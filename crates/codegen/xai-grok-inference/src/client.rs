@@ -778,41 +778,46 @@ impl InferenceClient {
             headers.insert(header_name, header_value);
         }
 
-        // Add x-grok-client-version header for version gating at the proxy.
-        if let Some(client_version) = config.client_version.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(client_version)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-client-version"),
-                header_value,
-            );
-        }
-
-        if let Some(deployment_id) = config.deployment_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(deployment_id)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-deployment-id"),
-                header_value,
-            );
-        }
-
-        if let Some(user_id) = config.user_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(user_id)
-        {
-            headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
-        }
-
-        {
-            let client_id = config
-                .client_identifier
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
-            if let Ok(header_value) = HeaderValue::from_str(&client_id) {
+        // Default `x-grok-client-*` / deployment / user headers are first-party
+        // only. Direct Anthropic (and other third-party identities) must not
+        // receive stable Grok client identifiers on the wire.
+        if config.provider_identity.is_first_party() {
+            // Add x-grok-client-version header for version gating at the proxy.
+            if let Some(client_version) = config.client_version.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(client_version)
+            {
                 headers.insert(
-                    HeaderName::from_static("x-grok-client-identifier"),
+                    HeaderName::from_static("x-grok-client-version"),
                     header_value,
                 );
+            }
+
+            if let Some(deployment_id) = config.deployment_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(deployment_id)
+            {
+                headers.insert(
+                    HeaderName::from_static("x-grok-deployment-id"),
+                    header_value,
+                );
+            }
+
+            if let Some(user_id) = config.user_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(user_id)
+            {
+                headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
+            }
+
+            {
+                let client_id = config
+                    .client_identifier
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
+                if let Ok(header_value) = HeaderValue::from_str(&client_id) {
+                    headers.insert(
+                        HeaderName::from_static("x-grok-client-identifier"),
+                        header_value,
+                    );
+                }
             }
         }
 
@@ -3962,6 +3967,7 @@ mod tests {
             (ProviderIdentity::Xai, true),
             (ProviderIdentity::OpenAi, false),
             (ProviderIdentity::OpenRouter, false),
+            (ProviderIdentity::Anthropic, false),
             (ProviderIdentity::Custom, false),
         ] {
             let cfg = InferenceConfig {
@@ -3974,6 +3980,51 @@ mod tests {
                 "first_party mismatch for {identity:?}"
             );
         }
+    }
+
+    /// Direct Anthropic identity must not receive any default `x-grok-*`
+    /// client/deployment/user headers on construction.
+    #[test]
+    fn anthropic_identity_omits_all_default_x_grok_headers() {
+        use crate::config::ProviderIdentity;
+        use reqwest::header::HeaderName;
+
+        let cfg = InferenceConfig {
+            api_key: Some("sk-ant-test".into()),
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            provider_identity: ProviderIdentity::Anthropic,
+            client_version: Some("1.2.3".into()),
+            client_identifier: Some("should-not-leak".into()),
+            deployment_id: Some("dep-1".into()),
+            user_id: Some("user-1".into()),
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).expect("client should build");
+        let req = client
+            .post("https://api.anthropic.com/v1/messages")
+            .build()
+            .expect("build request");
+        let h = req.headers();
+        for name in [
+            "x-grok-client-version",
+            "x-grok-client-identifier",
+            "x-grok-deployment-id",
+            "x-grok-user-id",
+            "x-grok-conv-id",
+            "x-grok-session-id",
+            "x-grok-agent-id",
+        ] {
+            assert!(
+                h.get(HeaderName::from_static(name)).is_none(),
+                "Anthropic request must not carry {name}"
+            );
+        }
+        // Auth still uses x-api-key for Anthropic Messages.
+        assert!(
+            h.get(HeaderName::from_static("x-api-key")).is_some(),
+            "Anthropic must still send x-api-key"
+        );
     }
 
     // ── Change 2: Chat/Responses conformance ─────────────────────────────
