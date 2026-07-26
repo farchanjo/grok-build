@@ -64,6 +64,10 @@ struct GlobalSandboxState {
     logger: SandboxLogger,
     applied: bool,
     restrict_network_at_known_linux_launches: bool,
+    /// Kernel/FS mechanism that was successfully applied (if any).
+    mechanism: SandboxMechanism,
+    /// Whether descendants inherit the applied FS sandbox contractually.
+    descendants_inherit_fs: bool,
 }
 fn restrict_network_at_known_linux_launches(applied: bool, configured: bool) -> bool {
     applied && configured && cfg!(target_os = "linux")
@@ -99,6 +103,173 @@ pub fn profile_name() -> Option<&'static str> {
         .get()
         .filter(|s| s.applied)
         .map(|s| s.profile.as_str())
+}
+
+/// Kernel / isolation mechanism that may have been applied at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMechanism {
+    /// No FS sandbox applied (profile off, apply failed, or enforce disabled).
+    None,
+    /// macOS Seatbelt via nono — process profile; descendants inherit.
+    MacOsSeatbelt,
+    /// Linux Landlock via nono — rules inherit across fork/clone.
+    LinuxLandlock,
+    /// Linux bubblewrap namespace isolation (re-exec path).
+    LinuxBwrap,
+    /// Active but mechanism is not one we contractually understand.
+    /// Callers must fail closed for inheritance claims.
+    Unknown,
+}
+
+/// Authoritative child-process sandbox posture emitted by this crate after
+/// real sandbox application (not env-marker heuristics).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChildSandboxPosture {
+    /// Parent process has an applied FS sandbox (`is_active()`).
+    pub parent_applied: bool,
+    pub profile: Option<String>,
+    pub mechanism: SandboxMechanism,
+    /// Contractual guarantee: children of this process inherit the applied
+    /// FS sandbox. Only true for mechanisms we document as inheritable.
+    pub descendants_inherit_fs: bool,
+    /// Process-level network remains open for Claude subscription API
+    /// (Grok leaves process net open; per-child seccomp is separate).
+    pub process_network_open_for_api: bool,
+    pub notes: Vec<String>,
+}
+
+impl ChildSandboxPosture {
+    /// Whether Claude CLI external turns may spawn under this posture.
+    ///
+    /// - Parent not applied → allow (disabled/unapplied is not a false claim).
+    /// - Parent applied + descendants inherit → allow.
+    /// - Parent applied without inheritance guarantee → **fail closed**.
+    pub fn allows_external_child_spawn(&self) -> bool {
+        if !self.parent_applied {
+            return true;
+        }
+        self.descendants_inherit_fs
+            && !matches!(
+                self.mechanism,
+                SandboxMechanism::Unknown | SandboxMechanism::None
+            )
+    }
+}
+
+/// Pure posture computation (unit-testable without OnceLock install).
+///
+/// Platform contracts:
+/// - **macOS Seatbelt** (nono): applied to the process; kernel profile is
+///   inherited by descendants of that process.
+/// - **Linux Landlock** (nono): rules are inherited across `fork`/`clone`.
+/// - **Linux bwrap**: only processes *inside* the bwrap namespace inherit
+///   that isolation; the outer host is not bwrap-isolated unless re-exec'd.
+/// - **None / unapplied**: do not claim active sandbox inheritance.
+/// - **Unknown**: never claim inheritance (fail closed for spawn gating).
+pub fn compute_child_sandbox_posture(
+    applied: bool,
+    profile: Option<&str>,
+    inside_bwrap: bool,
+) -> ChildSandboxPosture {
+    let mut notes = Vec::new();
+    if !applied && !inside_bwrap {
+        notes.push("sandbox not applied (disabled, unsupported, or apply failed)".into());
+        return ChildSandboxPosture {
+            parent_applied: false,
+            profile: profile.map(|s| s.to_owned()),
+            mechanism: SandboxMechanism::None,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes,
+        };
+    }
+
+    // Prefer bwrap when we are inside a bubblewrap re-exec: that is the
+    // isolation boundary for this process tree.
+    if inside_bwrap {
+        notes.push("process is inside bwrap namespace; descendants inherit bwrap isolation".into());
+        return ChildSandboxPosture {
+            parent_applied: true,
+            profile: profile.map(|s| s.to_owned()),
+            mechanism: SandboxMechanism::LinuxBwrap,
+            descendants_inherit_fs: true,
+            process_network_open_for_api: true,
+            notes,
+        };
+    }
+
+    if !applied {
+        notes.push("sandbox not applied".into());
+        return ChildSandboxPosture {
+            parent_applied: false,
+            profile: profile.map(|s| s.to_owned()),
+            mechanism: SandboxMechanism::None,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes,
+        };
+    }
+
+    // Applied via nono at process startup.
+    #[cfg(target_os = "macos")]
+    {
+        notes.push(
+            "macOS Seatbelt applied to process; descendants inherit the Seatbelt profile".into(),
+        );
+        return ChildSandboxPosture {
+            parent_applied: true,
+            profile: profile.map(|s| s.to_owned()),
+            mechanism: SandboxMechanism::MacOsSeatbelt,
+            descendants_inherit_fs: true,
+            process_network_open_for_api: true,
+            notes,
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        notes.push("Linux Landlock applied to process; rules inherit across fork/clone".into());
+        return ChildSandboxPosture {
+            parent_applied: true,
+            profile: profile.map(|s| s.to_owned()),
+            mechanism: SandboxMechanism::LinuxLandlock,
+            descendants_inherit_fs: true,
+            process_network_open_for_api: true,
+            notes,
+        };
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        notes.push(
+            "sandbox reported applied on unsupported platform; inheritance not guaranteed".into(),
+        );
+        ChildSandboxPosture {
+            parent_applied: true,
+            profile: profile.map(|s| s.to_owned()),
+            mechanism: SandboxMechanism::Unknown,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes,
+        }
+    }
+}
+
+/// Live posture from process-global sandbox install state.
+///
+/// Does **not** consult env markers. Disabled/unapplied profiles do not claim
+/// an active sandbox. Unknown mechanisms fail closed for inheritance.
+pub fn child_sandbox_posture() -> ChildSandboxPosture {
+    let inside_bwrap = is_inside_bwrap();
+    match SANDBOX.get() {
+        Some(state) => {
+            compute_child_sandbox_posture(state.applied, Some(state.profile.as_str()), inside_bwrap)
+        }
+        None => {
+            // install() never called — treat as unapplied unless inside bwrap.
+            compute_child_sandbox_posture(false, configured_profile_name(), inside_bwrap)
+        }
+    }
 }
 /// Log a sandbox violation. Immediately flushed to disk.
 /// No-op if sandbox is not active.
@@ -211,6 +382,11 @@ impl SandboxManager {
     /// Store globally for session-lifetime violation logging.
     pub fn install(self) {
         let _ = self.logger.flush_to_disk();
+        let posture = compute_child_sandbox_posture(
+            self.applied,
+            Some(&self.profile.to_string()),
+            is_inside_bwrap(),
+        );
         let _ = SANDBOX.set(GlobalSandboxState {
             profile: self.profile.to_string(),
             logger: self.logger,
@@ -219,6 +395,8 @@ impl SandboxManager {
                 self.applied,
                 self.net_restricted,
             ),
+            mechanism: posture.mechanism,
+            descendants_inherit_fs: posture.descendants_inherit_fs,
         });
     }
     /// Check whether the current platform supports sandboxing.
@@ -749,5 +927,73 @@ mod tests {
             "non-devbox custom with no deny needs no re-exec"
         );
         let _ = std::fs::remove_dir_all(&ws_ws);
+    }
+
+    #[test]
+    fn posture_disabled_allows_spawn_without_claiming_inheritance() {
+        let p = compute_child_sandbox_posture(false, Some("off"), false);
+        assert!(!p.parent_applied);
+        assert!(!p.descendants_inherit_fs);
+        assert_eq!(p.mechanism, SandboxMechanism::None);
+        assert!(p.allows_external_child_spawn());
+    }
+
+    #[test]
+    fn posture_applied_inheritable_allows_spawn() {
+        #[cfg(target_os = "macos")]
+        {
+            let p = compute_child_sandbox_posture(true, Some("workspace"), false);
+            assert!(p.parent_applied);
+            assert!(p.descendants_inherit_fs);
+            assert_eq!(p.mechanism, SandboxMechanism::MacOsSeatbelt);
+            assert!(p.allows_external_child_spawn());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let p = compute_child_sandbox_posture(true, Some("workspace"), false);
+            assert!(p.parent_applied);
+            assert!(p.descendants_inherit_fs);
+            assert_eq!(p.mechanism, SandboxMechanism::LinuxLandlock);
+            assert!(p.allows_external_child_spawn());
+        }
+    }
+
+    #[test]
+    #[serial(bwrap_env)]
+    fn posture_inside_bwrap_inherits() {
+        let p = compute_child_sandbox_posture(false, Some("devbox"), true);
+        assert!(p.parent_applied);
+        assert_eq!(p.mechanism, SandboxMechanism::LinuxBwrap);
+        assert!(p.descendants_inherit_fs);
+        assert!(p.allows_external_child_spawn());
+    }
+
+    #[test]
+    fn posture_unknown_fails_closed() {
+        // Simulate via allows_external_child_spawn contract.
+        let unknown = ChildSandboxPosture {
+            parent_applied: true,
+            profile: Some("custom".into()),
+            mechanism: SandboxMechanism::Unknown,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes: vec!["unknown".into()],
+        };
+        assert!(!unknown.allows_external_child_spawn());
+        let applied_no_inherit = ChildSandboxPosture {
+            parent_applied: true,
+            profile: Some("x".into()),
+            mechanism: SandboxMechanism::None,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes: vec![],
+        };
+        assert!(!applied_no_inherit.allows_external_child_spawn());
+    }
+
+    #[test]
+    fn process_network_always_open_for_api() {
+        let p = compute_child_sandbox_posture(true, Some("strict"), false);
+        assert!(p.process_network_open_for_api);
     }
 }

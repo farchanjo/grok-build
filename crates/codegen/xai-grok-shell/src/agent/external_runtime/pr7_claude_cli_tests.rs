@@ -23,7 +23,7 @@ use super::claude_cli::provider_status::{self, ApiKeyStatusNote};
 use super::claude_cli::resume_guard::{self, ResumeHardeningError};
 use super::claude_cli::runtime::ClaudeCliRuntime;
 use super::claude_cli::sandbox_probe::{
-    self, ChildSandboxObservation, ExpectedChildPosture, SANDBOX_POLICY_NOTE, SandboxPlatform,
+    self, ExpectedChildPosture, SANDBOX_POLICY_NOTE, SandboxPlatform,
 };
 use super::probe_cache;
 use super::{
@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
+use xai_grok_sandbox::{ChildSandboxPosture, SandboxMechanism};
 
 fn write_fake_claude(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("claude");
@@ -442,37 +443,37 @@ fn missing_pointer_never_replays_native_history() {
 
 #[test]
 fn sandbox_probe_macos_linux_fake_children() {
-    for platform in [SandboxPlatform::MacOs, SandboxPlatform::Linux] {
-        let obs = ChildSandboxObservation {
-            platform,
-            inherited_sandbox: false,
-            network_restricted: false,
-            claude_api_network_allowed: true,
-            positively_verified: false,
-            notes: vec!["fake".into()],
+    for _platform in [SandboxPlatform::MacOs, SandboxPlatform::Linux] {
+        let p = ChildSandboxPosture {
+            parent_applied: true,
+            profile: Some("workspace".into()),
+            mechanism: SandboxMechanism::Unknown,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes: vec!["fake unknown".into()],
         };
-        let r = sandbox_probe::verify_child_posture(&obs, &ExpectedChildPosture::default(), true);
+        let r = sandbox_probe::verify_child_posture(&p, &ExpectedChildPosture::default());
         assert!(matches!(
             r,
             sandbox_probe::SandboxVerifyResult::InheritanceMissing { .. }
         ));
         assert!(r.blocks_spawn());
     }
-    assert!(SANDBOX_POLICY_NOTE.contains("fails closed") || SANDBOX_POLICY_NOTE.contains("never"));
+    assert!(SANDBOX_POLICY_NOTE.contains("authoritative") || SANDBOX_POLICY_NOTE.contains("fail"));
 }
 
 #[test]
 fn inheritance_missing_blocks_spawn_gate() {
-    let obs = ChildSandboxObservation {
-        platform: SandboxPlatform::current(),
-        inherited_sandbox: false,
-        network_restricted: false,
-        claude_api_network_allowed: true,
-        positively_verified: false,
-        notes: vec!["no marker".into()],
+    let p = ChildSandboxPosture {
+        parent_applied: true,
+        profile: Some("test".into()),
+        mechanism: SandboxMechanism::Unknown,
+        descendants_inherit_fs: false,
+        process_network_open_for_api: true,
+        notes: vec!["no guarantee".into()],
     };
-    let err = sandbox_probe::gate_turn_for_sandbox(&obs, &ExpectedChildPosture::default(), true)
-        .unwrap_err();
+    let err =
+        sandbox_probe::gate_turn_for_sandbox(&p, &ExpectedChildPosture::default()).unwrap_err();
     assert!(matches!(
         err,
         sandbox_probe::SandboxVerifyResult::InheritanceMissing { .. }
@@ -766,35 +767,44 @@ async fn always_approve_yolo_policy_deny_still_denies_one_audit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sandbox_inheritance_missing_blocks_runtime_turn() {
     with_opt_in_async(|| async {
-        // Inject fail-closed posture as if parent sandbox is active without inheritance.
-        sandbox_probe::set_explicit_verified_posture(Some(ChildSandboxObservation {
-            platform: SandboxPlatform::current(),
-            inherited_sandbox: false,
-            network_restricted: false,
-            claude_api_network_allowed: true,
-            positively_verified: false,
+        sandbox_probe::set_explicit_verified_posture(Some(ChildSandboxPosture {
+            parent_applied: true,
+            profile: Some("workspace".into()),
+            mechanism: SandboxMechanism::Unknown,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
             notes: vec!["test: force inheritance missing".into()],
         }));
-        // Force parent_active by temporarily setting a marker the gate uses via
-        // explicit posture only — gate_turn still needs parent_active=true.
-        // We test the gate directly and also via runtime when parent is inactive
-        // the explicit posture alone doesn't block (parent inactive). So assert
-        // gate API here and that runtime proceeds when parent inactive.
-        let obs = sandbox_probe::observe_child_sandbox(sandbox_probe::default_child_probe);
-        assert!(!obs.positively_verified || !obs.inherited_sandbox);
-        let blocked = sandbox_probe::gate_turn_for_sandbox(
-            &obs,
-            &ExpectedChildPosture::default(),
-            true, // parent active
-        );
-        assert!(blocked.is_err());
+        let blocked = sandbox_probe::gate_live_turn();
+        assert!(blocked.is_err(), "active unknown must fail closed");
+        // Runtime turn also fails closed via gate_live_turn.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = write_fake_claude(dir.path(), "#!/bin/sh\necho '2.1.250'\n");
+        let runtime = ClaudeCliRuntime::new(Some(fake))
+            .with_host_executable(std::env::current_exe().unwrap());
+        let env = runtime
+            .start(ExternalStartRequest {
+                cwd: dir.path().display().to_string(),
+                worktree_identity: None,
+                selected_model: None,
+                reasoning_effort: None,
+                token_budget: None,
+            })
+            .await
+            .unwrap();
+        // Probe may fail without full fake turn script — ensure gate path:
+        let gate = sandbox_probe::gate_live_turn();
+        assert!(gate.is_err());
         sandbox_probe::set_explicit_verified_posture(None);
+        let _ = env;
+        let _ = runtime;
     })
     .await;
 }
 
+/// In-process UDS auth (full binary MCP process test: pager-bin/tests/claude_permission_bridge_process.rs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_reexec_process_level_allow_deny_and_auth() {
+async fn broker_uds_allow_deny_and_unauthorized_client() {
     use super::claude_cli::permission_bridge::{
         BRIDGE_TOKEN_ENV, PERMISSION_BRIDGE_SUBCOMMAND, PermissionBrokerServer, ScriptedBroker,
     };

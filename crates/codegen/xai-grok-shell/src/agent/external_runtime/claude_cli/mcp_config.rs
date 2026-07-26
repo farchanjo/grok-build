@@ -183,8 +183,8 @@ pub fn write_strict_mcp_config(
         )
     })?;
 
-    // Restrict permissions on the config file (contains paths only, no secrets
-    // by construction — still best-effort private).
+    // Config file includes the bridge auth token in the child `env` block.
+    // Protect it with 0600 (dir is 0700). Never log this file's contents.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

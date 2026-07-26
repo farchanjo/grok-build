@@ -516,34 +516,36 @@ impl ClaudePermissionBroker for ScriptedBroker {
 // ---------------------------------------------------------------------------
 
 /// Generate a high-entropy auth token (hex, 32 bytes).
-pub fn generate_bridge_token() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    // Prefer OS random when available.
+///
+/// **Fail closed** if OS RNG is unavailable — no weak fallback.
+pub fn generate_bridge_token() -> Result<String, ExternalRuntimeError> {
     let mut buf = [0u8; 32];
-    if fill_os_random(&mut buf) {
-        return hex_encode(&buf);
-    }
-    // Fallback: mix uuid + process entropy (still fail-closed if empty).
-    let mut h = DefaultHasher::new();
-    uuid::Uuid::new_v4().hash(&mut h);
-    std::process::id().hash(&mut h);
-    std::time::SystemTime::now().hash(&mut h);
-    let a = h.finish().to_le_bytes();
-    uuid::Uuid::new_v4().hash(&mut h);
-    let b = h.finish().to_le_bytes();
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&a);
-    out[8..].copy_from_slice(&b);
-    hex_encode(&out)
+    fill_os_random(&mut buf).map_err(|e| {
+        ExternalRuntimeError::new(
+            ExternalRuntimeErrorKind::Transport,
+            format!("permission bridge: OS RNG failure (fail closed): {e}"),
+            Some(ExternalAgentKind::ClaudeCli),
+        )
+    })?;
+    Ok(hex_encode(&buf))
 }
 
-fn fill_os_random(buf: &mut [u8]) -> bool {
-    // getrandom via std on modern rustc is not always available; use /dev/urandom.
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        return f.read_exact(buf).is_ok();
+fn fill_os_random(buf: &mut [u8]) -> Result<(), String> {
+    // Prefer getrandom if available via /dev/urandom (Unix).
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut f =
+            std::fs::File::open("/dev/urandom").map_err(|e| format!("open /dev/urandom: {e}"))?;
+        f.read_exact(buf)
+            .map_err(|e| format!("read /dev/urandom: {e}"))?;
+        return Ok(());
     }
-    false
+    #[cfg(not(unix))]
+    {
+        let _ = buf;
+        Err("OS RNG not available on this platform".into())
+    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -730,7 +732,7 @@ impl PermissionBrokerServer {
         })?;
         let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
 
-        let token = generate_bridge_token();
+        let token = generate_bridge_token()?;
         let server = Arc::new(Self {
             runtime_dir,
             socket_path,
@@ -1008,7 +1010,6 @@ pub fn maybe_run_permission_bridge_subprocess() -> Option<i32> {
         return None;
     }
     let mut socket: Option<PathBuf> = None;
-    let mut token: Option<String> = None;
     let mut i = 2usize;
     while i < argv.len() {
         let a = argv[i].to_string_lossy();
@@ -1020,14 +1021,8 @@ pub fn maybe_run_permission_bridge_subprocess() -> Option<i32> {
             }
         } else if let Some(rest) = a.strip_prefix("--socket=") {
             socket = Some(PathBuf::from(rest));
-        } else if a == "--token" {
-            // Prefer env over argv for secrets; accept for test harness only.
-            if let Some(p) = argv.get(i + 1) {
-                token = Some(p.to_string_lossy().into_owned());
-                i += 2;
-                continue;
-            }
         }
+        // Production: token is env-only (never argv — avoids process-table leakage).
         i += 1;
     }
     if socket.is_none() {
@@ -1037,19 +1032,17 @@ pub fn maybe_run_permission_bridge_subprocess() -> Option<i32> {
             }
         }
     }
-    if token.is_none() {
-        if let Ok(t) = std::env::var(BRIDGE_TOKEN_ENV) {
-            if !t.is_empty() {
-                token = Some(t);
-            }
-        }
-    }
+    // Token: environment only.
+    let token = std::env::var(BRIDGE_TOKEN_ENV)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
     let Some(path) = socket else {
         let _ = writeln_stderr("permission bridge: missing --socket");
         return Some(2);
     };
     let Some(tok) = token else {
-        let _ = writeln_stderr("permission bridge: missing auth token");
+        let _ = writeln_stderr("permission bridge: missing auth token env");
         return Some(2);
     };
     Some(run_permission_bridge_child(&path, &tok))
@@ -1169,8 +1162,7 @@ fn run_mcp_stdio_bridge(socket_path: &Path, token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Test helper: async authenticated forward.
-#[cfg(test)]
+/// Async authenticated forward (integration tests + unit tests).
 pub async fn forward_to_broker_for_test(
     socket_path: &Path,
     token: &str,
@@ -1179,7 +1171,6 @@ pub async fn forward_to_broker_for_test(
     forward_to_broker_async(socket_path, token, 1, request).await
 }
 
-#[cfg(test)]
 async fn forward_to_broker_async(
     socket_path: &Path,
     token: &str,

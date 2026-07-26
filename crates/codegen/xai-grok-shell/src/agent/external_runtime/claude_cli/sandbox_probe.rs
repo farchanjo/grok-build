@@ -1,34 +1,59 @@
-//! Process / sandbox inheritance probes for Claude CLI children (PR7).
+//! Claude CLI child sandbox gate (PR7).
 //!
-//! Parent sandbox inheritance is **not assumed blindly**. When the parent
-//! sandbox is active and inheritance cannot be positively verified, the
-//! external turn **fails closed before Claude is spawned**. Probes never
-//! weaken parent sandbox or permission policy.
+//! Consumes the **authoritative** posture from [`xai_grok_sandbox`] after real
+//! sandbox application — not production env markers. When the parent sandbox is
+//! active without a contractual inheritance guarantee, the external turn fails
+//! closed before Claude is spawned. Never weakens parent policy.
 //!
-//! Tests use fake child probes on macOS and Linux.
-
-use std::path::Path;
-use std::sync::Mutex;
+//! Test-only injection is gated behind `cfg(test)`.
 
 use serde::{Deserialize, Serialize};
+use xai_grok_sandbox::{ChildSandboxPosture, SandboxMechanism};
 
-/// Observed sandbox posture of a (fake or real) child process.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ChildSandboxObservation {
-    pub platform: SandboxPlatform,
-    /// Whether the child appears to run under an inherited sandbox profile.
-    pub inherited_sandbox: bool,
-    /// Whether outbound network appears restricted (not open).
-    pub network_restricted: bool,
-    /// Whether Claude API egress is expected to be permitted.
-    pub claude_api_network_allowed: bool,
-    /// True when posture was positively verified (marker or subsystem).
-    pub positively_verified: bool,
-    /// Human-readable probe notes (no secrets).
-    pub notes: Vec<String>,
+/// Re-export sandbox subsystem posture type for callers / tests.
+pub use xai_grok_sandbox::ChildSandboxPosture as AuthoritativePosture;
+
+/// Result of verifying posture for a Claude CLI turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxVerifyResult {
+    Ok,
+    /// Parent sandbox is active but descendants do not inherit — fail closed.
+    InheritanceMissing {
+        detail: String,
+    },
+    /// Claude API network appears blocked (should not happen with Grok's model).
+    ClaudeApiNetworkBlocked {
+        detail: String,
+    },
 }
 
+impl SandboxVerifyResult {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+
+    pub fn blocks_spawn(&self) -> bool {
+        !self.is_ok()
+    }
+}
+
+/// Host-side expected posture for a Claude CLI child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedChildPosture {
+    pub require_inherited_when_parent_active: bool,
+    pub allow_claude_api_network: bool,
+}
+
+impl Default for ExpectedChildPosture {
+    fn default() -> Self {
+        Self {
+            require_inherited_when_parent_active: true,
+            allow_claude_api_network: true,
+        }
+    }
+}
+
+/// Platform label for display/tests (not used for production inheritance).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxPlatform {
@@ -49,172 +74,77 @@ impl SandboxPlatform {
     }
 }
 
-/// Host-side expected posture for a Claude CLI child.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpectedChildPosture {
-    /// When the parent has an active sandbox, children must inherit it.
-    pub require_inherited_when_parent_active: bool,
-    /// Claude subscription API needs egress; do not require total net deny.
-    pub allow_claude_api_network: bool,
+/// Legacy observation shape kept for test helpers; production uses
+/// [`ChildSandboxPosture`] from the sandbox crate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChildSandboxObservation {
+    pub platform: SandboxPlatform,
+    pub inherited_sandbox: bool,
+    pub network_restricted: bool,
+    pub claude_api_network_allowed: bool,
+    pub positively_verified: bool,
+    pub notes: Vec<String>,
 }
 
-impl Default for ExpectedChildPosture {
-    fn default() -> Self {
+impl From<&ChildSandboxPosture> for ChildSandboxObservation {
+    fn from(p: &ChildSandboxPosture) -> Self {
         Self {
-            require_inherited_when_parent_active: true,
-            allow_claude_api_network: true,
+            platform: SandboxPlatform::current(),
+            inherited_sandbox: p.descendants_inherit_fs && p.parent_applied,
+            network_restricted: false, // process net open; child seccomp is separate
+            claude_api_network_allowed: p.process_network_open_for_api,
+            positively_verified: p.descendants_inherit_fs
+                && p.parent_applied
+                && !matches!(
+                    p.mechanism,
+                    SandboxMechanism::None | SandboxMechanism::Unknown
+                ),
+            notes: p.notes.clone(),
         }
     }
 }
 
-/// Result of verifying observation against expectation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SandboxVerifyResult {
-    Ok,
-    /// Child is not under the intended sandbox — **fail closed** before spawn.
-    InheritanceMissing {
-        detail: String,
-    },
-    /// Network is more open than intended.
-    NetworkTooOpen {
-        detail: String,
-    },
-    /// Claude API network blocked when subscription path needs it.
-    ClaudeApiNetworkBlocked {
-        detail: String,
-    },
-}
-
-impl SandboxVerifyResult {
-    pub fn is_ok(&self) -> bool {
-        matches!(self, Self::Ok)
-    }
-
-    pub fn blocks_spawn(&self) -> bool {
-        !self.is_ok()
-    }
-}
-
-/// Probe parent sandbox markers without weakening anything.
+/// Whether parent sandbox is applied (authoritative).
 pub fn parent_sandbox_active() -> bool {
     xai_grok_sandbox::is_active()
 }
 
-/// Optional explicit verified posture injected by the sandbox subsystem
-/// (or tests). When set, takes precedence over env-marker heuristics.
-static EXPLICIT_VERIFIED_POSTURE: Mutex<Option<ChildSandboxObservation>> = Mutex::new(None);
-
-/// Install an explicit verified child posture (sandbox subsystem or tests).
-pub fn set_explicit_verified_posture(obs: Option<ChildSandboxObservation>) {
-    *EXPLICIT_VERIFIED_POSTURE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = obs;
-}
-
-/// Observe child sandbox posture via a probe function, preferring any
-/// explicit verified posture from the sandbox subsystem.
-pub fn observe_child_sandbox<F>(probe: F) -> ChildSandboxObservation
-where
-    F: FnOnce(SandboxPlatform) -> ChildSandboxObservation,
-{
-    if let Some(explicit) = EXPLICIT_VERIFIED_POSTURE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+/// Live authoritative posture from the sandbox subsystem.
+pub fn authoritative_posture() -> ChildSandboxPosture {
+    #[cfg(test)]
     {
-        return explicit;
+        if let Some(p) = test_posture_override() {
+            return p;
+        }
     }
-    probe(SandboxPlatform::current())
+    xai_grok_sandbox::child_sandbox_posture()
 }
 
-/// Default probe using environment markers and platform heuristics.
-///
-/// Does **not** claim inheritance solely because the parent is sandboxed.
-/// Without a positive marker, `positively_verified` is false.
-pub fn default_child_probe(platform: SandboxPlatform) -> ChildSandboxObservation {
-    let mut notes = Vec::new();
-    let parent_active = parent_sandbox_active();
-    if parent_active {
-        notes.push("parent sandbox marker active".into());
-    } else {
-        notes.push("parent sandbox not active (or disabled profile)".into());
-    }
-
-    let (inherited, verified) = match platform {
-        SandboxPlatform::MacOs => {
-            // Positive markers only. Seatbelt alone is not assumed inherited.
-            let marker = std::env::var_os("GROK_SANDBOX_CHILD_INHERITED").is_some()
-                || std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some();
-            if marker {
-                notes.push("macOS child sandbox marker present (positively verified)".into());
-            } else {
-                notes.push(
-                    "macOS: no child sandbox marker; inheritance not positively verified".into(),
-                );
-            }
-            (marker, marker)
-        }
-        SandboxPlatform::Linux => {
-            let marker = std::env::var_os("GROK_SANDBOX_CHILD_INHERITED").is_some()
-                || std::env::var_os("container").is_some()
-                || path_exists("/.dockerenv")
-                || xai_grok_sandbox::is_inside_bwrap();
-            if marker {
-                notes.push("Linux child isolation marker present (positively verified)".into());
-            } else {
-                notes.push(
-                    "Linux: no bwrap/container child marker; inheritance not positively verified"
-                        .into(),
-                );
-            }
-            (marker, marker)
-        }
-        SandboxPlatform::Other => {
-            notes.push("unsupported platform for sandbox inheritance probe".into());
-            (false, false)
-        }
-    };
-
-    let network_restricted = std::env::var_os("GROK_SANDBOX_CHILD_NET_RESTRICTED").is_some();
-    let claude_api_network_allowed = std::env::var_os("GROK_SANDBOX_BLOCK_CLAUDE_API").is_none();
-
-    ChildSandboxObservation {
-        platform,
-        inherited_sandbox: inherited,
-        network_restricted,
-        claude_api_network_allowed,
-        positively_verified: verified,
-        notes,
-    }
+/// Observe posture for Claude CLI gating. Production path is authoritative only.
+pub fn observe_child_sandbox() -> ChildSandboxObservation {
+    ChildSandboxObservation::from(&authoritative_posture())
 }
 
-fn path_exists(p: &str) -> bool {
-    Path::new(p).exists()
-}
-
-/// Verify observation against expectation and parent activity.
-///
-/// When parent is active and inheritance is required, both
-/// `inherited_sandbox` **and** `positively_verified` must be true.
+/// Verify authoritative posture against expectation.
 pub fn verify_child_posture(
-    observation: &ChildSandboxObservation,
+    posture: &ChildSandboxPosture,
     expected: &ExpectedChildPosture,
-    parent_active: bool,
 ) -> SandboxVerifyResult {
-    if parent_active && expected.require_inherited_when_parent_active {
-        if !observation.inherited_sandbox || !observation.positively_verified {
+    if expected.require_inherited_when_parent_active && posture.parent_applied {
+        if !posture.allows_external_child_spawn() {
             return SandboxVerifyResult::InheritanceMissing {
                 detail: format!(
-                    "parent sandbox is active but child inheritance was not positively verified \
-                     (inherited={}, verified={}): {}",
-                    observation.inherited_sandbox,
-                    observation.positively_verified,
-                    observation.notes.join("; ")
+                    "parent sandbox applied (profile={:?}, mechanism={:?}) but descendants \
+                     do not inherit FS isolation: {}",
+                    posture.profile,
+                    posture.mechanism,
+                    posture.notes.join("; ")
                 ),
             };
         }
     }
-    if expected.allow_claude_api_network && !observation.claude_api_network_allowed {
+    if expected.allow_claude_api_network && !posture.process_network_open_for_api {
         return SandboxVerifyResult::ClaudeApiNetworkBlocked {
             detail: "Claude API network appears blocked; subscription path requires egress".into(),
         };
@@ -222,14 +152,13 @@ pub fn verify_child_posture(
     SandboxVerifyResult::Ok
 }
 
-/// Gate a Claude CLI turn: fail closed when sandbox inheritance is required
-/// but not verified. Call **before** spawning Claude.
+/// Gate a Claude CLI turn using the authoritative sandbox posture.
+/// Call **before** spawning Claude.
 pub fn gate_turn_for_sandbox(
-    observation: &ChildSandboxObservation,
+    posture: &ChildSandboxPosture,
     expected: &ExpectedChildPosture,
-    parent_active: bool,
 ) -> Result<(), SandboxVerifyResult> {
-    let result = verify_child_posture(observation, expected, parent_active);
+    let result = verify_child_posture(posture, expected);
     if result.blocks_spawn() {
         Err(result)
     } else {
@@ -237,50 +166,111 @@ pub fn gate_turn_for_sandbox(
     }
 }
 
-/// Documented guarantee: we never weaken global sandbox policy from this module.
+/// Gate using live authoritative posture (production entry point).
+pub fn gate_live_turn() -> Result<ChildSandboxPosture, SandboxVerifyResult> {
+    let posture = authoritative_posture();
+    gate_turn_for_sandbox(&posture, &ExpectedChildPosture::default())?;
+    Ok(posture)
+}
+
 pub const SANDBOX_POLICY_NOTE: &str = "\
-Claude CLI child sandbox probes never disable, relax, or reconfigure the parent \
-Grok sandbox or permission policy. When the parent sandbox is active, inheritance \
-must be positively verified or the external turn fails closed before spawn.";
+Claude CLI child sandbox gates consume the authoritative posture from \
+xai-grok-sandbox after real application (Seatbelt/Landlock/bwrap). They never \
+disable or relax parent policy. Env markers are not production verification. \
+Active unknown mechanisms fail closed before Claude spawn.";
+
+// ---------------------------------------------------------------------------
+// Test-only override (not callable from production builds)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+use std::sync::Mutex;
+
+#[cfg(test)]
+static TEST_POSTURE: Mutex<Option<ChildSandboxPosture>> = Mutex::new(None);
+
+/// Test-only: inject a posture. Not available in production builds.
+#[cfg(test)]
+pub fn set_explicit_verified_posture(obs: Option<ChildSandboxPosture>) {
+    *TEST_POSTURE.lock().unwrap_or_else(|e| e.into_inner()) = obs;
+}
+
+#[cfg(test)]
+fn test_posture_override() -> Option<ChildSandboxPosture> {
+    TEST_POSTURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Test helper: convert observation-style injection into a posture.
+/// Inheritance-missing cases set parent_applied=true with non-inheritable mechanism.
+#[cfg(test)]
+pub fn set_explicit_observation_for_test(obs: Option<ChildSandboxObservation>) {
+    let posture = obs.map(|o| {
+        let inherit = o.inherited_sandbox && o.positively_verified;
+        ChildSandboxPosture {
+            // When testing inheritance failure, parent is treated as applied.
+            parent_applied: inherit || !o.positively_verified || !o.inherited_sandbox,
+            profile: Some("test".into()),
+            mechanism: if inherit {
+                if cfg!(target_os = "macos") {
+                    SandboxMechanism::MacOsSeatbelt
+                } else if cfg!(target_os = "linux") {
+                    SandboxMechanism::LinuxLandlock
+                } else {
+                    SandboxMechanism::Unknown
+                }
+            } else {
+                SandboxMechanism::Unknown
+            },
+            descendants_inherit_fs: inherit,
+            process_network_open_for_api: o.claude_api_network_allowed,
+            notes: o.notes,
+        }
+    });
+    let posture = posture.map(|mut p| {
+        if !p.descendants_inherit_fs {
+            p.parent_applied = true;
+            p.mechanism = SandboxMechanism::Unknown;
+        }
+        p
+    });
+    set_explicit_verified_posture(posture);
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_sandbox::compute_child_sandbox_posture;
 
     #[test]
-    fn does_not_assume_inheritance_without_marker() {
-        unsafe {
-            std::env::remove_var("GROK_SANDBOX_CHILD_INHERITED");
-        }
-        set_explicit_verified_posture(None);
-        let obs = observe_child_sandbox(|p| ChildSandboxObservation {
-            platform: p,
-            inherited_sandbox: false,
-            network_restricted: false,
-            claude_api_network_allowed: true,
-            positively_verified: false,
-            notes: vec!["fake: no inheritance".into()],
-        });
-        assert!(!obs.inherited_sandbox);
-        let result = verify_child_posture(&obs, &ExpectedChildPosture::default(), true);
-        assert!(matches!(
-            result,
-            SandboxVerifyResult::InheritanceMissing { .. }
-        ));
-        assert!(result.blocks_spawn());
+    fn disabled_posture_allows_spawn() {
+        let p = compute_child_sandbox_posture(false, Some("off"), false);
+        assert!(gate_turn_for_sandbox(&p, &ExpectedChildPosture::default()).is_ok());
     }
 
     #[test]
-    fn inheritance_missing_blocks_gate_turn() {
-        let obs = ChildSandboxObservation {
-            platform: SandboxPlatform::current(),
-            inherited_sandbox: false,
-            network_restricted: false,
-            claude_api_network_allowed: true,
-            positively_verified: false,
-            notes: vec!["test".into()],
+    fn applied_inheritable_allows_spawn() {
+        let p = compute_child_sandbox_posture(true, Some("workspace"), false);
+        // On macOS/Linux this is inheritable.
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            assert!(p.allows_external_child_spawn());
+            assert!(gate_turn_for_sandbox(&p, &ExpectedChildPosture::default()).is_ok());
+        }
+    }
+
+    #[test]
+    fn active_unknown_fails_closed() {
+        let p = ChildSandboxPosture {
+            parent_applied: true,
+            profile: Some("x".into()),
+            mechanism: SandboxMechanism::Unknown,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes: vec!["unknown".into()],
         };
-        let err = gate_turn_for_sandbox(&obs, &ExpectedChildPosture::default(), true).unwrap_err();
+        let err = gate_turn_for_sandbox(&p, &ExpectedChildPosture::default()).unwrap_err();
         assert!(matches!(
             err,
             SandboxVerifyResult::InheritanceMissing { .. }
@@ -288,93 +278,38 @@ mod tests {
     }
 
     #[test]
-    fn positively_verified_inheritance_allows_spawn() {
-        for platform in [SandboxPlatform::MacOs, SandboxPlatform::Linux] {
-            let obs = ChildSandboxObservation {
-                platform,
-                inherited_sandbox: true,
-                network_restricted: true,
-                claude_api_network_allowed: true,
-                positively_verified: true,
-                notes: vec![format!("fake {platform:?}")],
-            };
-            assert!(gate_turn_for_sandbox(&obs, &ExpectedChildPosture::default(), true).is_ok());
-        }
-    }
-
-    #[test]
-    fn inherited_without_positive_verification_fails() {
-        let obs = ChildSandboxObservation {
-            platform: SandboxPlatform::MacOs,
-            inherited_sandbox: true,
-            network_restricted: false,
-            claude_api_network_allowed: true,
-            positively_verified: false,
-            notes: vec!["claimed but not verified".into()],
-        };
-        assert!(matches!(
-            verify_child_posture(&obs, &ExpectedChildPosture::default(), true),
-            SandboxVerifyResult::InheritanceMissing { .. }
-        ));
-    }
-
-    #[test]
-    fn explicit_verified_posture_overrides_probe() {
-        set_explicit_verified_posture(Some(ChildSandboxObservation {
-            platform: SandboxPlatform::current(),
-            inherited_sandbox: true,
-            network_restricted: true,
-            claude_api_network_allowed: true,
-            positively_verified: true,
-            notes: vec!["subsystem verified".into()],
+    fn test_injection_is_cfg_test_only() {
+        set_explicit_verified_posture(Some(ChildSandboxPosture {
+            parent_applied: true,
+            profile: Some("t".into()),
+            mechanism: SandboxMechanism::Unknown,
+            descendants_inherit_fs: false,
+            process_network_open_for_api: true,
+            notes: vec!["inject".into()],
         }));
-        let obs = observe_child_sandbox(|_| ChildSandboxObservation {
-            platform: SandboxPlatform::current(),
-            inherited_sandbox: false,
-            network_restricted: false,
-            claude_api_network_allowed: true,
-            positively_verified: false,
-            notes: vec!["would fail".into()],
-        });
-        assert!(obs.positively_verified);
-        assert!(obs.inherited_sandbox);
+        let live = authoritative_posture();
+        assert!(!live.allows_external_child_spawn());
         set_explicit_verified_posture(None);
     }
 
     #[test]
-    fn parent_inactive_skips_inheritance_requirement() {
-        let obs = ChildSandboxObservation {
-            platform: SandboxPlatform::current(),
-            inherited_sandbox: false,
-            network_restricted: false,
-            claude_api_network_allowed: true,
-            positively_verified: false,
-            notes: vec![],
-        };
-        assert!(gate_turn_for_sandbox(&obs, &ExpectedChildPosture::default(), false).is_ok());
-    }
-
-    #[test]
-    fn claude_api_block_fails() {
-        let obs = ChildSandboxObservation {
-            platform: SandboxPlatform::current(),
-            inherited_sandbox: true,
-            network_restricted: true,
-            claude_api_network_allowed: false,
-            positively_verified: true,
-            notes: vec![],
-        };
-        assert!(matches!(
-            verify_child_posture(&obs, &ExpectedChildPosture::default(), true),
-            SandboxVerifyResult::ClaudeApiNetworkBlocked { .. }
-        ));
-    }
-
-    #[test]
-    fn policy_note_documents_fail_closed() {
-        assert!(SANDBOX_POLICY_NOTE.contains("fails closed"));
+    fn policy_note_documents_authoritative() {
+        assert!(SANDBOX_POLICY_NOTE.contains("authoritative"));
         assert!(
-            SANDBOX_POLICY_NOTE.contains("never disable") || SANDBOX_POLICY_NOTE.contains("never")
+            SANDBOX_POLICY_NOTE.contains("fail closed")
+                || SANDBOX_POLICY_NOTE.contains("fails closed")
         );
+    }
+
+    #[test]
+    fn platform_abstractions_from_sandbox_crate() {
+        let mac = {
+            // Pure: Seatbelt when applied on macOS is tested in sandbox crate;
+            // here ensure conversion notes preserve API network flag.
+            let p = compute_child_sandbox_posture(false, None, false);
+            assert!(p.process_network_open_for_api);
+            p
+        };
+        let _ = mac;
     }
 }

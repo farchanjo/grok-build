@@ -82,6 +82,16 @@ serial_test = { workspace = true }
 # `PagerArgs::try_parse_from` in the CLI-parsing unit tests (needs the
 # `clap::Parser` trait in scope).
 clap = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "sync",
+] }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+# Integration tests exercise the feature-gated bridge when enabled.
+xai-grok-shell = { workspace = true }
 
 [features]
 default = [

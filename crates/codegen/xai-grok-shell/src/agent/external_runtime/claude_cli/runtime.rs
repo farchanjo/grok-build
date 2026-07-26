@@ -470,15 +470,10 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             .map_err(|e| e.into_runtime_error())?;
         }
 
-        // Sandbox gate: when parent is active, inheritance must be positively
-        // verified or the turn fails closed before Claude spawn. Never weakens
-        // parent policy.
-        let sandbox_obs = sandbox_probe::observe_child_sandbox(sandbox_probe::default_child_probe);
-        if let Err(fail) = sandbox_probe::gate_turn_for_sandbox(
-            &sandbox_obs,
-            &sandbox_probe::ExpectedChildPosture::default(),
-            sandbox_probe::parent_sandbox_active(),
-        ) {
+        // Sandbox gate: authoritative posture from xai-grok-sandbox. When parent
+        // is applied without contractual descendant inheritance, fail closed
+        // before Claude spawn. Never weakens parent policy.
+        if let Err(fail) = sandbox_probe::gate_live_turn() {
             return Err(ExternalRuntimeError::new(
                 ExternalRuntimeErrorKind::Unavailable,
                 format!(
