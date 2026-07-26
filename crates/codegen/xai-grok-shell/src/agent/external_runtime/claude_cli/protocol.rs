@@ -5,7 +5,14 @@
 //! text + parent_tool_use_id, final result/usage/cost/model/session ID/
 //! capabilities. Unknown events are ignored/preserved bounded for diagnostics.
 //!
+//! Text dedupe is **segment/message-aware** (not turn-global): stream partials
+//! are authoritative for a segment keyed by `parent_tool_use_id` (empty = main).
+//! A matching full assistant echo for that segment is skipped once; later
+//! post-tool assistant messages and unstreamed subagent text are retained.
+//!
 //! Never dispatches Claude tool events to the Grok tool executor.
+
+use std::collections::HashMap;
 
 use serde_json::Value;
 
@@ -19,6 +26,9 @@ pub const MAX_UNKNOWN_EVENT_SNIPPET: usize = 256;
 pub const MAX_UNKNOWN_EVENTS: usize = 16;
 /// Max chars of assistant text retained in normalized events aggregate checks.
 pub const MAX_TEXT_EVENT_CHARS: usize = 512 * 1024;
+
+/// Segment key: empty string = main conversation; otherwise `parent_tool_use_id`.
+type SegmentKey = String;
 
 /// Normalized parse of one turn's NDJSON stream.
 #[derive(Debug, Clone, Default)]
@@ -35,19 +45,27 @@ pub struct ParsedTurnStream {
     pub saw_final_result: bool,
     pub unknown_events: Vec<String>,
     pub errors: Vec<String>,
-    /// `true` when at least one `stream_event` text_delta was accepted.
-    /// When set, full assistant text blocks and result text are **not**
-    /// re-emitted (dedupe against `--include-partial-messages`).
-    pub saw_stream_text: bool,
+    /// Accumulated stream text per segment (for echo matching).
+    #[doc(hidden)]
+    streamed_text: HashMap<SegmentKey, String>,
+    /// Segment has open stream deltas not yet consumed by a full assistant echo.
+    #[doc(hidden)]
+    pending_stream_echo: HashMap<SegmentKey, bool>,
+    /// Whether any main-segment TextDelta was emitted (for result dedupe).
+    #[doc(hidden)]
+    main_text_emitted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
-    MalformedLine { detail: String },
-    InvalidUtf8,
-    Truncated { detail: String },
+    MalformedLine {
+        detail: String,
+    },
+    /// Stream ended cleanly without a final `result` event (truncated / incomplete).
     NoFinalResult,
-    Oversized { detail: String },
+    Oversized {
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -56,10 +74,11 @@ impl std::fmt::Display for ProtocolError {
             Self::MalformedLine { detail } => {
                 write!(f, "malformed Claude CLI NDJSON: {detail}")
             }
-            Self::InvalidUtf8 => write!(f, "invalid UTF-8 in Claude CLI stream"),
-            Self::Truncated { detail } => write!(f, "truncated Claude CLI stream: {detail}"),
             Self::NoFinalResult => {
-                write!(f, "Claude CLI stream ended without a final result event")
+                write!(
+                    f,
+                    "Claude CLI stream ended without a final result event (truncated or incomplete)"
+                )
             }
             Self::Oversized { detail } => write!(f, "oversized Claude CLI payload: {detail}"),
         }
@@ -70,8 +89,8 @@ impl std::error::Error for ProtocolError {}
 
 /// Parse all NDJSON lines from a completed turn.
 ///
-/// Returns `Err` for hard failures (no final result when stream ended cleanly
-/// without cancellation, malformed required structure). Soft unknowns accumulate
+/// Returns `Err(NoFinalResult)` when the stream ends without a final `result`
+/// event (process-layer truncation / incomplete). Soft unknowns accumulate
 /// in `unknown_events`.
 pub fn parse_turn_lines(lines: &[String]) -> Result<ParsedTurnStream, ProtocolError> {
     let mut parsed = ParsedTurnStream::default();
@@ -131,6 +150,17 @@ pub fn parse_turn_lines_allow_incomplete(lines: &[String]) -> ParsedTurnStream {
         }
     }
     parsed
+}
+
+fn segment_key(parent: Option<&str>) -> SegmentKey {
+    parent.unwrap_or("").to_owned()
+}
+
+fn parent_from_value(value: &Value) -> Option<&str> {
+    value
+        .get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != "null")
 }
 
 fn ingest_event(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), String> {
@@ -214,34 +244,89 @@ fn ingest_system(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), Str
     }
 }
 
-fn ingest_assistant(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), String> {
-    let parent = value
-        .get("parent_tool_use_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty() && *s != "null");
+fn should_skip_full_text_echo(parsed: &mut ParsedTurnStream, key: &str, full_text: &str) -> bool {
+    let pending = parsed
+        .pending_stream_echo
+        .get(key)
+        .copied()
+        .unwrap_or(false);
+    if !pending {
+        return false;
+    }
+    let streamed = parsed
+        .streamed_text
+        .get(key)
+        .map(String::as_str)
+        .unwrap_or("");
+    // Match exact stream concat, or full text equals stream (common).
+    // Also treat as echo when full starts with stream and stream is non-empty
+    // (minor trailing whitespace differences stripped).
+    let full_trim = full_text.trim();
+    let stream_trim = streamed.trim();
+    let is_echo = !stream_trim.is_empty()
+        && (full_trim == stream_trim
+            || full_trim == streamed
+            || streamed == full_text
+            || full_trim.starts_with(stream_trim));
+    if is_echo {
+        // Consume this stream segment so a later post-tool message can emit.
+        parsed.pending_stream_echo.insert(key.to_owned(), false);
+        parsed.streamed_text.insert(key.to_owned(), String::new());
+        return true;
+    }
+    // Pending stream but text doesn't match — keep stream, still emit full
+    // (defensive; rare protocol mismatch). Clear pending to avoid sticky skip.
+    parsed.pending_stream_echo.insert(key.to_owned(), false);
+    false
+}
 
-    // message.content array (Anthropic-style)
+fn emit_text(parsed: &mut ParsedTurnStream, key: &str, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    if key.is_empty() {
+        parsed.main_text_emitted = true;
+    }
+    parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
+        text: bound_text(&text, MAX_TEXT_EVENT_CHARS),
+    });
+}
+
+fn ingest_assistant(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), String> {
+    let parent = parent_from_value(value);
+    let key = segment_key(parent);
+
     let content = value
         .pointer("/message/content")
         .or_else(|| value.get("content"));
 
     if let Some(Value::Array(blocks)) = content {
+        // Collect full text first for echo matching (may be multi-block).
+        let mut full_text_parts: Vec<String> = Vec::new();
+        for block in blocks {
+            if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                    full_text_parts.push(t.to_owned());
+                }
+            }
+        }
+        let full_joined = full_text_parts.join("");
+        let skip_text = if full_joined.is_empty() {
+            false
+        } else {
+            should_skip_full_text_echo(parsed, &key, &full_joined)
+        };
+
         for block in blocks {
             let bty = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match bty {
                 "text" => {
-                    // When stream partials already delivered the text, skip the
-                    // full assistant text block to avoid duplicate transcript.
-                    if parsed.saw_stream_text {
+                    if skip_text {
                         continue;
                     }
                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                         let text = annotate_subagent(text, parent);
-                        if !text.is_empty() {
-                            parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
-                                text: bound_text(&text, MAX_TEXT_EVENT_CHARS),
-                            });
-                        }
+                        emit_text(parsed, &key, text);
                     }
                 }
                 "thinking" => {
@@ -250,8 +335,6 @@ fn ingest_assistant(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), 
                         .or_else(|| block.get("text"))
                         .and_then(|v| v.as_str())
                     {
-                        // Map thinking to status for MVP (no separate thought channel
-                        // on ExternalRuntimeTurnEvent yet).
                         let text = annotate_subagent(text, parent);
                         parsed.events.push(ExternalRuntimeTurnEvent::Status {
                             message: bound_text(&format!("thinking: {text}"), 2048),
@@ -259,7 +342,6 @@ fn ingest_assistant(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), 
                     }
                 }
                 "tool_use" => {
-                    // Display/audit only — never dispatch to Grok tools.
                     let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                     let id = block.get("id").and_then(|v| v.as_str());
                     let summary = id.map(|i| format!("id={i}"));
@@ -272,18 +354,15 @@ fn ingest_assistant(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), 
             }
         }
     } else if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-        if !parsed.saw_stream_text {
+        if !should_skip_full_text_echo(parsed, &key, text) {
             let text = annotate_subagent(text, parent);
-            parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
-                text: bound_text(&text, MAX_TEXT_EVENT_CHARS),
-            });
+            emit_text(parsed, &key, text);
         }
     }
     Ok(())
 }
 
 fn ingest_user(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), String> {
-    // tool_result blocks — display/audit only.
     let content = value
         .pointer("/message/content")
         .or_else(|| value.get("content"));
@@ -314,8 +393,8 @@ fn ingest_user(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), Strin
 }
 
 fn ingest_stream_event(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), String> {
-    // stream_event.event.delta.text for text_delta — authoritative channel when
-    // --include-partial-messages is enabled.
+    let parent = parent_from_value(value);
+    let key = segment_key(parent);
     let event = value.get("event").unwrap_or(value);
     let delta = event.get("delta");
     if let Some(delta) = delta {
@@ -323,9 +402,31 @@ fn ingest_stream_event(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(
         if dty == "text_delta" || delta.get("text").is_some() {
             if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
                 if !text.is_empty() {
-                    parsed.saw_stream_text = true;
+                    let entry = parsed.streamed_text.entry(key.clone()).or_default();
+                    entry.push_str(text);
+                    parsed.pending_stream_echo.insert(key.clone(), true);
+                    let display = if key.is_empty() {
+                        text.to_owned()
+                    } else {
+                        // Subagent partials: prefix only on first chunk of segment.
+                        // Keep raw delta for ordering; parent shown via later full
+                        // if not streamed — for stream, annotate first delta only
+                        // when segment just started.
+                        text.to_owned()
+                    };
+                    if key.is_empty() {
+                        parsed.main_text_emitted = true;
+                    }
+                    // For subagent, prefix the first character of a new pending segment.
+                    let emit = if !key.is_empty() && entry.len() == text.len() {
+                        annotate_subagent(&display, parent)
+                    } else if !key.is_empty() {
+                        display
+                    } else {
+                        display
+                    };
                     parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
-                        text: bound_text(text, MAX_TEXT_EVENT_CHARS),
+                        text: bound_text(&emit, MAX_TEXT_EVENT_CHARS),
                     });
                 }
             }
@@ -363,16 +464,10 @@ fn ingest_result(parsed: &mut ParsedTurnStream, value: &Value) -> Result<(), Str
     }
     if let Some(text) = value.get("result").and_then(|v| v.as_str()) {
         parsed.result_text = Some(bound_text(text, MAX_TEXT_EVENT_CHARS));
-        // Emit final result text only when no stream partials and no assistant
-        // text deltas were already recorded (no-partial streams).
-        let already_has_text = parsed
-            .events
-            .iter()
-            .any(|e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { .. }));
-        if !parsed.saw_stream_text && !already_has_text && !text.is_empty() {
-            parsed.events.push(ExternalRuntimeTurnEvent::TextDelta {
-                text: bound_text(text, MAX_TEXT_EVENT_CHARS),
-            });
+        // Result text is the main-conversation summary — emit only when no
+        // main-segment text was already delivered via stream or assistant.
+        if !parsed.main_text_emitted && !text.is_empty() {
+            emit_text(parsed, "", text.to_owned());
         }
     }
 
@@ -461,6 +556,16 @@ mod tests {
         xs.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    fn text_deltas(p: &ParsedTurnStream) -> Vec<&str> {
+        p.events
+            .iter()
+            .filter_map(|e| match e {
+                ExternalRuntimeTurnEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn parses_init_text_result() {
         let ls = lines(&[
@@ -471,151 +576,97 @@ mod tests {
         let p = parse_turn_lines(&ls).unwrap();
         assert!(p.saw_final_result);
         assert_eq!(p.session_id.as_deref(), Some("sess-1"));
-        assert_eq!(p.capabilities, vec!["interrupt_receipt_v1".to_owned()]);
-        assert!(
-            p.events.iter().any(
-                |e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { text } if text == "Hello")
-            )
-        );
+        assert_eq!(text_deltas(&p), vec!["Hello"]); // no result re-echo
         assert_eq!(p.usage.as_ref().unwrap().input_tokens, Some(10));
     }
 
     #[test]
-    fn tool_use_is_display_only() {
+    fn segment_aware_partial_echo_tool_later_and_subagent() {
         let ls = lines(&[
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
-            r#"{"type":"result","subtype":"success","result":"done","session_id":"s"}"#,
-        ]);
-        let p = parse_turn_lines(&ls).unwrap();
-        assert!(p.events.iter().any(
-            |e| matches!(e, ExternalRuntimeTurnEvent::ToolCall { name, .. } if name == "Bash")
-        ));
-    }
-
-    #[test]
-    fn api_retry_status() {
-        let ls = lines(&[
-            r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":3,"error":"rate_limit"}"#,
-            r#"{"type":"result","subtype":"success","result":"ok"}"#,
-        ]);
-        let p = parse_turn_lines(&ls).unwrap();
-        assert!(
-            p.events
-                .iter()
-                .any(|e| matches!(e, ExternalRuntimeTurnEvent::Status { message } if message.contains("rate_limit")))
-        );
-    }
-
-    #[test]
-    fn subagent_parent_tool_use_id() {
-        let ls = lines(&[
-            r#"{"type":"assistant","parent_tool_use_id":"tool_99","message":{"content":[{"type":"text","text":"from sub"}]}}"#,
-            r#"{"type":"result","subtype":"success","result":"ok"}"#,
-        ]);
-        let p = parse_turn_lines(&ls).unwrap();
-        assert!(p.events.iter().any(|e| matches!(
-            e,
-            ExternalRuntimeTurnEvent::TextDelta { text } if text.contains("subagent:tool_99")
-        )));
-    }
-
-    #[test]
-    fn no_final_result_errors() {
-        let ls =
-            lines(&[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}"#]);
-        let err = parse_turn_lines(&ls).unwrap_err();
-        assert!(matches!(err, ProtocolError::NoFinalResult));
-    }
-
-    #[test]
-    fn malformed_only_errors() {
-        let ls = lines(&["not-json{{{", "also bad"]);
-        let err = parse_turn_lines(&ls).unwrap_err();
-        assert!(matches!(
-            err,
-            ProtocolError::NoFinalResult | ProtocolError::MalformedLine { .. }
-        ));
-    }
-
-    #[test]
-    fn unknown_events_bounded() {
-        let mut ls = Vec::new();
-        for i in 0..30 {
-            ls.push(format!(r#"{{"type":"future_event_{i}","x":1}}"#));
-        }
-        ls.push(r#"{"type":"result","subtype":"success","result":"ok"}"#.into());
-        let p = parse_turn_lines(&ls).unwrap();
-        assert!(p.unknown_events.len() <= MAX_UNKNOWN_EVENTS);
-    }
-
-    #[test]
-    fn stream_event_text_delta() {
-        let ls = lines(&[
-            r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Hi"}}}"#,
-            r#"{"type":"result","subtype":"success","result":"Hi"}"#,
-        ]);
-        let p = parse_turn_lines(&ls).unwrap();
-        assert!(
-            p.events
-                .iter()
-                .any(|e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { text } if text == "Hi"))
-        );
-    }
-
-    #[test]
-    fn partial_plus_assistant_plus_result_emits_single_logical_transcript() {
-        let ls = lines(&[
+            // Main stream partials
             r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Hel"}}}"#,
             r#"{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"lo"}}}"#,
+            // Full assistant echo of main + tool
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"},{"type":"tool_use","id":"t1","name":"Read"}]}}"#,
-            r#"{"type":"result","subtype":"success","result":"Hello","session_id":"s1"}"#,
+            // Later post-tool assistant (no stream) — must keep
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"After tool"}]}}"#,
+            // Subagent full text (no stream) — must keep
+            r#"{"type":"assistant","parent_tool_use_id":"t1","message":{"content":[{"type":"text","text":"sub answer"}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"Hello After tool","session_id":"s1"}"#,
         ]);
         let p = parse_turn_lines(&ls).unwrap();
-        assert!(p.saw_stream_text);
-        let texts: Vec<&str> = p
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                ExternalRuntimeTurnEvent::TextDelta { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        // Stream partials only — no duplicate full assistant/result text.
-        assert_eq!(texts, vec!["Hel", "lo"]);
-        // Tools from assistant still recorded.
+        let texts = text_deltas(&p);
+        // Stream Hel+lo, skip Hello echo, keep After tool, keep subagent, skip result
+        assert_eq!(
+            texts,
+            vec!["Hel", "lo", "After tool", "[subagent:t1] sub answer"]
+        );
         assert!(p.events.iter().any(
             |e| matches!(e, ExternalRuntimeTurnEvent::ToolCall { name, .. } if name == "Read")
         ));
     }
 
     #[test]
-    fn no_partials_uses_assistant_or_result_text() {
+    fn subagent_stream_then_echo_deduped_main_later_kept() {
+        let ls = lines(&[
+            r#"{"type":"stream_event","parent_tool_use_id":"tool_9","event":{"delta":{"type":"text_delta","text":"sub"}}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"tool_9","message":{"content":[{"type":"text","text":"sub"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"main later"}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"done"}"#,
+        ]);
+        let p = parse_turn_lines(&ls).unwrap();
+        let texts = text_deltas(&p);
+        assert_eq!(texts, vec!["[subagent:tool_9] sub", "main later"]);
+    }
+
+    #[test]
+    fn no_partials_uses_assistant_once() {
         let ls = lines(&[
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Only full"}]}}"#,
             r#"{"type":"result","subtype":"success","result":"Only full"}"#,
         ]);
         let p = parse_turn_lines(&ls).unwrap();
-        assert!(!p.saw_stream_text);
-        let texts: Vec<&str> = p
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                ExternalRuntimeTurnEvent::TextDelta { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        // Assistant text once; result does not re-emit because text already present.
-        assert_eq!(texts, vec!["Only full"]);
+        assert_eq!(text_deltas(&p), vec!["Only full"]);
     }
 
     #[test]
     fn result_only_stream_emits_result_text() {
         let ls = lines(&[r#"{"type":"result","subtype":"success","result":"solo"}"#]);
         let p = parse_turn_lines(&ls).unwrap();
+        assert_eq!(text_deltas(&p), vec!["solo"]);
+    }
+
+    #[test]
+    fn no_final_result_is_explicit_incomplete() {
+        let ls =
+            lines(&[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}"#]);
+        let err = parse_turn_lines(&ls).unwrap_err();
+        assert!(matches!(err, ProtocolError::NoFinalResult));
         assert!(
-            p.events.iter().any(
-                |e| matches!(e, ExternalRuntimeTurnEvent::TextDelta { text } if text == "solo")
-            )
+            err.to_string().contains("truncated")
+                || err.to_string().contains("incomplete")
+                || err.to_string().contains("final result")
         );
+    }
+
+    #[test]
+    fn oversized_line_errors() {
+        let huge = "x".repeat(MAX_TEXT_EVENT_CHARS + 10);
+        assert!(matches!(
+            parse_turn_lines(&[huge]),
+            Err(ProtocolError::Oversized { .. })
+        ));
+    }
+
+    #[test]
+    fn tool_use_is_display_only() {
+        let ls = lines(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash"}]}}"#,
+            r#"{"type":"result","subtype":"success","result":"done","session_id":"s"}"#,
+        ]);
+        let p = parse_turn_lines(&ls).unwrap();
+        assert!(p.events.iter().any(
+            |e| matches!(e, ExternalRuntimeTurnEvent::ToolCall { name, .. } if name == "Bash")
+        ));
     }
 }

@@ -35,6 +35,13 @@ pub struct ExternalRuntimeError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_kind: Option<ExternalAgentKind>,
+    /// Best-effort partial envelope on cancel (session pointer / version / caps).
+    /// Not serialized into ACP error data (no raw NDJSON).
+    #[serde(skip)]
+    pub partial_envelope: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+    /// Partial normalized events observed before cancel (display only).
+    #[serde(skip)]
+    pub partial_events: Vec<ExternalRuntimeTurnEvent>,
 }
 
 impl ExternalRuntimeError {
@@ -45,6 +52,38 @@ impl ExternalRuntimeError {
                 ExternalAgentKind::ClaudeCli => EXTERNAL_RUNTIME_UNAVAILABLE_MESSAGE.to_owned(),
             },
             agent_kind: Some(agent_kind),
+            partial_envelope: None,
+            partial_events: Vec::new(),
+        }
+    }
+
+    /// Cancelled turn with optional best-effort envelope for resume.
+    pub fn cancelled(
+        agent_kind: ExternalAgentKind,
+        message: impl Into<String>,
+        partial_envelope: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+        partial_events: Vec<ExternalRuntimeTurnEvent>,
+    ) -> Self {
+        Self {
+            kind: ExternalRuntimeErrorKind::Cancelled,
+            message: message.into(),
+            agent_kind: Some(agent_kind),
+            partial_envelope,
+            partial_events,
+        }
+    }
+
+    pub fn new(
+        kind: ExternalRuntimeErrorKind,
+        message: impl Into<String>,
+        agent_kind: Option<ExternalAgentKind>,
+    ) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            agent_kind,
+            partial_envelope: None,
+            partial_events: Vec::new(),
         }
     }
 

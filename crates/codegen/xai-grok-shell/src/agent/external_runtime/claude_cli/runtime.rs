@@ -50,15 +50,15 @@ impl ClaudeCliRuntime {
         if !gates::claude_cli_feature_compiled() {
             return ExternalRuntimeError::unavailable(ExternalAgentKind::ClaudeCli);
         }
-        ExternalRuntimeError {
-            kind: ExternalRuntimeErrorKind::Unavailable,
-            message: format!(
+        ExternalRuntimeError::new(
+            ExternalRuntimeErrorKind::Unavailable,
+            format!(
                 "Claude Agent CLI runtime is disabled. Set {}=1 (or true) to opt in \
                  for development builds that include the claude-cli-runtime feature.",
                 gates::CLAUDE_CLI_ENV_OPT_IN
             ),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
-        }
+            Some(ExternalAgentKind::ClaudeCli),
+        )
     }
 
     fn ensure_gates() -> Result<(), ExternalRuntimeError> {
@@ -132,47 +132,79 @@ fn map_discovery_error(e: ClaudeCliDiscoveryError) -> ExternalRuntimeError {
         ClaudeCliDiscoveryError::ProbeFailed { .. }
         | ClaudeCliDiscoveryError::VersionParse { .. } => ExternalRuntimeErrorKind::Unavailable,
     };
-    ExternalRuntimeError {
-        kind,
-        message,
-        agent_kind: Some(ExternalAgentKind::ClaudeCli),
-    }
+    ExternalRuntimeError::new(kind, message, Some(ExternalAgentKind::ClaudeCli))
 }
 
 fn map_process_error(e: TurnProcessError) -> ExternalRuntimeError {
     match e {
-        TurnProcessError::Cancelled => ExternalRuntimeError {
-            kind: ExternalRuntimeErrorKind::Cancelled,
-            message: "Claude Agent CLI turn was cancelled".into(),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
-        },
-        TurnProcessError::Spawn(m) => ExternalRuntimeError {
-            kind: ExternalRuntimeErrorKind::Transport,
-            message: format!("failed to spawn Claude CLI: {m}"),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
-        },
-        other => ExternalRuntimeError {
-            kind: ExternalRuntimeErrorKind::Transport,
-            message: other.to_string(),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
-        },
+        TurnProcessError::Cancelled => ExternalRuntimeError::cancelled(
+            ExternalAgentKind::ClaudeCli,
+            "Claude Agent CLI turn was cancelled",
+            None,
+            Vec::new(),
+        ),
+        TurnProcessError::Spawn(m) => ExternalRuntimeError::new(
+            ExternalRuntimeErrorKind::Transport,
+            format!("failed to spawn Claude CLI: {m}"),
+            Some(ExternalAgentKind::ClaudeCli),
+        ),
+        other => ExternalRuntimeError::new(
+            ExternalRuntimeErrorKind::Transport,
+            other.to_string(),
+            Some(ExternalAgentKind::ClaudeCli),
+        ),
     }
 }
 
 fn map_protocol_error(e: ProtocolError) -> ExternalRuntimeError {
-    ExternalRuntimeError {
-        kind: ExternalRuntimeErrorKind::Transport,
-        message: e.to_string(),
-        agent_kind: Some(ExternalAgentKind::ClaudeCli),
-    }
+    ExternalRuntimeError::new(
+        ExternalRuntimeErrorKind::Transport,
+        e.to_string(),
+        Some(ExternalAgentKind::ClaudeCli),
+    )
 }
 
-fn cancelled_error(msg: &str) -> ExternalRuntimeError {
-    ExternalRuntimeError {
-        kind: ExternalRuntimeErrorKind::Cancelled,
-        message: msg.into(),
-        agent_kind: Some(ExternalAgentKind::ClaudeCli),
+fn cancelled_with_partial(
+    msg: &str,
+    base: &ExternalRuntimeEnvelope,
+    d: &ClaudeCliDiscovery,
+    session_id: Option<String>,
+    lines: &[String],
+) -> ExternalRuntimeError {
+    let partial = protocol::parse_turn_lines_allow_incomplete(lines);
+    let mut env = base.clone();
+    if let Some(sid) = partial.session_id.or(session_id) {
+        env.session_pointer = Some(sid);
     }
+    env.observed_version = Some(
+        partial
+            .version
+            .clone()
+            .unwrap_or_else(|| d.version.to_string()),
+    );
+    if !partial.capabilities.is_empty() {
+        env.capabilities = partial.capabilities.clone();
+    }
+    if let Some(model) = partial.model {
+        env.selected_model = Some(model);
+    }
+    env.usage = partial.usage.clone();
+    let pointer = env.session_pointer.clone();
+    let version = env.observed_version.clone();
+    let caps = env.capabilities.clone();
+    let events = partial.events;
+    let env = match env.validated() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            // Minimal pointer-only envelope if full validation fails.
+            let mut e = base.clone();
+            e.session_pointer = pointer;
+            e.observed_version = version;
+            e.capabilities = caps;
+            e.validated().ok()
+        }
+    };
+    ExternalRuntimeError::cancelled(ExternalAgentKind::ClaudeCli, msg, env, events)
 }
 
 #[async_trait]
@@ -205,10 +237,12 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         env.cwd = Some(request.cwd);
         env.worktree_identity = request.worktree_identity;
         env.session_pointer = None;
-        env.validated().map_err(|e| ExternalRuntimeError {
-            kind: ExternalRuntimeErrorKind::InvalidRequest,
-            message: e.to_string(),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
+        env.validated().map_err(|e| {
+            ExternalRuntimeError::new(
+                ExternalRuntimeErrorKind::InvalidRequest,
+                e.to_string(),
+                Some(ExternalAgentKind::ClaudeCli),
+            )
         })
     }
 
@@ -218,25 +252,27 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
     ) -> Result<ExternalRuntimeEnvelope, ExternalRuntimeError> {
         let d = self.ensure_discovery().await?;
         if envelope.kind != ExternalAgentKind::ClaudeCli {
-            return Err(ExternalRuntimeError {
-                kind: ExternalRuntimeErrorKind::InvalidRequest,
-                message: "envelope kind is not claude_cli".into(),
-                agent_kind: Some(ExternalAgentKind::ClaudeCli),
-            });
+            return Err(ExternalRuntimeError::new(
+                ExternalRuntimeErrorKind::InvalidRequest,
+                "envelope kind is not claude_cli",
+                Some(ExternalAgentKind::ClaudeCli),
+            ));
         }
         let mut env = envelope.clone();
         env.observed_version = Some(d.version.to_string());
         if env.session_pointer.as_ref().is_none_or(|s| s.is_empty()) {
-            return Err(ExternalRuntimeError {
-                kind: ExternalRuntimeErrorKind::InvalidRequest,
-                message: "cannot resume Claude CLI session without a session pointer".into(),
-                agent_kind: Some(ExternalAgentKind::ClaudeCli),
-            });
+            return Err(ExternalRuntimeError::new(
+                ExternalRuntimeErrorKind::InvalidRequest,
+                "cannot resume Claude CLI session without a session pointer",
+                Some(ExternalAgentKind::ClaudeCli),
+            ));
         }
-        env.validated().map_err(|e| ExternalRuntimeError {
-            kind: ExternalRuntimeErrorKind::InvalidRequest,
-            message: e.to_string(),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
+        env.validated().map_err(|e| {
+            ExternalRuntimeError::new(
+                ExternalRuntimeErrorKind::InvalidRequest,
+                e.to_string(),
+                Some(ExternalAgentKind::ClaudeCli),
+            )
         })
     }
 
@@ -294,16 +330,27 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         let outcome = match outcome {
             Ok(o) => o,
             Err(TurnProcessError::Cancelled) => {
-                return Err(cancelled_error("Claude Agent CLI turn was cancelled"));
+                return Err(cancelled_with_partial(
+                    "Claude Agent CLI turn was cancelled",
+                    envelope,
+                    &d,
+                    session_id,
+                    &[],
+                ));
             }
             Err(e) => return Err(map_process_error(e)),
         };
 
-        // Single terminal for cancellation: always ExternalRuntimeErrorKind::Cancelled.
+        // Single terminal for cancellation: always ExternalRuntimeErrorKind::Cancelled
+        // with best-effort partial envelope (session pointer from system/init).
         // Never Ok(EndTurn) / Completed.
         if outcome.cancelled || outcome.exit_code == Some(143) || outcome.exit_signal == Some(15) {
-            return Err(cancelled_error(
+            return Err(cancelled_with_partial(
                 "Claude Agent CLI turn was cancelled (SIGTERM/143)",
+                envelope,
+                &d,
+                session_id,
+                &outcome.lines,
             ));
         }
 
@@ -327,10 +374,12 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
         }
         env.result = parsed.result.clone();
         env.usage = parsed.usage.clone();
-        let env = env.validated().map_err(|e| ExternalRuntimeError {
-            kind: ExternalRuntimeErrorKind::InvalidRequest,
-            message: e.to_string(),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
+        let env = env.validated().map_err(|e| {
+            ExternalRuntimeError::new(
+                ExternalRuntimeErrorKind::InvalidRequest,
+                e.to_string(),
+                Some(ExternalAgentKind::ClaudeCli),
+            )
         })?;
 
         if let Some(code) = outcome.exit_code {
@@ -340,9 +389,9 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
                     .as_ref()
                     .is_some_and(|r| r.status == "error" || r.status == "error_during_execution")
             {
-                return Err(ExternalRuntimeError {
-                    kind: ExternalRuntimeErrorKind::Other,
-                    message: parsed
+                return Err(ExternalRuntimeError::new(
+                    ExternalRuntimeErrorKind::Other,
+                    parsed
                         .events
                         .iter()
                         .find_map(|e| match e {
@@ -350,8 +399,8 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
                             _ => None,
                         })
                         .unwrap_or_else(|| format!("Claude CLI exited with status {code}")),
-                    agent_kind: Some(ExternalAgentKind::ClaudeCli),
-                });
+                    Some(ExternalAgentKind::ClaudeCli),
+                ));
             }
         }
 
@@ -437,17 +486,50 @@ pub async fn auth_status_for_ui(
     let meta_path = executable.clone();
     // Lightweight identity check via validate only (no prior discovery).
     discovery::validate_executable_path(&meta_path).map_err(map_discovery_error)?;
-    auth::query_auth_status(&executable)
-        .await
-        .map_err(|e| ExternalRuntimeError {
-            kind: match e {
+    auth::query_auth_status(&executable).await.map_err(|e| {
+        ExternalRuntimeError::new(
+            match e {
                 auth::ClaudeCliAuthError::Timeout => ExternalRuntimeErrorKind::Transport,
                 auth::ClaudeCliAuthError::ProbeFailed { .. }
                 | auth::ClaudeCliAuthError::Unparseable => ExternalRuntimeErrorKind::Auth,
             },
-            message: e.to_string(),
-            agent_kind: Some(ExternalAgentKind::ClaudeCli),
-        })
+            e.to_string(),
+            Some(ExternalAgentKind::ClaudeCli),
+        )
+    })
+}
+
+/// Bounded async probe for catalog/UI bootstrap when gates are open.
+/// Updates [`crate::agent::external_runtime::probe_cache`]. Safe to call from
+/// provider refresh paths; does not block pure sync catalog resolve.
+pub async fn bootstrap_probe_if_gated() {
+    if !gates::claude_cli_both_gates_open() {
+        return;
+    }
+    let runtime = ClaudeCliRuntime::from_env_path();
+    match runtime.probe().await {
+        Ok(caps) => {
+            if let Some(v) = caps.version {
+                probe_cache::record_probe_ok(v);
+            } else {
+                probe_cache::record_probe_ok("unknown");
+            }
+        }
+        Err(e) => {
+            probe_cache::record_probe_failed(e.message);
+        }
+    }
+}
+
+impl ClaudeCliRuntime {
+    fn from_env_path() -> Self {
+        let configured = std::env::var(discovery::CLAUDE_CLI_PATH_ENV)
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        Self::new(configured)
+    }
 }
 
 /// Public min version constant re-export for status strings.

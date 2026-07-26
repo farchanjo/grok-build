@@ -1315,6 +1315,9 @@ impl ProviderManager {
                     }
                 }
             }
+            // Bootstrap experimental Claude Agent CLI probe when gated (async,
+            // does not require Anthropic API key). Updates probe_cache for catalog.
+            crate::agent::external_runtime::bootstrap_claude_cli_probe_if_gated().await;
         };
         let refresh_codex = async {
             match self.refresh_codex_catalog().await {

@@ -652,3 +652,212 @@ async fn process_group_required_spawns_ok_for_fake() {
     })
     .await;
 }
+
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn process_rejects_invalid_utf8_stdout() {
+    with_opt_in_async(|| async {
+        let dir = tempfile::tempdir().unwrap();
+        // Emit invalid UTF-8 on stdout then exit.
+        let script = r#"#!/bin/sh
+if [ "$1" = "--version" ] || echo "$@" | grep -q -- '--version'; then echo "2.1.250"; exit 0; fi
+# printf raw bytes (invalid UTF-8)
+printf '\xff\xfe invalid\n'
+exit 0
+"#;
+        let fake = write_fake_claude(dir.path(), script);
+        let plan = ClaudeCliTurnArgv {
+            executable: fake,
+            prompt: "x".into(),
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            session_id: None,
+            resume_session: None,
+            cwd: Some(dir.path().to_path_buf()),
+        }
+        .build_plan();
+        let err = process::run_turn_process(
+            &plan,
+            &ProcessLimits {
+                startup: Duration::from_secs(5),
+                idle: Duration::from_secs(5),
+                turn: Duration::from_secs(10),
+                shutdown_grace: Duration::from_millis(300),
+                max_line_bytes: 1024 * 1024,
+                max_stdout_bytes: 8 * 1024 * 1024,
+                max_stderr_bytes: 64 * 1024,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("invalid UTF-8 must fail");
+        assert!(
+            matches!(err, process::TurnProcessError::InvalidUtf8),
+            "got {err:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn process_rejects_oversized_stdout_line() {
+    with_opt_in_async(|| async {
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "2.1.250"; exit 0; fi
+done
+# One huge line without newline until end
+python3 -c 'print("x"*20000)'
+exit 0
+"#;
+        let fake = write_fake_claude(dir.path(), script);
+        let plan = ClaudeCliTurnArgv {
+            executable: fake,
+            prompt: "x".into(),
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            session_id: None,
+            resume_session: None,
+            cwd: Some(dir.path().to_path_buf()),
+        }
+        .build_plan();
+        let err = process::run_turn_process(
+            &plan,
+            &ProcessLimits {
+                startup: Duration::from_secs(5),
+                idle: Duration::from_secs(5),
+                turn: Duration::from_secs(10),
+                shutdown_grace: Duration::from_millis(300),
+                max_line_bytes: 1024, // small cap
+                max_stdout_bytes: 8 * 1024 * 1024,
+                max_stderr_bytes: 64 * 1024,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("oversized line must fail");
+        assert!(
+            matches!(err, process::TurnProcessError::LineTooLarge { .. }),
+            "got {err:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn cancel_after_init_persists_session_pointer_for_resume() {
+    with_opt_in_async(|| async {
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "2.1.250"; exit 0; fi
+done
+echo '{"type":"system","subtype":"init","session_id":"resume-me-001","model":"sonnet","capabilities":["interrupt_receipt_v1"]}'
+while true; do sleep 1; done
+"#;
+        let fake = write_fake_claude(dir.path(), script);
+        let limits = ProcessLimits {
+            startup: Duration::from_secs(5),
+            idle: Duration::from_secs(30),
+            turn: Duration::from_secs(60),
+            shutdown_grace: Duration::from_millis(400),
+            max_line_bytes: 1024 * 1024,
+            max_stdout_bytes: 8 * 1024 * 1024,
+            max_stderr_bytes: 64 * 1024,
+        };
+        let runtime = std::sync::Arc::new(ClaudeCliRuntime::new(Some(fake.clone())).with_limits(limits.clone()));
+        let env = runtime
+            .start(ExternalStartRequest {
+                cwd: dir.path().display().to_string(),
+                worktree_identity: None,
+                selected_model: Some("sonnet".into()),
+                reasoning_effort: None,
+                token_budget: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime_turn = runtime.clone();
+        let env_turn = env.clone();
+        let join = tokio::spawn(async move {
+            runtime_turn
+                .turn(
+                    &env_turn,
+                    ExternalTurnRequest {
+                        prompt: "x".into(),
+                        selected_model: None,
+                        reasoning_effort: None,
+                        token_budget: None,
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        runtime.cancel(&env).await.unwrap();
+        let err = join.await.unwrap().expect_err("must cancel");
+        assert_eq!(err.kind, ExternalRuntimeErrorKind::Cancelled);
+        let partial = err.partial_envelope.expect("partial envelope on cancel");
+        assert_eq!(
+            partial.session_pointer.as_deref(),
+            Some("resume-me-001"),
+            "session pointer from system/init must be persisted for --resume"
+        );
+
+        // Next turn plan should use --resume with that pointer.
+        let plan = ClaudeCliTurnArgv {
+            executable: fake,
+            prompt: "continue".into(),
+            model: None,
+            effort: None,
+            max_budget_usd: None,
+            session_id: None,
+            resume_session: partial.session_pointer.clone(),
+            cwd: Some(dir.path().to_path_buf()),
+        }
+        .build_plan();
+        let args: Vec<String> = plan
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|w| w[0] == "--resume" && w[1] == "resume-me-001"));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn bootstrap_probe_success_makes_catalog_selectable() {
+    probe_cache::clear_probe_cache();
+    unsafe {
+        std::env::set_var(gates::CLAUDE_CLI_ENV_OPT_IN, "1");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let fake = write_fake_claude(dir.path(), "#!/bin/sh\necho '2.1.250'\n");
+    unsafe {
+        std::env::set_var(discovery::CLAUDE_CLI_PATH_ENV, fake.display().to_string());
+    }
+    assert!(!capability_matrix::claude_cli_selectable());
+    super::claude_cli::runtime::bootstrap_probe_if_gated().await;
+    assert!(
+        capability_matrix::claude_cli_selectable(),
+        "after bootstrap probe success entry is selectable"
+    );
+    // Failure path
+    probe_cache::clear_probe_cache();
+    unsafe {
+        std::env::set_var(discovery::CLAUDE_CLI_PATH_ENV, "/nonexistent/claude-binary");
+    }
+    super::claude_cli::runtime::bootstrap_probe_if_gated().await;
+    assert!(!capability_matrix::claude_cli_selectable());
+    unsafe {
+        std::env::remove_var(gates::CLAUDE_CLI_ENV_OPT_IN);
+        std::env::remove_var(discovery::CLAUDE_CLI_PATH_ENV);
+    }
+    probe_cache::clear_probe_cache();
+}

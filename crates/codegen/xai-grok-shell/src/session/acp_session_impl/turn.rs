@@ -14,11 +14,11 @@ impl SessionActor {
             return Ok(());
         }
         let kind = backend.external_kind().ok_or_else(|| {
-            crate::agent::external_runtime::ExternalRuntimeError {
-                kind: crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
-                message: "external execution backend selected without a kind".into(),
-                agent_kind: None,
-            }
+            crate::agent::external_runtime::ExternalRuntimeError::new(
+                crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                "external execution backend selected without a kind",
+                None,
+            )
         })?;
         let runtime = crate::agent::external_runtime::default_registry()
             .create(kind)
@@ -47,11 +47,11 @@ impl SessionActor {
 
         let backend = self.execution_backend.get();
         let kind = backend.external_kind().ok_or_else(|| {
-            crate::agent::external_runtime::ExternalRuntimeError {
-                kind: crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
-                message: "external execution backend selected without a kind".into(),
-                agent_kind: None,
-            }
+            crate::agent::external_runtime::ExternalRuntimeError::new(
+                crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                "external execution backend selected without a kind",
+                None,
+            )
             .into_acp_error()
         })?;
 
@@ -65,11 +65,11 @@ impl SessionActor {
         // Unsupported host operations for external turns (explicit report).
         if self.goal_harness_enabled() {
             return Err(
-                crate::agent::external_runtime::ExternalRuntimeError {
-                    kind: crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
-                    message: "Goals are not supported on Claude Agent CLI sessions. Start /new with a native model.".into(),
-                    agent_kind: Some(kind),
-                }
+                crate::agent::external_runtime::ExternalRuntimeError::new(
+                    crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                    "Goals are not supported on Claude Agent CLI sessions. Start /new with a native model.",
+                    Some(kind),
+                )
                 .into_acp_error(),
             );
         }
@@ -133,6 +133,51 @@ impl SessionActor {
             Ok(o) => o,
             Err(e) => {
                 if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
+                    // Persist best-effort partial envelope (session pointer) so
+                    // the next turn can --resume; emit any partial events.
+                    for event in &e.partial_events {
+                        match event {
+                            ExternalRuntimeTurnEvent::TextDelta { text } if !text.is_empty() => {
+                                self.send_update(
+                                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                        acp::ContentBlock::Text(acp::TextContent::new(
+                                            text.clone(),
+                                        )),
+                                    )),
+                                    None,
+                                )
+                                .await;
+                            }
+                            ExternalRuntimeTurnEvent::Status { message } => {
+                                self.send_update(
+                                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                        acp::ContentBlock::Text(acp::TextContent::new(format!(
+                                            "[{message}]"
+                                        ))),
+                                    )),
+                                    None,
+                                )
+                                .await;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(partial) = e.partial_envelope.clone() {
+                        if let Ok(validated) = partial.clone().validated() {
+                            *self.external_runtime.borrow_mut() = Some(validated.clone());
+                            let model_id = acp::ModelId::new(selected_model.clone());
+                            let agent_name = self.agent.borrow().definition().name.clone();
+                            let _ = self.notifications.persistence_tx.send(
+                                crate::session::persistence::PersistenceMsg::CurrentModel {
+                                    model_id,
+                                    agent_name: Some(agent_name),
+                                    reasoning_effort: None,
+                                    execution_backend: Some(backend),
+                                    external_runtime: Some(Some(validated)),
+                                },
+                            );
+                        }
+                    }
                     return Ok(crate::session::commands::PromptTurnOk {
                         stop_reason: acp::StopReason::Cancelled,
                         total_tokens: 0,

@@ -18,6 +18,19 @@ mod types;
 #[cfg(feature = "claude-cli-runtime")]
 pub mod claude_cli;
 
+/// Schedule a bounded Claude CLI probe when compile+env gates are open.
+/// No-op without the feature. Safe for provider refresh / catalog bootstrap.
+pub async fn bootstrap_claude_cli_probe_if_gated() {
+    #[cfg(feature = "claude-cli-runtime")]
+    {
+        claude_cli::runtime::bootstrap_probe_if_gated().await;
+    }
+    #[cfg(not(feature = "claude-cli-runtime"))]
+    {
+        // Feature off: leave probe cache empty (catalog stays unselectable).
+    }
+}
+
 pub use envelope::{
     EnvelopeValidationError, ExternalResultMetadata, ExternalRuntimeEnvelope,
     ExternalUsageMetadata, MAX_ENVELOPE_JSON_BYTES, MAX_SESSION_POINTER_LEN,
@@ -201,6 +214,36 @@ workflow. No API keys. Persistent input / permission bridge / MCP deferred to a 
             .filter(|d| d.experimental && d.provider_peer_id == Some("anthropic"))
     }
 
+    /// Catalog model id for the experimental Claude Agent CLI entry.
+    pub const CLAUDE_CLI_CATALOG_MODEL_ID: &str = "claude-agent-cli";
+
+    /// When compile+env gates are open, ensure a catalog row exists for the
+    /// experimental Claude CLI (still hidden until probe succeeds).
+    /// Does not block or probe — call [`super::bootstrap_claude_cli_probe_if_gated`]
+    /// from async provider refresh for the probe bootstrap.
+    pub fn inject_claude_cli_catalog_entry_if_gated(
+        catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+    ) {
+        if !claude_cli_gates_open() {
+            return;
+        }
+        if catalog.contains_key(CLAUDE_CLI_CATALOG_MODEL_ID) {
+            return;
+        }
+        let mut entry = crate::agent::config::ModelEntry::fallback(
+            CLAUDE_CLI_CATALOG_MODEL_ID,
+            &Default::default(),
+        );
+        entry.info.execution_backend =
+            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+        entry.info.hidden = true;
+        entry.info.user_selectable = false;
+        entry.info.description = Some(format!(
+            "{CLAUDE_CLI_UI_LABEL}. {CLAUDE_CLI_UI_LIMITATIONS}"
+        ));
+        catalog.insert(CLAUDE_CLI_CATALOG_MODEL_ID.to_owned(), entry);
+    }
+
     /// Apply catalog visibility from the live probe cache (non-blocking).
     ///
     /// Claude CLI entries stay hidden / non-selectable until gates open **and**
@@ -208,6 +251,7 @@ workflow. No API keys. Persistent input / permission bridge / MCP deferred to a 
     pub fn apply_catalog_visibility(
         catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
     ) {
+        inject_claude_cli_catalog_entry_if_gated(catalog);
         let probe_ok = crate::agent::external_runtime::probe_cache::probe_cache_ok();
         apply_catalog_visibility_with_probe(catalog, Some(probe_ok));
     }

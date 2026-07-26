@@ -4794,6 +4794,11 @@ async fn run_provider_operation(
                         }
                         ProviderKind::Anthropic => {
                             let _ = manager.refresh_anthropic_catalog().await;
+                            // Async probe bootstrap for experimental Claude Agent CLI
+                            // (gated; does not use Anthropic API key).
+                            xai_grok_shell::agent::external_runtime::bootstrap_claude_cli_probe_if_gated(
+                            )
+                            .await;
                         }
                         ProviderKind::Xai | ProviderKind::Configured(_) => unreachable!(),
                     }
