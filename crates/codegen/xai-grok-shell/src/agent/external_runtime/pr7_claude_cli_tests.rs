@@ -702,44 +702,29 @@ fn auto_label_is_not_always_approve() {
 #[test]
 fn session_aware_factory_attaches_permission_handle_and_capability_mode() {
     use super::claude_cli::runtime::ClaudeCliRuntimeFactory;
-    use crate::agent::external_runtime::{
-        ExternalRuntimeFactory, ExternalRuntimeSessionContext, default_registry,
-    };
+    use crate::agent::external_runtime::ExternalRuntimeSessionContext;
     use xai_grok_workspace::permission::PermissionHandle;
 
     let factory = ClaudeCliRuntimeFactory::new(None);
 
-    // Plan → ReadOnly + handle. Factory returns Arc<dyn>; mirror binding
-    // via the same builder path create_for_session uses.
-    let ctx = ExternalRuntimeSessionContext::new(PermissionHandle::allow_all(), "plan", false);
-    let dyn_rt = factory.create_for_session(ExternalAgentKind::ClaudeCli, &ctx);
-    assert_eq!(dyn_rt.kind(), ExternalAgentKind::ClaudeCli);
-
-    // Explicit builder checks (same inputs as create_for_session).
-    let plan_rt = ClaudeCliRuntime::new(None)
-        .with_capability_mode(ClaudeCapabilityMode::from_host_label(&ctx.host_mode_label))
-        .with_permission_handle(ctx.permission_handle.clone())
-        .with_always_approve_opt_in(ctx.always_approve);
+    // Inspect the **factory-created** runtime (typed path) — not a rebuild.
+    let plan_ctx = ExternalRuntimeSessionContext::new(PermissionHandle::allow_all(), "read_only");
+    let plan_rt = factory.create_for_session_concrete(&plan_ctx);
     assert!(plan_rt.test_has_permission_handle());
     assert_eq!(
         plan_rt.test_capability_mode(),
         ClaudeCapabilityMode::ReadOnly
     );
+    assert!(!plan_rt.test_always_approve_opt_in());
+    assert!(
+        plan_rt.test_permission_handle().is_some(),
+        "live PermissionHandle must be attached"
+    );
 
-    // Yolo / always_approve → AlwaysApprove allowlist + handle (still brokered).
-    let ctx_yolo =
-        ExternalRuntimeSessionContext::new(PermissionHandle::allow_all(), "default", true);
-    let yolo_dyn = factory.create_for_session(ExternalAgentKind::ClaudeCli, &ctx_yolo);
-    assert_eq!(yolo_dyn.kind(), ExternalAgentKind::ClaudeCli);
-    let mode = if ctx_yolo.always_approve {
-        ClaudeCapabilityMode::AlwaysApprove
-    } else {
-        ClaudeCapabilityMode::from_host_label(&ctx_yolo.host_mode_label)
-    };
-    let yolo_rt = ClaudeCliRuntime::new(None)
-        .with_capability_mode(mode)
-        .with_permission_handle(ctx_yolo.permission_handle.clone())
-        .with_always_approve_opt_in(ctx_yolo.always_approve);
+    // Effective always_approve key → AlwaysApprove allowlist + handle.
+    let yolo_ctx =
+        ExternalRuntimeSessionContext::new(PermissionHandle::allow_all(), "always_approve");
+    let yolo_rt = factory.create_for_session_concrete(&yolo_ctx);
     assert!(yolo_rt.test_has_permission_handle());
     assert_eq!(
         yolo_rt.test_capability_mode(),
@@ -747,16 +732,53 @@ fn session_aware_factory_attaches_permission_handle_and_capability_mode() {
     );
     assert!(yolo_rt.test_always_approve_opt_in());
 
-    // auto → All (not AlwaysApprove); registry session path returns ClaudeCli.
-    let ctx_auto = ExternalRuntimeSessionContext::new(PermissionHandle::allow_all(), "auto", false);
-    let auto_dyn = default_registry()
-        .create_for_session(ExternalAgentKind::ClaudeCli, &ctx_auto)
-        .expect("registry");
-    assert_eq!(auto_dyn.kind(), ExternalAgentKind::ClaudeCli);
+    // auto/all → All (not AlwaysApprove).
+    let auto_ctx = ExternalRuntimeSessionContext::new(PermissionHandle::allow_all(), "all");
+    let auto_rt = factory.create_for_session_concrete(&auto_ctx);
+    assert_eq!(auto_rt.test_capability_mode(), ClaudeCapabilityMode::All);
+    assert!(!auto_rt.test_always_approve_opt_in());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn plan_plus_yolo_factory_is_read_only_and_broker_denies_write() {
+    use super::claude_cli::permission_bridge::{
+        ClaudePermissionRequest, ClaudePermissionResponse, PolicyPermissionBroker,
+    };
+    use super::claude_cli::runtime::ClaudeCliRuntimeFactory;
+    use crate::agent::external_runtime::ExternalRuntimeSessionContext;
+    use xai_grok_workspace::permission::PermissionHandle;
+
+    // SessionActor would pass effective_mode = "read_only" even when yolo is on.
+    let factory = ClaudeCliRuntimeFactory::new(None);
+    let ctx = ExternalRuntimeSessionContext::new(PermissionHandle::allow_all(), "read_only");
+    let rt = factory.create_for_session_concrete(&ctx);
     assert_eq!(
-        ClaudeCapabilityMode::from_host_label("auto"),
-        ClaudeCapabilityMode::All
+        rt.test_capability_mode(),
+        ClaudeCapabilityMode::ReadOnly,
+        "plan+yolo must not expose AlwaysApprove allowlist"
     );
+    // Attached handle reaches broker; capability precheck denies Edit/Bash.
+    let handle = rt.test_permission_handle().expect("handle attached");
+    let broker = PolicyPermissionBroker::new(rt.test_capability_mode()).with_permission(handle);
+    for tool in ["Edit", "Write", "Bash"] {
+        let r = broker
+            .decide(
+                ClaudePermissionRequest {
+                    tool_use_id: Some("t".into()),
+                    tool_name: tool.into(),
+                    input: json!({}),
+                    decision_reason: None,
+                    blocked_path: None,
+                    agent_id: None,
+                },
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            matches!(r, ClaudePermissionResponse::Deny { .. }),
+            "{tool} must be denied under plan+yolo ReadOnly: {r:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

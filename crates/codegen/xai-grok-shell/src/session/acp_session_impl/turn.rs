@@ -3,33 +3,45 @@
 use super::*;
 
 impl SessionActor {
-    /// Host capability label for external runtimes (plan / yolo / auto / default).
+    /// Single effective capability mode key for external runtimes.
     ///
-    /// Plan stays read-only. Yolo/always-approve selects the broad allowlist
-    /// (still brokered). Default and auto map to brokered all mode.
-    pub(crate) fn external_host_mode_label(&self) -> String {
+    /// Precedence (security): plan / read-only **always wins** over yolo.
+    /// `plan + yolo=true` → `read_only` (never always_approve). When not in
+    /// plan, yolo → `always_approve` (broad allowlist, still brokered). Auto
+    /// and default → `all`.
+    ///
+    /// This key is used both to configure the runtime and as the retained-runtime
+    /// compatibility key (mode changes force recreate + shutdown).
+    pub(crate) fn external_effective_mode_key(&self) -> String {
         use crate::session::plan_mode::PlanModeState;
         let plan_active = self.plan_mode.lock().state() != PlanModeState::Inactive
             || *self.current_prompt_mode.lock() == PromptMode::Plan;
+        // Plan always wins over yolo / always-approve.
         if plan_active {
-            return "plan".to_owned();
+            return "read_only".to_owned();
         }
         if self.permissions.is_yolo_mode() {
-            return "yolo".to_owned();
+            return "always_approve".to_owned();
         }
         if self.permissions.is_auto_mode() {
-            return "auto".to_owned();
+            return "all".to_owned();
         }
         match *self.current_prompt_mode.lock() {
             PromptMode::Ask => "read_only".to_owned(),
-            PromptMode::Plan => "plan".to_owned(),
-            PromptMode::Agent => "default".to_owned(),
+            PromptMode::Plan => "read_only".to_owned(),
+            // Default/agent: brokered all mode.
+            PromptMode::Agent => "all".to_owned(),
         }
     }
 
+    /// Back-compat alias used by older tests.
+    pub(crate) fn external_host_mode_label(&self) -> String {
+        self.external_effective_mode_key()
+    }
+
     /// Obtain or create the session-scoped external runtime (PermissionHandle +
-    /// live capability mode). Reuses one Arc across turns when kind and mode
-    /// label are unchanged.
+    /// effective capability mode). Reuses one Arc across turns when kind and
+    /// effective mode are unchanged.
     pub(crate) async fn ensure_external_agent_runtime(
         &self,
         kind: crate::agent::execution_backend::ExternalAgentKind,
@@ -41,23 +53,20 @@ impl SessionActor {
             ExternalRuntimeSessionContext, RetainedExternalAgentRuntime, default_registry,
         };
 
-        let mode_label = self.external_host_mode_label();
+        let effective_mode = self.external_effective_mode_key();
         {
             let guard = self.external_agent_runtime.borrow();
             if let Some(retained) = guard.as_ref() {
-                if retained.kind == kind && retained.mode_label == mode_label {
+                if retained.kind == kind && retained.effective_mode == effective_mode {
                     return Ok(retained.runtime.clone());
                 }
             }
         }
-        // Kind or capability mode changed: shut down prior instance first.
+        // Kind or effective capability mode changed: shut down prior instance.
         self.shutdown_external_agent_runtime().await;
 
-        let ctx = ExternalRuntimeSessionContext::new(
-            self.permissions.clone(),
-            mode_label.clone(),
-            self.permissions.is_yolo_mode(),
-        );
+        let ctx =
+            ExternalRuntimeSessionContext::new(self.permissions.clone(), effective_mode.clone());
         let runtime = default_registry()
             .create_for_session(kind, &ctx)
             .ok_or_else(|| {
@@ -65,7 +74,7 @@ impl SessionActor {
             })?;
         *self.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
             kind,
-            mode_label,
+            effective_mode,
             runtime.clone(),
         ));
         Ok(runtime)
@@ -217,14 +226,19 @@ impl SessionActor {
         let outcome = match turn_result {
             Ok(o) => o,
             Err(e) => {
-                if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
-                    // Persist best-effort partial envelope (session pointer) so
-                    // the next turn can --resume; emit any partial events.
-                    let mut partial_text = String::new();
-                    for event in &e.partial_events {
-                        match event {
-                            ExternalRuntimeTurnEvent::TextDelta { text } if !text.is_empty() => {
-                                partial_text.push_str(text);
+                // Persist text-only partial assistant content exactly once on
+                // *any* failure that carried TextDelta events (not only Cancelled).
+                // Never include ToolCall/Status/Error display text; never Grok tools.
+                let partial_text = Self::collect_external_text_deltas(&e.partial_events);
+                if !partial_text.is_empty() {
+                    // Stream TextDeltas for cancelled turns (user-visible partial).
+                    if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled
+                    {
+                        for event in &e.partial_events {
+                            if let ExternalRuntimeTurnEvent::TextDelta { text } = event {
+                                if text.is_empty() {
+                                    continue;
+                                }
                                 self.send_update(
                                     acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
                                         acp::ContentBlock::Text(acp::TextContent::new(
@@ -235,25 +249,29 @@ impl SessionActor {
                                 )
                                 .await;
                             }
-                            ExternalRuntimeTurnEvent::Status { message } => {
-                                self.send_update(
-                                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                                        acp::ContentBlock::Text(acp::TextContent::new(format!(
-                                            "[{message}]"
-                                        ))),
-                                    )),
-                                    None,
-                                )
-                                .await;
-                            }
-                            _ => {}
                         }
                     }
-                    // Persist partial assistant text for replay/export/rewind.
-                    if !partial_text.is_empty() {
-                        self.chat_state_handle
-                            .push_assistant_response(ConversationItem::assistant(partial_text));
+                    self.chat_state_handle
+                        .push_assistant_response(ConversationItem::assistant(partial_text));
+                }
+
+                if e.kind == crate::agent::external_runtime::ExternalRuntimeErrorKind::Cancelled {
+                    // Status/error display only for cancel path (not chat-state).
+                    for event in &e.partial_events {
+                        if let ExternalRuntimeTurnEvent::Status { message } = event {
+                            self.send_update(
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    acp::ContentBlock::Text(acp::TextContent::new(format!(
+                                        "[{message}]"
+                                    ))),
+                                )),
+                                None,
+                            )
+                            .await;
+                        }
                     }
+                    // Persist best-effort partial envelope (session pointer) so
+                    // the next turn can --resume.
                     if let Some(partial) = e.partial_envelope.clone() {
                         if let Ok(validated) = partial.clone().validated() {
                             *self.external_runtime.borrow_mut() = Some(validated.clone());
@@ -399,6 +417,23 @@ impl SessionActor {
         );
 
         ok_end_turn(tokens, None)
+    }
+
+    /// Collect TextDelta only from external events (exactly once for chat-state).
+    /// Excludes ToolCall / Status / Error display strings.
+    pub(crate) fn collect_external_text_deltas(
+        events: &[crate::agent::external_runtime::ExternalRuntimeTurnEvent],
+    ) -> String {
+        use crate::agent::external_runtime::ExternalRuntimeTurnEvent;
+        let mut out = String::new();
+        for event in events {
+            if let ExternalRuntimeTurnEvent::TextDelta { text } = event {
+                if !text.is_empty() {
+                    out.push_str(text);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -779,9 +814,11 @@ impl SessionActor {
                     | BuiltinAction::DeepResearch { .. }
                     | BuiltinAction::WorkflowLaunch { .. }
                     | BuiltinAction::WorkflowManage { .. }
+                    | BuiltinAction::Dream
+                    | BuiltinAction::FlushMemory
                         if self.execution_backend.get().is_external() =>
                     {
-                        // Reject before any goal/workflow setup or mutation.
+                        // Reject before any goal/workflow/memory/dream mutation.
                         xai_grok_telemetry::session_ctx::log_event(slash_used);
                         self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                         let msg = format!(

@@ -54,6 +54,22 @@ impl ClaudeCapabilityMode {
             _ => Self::ReadOnly, // unknown → most restrictive
         }
     }
+
+    /// Derive the **single effective** capability mode for a session.
+    ///
+    /// Precedence (security): plan / read-only **always wins** over yolo.
+    /// `plan + yolo=true` → [`Self::ReadOnly`] (never AlwaysApprove).
+    /// When not read-only, yolo upgrades to [`Self::AlwaysApprove`] (still brokered).
+    pub fn derive_effective(host_label: &str, yolo: bool) -> Self {
+        let base = Self::from_host_label(host_label);
+        if matches!(base, Self::ReadOnly) {
+            return Self::ReadOnly;
+        }
+        if yolo {
+            return Self::AlwaysApprove;
+        }
+        base
+    }
 }
 
 /// Claude built-in tools considered read/search only.
@@ -212,6 +228,32 @@ mod tests {
         // Broader allowlist, still no bypass flag semantics here.
         let allow = tools_allowlist(ClaudeCapabilityMode::AlwaysApprove);
         assert!(allow.contains(&"Bash"));
+    }
+
+    #[test]
+    fn plan_plus_yolo_stays_read_only() {
+        assert_eq!(
+            ClaudeCapabilityMode::derive_effective("plan", true),
+            ClaudeCapabilityMode::ReadOnly
+        );
+        assert_eq!(
+            ClaudeCapabilityMode::derive_effective("read_only", true),
+            ClaudeCapabilityMode::ReadOnly
+        );
+        // Non-plan host labels may upgrade under yolo.
+        assert_eq!(
+            ClaudeCapabilityMode::derive_effective("default", true),
+            ClaudeCapabilityMode::AlwaysApprove
+        );
+        assert_eq!(
+            ClaudeCapabilityMode::derive_effective("auto", false),
+            ClaudeCapabilityMode::All
+        );
+        // Write tools must not appear under plan+yolo.
+        let allow = tools_allowlist(ClaudeCapabilityMode::derive_effective("plan", true));
+        assert!(!allow.contains(&"Edit"));
+        assert!(!allow.contains(&"Bash"));
+        assert!(!allow.contains(&"Write"));
     }
 
     #[test]

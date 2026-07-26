@@ -127,20 +127,21 @@ pub struct ExternalTurnOutcome {
 #[derive(Clone)]
 pub struct RetainedExternalAgentRuntime {
     pub kind: ExternalAgentKind,
-    /// Host mode label snapshotted at create (plan / auto / yolo / default).
-    pub mode_label: String,
+    /// Effective capability mode key snapshotted at create (after plan>yolo
+    /// precedence). Mode changes force recreate + shutdown of the prior Arc.
+    pub effective_mode: String,
     pub runtime: Arc<dyn ExternalAgentRuntime>,
 }
 
 impl RetainedExternalAgentRuntime {
     pub fn new(
         kind: ExternalAgentKind,
-        mode_label: impl Into<String>,
+        effective_mode: impl Into<String>,
         runtime: Arc<dyn ExternalAgentRuntime>,
     ) -> Self {
         Self {
             kind,
-            mode_label: mode_label.into(),
+            effective_mode: effective_mode.into(),
             runtime,
         }
     }

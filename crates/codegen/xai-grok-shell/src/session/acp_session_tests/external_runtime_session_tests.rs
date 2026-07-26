@@ -1,6 +1,6 @@
 //! Production-path integration tests for session-scoped external runtimes:
-//! PermissionHandle + capability mode via session-aware factory, Arc reuse
-//! across turns, shutdown on session end, and chat-state assistant text.
+//! effective capability mode (plan > yolo), Arc reuse, mode-change replacement,
+//! shutdown, chat-state assistant text (success + partial failure), /dream gate.
 //!
 //! Uses a recording fake runtime injected into SessionActor (no real Claude
 //! binary). Feature-off builds still exercise the composition path.
@@ -10,12 +10,14 @@ use super::*;
 use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
 use crate::agent::external_runtime::{
     ExternalAgentRuntime, ExternalRuntimeCapabilities, ExternalRuntimeEnvelope,
-    ExternalRuntimeError, ExternalRuntimeStatus, ExternalRuntimeTurnEvent, ExternalStartRequest,
-    ExternalTurnOutcome, ExternalTurnRequest, RetainedExternalAgentRuntime,
+    ExternalRuntimeError, ExternalRuntimeErrorKind, ExternalRuntimeStatus,
+    ExternalRuntimeTurnEvent, ExternalStartRequest, ExternalTurnOutcome, ExternalTurnRequest,
+    RetainedExternalAgentRuntime,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Recording fake external runtime for session composition tests.
 struct RecordingExternalRuntime {
@@ -25,6 +27,9 @@ struct RecordingExternalRuntime {
     shutdown_count: AtomicUsize,
     cancel_count: AtomicUsize,
     turn_text: String,
+    /// When set, `turn` fails with this error kind and carries partial events.
+    fail_kind: Mutex<Option<ExternalRuntimeErrorKind>>,
+    partial_events: Mutex<Vec<ExternalRuntimeTurnEvent>>,
 }
 
 impl RecordingExternalRuntime {
@@ -36,7 +41,19 @@ impl RecordingExternalRuntime {
             shutdown_count: AtomicUsize::new(0),
             cancel_count: AtomicUsize::new(0),
             turn_text: turn_text.into(),
+            fail_kind: Mutex::new(None),
+            partial_events: Mutex::new(Vec::new()),
         })
+    }
+
+    fn with_failure(
+        fail_kind: ExternalRuntimeErrorKind,
+        partial: Vec<ExternalRuntimeTurnEvent>,
+    ) -> Arc<Self> {
+        let r = Self::new("");
+        *r.fail_kind.lock().unwrap() = Some(fail_kind);
+        *r.partial_events.lock().unwrap() = partial;
+        r
     }
 }
 
@@ -66,7 +83,7 @@ impl ExternalAgentRuntime for RecordingExternalRuntime {
         env.token_budget = request.token_budget;
         env.validated().map_err(|e| {
             ExternalRuntimeError::new(
-                crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                ExternalRuntimeErrorKind::InvalidRequest,
                 e.to_string(),
                 Some(self.kind),
             )
@@ -86,6 +103,17 @@ impl ExternalAgentRuntime for RecordingExternalRuntime {
         _request: ExternalTurnRequest,
     ) -> Result<ExternalTurnOutcome, ExternalRuntimeError> {
         self.turn_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(kind) = *self.fail_kind.lock().unwrap() {
+            let partial = self.partial_events.lock().unwrap().clone();
+            let mut err = ExternalRuntimeError::new(
+                kind,
+                "recording runtime forced failure",
+                Some(self.kind),
+            );
+            err.partial_events = partial;
+            err.partial_envelope = Some(envelope.clone());
+            return Err(err);
+        }
         let mut env = envelope.clone();
         if env.session_pointer.is_none() {
             env.session_pointer = Some("fake-sess".into());
@@ -129,7 +157,7 @@ impl ExternalAgentRuntime for RecordingExternalRuntime {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn host_mode_label_plan_yolo_auto_default() {
+async fn effective_mode_plan_wins_over_yolo() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -142,17 +170,25 @@ async fn host_mode_label_plan_yolo_auto_default() {
                 actor.permissions.is_yolo_mode(),
                 "test PermissionHandle::allow_all is yolo"
             );
-            assert_eq!(actor.external_host_mode_label(), "yolo");
+            assert_eq!(
+                actor.external_effective_mode_key(),
+                "always_approve",
+                "yolo alone → always_approve allowlist key"
+            );
 
             // Plan mode wins over yolo (read-only).
             *actor.current_prompt_mode.lock() = PromptMode::Plan;
             actor.plan_mode.lock().enter_pending();
-            assert_eq!(actor.external_host_mode_label(), "plan");
+            assert_eq!(
+                actor.external_effective_mode_key(),
+                "read_only",
+                "plan + yolo must be read_only"
+            );
 
             // Clear plan → yolo surfaces again.
             actor.plan_mode.lock().user_exit(false);
             *actor.current_prompt_mode.lock() = PromptMode::Agent;
-            assert_eq!(actor.external_host_mode_label(), "yolo");
+            assert_eq!(actor.external_effective_mode_key(), "always_approve");
         })
         .await;
 }
@@ -170,7 +206,7 @@ async fn two_turns_reuse_same_runtime_instance() {
             ));
 
             let fake = RecordingExternalRuntime::new("hello");
-            let mode = actor.external_host_mode_label();
+            let mode = actor.external_effective_mode_key();
             *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
                 ExternalAgentKind::ClaudeCli,
                 mode,
@@ -189,11 +225,64 @@ async fn two_turns_reuse_same_runtime_instance() {
                 Arc::ptr_eq(&r1, &r2),
                 "preflight/turn must reuse the same Arc"
             );
-            // Same concrete instance as injected.
             assert!(Arc::ptr_eq(
                 &(fake.clone() as Arc<dyn ExternalAgentRuntime>),
                 &r1
             ));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn effective_mode_change_recreates_and_shuts_down_prior_runtime() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                ExternalAgentKind::ClaudeCli,
+            ));
+
+            // Start under yolo → always_approve.
+            assert_eq!(actor.external_effective_mode_key(), "always_approve");
+            let yolo_fake = RecordingExternalRuntime::new("yolo-rt");
+            *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
+                ExternalAgentKind::ClaudeCli,
+                "always_approve",
+                yolo_fake.clone() as Arc<dyn ExternalAgentRuntime>,
+            ));
+
+            let r1 = actor
+                .ensure_external_agent_runtime(ExternalAgentKind::ClaudeCli)
+                .await
+                .expect("yolo retained");
+            assert!(Arc::ptr_eq(
+                &(yolo_fake.clone() as Arc<dyn ExternalAgentRuntime>),
+                &r1
+            ));
+            assert_eq!(yolo_fake.shutdown_count.load(Ordering::SeqCst), 0);
+
+            // Enter plan → effective mode read_only; prior runtime must shut down.
+            *actor.current_prompt_mode.lock() = PromptMode::Plan;
+            actor.plan_mode.lock().enter_pending();
+            assert_eq!(actor.external_effective_mode_key(), "read_only");
+
+            // ensure will try registry (may be unavailable stub) after shutting down yolo_fake.
+            let _ = actor
+                .ensure_external_agent_runtime(ExternalAgentKind::ClaudeCli)
+                .await;
+            assert_eq!(
+                yolo_fake.shutdown_count.load(Ordering::SeqCst),
+                1,
+                "mode change must shutdown prior retained runtime"
+            );
+            // Retained slot either empty (if registry create failed) or new mode key.
+            if let Some(retained) = actor.external_agent_runtime.borrow().as_ref() {
+                assert_eq!(retained.effective_mode, "read_only");
+                assert!(!Arc::ptr_eq(&retained.runtime, &r1));
+            }
         })
         .await;
 }
@@ -213,7 +302,7 @@ async fn session_shutdown_calls_runtime_shutdown() {
             let fake = RecordingExternalRuntime::new("x");
             *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
                 ExternalAgentKind::ClaudeCli,
-                actor.external_host_mode_label(),
+                actor.external_effective_mode_key(),
                 fake.clone() as Arc<dyn ExternalAgentRuntime>,
             ));
 
@@ -228,7 +317,6 @@ async fn session_shutdown_calls_runtime_shutdown() {
                 actor.external_agent_runtime.borrow().is_none(),
                 "retained slot must be cleared"
             );
-            // Idempotent.
             actor.shutdown_external_agent_runtime().await;
             assert_eq!(fake.shutdown_count.load(Ordering::SeqCst), 1);
         })
@@ -251,7 +339,7 @@ async fn external_assistant_text_lands_in_chat_state_without_tool_calls() {
             let fake = RecordingExternalRuntime::new("external assistant reply");
             *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
                 ExternalAgentKind::ClaudeCli,
-                actor.external_host_mode_label(),
+                actor.external_effective_mode_key(),
                 fake.clone() as Arc<dyn ExternalAgentRuntime>,
             ));
 
@@ -278,11 +366,84 @@ async fn external_assistant_text_lands_in_chat_state_without_tool_calls() {
                 "assistant text missing: {:?}",
                 assistant.content
             );
-            // No Grok tool_calls from Claude tool events.
             assert!(
                 assistant.tool_calls.is_empty(),
                 "Claude tools must not become Grok tool_calls: {:?}",
                 assistant.tool_calls
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn partial_text_delta_persisted_on_non_cancelled_failure() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+            actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                ExternalAgentKind::ClaudeCli,
+            ));
+
+            let fake = RecordingExternalRuntime::with_failure(
+                ExternalRuntimeErrorKind::Transport,
+                vec![
+                    ExternalRuntimeTurnEvent::TextDelta {
+                        text: "partial hello".into(),
+                    },
+                    ExternalRuntimeTurnEvent::ToolCall {
+                        name: "Bash".into(),
+                        summary: Some("should not persist".into()),
+                    },
+                    ExternalRuntimeTurnEvent::Status {
+                        message: "status not in chat-state".into(),
+                    },
+                    ExternalRuntimeTurnEvent::Error {
+                        message: "err not in chat-state".into(),
+                    },
+                    ExternalRuntimeTurnEvent::TextDelta {
+                        text: " world".into(),
+                    },
+                ],
+            );
+            *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
+                ExternalAgentKind::ClaudeCli,
+                actor.external_effective_mode_key(),
+                fake.clone() as Arc<dyn ExternalAgentRuntime>,
+            ));
+
+            let len_before = actor.chat_state_handle.get_conversation_len().await;
+            let err = actor
+                .run_external_agent_turn("ext-fail-1", "hi")
+                .await
+                .expect_err("transport failure");
+            let _ = err;
+
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                conv.len() > len_before,
+                "partial TextDelta must land in chat-state on non-cancelled failure"
+            );
+            let last_assistant = conv.iter().rev().find_map(|item| match item {
+                ConversationItem::Assistant(a) => Some(a),
+                _ => None,
+            });
+            let assistant = last_assistant.expect("assistant item");
+            assert_eq!(
+                assistant.content.as_ref(),
+                "partial hello world",
+                "only TextDelta content, concatenated once"
+            );
+            assert!(assistant.tool_calls.is_empty());
+            assert!(
+                !assistant.content.contains("should not persist")
+                    && !assistant.content.contains("status not")
+                    && !assistant.content.contains("err not"),
+                "ToolCall/Status/Error display must not enter chat-state: {:?}",
+                assistant.content
             );
         })
         .await;
@@ -302,7 +463,7 @@ async fn switching_to_native_shuts_down_external_runtime() {
             let fake = RecordingExternalRuntime::new("x");
             *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
                 ExternalAgentKind::ClaudeCli,
-                actor.external_host_mode_label(),
+                actor.external_effective_mode_key(),
                 fake.clone() as Arc<dyn ExternalAgentRuntime>,
             ));
 
@@ -331,6 +492,35 @@ async fn switching_to_native_shuts_down_external_runtime() {
         .await;
 }
 
-// Suppress unused import warnings for AtomicBool when only AtomicUsize is used.
-#[allow(dead_code)]
-fn _keep_atomic_bool(_: &AtomicBool) {}
+#[tokio::test(flavor = "current_thread")]
+async fn dream_slash_rejected_on_external_backend_without_side_effects() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+            actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                ExternalAgentKind::ClaudeCli,
+            ));
+            let dream_before = actor.memory.dream_count.load(Ordering::Relaxed);
+
+            // Direct slash-exec path (bypasses external preflight).
+            let result = actor
+                .execute_builtin_slash_command(slash_commands::BuiltinAction::Dream)
+                .await
+                .expect("slash returns ok with unsupported message");
+            assert_eq!(result.stop_reason, acp::StopReason::EndTurn);
+
+            // Defense-in-depth on the dream entry point itself.
+            actor.run_dream_slash_command().await;
+
+            assert_eq!(
+                actor.memory.dream_count.load(Ordering::Relaxed),
+                dream_before,
+                "/dream must not run consolidation on external backend"
+            );
+        })
+        .await;
+}

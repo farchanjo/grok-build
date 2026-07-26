@@ -7,29 +7,27 @@ use std::sync::Arc;
 
 /// Session-bound inputs for constructing an external runtime.
 ///
-/// Carries the live [`PermissionHandle`] and host/session capability mode so
-/// production Claude CLI (and future backends) attach real policy without
-/// downcasting the runtime trait object.
+/// Carries the live [`PermissionHandle`] and the **single effective** capability
+/// mode (after plan-over-yolo precedence) so production Claude CLI attaches real
+/// policy without downcasting the runtime trait object.
 #[derive(Clone)]
 pub struct ExternalRuntimeSessionContext {
     /// Live session permission manager (PolicyDeny wins under yolo).
     pub permission_handle: xai_grok_workspace::permission::PermissionHandle,
-    /// Host mode label: `plan`, `auto`, `yolo` / `always-approve`, `default`, …
-    pub host_mode_label: String,
-    /// Explicit always-approve / yolo from the live permission handle.
-    pub always_approve: bool,
+    /// Final effective mode key after plan > yolo precedence
+    /// (`read_only`, `always_approve`, `all`, …). Used for both runtime
+    /// configuration and retained-runtime compatibility.
+    pub effective_mode: String,
 }
 
 impl ExternalRuntimeSessionContext {
     pub fn new(
         permission_handle: xai_grok_workspace::permission::PermissionHandle,
-        host_mode_label: impl Into<String>,
-        always_approve: bool,
+        effective_mode: impl Into<String>,
     ) -> Self {
         Self {
             permission_handle,
-            host_mode_label: host_mode_label.into(),
-            always_approve,
+            effective_mode: effective_mode.into(),
         }
     }
 }

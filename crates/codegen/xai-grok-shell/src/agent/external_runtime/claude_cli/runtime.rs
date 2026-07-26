@@ -288,6 +288,14 @@ impl ClaudeCliRuntime {
         self.permission_handle.is_some()
     }
 
+    /// Test-only: clone of the attached PermissionHandle (if any).
+    #[cfg(test)]
+    pub fn test_permission_handle(
+        &self,
+    ) -> Option<xai_grok_workspace::permission::PermissionHandle> {
+        self.permission_handle.clone()
+    }
+
     /// Test-only: always-approve opt-in flag (allowlist only; still brokered).
     #[cfg(test)]
     pub fn test_always_approve_opt_in(&self) -> bool {
@@ -862,6 +870,32 @@ impl ClaudeCliRuntimeFactory {
             .map(PathBuf::from);
         Self::new(configured)
     }
+
+    /// Build a session-bound Claude runtime from the **already-effective** mode
+    /// key on `ctx` (callers must apply plan>yolo precedence before create).
+    fn bind_session(
+        &self,
+        ctx: &crate::agent::external_runtime::ExternalRuntimeSessionContext,
+    ) -> ClaudeCliRuntime {
+        // effective_mode is the sole capability source — never re-upgrade via
+        // a separate yolo flag (plan+yolo must remain ReadOnly).
+        let mode = ClaudeCapabilityMode::from_host_label(&ctx.effective_mode);
+        let always_approve = matches!(mode, ClaudeCapabilityMode::AlwaysApprove);
+        ClaudeCliRuntime::new(self.configured_path.clone())
+            .with_capability_mode(mode)
+            .with_permission_handle(ctx.permission_handle.clone())
+            .with_always_approve_opt_in(always_approve)
+    }
+
+    /// Test-only typed create so callers can inspect attached handle/mode
+    /// without rebuilding a separate runtime.
+    #[cfg(test)]
+    pub fn create_for_session_concrete(
+        &self,
+        ctx: &crate::agent::external_runtime::ExternalRuntimeSessionContext,
+    ) -> Arc<ClaudeCliRuntime> {
+        Arc::new(self.bind_session(ctx))
+    }
 }
 
 impl ExternalRuntimeFactory for ClaudeCliRuntimeFactory {
@@ -881,22 +915,7 @@ impl ExternalRuntimeFactory for ClaudeCliRuntimeFactory {
         ctx: &crate::agent::external_runtime::ExternalRuntimeSessionContext,
     ) -> Arc<dyn ExternalAgentRuntime> {
         match kind {
-            ExternalAgentKind::ClaudeCli => {
-                let mode = ClaudeCapabilityMode::from_host_label(&ctx.host_mode_label);
-                // Yolo selects AlwaysApprove allowlist; still attach the live
-                // handle so PolicyDeny wins on every bridge decision.
-                let mode = if ctx.always_approve {
-                    ClaudeCapabilityMode::AlwaysApprove
-                } else {
-                    mode
-                };
-                Arc::new(
-                    ClaudeCliRuntime::new(self.configured_path.clone())
-                        .with_capability_mode(mode)
-                        .with_permission_handle(ctx.permission_handle.clone())
-                        .with_always_approve_opt_in(ctx.always_approve),
-                )
-            }
+            ExternalAgentKind::ClaudeCli => Arc::new(self.bind_session(ctx)),
         }
     }
 }

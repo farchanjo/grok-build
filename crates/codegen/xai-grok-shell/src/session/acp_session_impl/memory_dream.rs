@@ -173,6 +173,15 @@ impl SessionActor {
     pub(super) async fn run_dream_slash_command(&self) {
         use crate::session::memory::dream_lock::sessions_since;
 
+        // Defense in depth: external sessions never consolidate.
+        if self.execution_backend.get().is_external() {
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_EXTERNAL_SKIP: refusing /dream on external execution backend"
+            );
+            return;
+        }
+
         let Some((storage, lock, sessions_dir, sid8)) = self.dream_context() else {
             return;
         };
