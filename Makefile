@@ -13,6 +13,8 @@ export RUSTC_WRAPPER
 
 PACKAGE ?= xai-grok-pager-bin
 PROFILE ?= release-dist
+FEATURES ?=
+FEATURE_ARGS := $(if $(strip $(FEATURES)),--features $(FEATURES),)
 BINARY_NAME ?= xai-grok-pager
 ARTIFACT := $(abspath $(CARGO_TARGET_DIR))/$(PROFILE)/$(BINARY_NAME)
 
@@ -34,7 +36,7 @@ PYTHON3 ?= /usr/bin/python3
 .PHONY: build deploy deploy-binary deploy-wrapper verify help
 
 build:
-	$(CARGO) build --locked --jobs $(CARGO_BUILD_JOBS) --timings -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE)
+	$(CARGO) build --locked --jobs $(CARGO_BUILD_JOBS) --timings -p $(PACKAGE) --bin $(BINARY_NAME) --profile $(PROFILE) $(FEATURE_ARGS)
 
 deploy: deploy-binary
 	+$(MAKE) deploy-wrapper
@@ -166,6 +168,7 @@ verify:
 	done; \
 	/usr/bin/grep -Fqx 'export GROK_HOME="$${HOME}/.grok-prod"' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'export GROK_LEADER_SOCKET="$${GROK_HOME}/leader.sock"' "$(DEPLOY_WRAPPER)"; \
+	/usr/bin/grep -Fqx 'export GROK_CLAUDE_CLI_RUNTIME=1' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'export GROK_EXTERNAL_OTEL=1' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'export OTEL_METRICS_EXPORTER=otlp' "$(DEPLOY_WRAPPER)"; \
 	/usr/bin/grep -Fqx 'export OTEL_LOGS_EXPORTER=otlp' "$(DEPLOY_WRAPPER)"; \
@@ -207,6 +210,7 @@ verify:
 
 help:
 	@echo "make                 Build the optimized release-dist artifact"
+	@echo "make FEATURES=name   Build with an explicit Cargo feature (for example claude-cli-runtime)"
 	@echo "make deploy          Build/sign the binary and deploy it with the isolated wrapper"
 	@echo "make deploy-binary   Build, sign, back up, and deploy to $(DEPLOY_BINARY)"
 	@echo "make deploy-wrapper  Back up and deploy the wrapper to $(DEPLOY_WRAPPER)"

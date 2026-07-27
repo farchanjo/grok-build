@@ -33,6 +33,11 @@ fi
 export GROK_HOME="${HOME}/.grok-prod"
 export GROK_LEADER_SOCKET="${GROK_HOME}/leader.sock"
 
+# Enable the explicitly feature-compiled experimental Claude Agent CLI runtime.
+# The CLI still performs its official binary/version/subscription probes and
+# remains independent from the Anthropic API-key provider path.
+export GROK_CLAUDE_CLI_RUNTIME=1
+
 # Export content-redacted production usage telemetry to the dedicated Alloy
 # receiver. Pin the routing before Grok starts so ambient OTEL settings cannot
 # mix this profile with development or leak unrelated collector credentials.
