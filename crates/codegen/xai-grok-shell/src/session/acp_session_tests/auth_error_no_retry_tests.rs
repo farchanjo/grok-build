@@ -817,7 +817,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_api_key_method() {
 /// even if stale session state left an effort set on the chat-state config.
 #[tokio::test(flavor = "current_thread")]
 async fn reconstruct_full_config_strips_reasoning_effort_for_unsupported_model() {
-    use xai_grok_inference_types::ReasoningEffort;
+    use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortSelection};
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -843,6 +843,7 @@ async fn reconstruct_full_config_strips_reasoning_effort_for_unsupported_model()
                 api_base_url: None,
             };
             entry.info.supports_reasoning_effort = Some(false);
+            entry.info.reasoning_effort_selection = ReasoningEffortSelection::Unsupported;
             entry.info.reasoning_effort = Some(ReasoningEffort::High);
             actor.models_manager.insert_test_entry("test", entry);
 

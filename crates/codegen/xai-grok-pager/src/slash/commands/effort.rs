@@ -95,7 +95,6 @@ impl SlashCommand for EffortCommand {
 mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::slash::commands::effort_levels::EFFORT_LEVELS;
     use agent_client_protocol as acp;
     use std::sync::Arc;
     use xai_grok_shell::inference::types::ReasoningEffort;
@@ -114,7 +113,11 @@ mod tests {
 
     fn plain_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));
-        let info = acp::ModelInfo::new(id.clone(), name.to_string());
+        let info = acp::ModelInfo::new(id.clone(), name.to_string()).meta(
+            serde_json::json!({ "reasoningEffortSelection": "unsupported" })
+                .as_object()
+                .cloned(),
+        );
         (id, info)
     }
 
@@ -361,7 +364,10 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
-        assert_eq!(items.len(), EFFORT_LEVELS.len());
+        assert_eq!(
+            items.len(),
+            xai_grok_shell::inference::types::REASONING_EFFORT_LADDER_CANONICAL.len()
+        );
         assert_eq!(items[0].insert_text, "xhigh");
         assert_eq!(items[1].insert_text, "high");
         assert_eq!(items[1].display, "high (active)");

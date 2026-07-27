@@ -1304,6 +1304,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             provider,
             status,
+            claude_cli_status,
             repair,
         } => {
             use super::auth::strip_trailing_auth_error_blocks;
@@ -1323,6 +1324,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     return false;
                 };
                 state.set_status(&provider, status);
+                if let Some(cli_status) = claude_cli_status {
+                    state.set_claude_cli_status(cli_status);
+                }
                 true
             });
             if !applied && let Some(error) = fallback_error {

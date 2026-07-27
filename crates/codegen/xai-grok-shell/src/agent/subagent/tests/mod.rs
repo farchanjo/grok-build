@@ -2987,6 +2987,44 @@ fn make_background_request(
     (req, rx)
 }
 #[tokio::test]
+async fn invalid_reasoning_effort_fails_before_subagent_spawn() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use xai_grok_inference_types::{ReasoningEffortSelection, ReasoningEffortOption};
+
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let mut entry = ModelEntry::fallback("test", &EndpointsConfig::default());
+    entry.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
+    entry.info.reasoning_efforts = vec![ReasoningEffortOption {
+        id: "low".into(),
+        value: xai_grok_inference_types::ReasoningEffort::Low,
+        label: "Low".into(),
+        description: None,
+        default: true,
+    }];
+    ctx.models_manager.insert_test_entry("test", entry);
+    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
+    let gateway = test_gateway();
+    let (mut request, result_rx) = make_request("explore");
+    request.runtime_overrides.reasoning_effort = Some("max".into());
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway)).await;
+        })
+        .await;
+    let result = result_rx.await.expect("should receive validation failure");
+    assert!(!result.success);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Invalid reasoning_effort 'max'")),
+        "unexpected result: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn background_unknown_type_records_failure_completion() {
     let ctx = ctx_with_toggle(HashMap::new());
     let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
@@ -3616,6 +3654,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             reasoning_effort: None,
             supports_reasoning_effort: None,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: xai_grok_inference_types::ReasoningEffortSelection::Unknown,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,

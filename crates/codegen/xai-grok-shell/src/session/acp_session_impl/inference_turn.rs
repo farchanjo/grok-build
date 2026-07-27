@@ -589,14 +589,24 @@ impl SessionActor {
         // disk or a model switch that left an effort set on a now-unsupported
         // model.
         let reasoning_effort = match (cfg.reasoning_effort, resolved_entry) {
-            (Some(_), Some(entry)) if entry.info().supports_reasoning_effort == Some(false) => {
-                tracing::debug!(
-                    model = %cfg.model,
-                    "reconstruct_full_config: stripping reasoning_effort — model explicitly disclaims reasoning support",
-                );
-                None
-            }
-            (effort, _) => effort,
+            (Some(effort), Some(entry)) => match entry
+                .info()
+                .reasoning_effort_selection
+                .resolve_token(effort.as_str(), &entry.info().reasoning_efforts)
+            {
+                Ok(validated) => Some(validated),
+                Err(error) => {
+                    tracing::warn!(
+                        model = %cfg.model,
+                        effort = %effort,
+                        %error,
+                        "reconstruct_full_config: clearing stale or unsupported reasoning_effort",
+                    );
+                    None
+                }
+            },
+            (effort, None) => effort,
+            (None, _) => None,
         };
         let is_zai = resolved_entry.is_some_and(|entry| {
             entry.model_provider.as_ref().is_some_and(|provider| {

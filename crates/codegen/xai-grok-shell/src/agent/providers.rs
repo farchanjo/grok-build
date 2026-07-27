@@ -15,13 +15,13 @@ use super::model_providers::ModelProviderKind;
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_CACHE_FILE: &str = "codex_models_cache.json";
-const CODEX_CACHE_VERSION: u8 = 1;
+const CODEX_CACHE_VERSION: u8 = 2;
 const OPENAI_CACHE_FILE: &str = "openai_models_cache.json";
-const OPENAI_CACHE_VERSION: u8 = 1;
+const OPENAI_CACHE_VERSION: u8 = 2;
 const OPENROUTER_CACHE_FILE: &str = "openrouter_models_cache.json";
-const OPENROUTER_CACHE_VERSION: u8 = 1;
+const OPENROUTER_CACHE_VERSION: u8 = 2;
 const ANTHROPIC_CACHE_FILE: &str = "anthropic_models_cache.json";
-const ANTHROPIC_CACHE_VERSION: u8 = 1;
+const ANTHROPIC_CACHE_VERSION: u8 = 2;
 /// Default freshness window for the OpenRouter catalog cache. A stale cache is
 /// revalidated in the background while the picker/session keeps using the
 /// last-good models.
@@ -184,6 +184,14 @@ pub struct ProviderModelPreset {
     /// Opt-in Anthropic strict tool definitions (never default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    /// Normalized reasoning effort selection (additive to legacy bool/list/default fields).
+    /// - Unknown: no information available
+    /// - Unsupported: model does not support reasoning effort
+    /// - LegacyFallback: historical xhigh/high/medium/low menu
+    /// - Exact: explicit non-empty reasoning_efforts list
+    /// - Unrestricted: all canonical values (max/xhigh/high/medium/low/minimal/none)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<xai_grok_inference_types::ReasoningEffortSelection>,
 }
 
 /// Source of an OpenRouter model catalog. A cache is only used after an
@@ -350,6 +358,7 @@ impl ProviderManager {
     }
 
     pub fn presets() -> Vec<ProviderModelPreset> {
+        use xai_grok_inference_types::ReasoningEffortSelection;
         vec![
             ProviderModelPreset {
                 id: "openai-gpt-5.6-sol".to_owned(),
@@ -363,8 +372,17 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                reasoning_efforts: Vec::new(),
-                default_reasoning_effort: None,
+                // OpenAI Platform curated: exact menu none/low/medium/high/xhigh/max
+                reasoning_efforts: vec![
+                    "none".to_owned(),
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                    "max".to_owned(),
+                ],
+                default_reasoning_effort: Some("medium".to_owned()),
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
             },
@@ -380,8 +398,17 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                reasoning_efforts: Vec::new(),
-                default_reasoning_effort: None,
+                // OpenAI Platform curated: exact menu none/low/medium/high/xhigh/max
+                reasoning_efforts: vec![
+                    "none".to_owned(),
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                    "max".to_owned(),
+                ],
+                default_reasoning_effort: Some("medium".to_owned()),
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
             },
@@ -397,8 +424,17 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                reasoning_efforts: Vec::new(),
-                default_reasoning_effort: None,
+                // OpenAI Platform curated: exact menu none/low/medium/high/xhigh/max
+                reasoning_efforts: vec![
+                    "none".to_owned(),
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                    "max".to_owned(),
+                ],
+                default_reasoning_effort: Some("medium".to_owned()),
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
             },
@@ -414,8 +450,17 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                reasoning_efforts: Vec::new(),
-                default_reasoning_effort: None,
+                // OpenRouter Platform curated: exact menu none/low/medium/high/xhigh/max
+                reasoning_efforts: vec![
+                    "none".to_owned(),
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                    "max".to_owned(),
+                ],
+                default_reasoning_effort: Some("medium".to_owned()),
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
             },
@@ -431,8 +476,17 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                reasoning_efforts: Vec::new(),
-                default_reasoning_effort: None,
+                // OpenRouter Platform curated: exact menu none/low/medium/high/xhigh/max
+                reasoning_efforts: vec![
+                    "none".to_owned(),
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                    "max".to_owned(),
+                ],
+                default_reasoning_effort: Some("medium".to_owned()),
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
             },
@@ -452,15 +506,16 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                // Sonnet 5 effort ladder (docs 2026-07): low/medium/high/xhigh;
-                // product default is high.
+                // Sonnet 5 effort ladder (docs 2026-07): low/medium/high/xhigh/max
                 reasoning_efforts: vec![
                     "low".to_owned(),
                     "medium".to_owned(),
                     "high".to_owned(),
                     "xhigh".to_owned(),
+                    "max".to_owned(),
                 ],
                 default_reasoning_effort: Some("high".to_owned()),
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
             },
@@ -476,16 +531,16 @@ impl ProviderManager {
                 max_completion_tokens: Some(128_000),
                 supports_tools: true,
                 supports_reasoning_effort: true,
-                // Opus 5 documents low/medium/high/xhigh/max; surface xhigh as
-                // the top curated ladder step used by agent presets (max remains
-                // available via hand-written TOML if needed).
+                // Opus 5 effort ladder (docs 2026-07): low/medium/high/xhigh/max.
                 reasoning_efforts: vec![
                     "low".to_owned(),
                     "medium".to_owned(),
                     "high".to_owned(),
                     "xhigh".to_owned(),
+                    "max".to_owned(),
                 ],
                 default_reasoning_effort: Some("high".to_owned()),
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
             },
@@ -502,9 +557,10 @@ impl ProviderManager {
                 supports_tools: true,
                 // Haiku 4.5 supports extended thinking but does not document the
                 // full adaptive effort ladder used by Sonnet/Opus 5.
-                supports_reasoning_effort: true,
+                supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Unknown),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
             },
@@ -697,6 +753,7 @@ impl ProviderManager {
                         &preset.reasoning_efforts,
                         preset.default_reasoning_effort.as_deref(),
                     ),
+                    reasoning_effort_selection: preset.reasoning_effort_selection,
                     hidden: None,
                     supports_tools: Some(preset.supports_tools),
                     supports_native_schema: preset.supports_native_schema,
@@ -1347,15 +1404,48 @@ impl ProviderManager {
         );
     }
 
-    /// Persist the ChatGPT OAuth model allowlist when subscription auth is active.
+    /// Refresh the authenticated ChatGPT/Codex catalog. The account-aware live
+    /// response is authoritative only for the built-in allowlist; failures keep
+    /// the static product fallback available.
     pub async fn refresh_codex_catalog(&self) -> Result<Vec<ProviderModelPreset>, ProviderError> {
-        if crate::auth::chatgpt_oauth::status(&self.grok_home)
-            != crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected
-        {
+        use crate::auth::chatgpt_oauth;
+
+        if chatgpt_oauth::status(&self.grok_home) != chatgpt_oauth::ChatGptOAuthStatus::Connected {
             let _ = clear_codex_catalog_cache(&self.grok_home);
             return Ok(Vec::new());
         }
-        let presets = static_chatgpt_oauth_presets();
+        let fallback = static_chatgpt_oauth_presets();
+        let live = async {
+            let (token, account_id) = chatgpt_oauth::valid_access_token(&self.grok_home)
+                .await
+                .ok()??;
+            let url = format!(
+                "{}/models?client_version={}",
+                chatgpt_oauth::CODEX_RESPONSES_BASE_URL,
+                xai_grok_version::VERSION
+            );
+            let mut request = reqwest::Client::builder()
+                .timeout(CONNECTION_TIMEOUT)
+                .build()
+                .ok()?
+                .get(url)
+                .bearer_auth(token);
+            for (name, value) in chatgpt_oauth::oauth_extra_headers(account_id.as_deref()) {
+                request = request.header(name, value);
+            }
+            let body = request
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .bytes()
+                .await
+                .ok()?;
+            parse_codex_catalog(&body, &fallback).ok()
+        }
+        .await;
+        let presets = live.unwrap_or(fallback);
         save_codex_catalog_cache(&self.grok_home, &presets)
             .map_err(|_| ProviderError::CodexCatalogUnavailable)?;
         Ok(presets)
@@ -1455,6 +1545,7 @@ pub(crate) fn prefer_chatgpt_device_auth() -> bool {
 
 fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
     use crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL;
+    use xai_grok_inference_types::ReasoningEffortSelection;
     // Allowlisted ChatGPT subscription models (Codex OAuth backend).
     //
     // Context windows here are the **product** caps on
@@ -1469,42 +1560,173 @@ fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
     // Codex raw catalog window so auto-compact fires before the product
     // truncates mid-turn.
     //
-    // Tuple: (api_slug, label, context_window, max_completion_tokens)
-    const MODELS: &[(&str, &str, u64, u32)] = &[
+    // Tuple: (api_slug, label, context_window, max_completion_tokens, reasoning_efforts)
+    const MODELS: &[(&str, &str, u64, u32, &[&str])] = &[
         // Codex catalog: context_window / max_context_window = 372_000
-        ("gpt-5.6-sol", "GPT-5.6 Sol", 372_000, 128_000),
-        ("gpt-5.6-terra", "GPT-5.6 Terra", 372_000, 128_000),
-        ("gpt-5.6-luna", "GPT-5.6 Luna", 372_000, 128_000),
+        // GPT-5.6 models have full reasoning effort ladder (low/medium/high/xhigh/max)
+        // Default: Sol=low, Terra/Luna=medium
+        (
+            "gpt-5.6-sol",
+            "GPT-5.6 Sol",
+            372_000,
+            128_000,
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "gpt-5.6-terra",
+            "GPT-5.6 Terra",
+            372_000,
+            128_000,
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (
+            "gpt-5.6-luna",
+            "GPT-5.6 Luna",
+            372_000,
+            128_000,
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
         // Codex / OpenCode: 400k product context, ~272k typical input budget
-        ("gpt-5.5", "GPT-5.5", 400_000, 128_000),
-        ("gpt-5.4", "GPT-5.4", 400_000, 128_000),
-        ("gpt-5.4-mini", "GPT-5.4 Mini", 400_000, 128_000),
+        // GPT-5.5/5.4 have limited reasoning effort ladder (low/medium/high/xhigh)
+        (
+            "gpt-5.5",
+            "GPT-5.5",
+            400_000,
+            128_000,
+            &["low", "medium", "high", "xhigh"],
+        ),
+        (
+            "gpt-5.4",
+            "GPT-5.4",
+            400_000,
+            128_000,
+            &["low", "medium", "high", "xhigh"],
+        ),
+        (
+            "gpt-5.4-mini",
+            "GPT-5.4 Mini",
+            400_000,
+            128_000,
+            &["low", "medium", "high", "xhigh"],
+        ),
     ];
     MODELS
         .iter()
-        .map(|(model, label, ctx, max_out)| ProviderModelPreset {
-            id: format!("chatgpt-{model}"),
-            provider: ProviderId::OpenAi,
-            label: format!("{label} via ChatGPT"),
-            model: (*model).to_owned(),
-            base_url: Some(CODEX_RESPONSES_BASE_URL.to_owned()),
-            is_agent: false,
-            description: Some("ChatGPT subscription (OAuth)".to_owned()),
-            context_window: Some(*ctx),
-            max_completion_tokens: Some(*max_out),
-            supports_tools: true,
-            supports_reasoning_effort: true,
-            reasoning_efforts: vec![
-                "low".to_owned(),
-                "medium".to_owned(),
-                "high".to_owned(),
-                "xhigh".to_owned(),
-            ],
-            default_reasoning_effort: Some("medium".to_owned()),
-            supports_native_schema: None,
-            supports_strict_tools: None,
+        .map(|(model, label, ctx, max_out, efforts)| {
+            let default_effort = if *model == "gpt-5.6-sol" {
+                Some("low".to_owned())
+            } else {
+                Some("medium".to_owned())
+            };
+            ProviderModelPreset {
+                id: format!("chatgpt-{model}"),
+                provider: ProviderId::OpenAi,
+                label: format!("{label} via ChatGPT"),
+                model: (*model).to_owned(),
+                base_url: Some(CODEX_RESPONSES_BASE_URL.to_owned()),
+                is_agent: false,
+                description: Some("ChatGPT subscription (OAuth)".to_owned()),
+                context_window: Some(*ctx),
+                max_completion_tokens: Some(*max_out),
+                supports_tools: true,
+                supports_reasoning_effort: true,
+                reasoning_efforts: efforts.iter().map(|s| (*s).to_owned()).collect(),
+                default_reasoning_effort: default_effort,
+                supports_native_schema: None,
+                supports_strict_tools: None,
+                reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
+            }
         })
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexModelsResponse {
+    models: Vec<CodexModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexModel {
+    slug: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    max_context_window: Option<u64>,
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    supported_in_api: Option<bool>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexReasoningLevel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexReasoningLevel {
+    effort: String,
+}
+
+fn parse_codex_catalog(
+    body: &[u8],
+    fallback: &[ProviderModelPreset],
+) -> Result<Vec<ProviderModelPreset>, ()> {
+    let response: CodexModelsResponse = serde_json::from_slice(body).map_err(|_| ())?;
+    let mut by_slug = response
+        .models
+        .into_iter()
+        .filter(|model| {
+            model.visibility.as_deref() != Some("hide") && model.supported_in_api.unwrap_or(true)
+        })
+        .map(|model| (model.slug.clone(), model))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut projected = Vec::new();
+    for preset in fallback {
+        let Some(live) = by_slug.remove(&preset.model) else {
+            continue;
+        };
+        let mut updated = preset.clone();
+        if let Some(name) = live.display_name {
+            updated.label = format!("{name} via ChatGPT");
+        }
+        updated.description = live.description.or(updated.description);
+        updated.context_window = live
+            .context_window
+            .or(live.max_context_window)
+            .or(updated.context_window);
+        let options = live
+            .supported_reasoning_levels
+            .into_iter()
+            .filter_map(|level| {
+                let effort = level.effort.trim().to_ascii_lowercase();
+                // `ultra` is a delegation policy, not a canonical wire effort.
+                effort
+                    .parse::<xai_grok_inference_types::ReasoningEffort>()
+                    .ok()?;
+                Some(effort)
+            })
+            .collect::<Vec<_>>();
+        if !options.is_empty() {
+            updated.reasoning_efforts = options;
+            updated.supports_reasoning_effort = true;
+            updated.reasoning_effort_selection =
+                Some(xai_grok_inference_types::ReasoningEffortSelection::Exact);
+            updated.default_reasoning_effort = live
+                .default_reasoning_level
+                .map(|value| value.to_ascii_lowercase())
+                .filter(|value| updated.reasoning_efforts.iter().any(|item| item == value));
+        }
+        projected.push(updated);
+    }
+    if projected.is_empty() {
+        Err(())
+    } else {
+        Ok(projected)
+    }
 }
 
 /// Resolve a key saved by [`ProviderManager`] for the model resolver. This is
@@ -1669,9 +1891,14 @@ fn parse_openai_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
                 context_window: None,
                 max_completion_tokens: None,
                 supports_tools: false,
+                // OpenAI's /v1/models response is identity-only; it does not
+                // establish that reasoning effort is unsupported.
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                reasoning_effort_selection: Some(
+                    xai_grok_inference_types::ReasoningEffortSelection::Unknown,
+                ),
                 supports_native_schema: None,
                 supports_strict_tools: None,
             })
@@ -1746,9 +1973,43 @@ struct OpenRouterModel {
     /// Optional provider-advertised defaults (effort, temperature, …).
     #[serde(default)]
     default_parameters: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Optional advertised reasoning-effort levels when present.
+    /// Legacy top-level reasoning-effort levels (kept for old fixtures).
+    /// Deprecated: prefer nested `reasoning` field.
     #[serde(default)]
     reasoning_effort_options: Option<Vec<String>>,
+    /// Current OpenRouter reasoning capability metadata.
+    #[serde(default)]
+    reasoning: Option<OpenRouterReasoningMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenRouterReasoningMetadata {
+    /// Presence-sensitive: omitted means no discrete selector, while `null`
+    /// means every gateway effort value is accepted.
+    #[serde(default)]
+    supported_efforts: OpenRouterSupportedEfforts,
+    #[serde(default)]
+    default_effort: Option<String>,
+    #[serde(default)]
+    mandatory: bool,
+}
+
+#[derive(Debug, Default)]
+enum OpenRouterSupportedEfforts {
+    #[default]
+    Omitted,
+    Unrestricted,
+    Exact(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for OpenRouterSupportedEfforts {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<Vec<String>>::deserialize(deserializer)
+            .map(|value| value.map_or(Self::Unrestricted, Self::Exact))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1756,10 +2017,6 @@ struct OpenRouterTopProvider {
     #[serde(default)]
     max_completion_tokens: Option<u64>,
 }
-
-/// Default effort ladder for OpenRouter models that advertise reasoning but
-/// do not publish an explicit option list. Matches common OR tiers.
-const OPENROUTER_DEFAULT_REASONING_EFFORTS: &[&str] = &["low", "medium", "high"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OpenRouterCatalogCache {
@@ -1773,6 +2030,7 @@ struct OpenRouterCatalogCache {
 }
 
 fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
+    use xai_grok_inference_types::ReasoningEffortSelection;
     let response: OpenRouterModelsResponse = serde_json::from_slice(body).map_err(|_| ())?;
     let mut models = response
         .data
@@ -1799,8 +2057,9 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
                     "reasoning" | "reasoning_effort" | "include_reasoning"
                 )
             });
-            let (reasoning_efforts, default_reasoning_effort) =
+            let (reasoning_effort_selection, reasoning_efforts, default_reasoning_effort) =
                 openrouter_effort_metadata(&model, supports_reasoning_effort);
+
             Some(ProviderModelPreset {
                 // The upstream id is preserved verbatim after a stable local
                 // namespace; it is the value sent to OpenRouter.
@@ -1820,6 +2079,7 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
                 supports_reasoning_effort,
                 reasoning_efforts,
                 default_reasoning_effort,
+                reasoning_effort_selection,
                 supports_native_schema: None,
                 supports_strict_tools: None,
             })
@@ -1837,48 +2097,111 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
 }
 
 /// Extract advertised reasoning-effort options and default from an OpenRouter
-/// catalog entry. Falls back to a standard low/medium/high ladder when the
-/// model supports reasoning but omits an explicit list.
+/// catalog entry. Handles the nested `reasoning` field with double Option pattern:
+/// - None (field omitted): Unknown/no menu
+/// - Some(None) (field is null): Unrestricted all canonical values
+/// - Some(Some(array)): Exact list of supported efforts
+///
+/// Falls back to legacy top-level reasoning_effort_options for old fixtures.
+/// Removes invented generic low/medium/high fallback - selector omitted means Unknown.
 fn openrouter_effort_metadata(
     model: &OpenRouterModel,
     supports_reasoning: bool,
-) -> (Vec<String>, Option<String>) {
-    if !supports_reasoning {
-        return (Vec::new(), None);
-    }
-    let mut efforts = model
-        .reasoning_effort_options
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
-    if efforts.is_empty() {
-        efforts = OPENROUTER_DEFAULT_REASONING_EFFORTS
+) -> (
+    Option<xai_grok_inference_types::ReasoningEffortSelection>,
+    Vec<String>,
+    Option<String>,
+) {
+    use xai_grok_inference_types::ReasoningEffortSelection;
+
+    const ALL: &[&str] = &["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+    let normalize = |values: &[String]| {
+        values
             .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
-    }
-    let default = model
-        .default_parameters
-        .as_ref()
-        .and_then(|params| {
-            params
-                .get("reasoning_effort")
-                .or_else(|| params.get("reasoningEffort"))
-        })
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            if efforts.iter().any(|e| e == "medium") {
-                Some("medium".to_owned())
-            } else {
-                efforts.first().cloned()
+            .filter_map(|raw| {
+                let value = raw.trim().to_ascii_lowercase();
+                value
+                    .parse::<xai_grok_inference_types::ReasoningEffort>()
+                    .ok()?;
+                Some(value)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if let Some(reasoning) = &model.reasoning {
+        let default = reasoning
+            .default_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| {
+                value
+                    .parse::<xai_grok_inference_types::ReasoningEffort>()
+                    .is_ok()
+            })
+            .map(str::to_ascii_lowercase);
+        return match &reasoning.supported_efforts {
+            OpenRouterSupportedEfforts::Omitted => {
+                (Some(ReasoningEffortSelection::Unknown), Vec::new(), None)
             }
-        });
-    (efforts, default)
+            OpenRouterSupportedEfforts::Unrestricted if reasoning.mandatory => {
+                let efforts = ALL
+                    .iter()
+                    .copied()
+                    .filter(|value| *value != "none")
+                    .map(str::to_owned)
+                    .collect();
+                (Some(ReasoningEffortSelection::Exact), efforts, default)
+            }
+            OpenRouterSupportedEfforts::Unrestricted => (
+                Some(ReasoningEffortSelection::Unrestricted),
+                Vec::new(),
+                default,
+            ),
+            OpenRouterSupportedEfforts::Exact(values) => {
+                let mut efforts = normalize(values);
+                if reasoning.mandatory {
+                    efforts.retain(|value| value != "none");
+                }
+                let selection = if efforts.is_empty() {
+                    ReasoningEffortSelection::Unsupported
+                } else {
+                    ReasoningEffortSelection::Exact
+                };
+                let default = default.filter(|value| efforts.iter().any(|item| item == value));
+                (Some(selection), efforts, default)
+            }
+        };
+    }
+
+    let legacy = model
+        .reasoning_effort_options
+        .as_deref()
+        .map(normalize)
+        .unwrap_or_default();
+    if !legacy.is_empty() {
+        let default = model
+            .default_parameters
+            .as_ref()
+            .and_then(|params| {
+                params
+                    .get("reasoning_effort")
+                    .or_else(|| params.get("reasoningEffort"))
+            })
+            .and_then(|value| value.as_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|value| legacy.iter().any(|item| item == value));
+        return (Some(ReasoningEffortSelection::Exact), legacy, default);
+    }
+
+    if supports_reasoning {
+        (Some(ReasoningEffortSelection::Unknown), Vec::new(), None)
+    } else {
+        (
+            Some(ReasoningEffortSelection::Unsupported),
+            Vec::new(),
+            None,
+        )
+    }
 }
 
 fn openrouter_cache_path(grok_home: &Path) -> PathBuf {
@@ -2267,6 +2590,26 @@ async fn fetch_anthropic_catalog_live(
     Some(merge_anthropic_catalog(discovered))
 }
 
+fn anthropic_effort_metadata(
+    capabilities: Option<&xai_grok_inference_types::ModelCapabilities>,
+) -> Option<Vec<String>> {
+    let effort = capabilities?.effort.as_ref()?;
+    let levels = [
+        ("low", effort.low.as_ref()),
+        ("medium", effort.medium.as_ref()),
+        ("high", effort.high.as_ref()),
+        ("xhigh", effort.xhigh.as_ref()),
+        ("max", effort.max.as_ref()),
+    ];
+    Some(
+        levels
+            .into_iter()
+            .filter(|(_, support)| support.is_some_and(|value| value.supported))
+            .map(|(name, _)| name.to_owned())
+            .collect(),
+    )
+}
+
 fn merge_anthropic_catalog(
     discovered: Vec<xai_grok_inference::ModelInfo>,
 ) -> Vec<ProviderModelPreset> {
@@ -2294,6 +2637,28 @@ fn merge_anthropic_catalog(
                 if let Some(name) = info.display_name.clone() {
                     preset.label = name;
                 }
+                if let Some(efforts) = anthropic_effort_metadata(info.capabilities.as_ref()) {
+                    preset.reasoning_efforts = efforts;
+                    preset.supports_reasoning_effort = !preset.reasoning_efforts.is_empty();
+                    preset.reasoning_effort_selection =
+                        Some(if preset.reasoning_efforts.is_empty() {
+                            xai_grok_inference_types::ReasoningEffortSelection::Unsupported
+                        } else {
+                            xai_grok_inference_types::ReasoningEffortSelection::Exact
+                        });
+                    if preset
+                        .default_reasoning_effort
+                        .as_ref()
+                        .is_some_and(|default| {
+                            !preset
+                                .reasoning_efforts
+                                .iter()
+                                .any(|effort| effort == default)
+                        })
+                    {
+                        preset.default_reasoning_effort = None;
+                    }
+                }
             }
             // Curated IDs missing from `live_ids` stay available: product
             // aliases may not appear under the same slug in every account.
@@ -2309,13 +2674,15 @@ fn merge_anthropic_catalog(
         .map(|info| {
             let id = info.id.trim().to_owned();
             // Unknown models: never assume tool/subagent capability. Map
-            // structured_outputs so a capable experimental model can still
-            // opt into native schema once the user enables tools explicitly.
+            // structured outputs and the provider-advertised effort selector.
             let structured = info
                 .capabilities
                 .as_ref()
                 .and_then(|c| c.structured_outputs.as_ref())
                 .is_some_and(|s| s.supported);
+            let advertised_efforts = anthropic_effort_metadata(info.capabilities.as_ref());
+            let effort_options = advertised_efforts.clone().unwrap_or_default();
+            let supports_effort = !effort_options.is_empty();
             ProviderModelPreset {
                 id: format!("anthropic:{id}"),
                 provider: ProviderId::Anthropic,
@@ -2329,9 +2696,16 @@ fn merge_anthropic_catalog(
                 context_window: info.max_input_tokens.filter(|n| *n > 0),
                 max_completion_tokens: info.max_tokens.and_then(|n| u32::try_from(n).ok()),
                 supports_tools: false,
-                supports_reasoning_effort: false,
-                reasoning_efforts: Vec::new(),
+                supports_reasoning_effort: supports_effort,
+                reasoning_efforts: effort_options,
                 default_reasoning_effort: None,
+                reasoning_effort_selection: Some(match advertised_efforts {
+                    None => xai_grok_inference_types::ReasoningEffortSelection::Unknown,
+                    Some(_) if supports_effort => {
+                        xai_grok_inference_types::ReasoningEffortSelection::Exact
+                    }
+                    Some(_) => xai_grok_inference_types::ReasoningEffortSelection::Unsupported,
+                }),
                 supports_native_schema: structured.then_some(true),
                 supports_strict_tools: None,
             }
@@ -2735,7 +3109,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_catalog_merge_keeps_curated_tools_and_demotes_unknown() {
+    fn anthropic_catalog_merge_marks_missing_reasoning_effort_unknown() {
         let discovered = vec![
             xai_grok_inference::ModelInfo {
                 id: "claude-sonnet-5".into(),
@@ -2771,6 +3145,67 @@ mod tests {
         assert!(
             !experimental.supports_tools,
             "unknown Anthropic models must not be assumed tool-capable"
+        );
+        assert_eq!(
+            experimental.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unknown),
+            "missing effort capability metadata is unknown, not unsupported"
+        );
+    }
+
+    #[test]
+    fn anthropic_catalog_merge_uses_exact_typed_effort_ladder() {
+        use xai_grok_inference_types::{
+            CapabilitySupport, EffortCapability, ModelCapabilities, ReasoningEffortSelection,
+        };
+
+        let supported = || {
+            Some(CapabilitySupport {
+                supported: true,
+                extra: Default::default(),
+            })
+        };
+        let unsupported = || {
+            Some(CapabilitySupport {
+                supported: false,
+                extra: Default::default(),
+            })
+        };
+        let discovered = vec![xai_grok_inference::ModelInfo {
+            id: "claude-sonnet-5".into(),
+            display_name: Some("Claude Sonnet 5 Live".into()),
+            created_at: None,
+            r#type: Some("model".into()),
+            max_input_tokens: Some(900_000),
+            max_tokens: Some(96_000),
+            capabilities: Some(ModelCapabilities {
+                effort: Some(EffortCapability {
+                    low: supported(),
+                    medium: unsupported(),
+                    high: supported(),
+                    xhigh: None,
+                    max: supported(),
+                    extra: Default::default(),
+                }),
+                ..Default::default()
+            }),
+            extra: Default::default(),
+        }];
+        let merged = merge_anthropic_catalog(discovered);
+        let sonnet = merged
+            .iter()
+            .find(|model| model.model == "claude-sonnet-5")
+            .unwrap();
+        assert_eq!(sonnet.reasoning_efforts, ["low", "high", "max"]);
+        assert_eq!(
+            sonnet.reasoning_effort_selection,
+            Some(ReasoningEffortSelection::Exact)
+        );
+        assert!(sonnet.supports_reasoning_effort);
+        assert_eq!(
+            sonnet.default_reasoning_effort.as_deref(),
+            Some("high"),
+            "a curated default present in the live exact ladder must be preserved"
         );
     }
 
@@ -2862,6 +3297,9 @@ mod tests {
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                reasoning_effort_selection: Some(
+                    xai_grok_inference_types::ReasoningEffortSelection::Unsupported,
+                ),
                 supports_native_schema: None,
                 supports_strict_tools: None,
             }],
@@ -2884,6 +3322,9 @@ mod tests {
                 supports_reasoning_effort: true,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
+                reasoning_effort_selection: Some(
+                    xai_grok_inference_types::ReasoningEffortSelection::LegacyFallback,
+                ),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
             }],
@@ -3229,6 +3670,7 @@ mod tests {
                 "medium".to_owned(),
                 "high".to_owned(),
                 "xhigh".to_owned(),
+                "max".to_owned(),
             ]
         );
         assert_eq!(sonnet.default_reasoning_effort.as_deref(), Some("high"));
@@ -3245,6 +3687,7 @@ mod tests {
                 "medium".to_owned(),
                 "high".to_owned(),
                 "xhigh".to_owned(),
+                "max".to_owned(),
             ]
         );
         assert_eq!(opus.default_reasoning_effort.as_deref(), Some("high"));
@@ -3284,6 +3727,11 @@ mod tests {
         assert!(experimental.label.contains("experimental"));
         assert!(!experimental.supports_tools);
         assert!(!experimental.supports_reasoning_effort);
+        assert_eq!(
+            experimental.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unknown),
+            "/v1/models does not disclose exact reasoning capabilities"
+        );
         assert_eq!(
             models
                 .iter()
@@ -3412,12 +3860,12 @@ mod tests {
         assert_eq!(reasoner.max_completion_tokens, Some(8192));
         assert!(reasoner.supports_tools);
         assert!(reasoner.supports_reasoning_effort);
+        assert!(reasoner.reasoning_efforts.is_empty());
         assert_eq!(
-            reasoner.reasoning_efforts,
-            ["low", "medium", "high"],
-            "reasoning models without explicit options get the standard ladder"
+            reasoner.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unknown)
         );
-        assert_eq!(reasoner.default_reasoning_effort.as_deref(), Some("medium"));
+        assert!(reasoner.default_reasoning_effort.is_none());
         let basic = models
             .iter()
             .find(|model| model.id == "openrouter:acme/basic")
@@ -3442,6 +3890,173 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].reasoning_efforts, ["minimal", "low", "high"]);
         assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn openrouter_nested_effort_metadata_distinguishes_omitted_null_and_exact() {
+        let fixture = br#"{
+          "data": [
+            {
+              "id": "acme/omitted",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {"default_effort": "high"}
+            },
+            {
+              "id": "acme/unrestricted",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {"supported_efforts": null, "default_effort": "max"}
+            },
+            {
+              "id": "acme/exact",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {
+                "supported_efforts": ["minimal", "low", "high", "future"],
+                "default_effort": "low"
+              }
+            }
+          ]
+        }"#;
+        let models = parse_openrouter_catalog(fixture).unwrap();
+        let by_model = models
+            .into_iter()
+            .map(|model| (model.model.clone(), model))
+            .collect::<std::collections::HashMap<_, _>>();
+        let omitted = &by_model["acme/omitted"];
+        assert_eq!(
+            omitted.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unknown)
+        );
+        assert!(omitted.reasoning_efforts.is_empty());
+        assert!(omitted.default_reasoning_effort.is_none());
+
+        let unrestricted = &by_model["acme/unrestricted"];
+        assert_eq!(
+            unrestricted.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unrestricted)
+        );
+        assert!(unrestricted.reasoning_efforts.is_empty());
+        assert_eq!(
+            unrestricted.default_reasoning_effort.as_deref(),
+            Some("max")
+        );
+
+        let exact = &by_model["acme/exact"];
+        assert_eq!(
+            exact.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Exact)
+        );
+        assert_eq!(exact.reasoning_efforts, ["minimal", "low", "high"]);
+        assert_eq!(exact.default_reasoning_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn openrouter_mandatory_effort_excludes_none_and_fails_closed_when_empty() {
+        let fixture = br#"{
+          "data": [
+            {
+              "id": "acme/mandatory-unrestricted",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {"supported_efforts": null, "mandatory": true}
+            },
+            {
+              "id": "acme/mandatory-exact",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {
+                "supported_efforts": ["none", "low", "max"],
+                "default_effort": "none",
+                "mandatory": true
+              }
+            },
+            {
+              "id": "acme/mandatory-none-only",
+              "supported_parameters": ["reasoning"],
+              "reasoning": {
+                "supported_efforts": ["none"],
+                "mandatory": true
+              }
+            }
+          ]
+        }"#;
+        let models = parse_openrouter_catalog(fixture).unwrap();
+        let by_model = models
+            .into_iter()
+            .map(|model| (model.model.clone(), model))
+            .collect::<std::collections::HashMap<_, _>>();
+        let unrestricted = &by_model["acme/mandatory-unrestricted"];
+        assert_eq!(
+            unrestricted.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Exact)
+        );
+        assert!(
+            !unrestricted
+                .reasoning_efforts
+                .iter()
+                .any(|effort| effort == "none")
+        );
+        assert_eq!(
+            unrestricted.reasoning_efforts.first().map(String::as_str),
+            Some("max")
+        );
+
+        let exact = &by_model["acme/mandatory-exact"];
+        assert_eq!(exact.reasoning_efforts, ["low", "max"]);
+        assert!(exact.default_reasoning_effort.is_none());
+
+        let none_only = &by_model["acme/mandatory-none-only"];
+        assert_eq!(
+            none_only.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Unsupported)
+        );
+        assert!(none_only.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn codex_reasoning_effort_catalog_projects_allowlisted_levels_and_skips_ultra() {
+        let fallback = static_chatgpt_oauth_presets();
+        let fixture = br#"{
+          "models": [
+            {
+              "slug": "gpt-5.6-sol",
+              "display_name": "GPT-5.6 Sol Live",
+              "description": "Account-aware model",
+              "context_window": 390000,
+              "visibility": "show",
+              "supported_in_api": true,
+              "default_reasoning_level": "high",
+              "supported_reasoning_levels": [
+                {"effort": "low", "description": "Fast"},
+                {"effort": "high", "description": "Deep"},
+                {"effort": "max", "description": "Maximum"},
+                {"effort": "ultra", "description": "Delegation"}
+              ]
+            },
+            {
+              "slug": "gpt-5.6-terra",
+              "visibility": "hide",
+              "supported_reasoning_levels": [{"effort": "medium"}]
+            },
+            {
+              "slug": "gpt-private-preview",
+              "supported_reasoning_levels": [{"effort": "high"}]
+            }
+          ]
+        }"#;
+        let models = parse_codex_catalog(fixture, &fallback).unwrap();
+        assert_eq!(
+            models.len(),
+            1,
+            "only live models on the built-in allowlist survive"
+        );
+        let sol = &models[0];
+        assert_eq!(sol.model, "gpt-5.6-sol");
+        assert_eq!(sol.label, "GPT-5.6 Sol Live via ChatGPT");
+        assert_eq!(sol.context_window, Some(390_000));
+        assert_eq!(sol.reasoning_efforts, ["low", "high", "max"]);
+        assert_eq!(sol.default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            sol.reasoning_effort_selection,
+            Some(xai_grok_inference_types::ReasoningEffortSelection::Exact)
+        );
     }
 
     #[tokio::test]
@@ -3651,9 +4266,12 @@ mod tests {
             "the provider capability ceiling must not become a per-turn output request"
         );
         assert_eq!(
-            model.info.supports_reasoning_effort,
-            Some(true),
-            "catalog model advertising reasoning should resolve to Some(true)",
+            model.info.supports_reasoning_effort, None,
+            "reasoning without supported_efforts must remain unknown",
+        );
+        assert_eq!(
+            model.info.reasoning_effort_selection,
+            xai_grok_inference_types::ReasoningEffortSelection::Unknown,
         );
         assert_eq!(
             model.info.api_backend,

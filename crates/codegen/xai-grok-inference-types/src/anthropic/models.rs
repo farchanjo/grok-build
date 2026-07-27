@@ -25,6 +25,23 @@ pub struct CapabilitySupport {
     pub extra: BTreeMap<String, JsonValue>,
 }
 
+/// Per-level support advertised by Anthropic's effort capability.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffortCapability {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low: Option<CapabilitySupport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<CapabilitySupport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high: Option<CapabilitySupport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xhigh: Option<CapabilitySupport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<CapabilitySupport>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
 /// Documented model capabilities plus additive unknown keys.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -40,7 +57,9 @@ pub struct ModelCapabilities {
     pub pdf_input: Option<CapabilitySupport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_outputs: Option<CapabilitySupport>,
-    /// Nested capability objects (thinking, effort, context_management, …)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortCapability>,
+    /// Other nested capability objects (thinking, context_management, …)
     /// retained as JSON for forward compatibility.
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, JsonValue>,
@@ -119,6 +138,31 @@ mod tests {
                 .as_ref()
                 .is_some_and(|c| c.extra.contains_key("thinking"))
         );
+    }
+
+    #[test]
+    fn model_info_parses_typed_effort_capabilities() {
+        let raw = r#"{
+            "id": "claude-sonnet-test",
+            "capabilities": {
+                "effort": {
+                    "low": {"supported": true},
+                    "medium": {"supported": false},
+                    "high": {"supported": true},
+                    "xhigh": {"supported": true},
+                    "max": {"supported": true},
+                    "future": {"supported": true}
+                }
+            }
+        }"#;
+        let info: ModelInfo = serde_json::from_str(raw).unwrap();
+        let effort = info.capabilities.unwrap().effort.unwrap();
+        assert_eq!(effort.low.map(|level| level.supported), Some(true));
+        assert_eq!(effort.medium.map(|level| level.supported), Some(false));
+        assert_eq!(effort.high.map(|level| level.supported), Some(true));
+        assert_eq!(effort.xhigh.map(|level| level.supported), Some(true));
+        assert_eq!(effort.max.map(|level| level.supported), Some(true));
+        assert!(effort.extra.contains_key("future"));
     }
 
     #[test]

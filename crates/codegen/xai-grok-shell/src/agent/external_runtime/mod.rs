@@ -272,6 +272,7 @@ otherwise one process per turn on the retained runtime.";
             ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
         entry.info.hidden = true;
         entry.info.user_selectable = false;
+        entry.info.name = Some(CLAUDE_CLI_UI_LABEL.to_owned());
         entry.info.description = Some(format!(
             "{CLAUDE_CLI_UI_LABEL}. {CLAUDE_CLI_UI_LIMITATIONS}"
         ));

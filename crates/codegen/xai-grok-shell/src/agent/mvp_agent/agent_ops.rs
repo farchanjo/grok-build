@@ -2398,15 +2398,18 @@ impl MvpAgent {
             .flatten()
             .or_else(|| self.models_manager.current_reasoning_effort());
         if let Some(override_effort) = override_effort
+            && let Ok(validated) = self.models_manager.validate_reasoning_effort_for_model(
+                model_id.0.as_ref(),
+                override_effort.as_str(),
+            )
             && let Some(info) = available_models
                 .iter_mut()
                 .find(|info| info.model_id == model_id)
-            && supports_reasoning_effort_meta(info.meta.as_ref())
         {
             let mut map = info.meta.clone().unwrap_or_default();
             map.insert(
                 REASONING_EFFORT_META_KEY.to_string(),
-                reasoning_effort_meta_value(override_effort),
+                reasoning_effort_meta_value(validated),
             );
             info.meta = Some(map);
         }
@@ -2422,40 +2425,29 @@ impl MvpAgent {
                 &state.current_model_id,
             )
             .unwrap_or_else(|| state.current_model_id.clone());
-        let supports_effort = self
+
+        // Get normalized selection state from the model catalog
+        let selection = self
             .models_manager
-            .model_supports_reasoning_effort(model_id.0.as_ref());
-        let effort_options: Vec<ReasoningEffortOption> = if supports_effort {
-            let options = self
-                .models_manager
-                .model_reasoning_efforts(model_id.0.as_ref());
-            if options.is_empty() {
-                session_config::legacy_session_effort_options()
-            } else {
-                options
-            }
-        } else {
-            Vec::new()
-        };
-        let current_effort = if supports_effort {
-            session_id
-                .and_then(|sid| {
-                    self.sessions.borrow().get(sid).map(|h| h.reasoning_effort)
-                })
-                .flatten()
-                .or_else(|| self.models_manager.current_reasoning_effort())
-                .or_else(|| {
-                    self
-                        .models_manager
-                        .model_default_reasoning_effort(model_id.0.as_ref())
-                })
-        } else {
-            None
-        };
+            .model_reasoning_effort_selection(model_id.0.as_ref());
+
+        // Get the model's provided options (may be empty)
+        let provided_options = self
+            .models_manager
+            .model_reasoning_efforts(model_id.0.as_ref());
+
+        // Get current effort from session or fallback to catalog default
+        let current_effort = session_id
+            .and_then(|sid| self.sessions.borrow().get(sid).map(|h| h.reasoning_effort))
+            .flatten()
+            .or_else(|| self.models_manager.current_reasoning_effort())
+            .or_else(|| self.models_manager.model_default_reasoning_effort(model_id.0.as_ref()));
+
         session_config::build_session_config_options(
             &state.available_models,
             &model_id,
-            &effort_options,
+            selection,
+            &provided_options,
             current_effort,
         )
     }

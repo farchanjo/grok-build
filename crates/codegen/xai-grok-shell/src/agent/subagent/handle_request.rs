@@ -593,20 +593,19 @@ pub(crate) async fn handle_subagent_request(
             return;
         }
     }
-    if let Some(raw) = effective_runtime.reasoning_effort.as_deref()
-        && ctx
+    if let Some(raw) = effective_runtime.reasoning_effort.as_deref() {
+        match ctx
             .models_manager
-            .model_supports_reasoning_effort(effective_model_id.0.as_ref())
-    {
-        use xai_grok_inference_types::ReasoningEffort;
-        match raw.parse::<ReasoningEffort>() {
-            Ok(eff) => effective_inference_config.reasoning_effort = Some(eff),
-            Err(err) => {
-                tracing::warn!(
-                value = raw,
-                error = %err,
-                "subagent reasoning_effort: parse failed, ignoring override"
-            )
+            .validate_reasoning_effort_for_model(effective_model_id.0.as_ref(), raw)
+        {
+            Ok(effort) => effective_inference_config.reasoning_effort = Some(effort),
+            Err(error) => {
+                let message = format!(
+                    "Invalid reasoning_effort '{raw}' for model '{}': {error}",
+                    effective_model_id.0
+                );
+                send_failure(request, &message);
+                return;
             }
         }
     }

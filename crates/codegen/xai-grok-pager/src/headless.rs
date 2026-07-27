@@ -702,11 +702,10 @@ async fn fork_then_open(
 /// Apply `-m` / effort after session open (via `resolve_effort_for_model`, then
 /// SetSessionModel).
 ///
-/// Headless maps the classified [`EffortTokenError`] differently from the TUI: a
-/// one-shot run soft-ignores effort on a non-supporting model (still applying
-/// `-m`) but hard-fails on a genuinely unknown token. The TUI instead keeps the
-/// `-m` switch and only toasts — intentional, since headless has no scrollback
-/// to carry a non-fatal warning.
+/// Headless maps validation failures differently from the TUI: a one-shot run
+/// fails fast for both unsupported models and unknown/disallowed tokens. The TUI
+/// can keep a model switch and surface a toast because it has a persistent
+/// interactive error channel; headless cannot safely hide a dropped override.
 async fn apply_headless_model_and_effort(
     acp_tx: &AcpAgentTx,
     session_id: &acp::SessionId,
@@ -746,14 +745,11 @@ async fn apply_headless_model_and_effort(
         }
         Some(token) => match models.resolve_effort_for_model(&model_id, token) {
             Ok(effort) => Some(effort),
-            // Soft-ignore effort on a non-supporting model; still apply `-m`.
+            // Fail fast on Unsupported rather than soft-ignore.
             Err(EffortTokenError::Unsupported) => {
-                tracing::warn!(
-                    model = %model_id.0,
-                    token,
-                    "--effort/--reasoning-effort: model does not support reasoning effort; ignoring"
-                );
-                None
+                anyhow::bail!(
+                    "--effort/--reasoning-effort: model does not support reasoning effort"
+                )
             }
             Err(err) => anyhow::bail!("--effort/--reasoning-effort: {}", err.message()),
         },

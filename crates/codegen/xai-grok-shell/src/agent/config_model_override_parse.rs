@@ -443,6 +443,7 @@ mod tests {
     use crate::inference::ApiBackend;
     use xai_grok_inference_types::{
         CompactionAtTokens, CompactionsRemaining, ReasoningEffort, ReasoningEffortOption,
+        ReasoningEffortSelection,
     };
 
     fn parse_cfg(toml_str: &str) -> crate::agent::config::Config {
@@ -706,6 +707,7 @@ mod tests {
                 description: Some("Deep reasoning".to_string()),
                 default: true,
             }],
+            reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
             supports_backend_search: Some(false),
             supports_native_schema: None,
             supports_strict_tools: None,

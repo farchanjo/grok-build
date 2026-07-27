@@ -292,6 +292,24 @@ fn subscription_cli_catalog_hidden_without_gates_and_probe() {
 }
 
 #[test]
+#[serial_test::serial(claude_cli_env)]
+fn injected_cli_catalog_entry_uses_the_human_ui_label() {
+    if !gates::claude_cli_feature_compiled() {
+        return;
+    }
+    let _env = xai_grok_test_support::EnvGuard::set(gates::CLAUDE_CLI_ENV_OPT_IN, "1");
+    let mut catalog = IndexMap::new();
+    capability_matrix::inject_claude_cli_catalog_entry_if_gated(&mut catalog);
+    let cli = catalog
+        .get(capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID)
+        .expect("gated CLI entry");
+    assert_eq!(
+        cli.info.name.as_deref(),
+        Some(capability_matrix::CLAUDE_CLI_UI_LABEL)
+    );
+}
+
+#[test]
 fn capability_descriptor_never_implies_default_principal() {
     let d = capability_matrix::for_backend(ExecutionBackend::ExternalAgent(
         ExternalAgentKind::ClaudeCli,

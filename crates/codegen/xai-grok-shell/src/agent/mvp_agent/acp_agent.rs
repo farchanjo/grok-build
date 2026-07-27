@@ -1081,11 +1081,11 @@ impl acp::Agent for MvpAgent {
                     )
             });
         if let Some(effort) = self.models_manager.current_reasoning_effort()
-            && self
+            && let Ok(validated) = self
                 .models_manager
-                .model_supports_reasoning_effort(&session_sampling.model)
+                .validate_reasoning_effort_for_model(&session_sampling.model, effort.as_str())
         {
-            session_sampling.reasoning_effort = Some(effort);
+            session_sampling.reasoning_effort = Some(validated);
         }
         let (summary_client, summary_model) = self
             .build_summary_client(&session_sampling)?;
@@ -2302,12 +2302,16 @@ impl acp::Agent for MvpAgent {
             .send(crate::session::SessionCommand::GetCurrentModelRoute {
                 responds_to: model_tx,
             });
-        let (model, native_provider) = model_rx
-            .await
-            .unwrap_or_else(|_| (self.inference_config.borrow().model.clone(), None));
+        let (model, base_url, native_provider) = model_rx.await.unwrap_or_else(|_| {
+            let config = self.inference_config.borrow();
+            (config.model.clone(), config.base_url.clone(), None)
+        });
         if native_provider.is_none()
-            && let Some(entry) =
-                crate::agent::config::find_model_by_id(&self.models_manager.models(), &model)
+            && let Some(entry) = crate::agent::config::find_model_by_route(
+                &self.models_manager.models(),
+                &model,
+                &base_url,
+            )
             && let Some(provider) = crate::agent::providers::missing_api_key_provider(entry)
         {
             return Err(

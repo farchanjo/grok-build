@@ -826,6 +826,37 @@ pub fn parse_remote_model_value(
             _ => None,
         })
         .unwrap_or_default();
+    let reasoning_efforts = obj
+        .get("reasoningEfforts")
+        .or_else(|| obj.get("reasoning_efforts"))
+        .or_else(|| meta.and_then(|m| m.get("reasoningEfforts")))
+        .and_then(|v| v.as_array())
+        .map(|arr| xai_grok_inference_types::parse_reasoning_effort_options(arr))
+        .unwrap_or_default();
+    let legacy_supports_reasoning_effort = obj
+        .get("supportsReasoningEffort")
+        .or_else(|| obj.get("supports_reasoning_effort"))
+        .or_else(|| meta.and_then(|m| m.get("supportsReasoningEffort")))
+        .and_then(|v| v.as_bool());
+    let reasoning_effort_selection = obj
+        .get("reasoningEffortSelection")
+        .or_else(|| obj.get("reasoning_effort_selection"))
+        .or_else(|| meta.and_then(|m| m.get("reasoningEffortSelection")))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            xai_grok_inference_types::ReasoningEffortSelection::from_legacy(
+                legacy_supports_reasoning_effort,
+                &reasoning_efforts,
+            )
+        });
+    let (supports_reasoning_effort, reasoning_efforts) = match reasoning_effort_selection {
+        xai_grok_inference_types::ReasoningEffortSelection::Unknown => (false, Vec::new()),
+        xai_grok_inference_types::ReasoningEffortSelection::Unsupported => (false, Vec::new()),
+        xai_grok_inference_types::ReasoningEffortSelection::LegacyFallback => (true, Vec::new()),
+        xai_grok_inference_types::ReasoningEffortSelection::Exact => (true, reasoning_efforts),
+        xai_grok_inference_types::ReasoningEffortSelection::Unrestricted => (true, Vec::new()),
+    };
     Some(crate::agent::config::ModelEntryConfig {
         id,
         model,
@@ -877,19 +908,8 @@ pub fn parse_remote_model_value(
             .or_else(|| get_string(obj, "reasoning_effort"))
             .or_else(|| meta.and_then(|m| get_string(m, "reasoningEffort")))
             .and_then(|s| s.parse().ok()),
-        supports_reasoning_effort: obj
-            .get("supportsReasoningEffort")
-            .or_else(|| obj.get("supports_reasoning_effort"))
-            .or_else(|| meta.and_then(|m| m.get("supportsReasoningEffort")))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        reasoning_efforts: obj
-            .get("reasoningEfforts")
-            .or_else(|| obj.get("reasoning_efforts"))
-            .or_else(|| meta.and_then(|m| m.get("reasoningEfforts")))
-            .and_then(|v| v.as_array())
-            .map(|arr| xai_grok_inference_types::parse_reasoning_effort_options(arr))
-            .unwrap_or_default(),
+        supports_reasoning_effort,
+        reasoning_efforts,
         supports_backend_search: obj
             .get("supportsBackendSearch")
             .or_else(|| obj.get("supports_backend_search"))
@@ -951,6 +971,7 @@ pub fn parse_remote_model_value(
             .or_else(|| meta.and_then(|m| m.get("supportsStrictTools")))
             .and_then(|v| v.as_bool()),
         execution_backend: parse_remote_execution_backend(obj, meta),
+        reasoning_effort_selection,
     })
 }
 
@@ -1534,6 +1555,47 @@ mod tests {
         let result = parse_remote_model_value(&value, "https://default.url").unwrap();
         assert!(result.reasoning_efforts.is_empty());
     }
+    #[test]
+    fn parse_reasoning_effort_selection_preserves_explicit_unknown_and_legacy_projection() {
+        let explicit_unknown = serde_json::json!({
+            "model": "router-model",
+            "context_window": 256_000,
+            "supportsReasoningEffort": true,
+            "reasoningEffortSelection": "unknown",
+            "reasoningEfforts": [{"id": "deep", "value": "xhigh"}]
+        });
+        let result = parse_remote_model_value(&explicit_unknown, "https://default.url").unwrap();
+        assert_eq!(
+            result.reasoning_effort_selection,
+            xai_grok_inference_types::ReasoningEffortSelection::Unknown,
+            "explicit unknown must not become a legacy fallback menu"
+        );
+        assert!(!result.supports_reasoning_effort);
+        assert!(result.reasoning_efforts.is_empty());
+
+        let legacy = serde_json::json!({
+            "model": "legacy-model",
+            "context_window": 256_000,
+            "supportsReasoningEffort": true
+        });
+        let result = parse_remote_model_value(&legacy, "https://default.url").unwrap();
+        assert_eq!(
+            result.reasoning_effort_selection,
+            xai_grok_inference_types::ReasoningEffortSelection::LegacyFallback
+        );
+
+        let exact = serde_json::json!({
+            "model": "exact-model",
+            "context_window": 256_000,
+            "reasoningEfforts": [{"id": "deep", "value": "xhigh"}]
+        });
+        let result = parse_remote_model_value(&exact, "https://default.url").unwrap();
+        assert_eq!(
+            result.reasoning_effort_selection,
+            xai_grok_inference_types::ReasoningEffortSelection::Exact
+        );
+    }
+
     #[test]
     fn parse_reads_meta_fallback_fields() {
         let value = serde_json::json!({

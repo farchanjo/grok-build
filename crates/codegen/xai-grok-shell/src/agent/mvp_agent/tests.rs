@@ -1256,10 +1256,13 @@ async fn set_session_model_does_not_cross_contaminate() {
 #[tokio::test]
 async fn model_state_prefers_session_reasoning_effort_over_global() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use xai_grok_inference_types::{REASONING_EFFORT_META_KEY, ReasoningEffort};
+    use xai_grok_inference_types::{
+        REASONING_EFFORT_META_KEY, ReasoningEffort, ReasoningEffortSelection,
+    };
     let agent = build_minimal_agent_for_tests();
     let mut entry = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
     entry.info.supports_reasoning_effort = Some(true);
+    entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
     agent
         .models_manager
         .insert_test_entry("effort-model", entry);
@@ -1301,13 +1304,14 @@ async fn model_state_prefers_session_reasoning_effort_over_global() {
 /// `session_config_options` — the id is resolved to the catalog key before
 /// the catalog effort lookups and the selected-model match.
 #[tokio::test]
-async fn session_config_options_resolves_routing_slug_to_catalog_model() {
+async fn reasoning_effort_session_config_resolves_routing_slug_to_catalog_model() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use xai_grok_inference_types::ReasoningEffort;
+    use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortSelection};
     let agent = build_minimal_agent_for_tests();
     let mut entry = ModelEntry::fallback("catalog-key-model", &EndpointsConfig::default());
     entry.info.model = "routing-slug".to_string();
     entry.info.supports_reasoning_effort = Some(true);
+    entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
     entry.info.reasoning_effort = Some(ReasoningEffort::High);
     agent
         .models_manager
@@ -2143,6 +2147,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             reasoning_effort: None,
             supports_reasoning_effort: None,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: xai_grok_inference_types::ReasoningEffortSelection::Unknown,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,

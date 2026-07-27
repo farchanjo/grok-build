@@ -2456,6 +2456,9 @@ pub enum TaskResult {
         agent_id: AgentId,
         provider: crate::views::providers_modal::ProviderKind,
         status: crate::views::providers_modal::ProviderStatus,
+        /// Claude subscription mode status accompanies Anthropic refreshes and
+        /// remains independent from the Messages API-key status.
+        claude_cli_status: Option<crate::views::providers_modal::ClaudeCliStatus>,
         /// Echo of the repair scope attached when the op started (`None` for
         /// status refresh / unbound connect).
         repair: Option<crate::app::agent::CredentialRepairScope>,

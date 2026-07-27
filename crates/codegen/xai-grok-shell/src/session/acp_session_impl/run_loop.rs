@@ -949,7 +949,7 @@ pub(super) async fn run_session(
                             let _ = responds_to.send(model);
                         }
                         SessionCommand::GetCurrentModelRoute { responds_to } => {
-                            let (model, native_provider) = session
+                            let (model, base_url, native_provider) = session
                                 .chat_state_handle
                                 .get_inference_settings()
                                 .await
@@ -958,10 +958,10 @@ pub(super) async fn run_session(
                                         .extra_headers
                                         .get(crate::agent::model_providers::NATIVE_AGENT_PROVIDER_HEADER)
                                         .cloned();
-                                    (config.model, provider)
+                                    (config.model, config.base_url, provider)
                                 })
                                 .unwrap_or_default();
-                            let _ = responds_to.send((model, native_provider));
+                            let _ = responds_to.send((model, base_url, native_provider));
                         }
                         SessionCommand::GetCurrentPromptMode { responds_to } => {
                             let mode = *session.current_prompt_mode.lock();

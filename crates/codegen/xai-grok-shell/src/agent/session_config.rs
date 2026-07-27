@@ -1,16 +1,13 @@
 use agent_client_protocol as acp;
 use serde::Serialize;
-use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortOption};
+use xai_grok_inference_types::{
+    REASONING_EFFORT_LADDER_CANONICAL, ReasoningEffort, ReasoningEffortOption,
+    ReasoningEffortSelection, legacy_effort_options,
+};
 
 use crate::session::unified_list::SessionKind;
 
-pub(crate) const SELECTABLE_REASONING_EFFORTS: [ReasoningEffort; 5] = [
-    ReasoningEffort::Minimal,
-    ReasoningEffort::Low,
-    ReasoningEffort::Medium,
-    ReasoningEffort::High,
-    ReasoningEffort::Xhigh,
-];
+pub(crate) const LEGACY_SELECTABLE_EFFORTS: &[ReasoningEffort] = REASONING_EFFORT_LADDER_CANONICAL;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,27 +61,38 @@ fn effort_label(effort: ReasoningEffort) -> String {
     .to_string()
 }
 
-/// The built-in session-picker modes used when the model has no server list.
-/// Reproduces the historical five rows and their labels.
+/// Build the shared historical xhigh/high/medium/low fallback menu.
 pub(crate) fn legacy_session_effort_options() -> Vec<ReasoningEffortOption> {
-    SELECTABLE_REASONING_EFFORTS
-        .iter()
-        .map(|&effort| ReasoningEffortOption {
-            id: effort.as_str().to_string(),
-            value: effort,
-            label: effort_label(effort),
-            description: None,
-            default: false,
+    legacy_effort_options()
+        .into_iter()
+        .map(|mut option| {
+            option.label = effort_label(option.value);
+            option.description = None;
+            option
         })
         .collect()
 }
 
+/// Build session config options using normalized selection state.
+///
+/// This function uses the `ReasoningEffortSelection` enum to determine
+/// the appropriate menu options:
+/// - `Unknown`: shows no mode options (no menu)
+/// - `Unsupported`: shows no mode options (rejects all tokens)
+/// - `LegacyFallback`: shows xhigh/high/medium/low historical menu
+/// - `Exact`: shows the model's explicit `reasoningEfforts` list
+/// - `Unrestricted`: shows all canonical values (max/xhigh/high/medium/low/minimal/none)
 pub(crate) fn build_session_config_options(
     available_models: &[acp::ModelInfo],
     current_model_id: &acp::ModelId,
-    effort_options: &[ReasoningEffortOption],
+    selection: ReasoningEffortSelection,
+    provided_options: &[ReasoningEffortOption],
     current_effort: Option<ReasoningEffort>,
 ) -> Vec<SessionConfigOption> {
+    let effort_options = match selection {
+        ReasoningEffortSelection::LegacyFallback => legacy_session_effort_options(),
+        _ => selection.menu_options(provided_options),
+    };
     let mut options = Vec::with_capacity(available_models.len() + effort_options.len());
 
     for model in available_models {
@@ -133,7 +141,8 @@ mod tests {
         let opts = build_session_config_options(
             &models,
             &current,
-            &legacy_session_effort_options(),
+            ReasoningEffortSelection::LegacyFallback,
+            &[],
             Some(ReasoningEffort::High),
         );
 
@@ -144,7 +153,7 @@ mod tests {
         assert_eq!(selected_models[0].id, "grok-build");
 
         let mode_opts: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
-        assert_eq!(mode_opts.len(), SELECTABLE_REASONING_EFFORTS.len());
+        assert_eq!(mode_opts.len(), LEGACY_SELECTABLE_EFFORTS.len());
         let selected_modes: Vec<_> = mode_opts.iter().filter(|o| o.selected).collect();
         assert_eq!(selected_modes.len(), 1);
         assert_eq!(selected_modes[0].id, "high");
@@ -153,13 +162,14 @@ mod tests {
 
     #[test]
     fn none_effort_is_not_a_user_selectable_mode() {
-        assert!(!SELECTABLE_REASONING_EFFORTS.contains(&ReasoningEffort::None));
+        assert!(!LEGACY_SELECTABLE_EFFORTS.contains(&ReasoningEffort::None));
         let models = [model("grok-build", "Grok Build")];
         let current = acp::ModelId::from("grok-build");
         let opts = build_session_config_options(
             &models,
             &current,
-            &legacy_session_effort_options(),
+            ReasoningEffortSelection::LegacyFallback,
+            &[],
             Some(ReasoningEffort::None),
         );
         let modes: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
@@ -171,7 +181,13 @@ mod tests {
     fn no_mode_options_when_model_lacks_effort_support() {
         let models = [model("grok-build", "Grok Build")];
         let current = acp::ModelId::from("grok-build");
-        let opts = build_session_config_options(&models, &current, &[], None);
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::Unknown,
+            &[],
+            None,
+        );
         assert_eq!(opts.len(), 1);
         assert!(opts.iter().all(|o| o.category == "model"));
     }
@@ -180,7 +196,13 @@ mod tests {
     fn model_label_falls_back_to_id_when_name_empty() {
         let models = [model("grok-build", "")];
         let current = acp::ModelId::from("grok-build");
-        let opts = build_session_config_options(&models, &current, &[], None);
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::Unknown,
+            &[],
+            None,
+        );
         assert_eq!(opts[0].label, "grok-build");
     }
 
@@ -215,5 +237,146 @@ mod tests {
         assert_eq!(v["cwd"], "/Users/me/xai");
         assert_eq!(v["currentModelId"], "grok-build");
         assert!(v.get("title").is_none());
+    }
+
+    // ── Normalized selection state tests ─────────────────────────────────────
+
+    #[test]
+    fn unknown_selection_shows_no_mode_options() {
+        let models = [model("grok-build", "Grok Build")];
+        let current = acp::ModelId::from("grok-build");
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::Unknown,
+            &[],
+            None,
+        );
+        // Only model option, no mode options
+        assert_eq!(opts.len(), 1);
+        assert!(opts.iter().all(|o| o.category == "model"));
+    }
+
+    #[test]
+    fn unsupported_selection_shows_no_mode_options() {
+        let models = [model("grok-build", "Grok Build")];
+        let current = acp::ModelId::from("grok-build");
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::Unsupported,
+            &[],
+            None,
+        );
+        // Only model option, no mode options
+        assert_eq!(opts.len(), 1);
+        assert!(opts.iter().all(|o| o.category == "model"));
+    }
+
+    #[test]
+    fn legacy_fallback_selection_shows_historical_menu() {
+        let models = [model("grok-build", "Grok Build")];
+        let current = acp::ModelId::from("grok-build");
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::LegacyFallback,
+            &[],
+            None,
+        );
+        assert_eq!(opts.len(), 5);
+        let mode_opts: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
+        assert_eq!(mode_opts.len(), 4);
+        let ids: Vec<_> = mode_opts.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["xhigh", "high", "medium", "low"]);
+    }
+
+    #[test]
+    fn exact_selection_shows_provided_options() {
+        let provided = vec![
+            ReasoningEffortOption {
+                id: "deep".to_string(),
+                value: ReasoningEffort::Xhigh,
+                label: "Deep".to_string(),
+                description: Some("Maximum reasoning".to_string()),
+                default: true,
+            },
+            ReasoningEffortOption {
+                id: "balanced".to_string(),
+                value: ReasoningEffort::Medium,
+                label: "Balanced".to_string(),
+                description: None,
+                default: false,
+            },
+        ];
+        let models = [model("grok-build", "Grok Build")];
+        let current = acp::ModelId::from("grok-build");
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::Exact,
+            &provided,
+            Some(ReasoningEffort::Medium),
+        );
+        // Model + 2 provided options
+        assert_eq!(opts.len(), 3);
+        let mode_opts: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
+        assert_eq!(mode_opts.len(), 2);
+        assert_eq!(mode_opts[0].id, "deep");
+        assert_eq!(mode_opts[1].id, "balanced");
+        // Check selection
+        let selected: Vec<_> = mode_opts.iter().filter(|o| o.selected).collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "balanced");
+    }
+
+    #[test]
+    fn unrestricted_selection_shows_all_canonical_values() {
+        let models = [model("grok-build", "Grok Build")];
+        let current = acp::ModelId::from("grok-build");
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::Unrestricted,
+            &[],
+            Some(ReasoningEffort::Medium),
+        );
+        assert_eq!(opts.len(), 8);
+        let mode_opts: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
+        assert_eq!(mode_opts.len(), 7);
+        let ids: Vec<_> = mode_opts.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+        );
+        // Check selection
+        let selected: Vec<_> = mode_opts.iter().filter(|o| o.selected).collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "medium");
+    }
+
+    #[test]
+    fn exact_selection_with_custom_options_shows_only_provided() {
+        let provided = vec![ReasoningEffortOption {
+            id: "ultra".to_string(),
+            value: ReasoningEffort::Max,
+            label: "Ultra".to_string(),
+            description: None,
+            default: false,
+        }];
+        let models = [model("grok-build", "Grok Build")];
+        let current = acp::ModelId::from("grok-build");
+        let opts = build_session_config_options(
+            &models,
+            &current,
+            ReasoningEffortSelection::Exact,
+            &provided,
+            None,
+        );
+        // Model + 1 provided option
+        assert_eq!(opts.len(), 2);
+        let mode_opts: Vec<_> = opts.iter().filter(|o| o.category == "mode").collect();
+        assert_eq!(mode_opts.len(), 1);
+        assert_eq!(mode_opts[0].id, "ultra");
     }
 }

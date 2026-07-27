@@ -165,24 +165,21 @@ pub(crate) async fn apply(
     let mut model_sampling =
         agent.prepare_inference_config_for_model(&model, handle.origin_client.clone());
     if let Some(eff) = effort_override {
-        if agent
+        let validated = agent
             .models_manager
-            .model_supports_reasoning_effort(model_id.0.as_ref())
-        {
-            tracing::info!(
-                session_id = %session_id.0,
-                effort = %eff,
-                "set_session_model: applying reasoning_effort override from meta"
-            );
-            model_sampling.reasoning_effort = Some(eff);
-        } else {
-            tracing::warn!(
-                session_id = %session_id.0,
-                model_id = %model_id.0,
-                effort = %eff,
-                "set_session_model: ignoring reasoning_effort override — model does not support it"
-            );
-        }
+            .validate_reasoning_effort_for_model(model_id.0.as_ref(), eff.as_str())
+            .map_err(|error| {
+                acp::Error::invalid_params().data(format!(
+                    "reasoning effort '{}' is not valid for model '{}': {error}",
+                    eff, model_id.0
+                ))
+            })?;
+        tracing::info!(
+            session_id = %session_id.0,
+            effort = %validated,
+            "set_session_model: applying validated reasoning_effort override from meta"
+        );
+        model_sampling.reasoning_effort = Some(validated);
     }
     let applied_effort = model_sampling.reasoning_effort;
     let gate_closed = !handle

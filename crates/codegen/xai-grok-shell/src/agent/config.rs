@@ -17,8 +17,9 @@ use xai_grok_inference::config::ProviderIdentity;
 use xai_grok_inference::{AuthScheme, InferenceConfig};
 use xai_grok_inference_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
-    REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
-    reasoning_effort_meta_value, reasoning_efforts_meta_value,
+    REASONING_EFFORT_SELECTION_META_KEY, REASONING_EFFORTS_META_KEY, ReasoningEffort,
+    ReasoningEffortOption, ReasoningEffortSelection, reasoning_effort_meta_value,
+    reasoning_effort_selection_meta_value, reasoning_efforts_meta_value,
 };
 use xai_grok_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
@@ -3874,6 +3875,23 @@ pub fn find_model_by_id<'a>(
         .get(model_id)
         .or_else(|| models.values().find(|m| m.model == model_id))
 }
+
+/// Resolve a model by (model_id, base_url) tuple.
+/// First matches by model_id (key or slug), then verifies base_url matches.
+/// Used by ACP agent to validate BYOK routes.
+pub fn find_model_by_route<'a>(
+    models: &'a IndexMap<String, ModelEntry>,
+    model_id: &str,
+    base_url: &str,
+) -> Option<&'a ModelEntry> {
+    let entry = find_model_by_id(models, model_id)?;
+    if entry.info.base_url == base_url || entry.api_base_url.as_deref() == Some(base_url) {
+        Some(entry)
+    } else {
+        None
+    }
+}
+
 /// Whether the EFFECTIVE Auto-mode classifier model supports reasoning effort:
 /// the model actually routed to (`aux_model` when the aux sampler resolved) else
 /// the session model the worker falls back to. Not-found-in-catalog ⇒ `false`
@@ -3910,6 +3928,10 @@ struct DefaultModelJson {
     supports_reasoning_effort: bool,
     #[serde(default)]
     reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Normalized reasoning effort selection state. `None` projects from the
+    /// legacy support/list fields; `Some(Unknown)` is an explicit no-menu state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort_selection: Option<ReasoningEffortSelection>,
     /// When false, only OAuth users see this in the picker.
     #[serde(default = "default_true")]
     supported_in_api: bool,
@@ -3951,6 +3973,12 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
             let context_window = m
                 .context_window
                 .unwrap_or_else(|| NonZeroU64::new(200_000).expect("200000 is non-zero"));
+            let reasoning_effort_selection = m.reasoning_effort_selection.unwrap_or_else(|| {
+                ReasoningEffortSelection::from_legacy(
+                    Some(m.supports_reasoning_effort),
+                    &m.reasoning_efforts,
+                )
+            });
             let config = ModelEntryConfig {
                 id: m.id,
                 model: m.model,
@@ -3978,6 +4006,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 reasoning_effort: m.reasoning_effort,
                 supports_reasoning_effort: m.supports_reasoning_effort,
                 reasoning_efforts: m.reasoning_efforts,
+                reasoning_effort_selection,
                 supports_backend_search: m.supports_backend_search,
                 supports_native_schema: None,
                 supports_strict_tools: None,
@@ -4037,6 +4066,9 @@ pub struct ModelEntryConfig {
     /// above are derived from this list when it is non-empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Normalized selector semantics. Legacy fields remain for compatibility.
+    #[serde(default, skip_serializing_if = "ReasoningEffortSelection::is_unknown")]
+    pub reasoning_effort_selection: ReasoningEffortSelection,
     /// Extra headers to send with requests to this model's endpoint.
     /// Useful for BYOK (Bring Your Own Key) scenarios.
     /// Example: { "x-anthropic-api-key" = "sk-ant-..." }
@@ -4230,6 +4262,14 @@ pub struct ConfigModelOverride {
     /// Opt-in Anthropic strict tool definitions. See
     /// [`ModelInfo::supports_strict_tools`].
     pub supports_strict_tools: Option<bool>,
+    /// Normalized reasoning effort selection state (additive to legacy bool/list/default fields).
+    /// - Unknown: no information available
+    /// - Unsupported: model does not support reasoning effort
+    /// - LegacyFallback: historical xhigh/high/medium/low menu
+    /// - Exact: explicit non-empty reasoning_efforts list
+    /// - Unrestricted: all canonical values (max/xhigh/high/medium/low/minimal/none)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<xai_grok_inference_types::ReasoningEffortSelection>,
     /// Optional execution backend override (`native_inference` /
     /// `{ external_agent = "claude_cli" }`). Absent inherits base / default
     /// native. Never confuses with `api_backend` or provider `kind`.
@@ -4310,6 +4350,18 @@ impl ConfigModelOverride {
         }
         if !self.reasoning_efforts.is_empty() {
             entry.info.reasoning_efforts = self.reasoning_efforts.clone();
+        }
+        if let Some(selection) = self.reasoning_effort_selection {
+            entry.info.reasoning_effort_selection = selection;
+        } else if self.supports_reasoning_effort.is_some() || !self.reasoning_efforts.is_empty() {
+            entry.info.reasoning_effort_selection = ReasoningEffortSelection::from_legacy(
+                entry.info.supports_reasoning_effort,
+                &entry.info.reasoning_efforts,
+            );
+        } else if entry.info.reasoning_effort_selection.is_unknown()
+            && matches!(entry.info.api_backend, ApiBackend::Messages)
+        {
+            entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         }
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
@@ -4447,6 +4499,10 @@ pub struct ModelInfo {
     /// Per-model reasoning-effort menu (source of truth); legacy fields derived from it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    /// Normalized selector semantics. The legacy support/list fields are retained
+    /// as a compatibility projection for existing config and ACP clients.
+    #[serde(default, skip_serializing_if = "ReasoningEffortSelection::is_unknown")]
+    pub reasoning_effort_selection: ReasoningEffortSelection,
     pub supports_backend_search: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4514,6 +4570,7 @@ impl ModelInfo {
             reasoning_effort: None,
             supports_reasoning_effort: None,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: ReasoningEffortSelection::Unknown,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -4553,6 +4610,7 @@ impl ModelInfo {
             reasoning_effort: entry.reasoning_effort,
             supports_reasoning_effort: Some(entry.supports_reasoning_effort),
             reasoning_efforts: entry.reasoning_efforts.clone(),
+            reasoning_effort_selection: entry.reasoning_effort_selection,
             supports_backend_search: entry.supports_backend_search,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
@@ -4568,24 +4626,42 @@ impl ModelInfo {
             execution_backend: entry.execution_backend,
         }
     }
-    /// Derive the legacy effort gate/default from `reasoning_efforts` so the
-    /// shell's internal reads (support gate, wire default, session modes) treat
-    /// a menu-only model as supported. The single derive site; `to_acp_model_info`
-    /// then just reads these fields. Idempotent (the remote/CCP path already sets
-    /// them); the empty-list path leaves both legacy fields untouched.
+    /// Project normalized selector state into the legacy support/list/default
+    /// fields. Every input path resolves legacy-only metadata before this
+    /// stage, so the enum is authoritative here: explicit `Unknown` must stay
+    /// no-menu even if contradictory legacy fields were supplied.
     fn derive_reasoning_effort_fields(&mut self) {
-        if self.reasoning_efforts.is_empty() {
-            return;
+        match self.reasoning_effort_selection {
+            ReasoningEffortSelection::Unknown => {
+                self.supports_reasoning_effort = None;
+                self.reasoning_efforts.clear();
+            }
+            ReasoningEffortSelection::Unsupported => {
+                self.supports_reasoning_effort = Some(false);
+                self.reasoning_efforts.clear();
+                self.reasoning_effort = None;
+            }
+            ReasoningEffortSelection::LegacyFallback => {
+                self.supports_reasoning_effort = Some(true);
+                self.reasoning_efforts.clear();
+            }
+            ReasoningEffortSelection::Exact => {
+                self.supports_reasoning_effort = Some(true);
+                if self.reasoning_efforts.is_empty() {
+                    self.reasoning_effort = None;
+                }
+            }
+            ReasoningEffortSelection::Unrestricted => {
+                self.supports_reasoning_effort = Some(true);
+            }
         }
-        self.supports_reasoning_effort = Some(true);
-        if self.reasoning_effort.is_none() {
-            let default = self
+        if self.reasoning_effort.is_none() && !self.reasoning_efforts.is_empty() {
+            self.reasoning_effort = self
                 .reasoning_efforts
                 .iter()
                 .find(|opt| opt.default)
                 .or_else(|| self.reasoning_efforts.first())
                 .map(|opt| opt.value);
-            self.reasoning_effort = default;
         }
     }
     /// Whether this model appears in the picker for the given auth mode.
@@ -4605,7 +4681,7 @@ impl ModelInfo {
     /// [`Self::supports_reasoning_effort`] directly against `Some(false)` so the
     /// `None` case still honors an explicit `reasoning_effort`.
     pub fn supports_reasoning_effort_ui(&self) -> bool {
-        self.supports_reasoning_effort.unwrap_or(false)
+        self.reasoning_effort_selection.has_menu()
     }
 }
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
@@ -5381,6 +5457,7 @@ pub fn resolve_aux_model_inference_config(
                 reasoning_effort: None,
                 supports_reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
+                reasoning_effort_selection: ReasoningEffortSelection::Unknown,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -5579,24 +5656,27 @@ pub fn inference_config_for_model(
         None
     };
     let provider_identity = provider_identity_for_model(model);
-    // Wire shaping (H4): when the resolved model explicitly disclaims
-    // reasoning-effort support (`supports_reasoning_effort == Some(false)`),
-    // strip any `reasoning_effort` before it reaches the request body — some
-    // upstreams (notably OpenRouter models that never advertised `reasoning`
-    // in `supported_parameters`) hard-400 the whole request when the field is
-    // present. `Some(true)` and `None` (unknown, e.g. hand-written TOML) keep
-    // prior behavior: an explicit user-set effort is an explicit statement and
-    // must be honored.
-    let reasoning_effort = match (info.reasoning_effort, info.supports_reasoning_effort) {
-        (Some(_), Some(false)) => {
-            tracing::debug!(
-                model = %info.model,
-                "stripping reasoning_effort: model explicitly disclaims reasoning support",
-            );
-            None
+    // Validate the catalog/default effort against the normalized model-bound
+    // selector before it can reach any wire backend. Unknown keeps explicit
+    // canonical tokens compatible; Unsupported and stale Exact/Legacy values
+    // are stripped so providers never receive a value outside their contract.
+    let reasoning_effort = info.reasoning_effort.and_then(|effort| {
+        match info
+            .reasoning_effort_selection
+            .resolve_token(effort.as_str(), &info.reasoning_efforts)
+        {
+            Ok(validated) => Some(validated),
+            Err(error) => {
+                tracing::debug!(
+                    model = %info.model,
+                    effort = %effort,
+                    %error,
+                    "stripping invalid reasoning_effort from inference config",
+                );
+                None
+            }
         }
-        (effort, _) => effort,
-    };
+    });
     InferenceConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5727,6 +5807,7 @@ fn resolve_hidden_default_web_search_inference_config(
             reasoning_effort: None,
             supports_reasoning_effort: None,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: ReasoningEffortSelection::Unknown,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -5846,17 +5927,26 @@ pub fn to_acp_model_info(
                     "providerIdentity".to_string(),
                     serde_json::Value::String(provider_identity.to_string()),
                 );
-                if info.supports_reasoning_effort_ui() {
+                map.insert(
+                    REASONING_EFFORT_SELECTION_META_KEY.to_string(),
+                    reasoning_effort_selection_meta_value(info.reasoning_effort_selection),
+                );
+                if let Some(supports) = info.supports_reasoning_effort {
                     map.insert(
                         "supportsReasoningEffort".to_string(),
-                        serde_json::Value::Bool(true),
+                        serde_json::Value::Bool(supports),
                     );
-                    if let Some(effort) = info.reasoning_effort {
-                        map.insert(
-                            REASONING_EFFORT_META_KEY.to_string(),
-                            reasoning_effort_meta_value(effort),
-                        );
-                    }
+                }
+                if let Some(effort) = info.reasoning_effort
+                    && info
+                        .reasoning_effort_selection
+                        .resolve_token(effort.as_str(), &info.reasoning_efforts)
+                        .is_ok()
+                {
+                    map.insert(
+                        REASONING_EFFORT_META_KEY.to_string(),
+                        reasoning_effort_meta_value(effort),
+                    );
                 }
                 if !info.reasoning_efforts.is_empty() {
                     map.insert(
@@ -6904,6 +6994,7 @@ reasoning_effort = "low"
                 reasoning_effort: None,
                 supports_reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
+                reasoning_effort_selection: ReasoningEffortSelection::Unknown,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
@@ -7422,6 +7513,7 @@ reasoning_effort = "low"
         );
         model.info.reasoning_effort = Some(ReasoningEffort::High);
         model.info.supports_reasoning_effort = Some(false);
+        model.info.reasoning_effort_selection = ReasoningEffortSelection::Unsupported;
         let creds = resolve_credentials(&model, None);
         let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(
@@ -7436,6 +7528,7 @@ reasoning_effort = "low"
         let mut model = test_model_entry("grok-4.5", "https://api.x.ai/v1", None, None, None);
         model.info.reasoning_effort = Some(ReasoningEffort::High);
         model.info.supports_reasoning_effort = Some(true);
+        model.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         let creds = resolve_credentials(&model, None);
         let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(
@@ -7480,6 +7573,7 @@ reasoning_effort = "low"
         );
         model.info.reasoning_effort = None;
         model.info.supports_reasoning_effort = Some(false);
+        model.info.reasoning_effort_selection = ReasoningEffortSelection::Unsupported;
         let creds = resolve_credentials(&model, None);
         let config = inference_config_for_model(&model, creds, None, None, None, None);
         assert_eq!(config.reasoning_effort, None);
@@ -8273,6 +8367,7 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: ReasoningEffortSelection::Unknown,
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
@@ -8435,6 +8530,7 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: ReasoningEffortSelection::Unknown,
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
@@ -8483,6 +8579,7 @@ reasoning_effort = "low"
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
         entry.info.supports_reasoning_effort = Some(true);
+        entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         entry.info.reasoning_effort = Some(ReasoningEffort::High);
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
@@ -8500,6 +8597,7 @@ reasoning_effort = "low"
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
         entry.info.supports_reasoning_effort = Some(true);
+        entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
             .values()
@@ -8515,6 +8613,7 @@ reasoning_effort = "low"
     fn acp_model_meta_emits_reasoning_efforts_and_derives_legacy() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        entry.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
         entry.info.reasoning_efforts = vec![
             ReasoningEffortOption {
                 id: "deep".to_string(),
@@ -8550,6 +8649,7 @@ reasoning_effort = "low"
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
         entry.info.supports_reasoning_effort = Some(true);
+        entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         entry.info.reasoning_effort = Some(ReasoningEffort::Medium);
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
@@ -8564,10 +8664,11 @@ reasoning_effort = "low"
         assert_eq!(meta["reasoningEffort"], "medium");
     }
     #[test]
-    fn acp_model_meta_keeps_explicit_scalar_when_list_present() {
+    fn acp_model_meta_omits_explicit_scalar_outside_exact_list() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
         entry.info.reasoning_effort = Some(ReasoningEffort::Low);
+        entry.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
         entry.info.reasoning_efforts = vec![ReasoningEffortOption {
             id: "high".to_string(),
             value: ReasoningEffort::High,
@@ -8585,7 +8686,10 @@ reasoning_effort = "low"
             .clone()
             .unwrap();
         assert_eq!(meta["supportsReasoningEffort"], true);
-        assert_eq!(meta["reasoningEffort"], "low");
+        assert!(
+            meta.get("reasoningEffort").is_none(),
+            "a stale scalar outside the exact menu must not be projected"
+        );
     }
     #[test]
     fn acp_model_meta_derives_first_option_when_no_default() {
@@ -8889,6 +8993,7 @@ reasoning_effort = "low"
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: ReasoningEffortSelection::Unknown,
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
@@ -12621,6 +12726,7 @@ default = "grok-4.5"
                 reasoning_effort: None,
                 supports_reasoning_effort: None,
                 reasoning_efforts: Vec::new(),
+                reasoning_effort_selection: ReasoningEffortSelection::Unknown,
                 supports_backend_search: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,

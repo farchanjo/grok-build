@@ -908,6 +908,274 @@ impl std::str::FromStr for ReasoningEffort {
     }
 }
 
+/// Selection state for reasoning effort support on a model.
+///
+/// This enum provides a serde-compatible way to represent the model's
+/// reasoning effort capability state in ACP metadata. It projects
+/// deterministically from the legacy `supports_reasoning_effort: Option<bool>`
+/// and `reasoning_efforts: Vec<ReasoningEffortOption>` fields.
+///
+/// # States
+///
+/// - **Unknown**: No information available (hand-written TOML model, or unknown from catalog).
+///   No selectable menu is shown, but explicit canonical effort tokens remain wire-compatible.
+/// - **Unsupported**: The model does not support discrete reasoning effort parameters.
+///   No menu is shown; requests are rejected.
+/// - **LegacyFallback**: The model supports effort via a historical bool-only mode.
+///   Shows the legacy xhigh/high/medium/low menu.
+/// - **Exact**: The model has an explicit non-empty menu of reasoning effort options.
+///   Only listed option IDs and canonical values are accepted.
+/// - **Unrestricted**: The model supports reasoning effort without restriction.
+///   All canonical values (max/xhigh/high/medium/low/minimal/none) are accepted in
+///   strongest-first display order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffortSelection {
+    /// No information available (hand-written TOML model, or unknown from catalog).
+    /// No selectable menu shown, but explicit canonical effort tokens remain wire-compatible.
+    #[default]
+    Unknown,
+    /// The model does not support discrete reasoning effort parameters.
+    /// No menu shown; requests are rejected with an error.
+    Unsupported,
+    /// The model supports effort but has no discrete menu; use legacy bool-only.
+    /// Shows the historical xhigh/high/medium/low menu.
+    LegacyFallback,
+    /// The model has an explicit non-empty menu of reasoning effort options.
+    /// Only listed option IDs and canonical values are accepted.
+    Exact,
+    /// The model supports reasoning effort without restriction (all canonical values).
+    /// All canonical values accepted in strongest-first display order.
+    Unrestricted,
+}
+
+impl ReasoningEffortSelection {
+    /// Project from legacy fields to the normalized selection.
+    ///
+    /// Projection rules:
+    /// - `Some(false)` → Unsupported (explicit negative wins)
+    /// - `Some(true)` + empty `reasoning_efforts` → LegacyFallback
+    /// - `Some(true)` + non-empty `reasoning_efforts` → Exact
+    /// - `None` + empty `reasoning_efforts` → Unknown
+    /// - `None` + non-empty `reasoning_efforts` → Exact
+    pub fn from_legacy(
+        supports_reasoning_effort: Option<bool>,
+        reasoning_efforts: &[ReasoningEffortOption],
+    ) -> Self {
+        match supports_reasoning_effort {
+            Some(false) => Self::Unsupported,
+            Some(true) if reasoning_efforts.is_empty() => Self::LegacyFallback,
+            Some(true) => Self::Exact,
+            None if reasoning_efforts.is_empty() => Self::Unknown,
+            None => Self::Exact,
+        }
+    }
+
+    /// Returns true if this selection state is Unknown (no information available).
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    /// Project to legacy fields for wire serialization.
+    /// Returns (supports_reasoning_effort, reasoning_efforts).
+    pub fn to_legacy(
+        self,
+        options: Vec<ReasoningEffortOption>,
+    ) -> (Option<bool>, Vec<ReasoningEffortOption>) {
+        match self {
+            Self::Unknown => (None, Vec::new()),
+            Self::Unsupported => (Some(false), Vec::new()),
+            Self::LegacyFallback => (Some(true), Vec::new()),
+            Self::Exact | Self::Unrestricted => (Some(true), options),
+        }
+    }
+
+    /// Returns the canonical ladder for this selection state.
+    ///
+    /// - Unknown: empty (no menu)
+    /// - Unsupported: empty (no menu)
+    /// - LegacyFallback: xhigh/high/medium/low (historical)
+    /// - Exact: empty (uses provided options)
+    /// - Unrestricted: max/xhigh/high/medium/low/minimal/none (all canonical)
+    pub fn canonical_ladder(&self) -> &'static [ReasoningEffort] {
+        match self {
+            Self::Unknown | Self::Unsupported => &[],
+            Self::LegacyFallback => REASONING_EFFORT_LADDER_CANONICAL,
+            Self::Exact => &[], // Uses provided options
+            Self::Unrestricted => &[
+                ReasoningEffort::Max,
+                ReasoningEffort::Xhigh,
+                ReasoningEffort::High,
+                ReasoningEffort::Medium,
+                ReasoningEffort::Low,
+                ReasoningEffort::Minimal,
+                ReasoningEffort::None,
+            ],
+        }
+    }
+
+    /// Returns the default option for this selection state (if any).
+    pub fn default_option(&self) -> Option<ReasoningEffort> {
+        match self {
+            Self::Unknown | Self::Unsupported => None,
+            Self::LegacyFallback => Some(ReasoningEffort::Medium),
+            Self::Exact => None, // Uses provided options' default
+            Self::Unrestricted => Some(ReasoningEffort::Medium),
+        }
+    }
+
+    /// Returns true if this state shows a selectable menu.
+    pub fn has_menu(&self) -> bool {
+        matches!(
+            self,
+            Self::LegacyFallback | Self::Exact | Self::Unrestricted
+        )
+    }
+
+    /// Returns true if this state accepts explicit canonical tokens.
+    pub fn accepts_canonical(&self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+
+    /// Resolves an effort token against this selection state.
+    ///
+    /// Returns `Ok(effort)` if the token is valid for this state,
+    /// or `Err(message)` with a descriptive error.
+    pub fn resolve_token(
+        &self,
+        token: &str,
+        options: &[ReasoningEffortOption],
+    ) -> Result<ReasoningEffort, String> {
+        match self {
+            Self::Unsupported => Err(format!(
+                "model does not support reasoning effort; cannot use '{}' effort level",
+                token
+            )),
+            Self::Unknown => {
+                // Accept explicit canonical tokens but show no menu
+                token
+                    .parse()
+                    .map_err(|_| format!("invalid reasoning effort: '{}'", token))
+            }
+            Self::LegacyFallback => {
+                let ladder = Self::LegacyFallback.canonical_ladder();
+                let parsed = token.parse::<ReasoningEffort>().ok();
+                if let Some(eff) = parsed {
+                    if ladder.contains(&eff) {
+                        Ok(eff)
+                    } else {
+                        Err(format!(
+                            "effort '{}' not in legacy ladder (xhigh/high/medium/low)",
+                            token
+                        ))
+                    }
+                } else {
+                    Err(format!("invalid reasoning effort: '{}'", token))
+                }
+            }
+            Self::Exact => {
+                // Check by id (case-insensitive)
+                for opt in options {
+                    if opt.id.eq_ignore_ascii_case(token) {
+                        return Ok(opt.value);
+                    }
+                }
+                // Check by canonical value
+                if let Ok(parsed) = token.parse::<ReasoningEffort>() {
+                    if options.iter().any(|o| o.value == parsed) {
+                        return Ok(parsed);
+                    }
+                }
+                let offered: Vec<_> = options.iter().map(|o| o.id.as_str()).collect();
+                Err(format!(
+                    "unknown effort level '{}'; use one of: {}",
+                    token,
+                    offered.join(", ")
+                ))
+            }
+            Self::Unrestricted => token
+                .parse()
+                .map_err(|_| format!("invalid reasoning effort: '{}'", token)),
+        }
+    }
+
+    /// Returns the menu options for this selection state.
+    ///
+    /// - Unknown/Unsupported: empty vec
+    /// - LegacyFallback: xhigh/high/medium/low with labels
+    /// - Exact: the provided options (unchanged)
+    /// - Unrestricted: all canonical values in strongest-first order
+    pub fn menu_options(
+        &self,
+        provided_options: &[ReasoningEffortOption],
+    ) -> Vec<ReasoningEffortOption> {
+        match self {
+            Self::Unknown | Self::Unsupported => Vec::new(),
+            Self::LegacyFallback => legacy_effort_options(),
+            Self::Exact => provided_options.to_vec(),
+            Self::Unrestricted => REASONING_EFFORT_LADDER_ALL
+                .iter()
+                .map(|&eff| ReasoningEffortOption {
+                    id: eff.as_str().to_string(),
+                    value: eff,
+                    label: eff.to_string(),
+                    description: Some(effort_description(eff).to_string()),
+                    default: false,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Human-readable description for a reasoning effort level.
+pub fn effort_description(level: ReasoningEffort) -> &'static str {
+    match level {
+        ReasoningEffort::None => "No reasoning",
+        ReasoningEffort::Minimal => "Minimal reasoning",
+        ReasoningEffort::Low => "Faster, lighter reasoning",
+        ReasoningEffort::Medium => "Balanced reasoning",
+        ReasoningEffort::High => "Heavy reasoning",
+        ReasoningEffort::Xhigh => "Extended reasoning",
+        ReasoningEffort::Max => "Maximum reasoning",
+    }
+}
+
+/// The built-in legacy menu used when the server sends no `reasoningEfforts`.
+/// Reproduces the historical rows: labels are the lowercase level (via `Display`),
+/// descriptions from `effort_description`. The active row is matched by value
+/// against the session effort at render time, so `default` is left unset here.
+pub fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
+    REASONING_EFFORT_LADDER_CANONICAL
+        .iter()
+        .map(|&level| ReasoningEffortOption {
+            id: level.as_str().to_string(),
+            value: level,
+            label: level.to_string(),
+            description: Some(effort_description(level).to_string()),
+            default: false,
+        })
+        .collect()
+}
+
+/// Historical fallback menu in strongest-first display order.
+pub const REASONING_EFFORT_LADDER_CANONICAL: &[ReasoningEffort] = &[
+    ReasoningEffort::Xhigh,
+    ReasoningEffort::High,
+    ReasoningEffort::Medium,
+    ReasoningEffort::Low,
+];
+
+/// Canonical values in strongest-first display order.
+pub const REASONING_EFFORT_LADDER_ALL: &[ReasoningEffort] = &[
+    ReasoningEffort::Max,
+    ReasoningEffort::Xhigh,
+    ReasoningEffort::High,
+    ReasoningEffort::Medium,
+    ReasoningEffort::Low,
+    ReasoningEffort::Minimal,
+    ReasoningEffort::None,
+];
+
 pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
     token.parse().ok()
 }
@@ -1068,6 +1336,76 @@ pub fn parse_reasoning_efforts_meta(
 
 pub fn reasoning_efforts_meta_value(opts: &[ReasoningEffortOption]) -> serde_json::Value {
     serde_json::to_value(opts).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+}
+
+/// ACP meta key for the normalized reasoning effort selection.
+pub const REASONING_EFFORT_SELECTION_META_KEY: &str = "reasoningEffortSelection";
+
+/// Parse the normalized reasoning effort selection from ACP meta.
+///
+/// Projection rules from legacy fields:
+/// - Key absent → Unknown (if no reasoning_efforts) or Exact (if reasoning_efforts present)
+/// - "unsupported" → Unsupported
+/// - "legacy_fallback" → LegacyFallback
+/// - "exact" → Exact
+/// - "unrestricted" → Unrestricted
+pub fn parse_reasoning_effort_selection_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    reasoning_efforts: &[ReasoningEffortOption],
+) -> ReasoningEffortSelection {
+    // If the key is present, parse it directly
+    if let Some(raw) = meta.and_then(|m| m.get(REASONING_EFFORT_SELECTION_META_KEY)) {
+        if let Some(s) = raw.as_str() {
+            return match s.parse() {
+                Ok(sel) => sel,
+                Err(_) => {
+                    tracing::warn!(value = %s, "meta.reasoningEffortSelection: unknown value, falling back");
+                    ReasoningEffortSelection::default()
+                }
+            };
+        }
+    }
+    // Project from legacy fields when the normalized key is absent.
+    let supports = meta
+        .and_then(|map| map.get(SUPPORTS_REASONING_EFFORT_META_KEY))
+        .and_then(|value| value.as_bool());
+    ReasoningEffortSelection::from_legacy(supports, reasoning_efforts)
+}
+
+/// Serialize a reasoning effort selection for ACP meta.
+pub fn reasoning_effort_selection_meta_value(
+    selection: ReasoningEffortSelection,
+) -> serde_json::Value {
+    serde_json::Value::String(selection.as_str().to_string())
+}
+
+impl ReasoningEffortSelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Unsupported => "unsupported",
+            Self::LegacyFallback => "legacy_fallback",
+            Self::Exact => "exact",
+            Self::Unrestricted => "unrestricted",
+        }
+    }
+}
+
+impl std::str::FromStr for ReasoningEffortSelection {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "unknown" => Ok(Self::Unknown),
+            "unsupported" => Ok(Self::Unsupported),
+            "legacy_fallback" => Ok(Self::LegacyFallback),
+            "exact" => Ok(Self::Exact),
+            "unrestricted" => Ok(Self::Unrestricted),
+            _ => Err(format!(
+                "invalid reasoning effort selection: {s:?} (expected one of: unknown, unsupported, legacy_fallback, exact, unrestricted)"
+            )),
+        }
+    }
 }
 
 /// Which API backend to use for model inference.
@@ -1457,6 +1795,116 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(parse_reasoning_efforts_meta(Some(&meta)).unwrap(), opts);
+    }
+
+    #[test]
+    fn reasoning_effort_selection_projects_legacy_fields() {
+        let exact = vec![ReasoningEffortOption {
+            id: "deep".to_string(),
+            value: ReasoningEffort::Xhigh,
+            label: "Deep".to_string(),
+            description: None,
+            default: false,
+        }];
+        assert_eq!(
+            ReasoningEffortSelection::from_legacy(None, &exact),
+            ReasoningEffortSelection::Exact
+        );
+        assert_eq!(
+            ReasoningEffortSelection::from_legacy(Some(false), &exact),
+            ReasoningEffortSelection::Unsupported
+        );
+        assert_eq!(
+            ReasoningEffortSelection::from_legacy(None, &[]),
+            ReasoningEffortSelection::Unknown
+        );
+        assert_eq!(
+            ReasoningEffortSelection::from_legacy(Some(false), &[]),
+            ReasoningEffortSelection::Unsupported
+        );
+        assert_eq!(
+            ReasoningEffortSelection::from_legacy(Some(true), &[]),
+            ReasoningEffortSelection::LegacyFallback
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_selection_resolves_each_state() {
+        let exact = vec![ReasoningEffortOption {
+            id: "deep".to_string(),
+            value: ReasoningEffort::Xhigh,
+            label: "Deep".to_string(),
+            description: None,
+            default: false,
+        }];
+        assert_eq!(
+            ReasoningEffortSelection::Unknown
+                .resolve_token("max", &[])
+                .unwrap(),
+            ReasoningEffort::Max
+        );
+        assert!(
+            ReasoningEffortSelection::Unsupported
+                .resolve_token("high", &[])
+                .is_err()
+        );
+        assert_eq!(
+            ReasoningEffortSelection::LegacyFallback
+                .resolve_token("xhigh", &[])
+                .unwrap(),
+            ReasoningEffort::Xhigh
+        );
+        assert!(
+            ReasoningEffortSelection::LegacyFallback
+                .resolve_token("max", &[])
+                .is_err()
+        );
+        assert_eq!(
+            ReasoningEffortSelection::Exact
+                .resolve_token("deep", &exact)
+                .unwrap(),
+            ReasoningEffort::Xhigh
+        );
+        assert!(
+            ReasoningEffortSelection::Exact
+                .resolve_token("high", &exact)
+                .is_err()
+        );
+        assert_eq!(
+            ReasoningEffortSelection::Unrestricted
+                .resolve_token("none", &[])
+                .unwrap(),
+            ReasoningEffort::None
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_selection_meta_prefers_normalized_state_and_projects_legacy() {
+        let normalized = json!({
+            REASONING_EFFORT_SELECTION_META_KEY: "unknown",
+            SUPPORTS_REASONING_EFFORT_META_KEY: true
+        });
+        assert_eq!(
+            parse_reasoning_effort_selection_meta(normalized.as_object(), &[]),
+            ReasoningEffortSelection::Unknown,
+            "an explicit unknown state must not invent the legacy menu"
+        );
+        let legacy = json!({ SUPPORTS_REASONING_EFFORT_META_KEY: true });
+        assert_eq!(
+            parse_reasoning_effort_selection_meta(legacy.as_object(), &[]),
+            ReasoningEffortSelection::LegacyFallback
+        );
+        let exact = vec![ReasoningEffortOption {
+            id: "deep".to_string(),
+            value: ReasoningEffort::Xhigh,
+            label: "Deep".to_string(),
+            description: None,
+            default: false,
+        }];
+        assert_eq!(
+            parse_reasoning_effort_selection_meta(None, &exact),
+            ReasoningEffortSelection::Exact
+        );
     }
 
     #[test]

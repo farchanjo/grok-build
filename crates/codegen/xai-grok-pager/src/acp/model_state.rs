@@ -3,11 +3,9 @@
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use xai_grok_shell::inference::types::{
-    ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
-    parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    ReasoningEffort, ReasoningEffortOption, ReasoningEffortSelection, parse_reasoning_effort_meta,
+    parse_reasoning_effort_selection_meta, parse_reasoning_efforts_meta,
 };
-
-use crate::slash::commands::effort_levels::legacy_effort_options;
 
 /// Why an effort token could not be applied to a model. Shared by every effort
 /// surface (`/effort`, the CLI deferred switch, and headless) so they classify
@@ -52,6 +50,9 @@ pub struct ModelState {
     pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
     pub current: Option<acp::ModelId>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// The normalized reasoning effort selection state for the current model.
+    /// Derived from ACP meta with legacy projection fallback.
+    pub reasoning_effort_selection: ReasoningEffortSelection,
     /// External override for the context window size (tokens).
     /// When set, `get_context_window()` returns this instead of
     /// reading from the current model's metadata. Used for subagent
@@ -155,11 +156,16 @@ impl ModelState {
         // not this session's choice; only re-derive when the model changed so a
         // catalog refresh can't clobber a user-set effort.
         if self.current != previous_current_model {
-            self.reasoning_effort = self
-                .current
-                .as_ref()
-                .and_then(|id| self.available.get(id))
-                .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
+            if let Some(id) = &self.current {
+                if let Some(info) = self.available.get(id) {
+                    let options = parse_reasoning_efforts_meta(info.meta.as_ref());
+                    self.reasoning_effort_selection = parse_reasoning_effort_selection_meta(
+                        info.meta.as_ref(),
+                        &options.unwrap_or_default(),
+                    );
+                    self.reasoning_effort = parse_reasoning_effort_meta(info.meta.as_ref());
+                }
+            }
         }
     }
 
@@ -170,11 +176,30 @@ impl ModelState {
         effort_override: Option<ReasoningEffort>,
     ) {
         self.current = Some(model_id.clone());
+        if let Some(info) = self.available.get(&model_id) {
+            let options = parse_reasoning_efforts_meta(info.meta.as_ref());
+            self.reasoning_effort_selection = parse_reasoning_effort_selection_meta(
+                info.meta.as_ref(),
+                &options.unwrap_or_default(),
+            );
+        }
         self.reasoning_effort = effort_override.or_else(|| {
             self.available
                 .get(&model_id)
                 .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()))
         });
+    }
+
+    /// Derive the normalized reasoning effort selection for a model id from its meta.
+    pub(crate) fn derive_reasoning_effort_selection(
+        &self,
+        id: &acp::ModelId,
+    ) -> ReasoningEffortSelection {
+        let Some(info) = self.available.get(id) else {
+            return ReasoningEffortSelection::default();
+        };
+        let options = parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_default();
+        parse_reasoning_effort_selection_meta(info.meta.as_ref(), &options)
     }
 
     /// The reasoning-effort menu for the current model. Gate-first: an unset or
@@ -188,9 +213,11 @@ impl ModelState {
     }
 
     /// Menu for a specific catalog model id (used by `/model`'s effort phase).
-    /// `parse_reasoning_efforts_meta` returns `None` for absent, non-array, or
-    /// present-but-unusable lists, so all of those fall back to the built-in menu
-    /// exactly as the shell's session picker does.
+    /// Uses the normalized selection state to determine the menu:
+    /// - Unknown/Unsupported: empty menu
+    /// - LegacyFallback: xhigh/high/medium/low
+    /// - Exact: the server-provided options
+    /// - Unrestricted: all canonical values in strongest-first order
     pub(crate) fn reasoning_effort_options_for(
         &self,
         id: &acp::ModelId,
@@ -198,10 +225,9 @@ impl ModelState {
         let Some(info) = self.available.get(id) else {
             return Vec::new();
         };
-        if !supports_reasoning_effort_meta(info.meta.as_ref()) {
-            return Vec::new();
-        }
-        parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_else(legacy_effort_options)
+        let selection = self.derive_reasoning_effort_selection(id);
+        let options = parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_default();
+        selection.menu_options(&options)
     }
 
     /// Map a typed/selected effort token to its canonical value for the current
@@ -224,18 +250,9 @@ impl ModelState {
         id: &acp::ModelId,
         token: &str,
     ) -> Option<ReasoningEffort> {
+        let selection = self.derive_reasoning_effort_selection(id);
         let options = self.reasoning_effort_options_for(id);
-        if let Some(option) = options
-            .iter()
-            .find(|opt| opt.id.eq_ignore_ascii_case(token))
-        {
-            return Some(option.value);
-        }
-        let parsed = token.parse::<ReasoningEffort>().ok()?;
-        options
-            .iter()
-            .find(|opt| opt.value == parsed)
-            .map(|o| o.value)
+        selection.resolve_token(token, &options).ok()
     }
 
     /// Canonical effort-token policy: gate on the model's support flag first,
@@ -247,25 +264,40 @@ impl ModelState {
         id: &acp::ModelId,
         token: &str,
     ) -> Result<ReasoningEffort, EffortTokenError> {
-        let supports = self
-            .available
-            .get(id)
-            .map(|info| supports_reasoning_effort_meta(info.meta.as_ref()))
-            .unwrap_or(false);
-        if !supports {
+        let selection = self.derive_reasoning_effort_selection(id);
+        if !selection.accepts_canonical() {
             return Err(EffortTokenError::Unsupported);
         }
-        self.resolve_effort_token_for(id, token)
-            .ok_or_else(|| EffortTokenError::UnknownToken {
-                token: token.to_string(),
-                // Menu option ids only — matches `/effort` autocomplete and
-                // never invents levels (none/minimal/…) the model does not offer.
-                offered: self
-                    .reasoning_effort_options_for(id)
-                    .into_iter()
-                    .map(|opt| opt.id)
-                    .collect(),
-            })
+        let options = self.reasoning_effort_options_for(id);
+        let result = selection.resolve_token(token, &options).map_err(|msg| {
+            // Parse the error message to extract offered options if present
+            // The shared helper returns a formatted error message
+            if let Some(offered) =
+                msg.strip_prefix(&format!("unknown effort level '{}'; use one of: ", token))
+            {
+                EffortTokenError::UnknownToken {
+                    token: token.to_string(),
+                    offered: offered.split(',').map(|s| s.trim().to_string()).collect(),
+                }
+            } else if msg.contains("not in legacy ladder") {
+                // LegacyFallback state error
+                EffortTokenError::UnknownToken {
+                    token: token.to_string(),
+                    offered: selection
+                        .canonical_ladder()
+                        .iter()
+                        .map(|e| e.as_str().to_string())
+                        .collect(),
+                }
+            } else {
+                // Generic unknown token error
+                EffortTokenError::UnknownToken {
+                    token: token.to_string(),
+                    offered: options.iter().map(|o| o.id.clone()).collect(),
+                }
+            }
+        })?;
+        Ok(result)
     }
 
     /// Resolve a user-supplied name to a `ModelId` via case-insensitive
@@ -313,14 +345,23 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                 let current_model = models
                     .contains_key(&state.current_model_id)
                     .then_some(state.current_model_id);
-                let reasoning_effort = current_model
+                let (reasoning_effort_selection, reasoning_effort) = current_model
                     .as_ref()
                     .and_then(|id| models.get(id))
-                    .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
+                    .map(|info| {
+                        let options =
+                            parse_reasoning_efforts_meta(info.meta.as_ref()).unwrap_or_default();
+                        let selection =
+                            parse_reasoning_effort_selection_meta(info.meta.as_ref(), &options);
+                        let effort = parse_reasoning_effort_meta(info.meta.as_ref());
+                        (selection, effort)
+                    })
+                    .unwrap_or((ReasoningEffortSelection::default(), None));
                 Self {
                     available: models,
                     current: current_model,
                     reasoning_effort,
+                    reasoning_effort_selection,
                     context_window_override: None,
                 }
             })
@@ -443,7 +484,7 @@ mod tests {
             acp::ModelInfo::new(id.clone(), "M".to_string())
                 .meta(meta.and_then(|v| v.as_object().cloned())),
         );
-        state.current = Some(id);
+        state.set_current(id, None);
         state
     }
 
@@ -482,6 +523,8 @@ mod tests {
         assert!(ModelState::default().reasoning_effort_options().is_empty());
         // Current model that does not support effort → empty (even with a list).
         let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": false,
+            "reasoningEffortSelection": "unsupported",
             "reasoningEfforts": [{ "value": "high" }],
         })));
         assert!(state.reasoning_effort_options().is_empty());
@@ -641,6 +684,218 @@ mod tests {
         assert!(
             !state_with_meta(Some(serde_json::json!({ "inputModalities": ["text"] })))
                 .current_model_accepts_images()
+        );
+    }
+
+    // ── ReasoningEffortSelection state tests ─────────────────────────────────
+
+    #[test]
+    fn reasoning_effort_selection_unknown_accepts_canonical_token() {
+        // Unknown: no menu, but explicit canonical tokens are wire-compatible
+        let state = state_with_meta(Some(serde_json::json!({})));
+        assert_eq!(
+            state.reasoning_effort_selection,
+            ReasoningEffortSelection::Unknown
+        );
+        // Unknown still accepts canonical tokens
+        assert_eq!(
+            state.resolve_effort_token("high"),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            state.resolve_effort_token("max"),
+            Some(ReasoningEffort::Max)
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_selection_unsupported_errors() {
+        // Unsupported: model explicitly does not support
+        let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": false,
+        })));
+        assert_eq!(
+            state.reasoning_effort_selection,
+            ReasoningEffortSelection::Unsupported
+        );
+        assert!(state.reasoning_effort_options().is_empty());
+        // Unsupported should error when trying to resolve effort
+        let err = state.resolve_effort_for_model(state.current.as_ref().unwrap(), "high");
+        assert!(matches!(err, Err(EffortTokenError::Unsupported)));
+    }
+
+    #[test]
+    fn reasoning_effort_selection_legacy_fallback_shows_builtin_menu() {
+        // LegacyFallback: supports=true but no reasoningEfforts list
+        let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
+        })));
+        assert_eq!(
+            state.reasoning_effort_selection,
+            ReasoningEffortSelection::LegacyFallback
+        );
+        let ids: Vec<_> = state
+            .reasoning_effort_options()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+        // Legacy menu: xhigh, high, medium, low (no none/minimal)
+        assert_eq!(ids, ["xhigh", "high", "medium", "low"]);
+    }
+
+    #[test]
+    fn reasoning_effort_selection_exact_with_valid_menu() {
+        // Exact: supports=true with explicit reasoningEfforts list
+        let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEfforts": [
+                { "id": "deep", "value": "xhigh", "label": "Deep" },
+                { "id": "balanced", "value": "medium", "label": "Balanced" },
+            ],
+        })));
+        assert_eq!(
+            state.reasoning_effort_selection,
+            ReasoningEffortSelection::Exact
+        );
+        let opts = state.reasoning_effort_options();
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "deep");
+        assert_eq!(opts[0].value, ReasoningEffort::Xhigh);
+        assert_eq!(opts[1].id, "balanced");
+        assert_eq!(opts[1].value, ReasoningEffort::Medium);
+    }
+
+    #[test]
+    fn reasoning_effort_selection_exact_present_but_unusable_fails_closed() {
+        for meta in [
+            serde_json::json!({
+                "supportsReasoningEffort": true,
+                "reasoningEffortSelection": "exact",
+                "reasoningEfforts": []
+            }),
+            serde_json::json!({
+                "supportsReasoningEffort": true,
+                "reasoningEffortSelection": "exact",
+                "reasoningEfforts": [{ "value": "quantum" }],
+            }),
+        ] {
+            let state = state_with_meta(Some(meta.clone()));
+            assert_eq!(
+                state.reasoning_effort_selection,
+                ReasoningEffortSelection::Exact,
+                "for meta {meta}"
+            );
+            assert!(state.reasoning_effort_options().is_empty());
+            assert!(state.resolve_effort_token("high").is_none());
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_selection_unrestricted_shows_all_canonical() {
+        // Unrestricted: all canonical values in strongest-first order
+        // This requires the ACP meta to explicitly have reasoningEffortSelection: "unrestricted"
+        let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEffortSelection": "unrestricted",
+        })));
+        assert_eq!(
+            state.reasoning_effort_selection,
+            ReasoningEffortSelection::Unrestricted
+        );
+        let opts = state.reasoning_effort_options();
+        // Unrestricted: max, xhigh, high, medium, low, minimal, none
+        assert_eq!(opts.len(), 7);
+        assert_eq!(opts[0].value, ReasoningEffort::Max);
+        assert_eq!(opts[1].value, ReasoningEffort::Xhigh);
+        assert_eq!(opts[2].value, ReasoningEffort::High);
+        assert_eq!(opts[3].value, ReasoningEffort::Medium);
+        assert_eq!(opts[4].value, ReasoningEffort::Low);
+        assert_eq!(opts[5].value, ReasoningEffort::Minimal);
+        assert_eq!(opts[6].value, ReasoningEffort::None);
+    }
+
+    #[test]
+    fn reasoning_effort_selection_unknown_explicit_canonical_no_menu() {
+        // Unknown with explicit canonical token should work
+        let state = state_with_meta(Some(serde_json::json!({})));
+        // No menu shown
+        assert!(state.reasoning_effort_options().is_empty());
+        // But explicit canonical tokens are accepted
+        assert_eq!(
+            state.resolve_effort_token("max"),
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            state.resolve_effort_token("xhigh"),
+            Some(ReasoningEffort::Xhigh)
+        );
+        assert_eq!(
+            state.resolve_effort_token("high"),
+            Some(ReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_selection_unknown_invalid_token_errors() {
+        // Unknown with invalid token should error
+        let state = state_with_meta(Some(serde_json::json!({})));
+        let err = state.resolve_effort_for_model(state.current.as_ref().unwrap(), "bogus");
+        assert!(err.is_err());
+        let err = err.unwrap_err();
+        assert!(matches!(err, EffortTokenError::UnknownToken { .. }));
+    }
+
+    #[test]
+    fn reasoning_effort_selection_exact_menu_id_only() {
+        // Exact: only listed option IDs and canonical values are accepted
+        let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEfforts": [
+                { "id": "deep", "value": "xhigh", "label": "Deep" },
+            ],
+        })));
+        // Menu id works
+        assert_eq!(
+            state.resolve_effort_token("deep"),
+            Some(ReasoningEffort::Xhigh)
+        );
+        // Canonical value in menu works
+        assert_eq!(
+            state.resolve_effort_token("xhigh"),
+            Some(ReasoningEffort::Xhigh)
+        );
+        // Canonical value NOT in menu fails
+        assert!(state.resolve_effort_token("high").is_none());
+        assert!(state.resolve_effort_token("medium").is_none());
+        assert!(state.resolve_effort_token("low").is_none());
+        assert!(state.resolve_effort_token("none").is_none());
+        assert!(state.resolve_effort_token("minimal").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_selection_fallback_consistency() {
+        // LegacyFallback should consistently reject none/minimal
+        let state = state_with_meta(Some(serde_json::json!({
+            "supportsReasoningEffort": true,
+        })));
+        assert!(state.resolve_effort_token("none").is_none());
+        assert!(state.resolve_effort_token("minimal").is_none());
+        // But accepts the legacy ladder
+        assert_eq!(
+            state.resolve_effort_token("low"),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            state.resolve_effort_token("medium"),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            state.resolve_effort_token("high"),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            state.resolve_effort_token("xhigh"),
+            Some(ReasoningEffort::Xhigh)
         );
     }
 }

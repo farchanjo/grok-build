@@ -56,12 +56,7 @@ impl ProviderKind {
             Self::Xai => "Grok/xAI account (OAuth) or xAI API key".into(),
             Self::OpenAi => "ChatGPT OAuth or API key · Responses".into(),
             Self::OpenRouter => "Chat Completions · key stored securely".into(),
-            Self::Anthropic => {
-                // API key path is independent of the experimental Claude Agent CLI
-                // subscription path (build-gated + runtime opt-in elsewhere).
-                "Messages API · x-api-key stored securely · Claude Agent (CLI, Experimental) when gated"
-                    .into()
-            }
+            Self::Anthropic => "Native Grok agent loop · x-api-key stored securely".into(),
             Self::Configured(id) if id == "zai-model-api" || id == "zai" => {
                 "Z.ai Model API · Chat Completions · key stored securely".into()
             }
@@ -109,6 +104,43 @@ impl ProviderStatus {
             Self::Connecting => "Checking…",
             Self::Connected { .. } => "Connected",
             Self::Error(_) => "Connection error",
+        }
+    }
+}
+
+/// Experimental subscription-backed Claude CLI mode shown within the single
+/// Anthropic provider card. This is deliberately separate from the Messages
+/// API status because it never uses the Anthropic API key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeCliStatus {
+    Checking,
+    Ready {
+        version: String,
+        auth_summary: String,
+    },
+    AuthRequired {
+        version: String,
+        detail: String,
+    },
+    AuthUnknown {
+        version: String,
+        detail: String,
+    },
+    FeatureNotCompiled,
+    OptInMissing,
+    ProbeFailed(String),
+}
+
+impl ClaudeCliStatus {
+    fn label(&self) -> &str {
+        match self {
+            Self::Checking => "Checking…",
+            Self::Ready { .. } => "Ready",
+            Self::AuthRequired { .. } => "Login required",
+            Self::AuthUnknown { .. } => "Auth check failed",
+            Self::FeatureNotCompiled => "Not compiled",
+            Self::OptInMissing => "Opt-in required",
+            Self::ProbeFailed(_) => "Unavailable",
         }
     }
 }
@@ -185,6 +217,7 @@ pub struct ProviderModalState {
     /// Dynamic row list: built-ins first, then configured providers.
     pub rows: Vec<ProviderKind>,
     pub statuses: Vec<ProviderStatus>,
+    pub claude_cli_status: ClaudeCliStatus,
     pub(crate) mode: ProviderModalMode,
     /// When set, browse focus jumps to this provider id (provider-scoped 401).
     pub focus_provider_id: Option<String>,
@@ -209,6 +242,7 @@ impl std::fmt::Debug for ProviderModalState {
                     .collect::<Vec<_>>(),
             )
             .field("statuses", &self.statuses)
+            .field("claude_cli_status", &self.claude_cli_status)
             .field(
                 "mode",
                 &match &self.mode {
@@ -230,6 +264,18 @@ impl Default for ProviderModalState {
     }
 }
 
+fn initial_claude_cli_status() -> ClaudeCliStatus {
+    use xai_grok_shell::agent::external_runtime::gates;
+
+    if !gates::claude_cli_feature_compiled() {
+        ClaudeCliStatus::FeatureNotCompiled
+    } else if !gates::claude_cli_runtime_opt_in() {
+        ClaudeCliStatus::OptInMissing
+    } else {
+        ClaudeCliStatus::Checking
+    }
+}
+
 impl ProviderModalState {
     pub fn new() -> Self {
         let rows: Vec<ProviderKind> = ProviderKind::BUILTINS.to_vec();
@@ -239,6 +285,7 @@ impl ProviderModalState {
             selected: 0,
             rows,
             statuses: vec![ProviderStatus::Missing; n],
+            claude_cli_status: initial_claude_cli_status(),
             mode: ProviderModalMode::Browse,
             focus_provider_id: None,
             submitted_secret: None,
@@ -297,6 +344,10 @@ impl ProviderModalState {
             }
             self.statuses[idx] = status;
         }
+    }
+
+    pub fn set_claude_cli_status(&mut self, status: ClaudeCliStatus) {
+        self.claude_cli_status = status;
     }
 
     /// Returns the newly submitted key exactly once.
@@ -613,7 +664,14 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         Style::default().fg(theme.gray),
     );
     for (idx, provider) in state.rows.iter().enumerate() {
-        if y.saturating_add(2) >= content.content.y.saturating_add(content.content.height) {
+        let show_claude_cli = provider == &ProviderKind::Anthropic
+            && !matches!(
+                &state.claude_cli_status,
+                ClaudeCliStatus::FeatureNotCompiled
+            );
+        let row_height = if show_claude_cli { 4 } else { 2 };
+        if y.saturating_add(row_height) >= content.content.y.saturating_add(content.content.height)
+        {
             break;
         }
         let selected = state.selected == idx && matches!(&state.mode, ProviderModalMode::Browse);
@@ -656,13 +714,66 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             ProviderStatus::Error(error) => error.as_str(),
             _ => owned_detail.as_str(),
         };
-        put_line(
-            buf,
-            content.content,
-            &mut y,
-            &format!("    {detail}"),
-            detail_style,
-        );
+        let detail = if provider == &ProviderKind::Anthropic {
+            format!("    Messages API: {detail}")
+        } else {
+            format!("    {detail}")
+        };
+        put_line(buf, content.content, &mut y, &detail, detail_style);
+
+        if show_claude_cli {
+            let cli_status = &state.claude_cli_status;
+            let cli_color = match cli_status {
+                ClaudeCliStatus::Ready { .. } => theme.accent_success,
+                ClaudeCliStatus::Checking => theme.accent_running,
+                ClaudeCliStatus::AuthRequired { .. } => theme.warning,
+                ClaudeCliStatus::AuthUnknown { .. } | ClaudeCliStatus::ProbeFailed(_) => {
+                    theme.accent_error
+                }
+                ClaudeCliStatus::FeatureNotCompiled | ClaudeCliStatus::OptInMissing => {
+                    theme.gray_dim
+                }
+            };
+            let cli_detail = match cli_status {
+                ClaudeCliStatus::Checking => {
+                    "probing official `claude` binary and subscription".to_owned()
+                }
+                ClaudeCliStatus::Ready {
+                    version,
+                    auth_summary,
+                } => format!("v{version} · {auth_summary}"),
+                ClaudeCliStatus::AuthRequired { version, detail }
+                | ClaudeCliStatus::AuthUnknown { version, detail } => {
+                    format!("v{version} · {detail}")
+                }
+                ClaudeCliStatus::FeatureNotCompiled => {
+                    "build without `claude-cli-runtime`; hidden from /model".to_owned()
+                }
+                ClaudeCliStatus::OptInMissing => {
+                    "set GROK_CLAUDE_CLI_RUNTIME=1; hidden from /model".to_owned()
+                }
+                ClaudeCliStatus::ProbeFailed(error) => {
+                    format!("{error} · hidden from /model")
+                }
+            };
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                &format!(
+                    "    Claude Agent CLI [{}]: {cli_detail}",
+                    cli_status.label()
+                ),
+                Style::default().fg(cli_color),
+            );
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                "      Experimental subscription mode · separate from the API key",
+                Style::default().fg(theme.gray_dim),
+            );
+        }
     }
     if let ProviderModalMode::EditingKey { provider, editor } = &state.mode {
         y = y.saturating_add(1);
@@ -750,7 +861,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             buf,
             content.content,
             &mut y,
-            "xAI/OpenAI: OAuth and API keys are independent; model routes select the method. OpenRouter/Anthropic: API key.",
+            "xAI/OpenAI: routes select OAuth or API key. Anthropic: Messages API key or separate Claude CLI subscription.",
             Style::default().fg(theme.gray_dim),
         );
     }
@@ -891,7 +1002,79 @@ mod tests {
         assert_eq!(state.rows[3], ProviderKind::Anthropic);
         assert!(ProviderKind::Anthropic.needs_api_key());
         assert_eq!(ProviderKind::Anthropic.id_str(), "anthropic");
-        assert!(ProviderKind::Anthropic.detail().contains("Messages"));
+        assert!(
+            ProviderKind::Anthropic
+                .detail()
+                .contains("Native Grok agent loop")
+        );
+    }
+
+    #[test]
+    fn anthropic_card_renders_api_and_ready_cli_modes_separately() {
+        let mut state = ProviderModalState::new();
+        state.set_status(
+            &ProviderKind::Anthropic,
+            ProviderStatus::Connected {
+                detail: Some("Configured by environment variable".into()),
+            },
+        );
+        state.set_claude_cli_status(ClaudeCliStatus::Ready {
+            version: "2.1.219".into(),
+            auth_summary: "Claude subscription logged in".into(),
+        });
+
+        let area = Rect::new(0, 0, 110, 32);
+        let mut buf = Buffer::empty(area);
+        render_modal(&mut buf, area, &mut state, false);
+        let mut rendered = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        assert!(rendered.contains("Messages API: Configured by environment variable"));
+        assert!(rendered.contains("Claude Agent CLI [Ready]: v2.1.219"));
+        assert!(rendered.contains("subscription logged in"));
+        assert!(rendered.contains("separate from the API key"));
+    }
+
+    #[test]
+    fn release_build_hides_cli_mode_when_feature_is_not_compiled() {
+        let mut state = ProviderModalState::new();
+        state.set_claude_cli_status(ClaudeCliStatus::FeatureNotCompiled);
+        let area = Rect::new(0, 0, 110, 32);
+        let mut buf = Buffer::empty(area);
+        render_modal(&mut buf, area, &mut state, false);
+        let mut rendered = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        assert!(!rendered.contains("Claude Agent CLI"));
+    }
+
+    #[test]
+    fn anthropic_card_renders_actionable_cli_gate_status() {
+        let mut state = ProviderModalState::new();
+        state.set_claude_cli_status(ClaudeCliStatus::OptInMissing);
+        let area = Rect::new(0, 0, 110, 32);
+        let mut buf = Buffer::empty(area);
+        render_modal(&mut buf, area, &mut state, false);
+        let mut rendered = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        assert!(rendered.contains("Claude Agent CLI [Opt-in required]"));
+        assert!(rendered.contains("GROK_CLAUDE_CLI_RUNTIME=1"));
     }
 
     #[test]

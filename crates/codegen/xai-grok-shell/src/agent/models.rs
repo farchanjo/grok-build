@@ -14,7 +14,7 @@ use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
 use crate::inference::InferenceConfig;
 use crate::remote::{FetchModelsResult, fetch_models_blocking};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortOption};
+use xai_grok_inference_types::{ReasoningEffort, ReasoningEffortOption, ReasoningEffortSelection};
 
 // ── Auth method for model fetching ──────────────────────────────────────────
 
@@ -547,14 +547,9 @@ impl ModelsManager {
         *self.inner.current_reasoning_effort.write() = effort;
     }
 
-    /// Whether the given model supports reasoning effort according to the catalog.
+    /// Whether the given model exposes a reasoning-effort menu.
     pub fn model_supports_reasoning_effort(&self, model_id: &str) -> bool {
-        self.inner
-            .models
-            .read()
-            .get(model_id)
-            .map(|e| e.info().supports_reasoning_effort_ui())
-            .unwrap_or(false)
+        self.model_reasoning_effort_selection(model_id).has_menu()
     }
 
     /// The catalog default reasoning effort for `model_id`, if the catalog
@@ -562,11 +557,10 @@ impl ModelsManager {
     /// nor the global config sets an explicit effort, so surfaced config stays
     /// consistent with the effort sampling actually uses.
     pub fn model_default_reasoning_effort(&self, model_id: &str) -> Option<ReasoningEffort> {
-        self.inner
-            .models
-            .read()
-            .get(model_id)
-            .and_then(|e| e.info().reasoning_effort)
+        let models = self.inner.models.read();
+        resolve_catalog_key(&models, &acp::ModelId::new(model_id))
+            .and_then(|key| models.get(key.0.as_ref()))
+            .and_then(|entry| entry.info().reasoning_effort)
     }
 
     /// The raw catalog `reasoning_efforts` list for `model_id` with no fallback,
@@ -574,11 +568,10 @@ impl ModelsManager {
     /// session modes). Distinct from the pager's gate-first, fallback-applied
     /// `ModelState::reasoning_effort_options`.
     pub fn model_reasoning_efforts(&self, model_id: &str) -> Vec<ReasoningEffortOption> {
-        self.inner
-            .models
-            .read()
-            .get(model_id)
-            .map(|e| e.info().reasoning_efforts.clone())
+        let models = self.inner.models.read();
+        resolve_catalog_key(&models, &acp::ModelId::new(model_id))
+            .and_then(|key| models.get(key.0.as_ref()))
+            .map(|entry| entry.info().reasoning_efforts.clone())
             .unwrap_or_default()
     }
 
@@ -626,6 +619,102 @@ impl ModelsManager {
             .and_then(|key| models.get(key.0.as_ref()))
             .map(|e| e.info().show_model_fingerprint)
             .unwrap_or(false)
+    }
+
+    // ── Normalized reasoning effort selection ───────────────────────────────────
+
+    /// Get the normalized reasoning effort selection for a model.
+    ///
+    /// Returns the `reasoning_effort_selection` from the model's catalog entry.
+    /// Uses route-aware lookup: resolves routing slugs to catalog keys first.
+    /// Returns the default (`Unknown`) if the model is not found.
+    pub fn model_reasoning_effort_selection(&self, model_id: &str) -> ReasoningEffortSelection {
+        let models = self.inner.models.read();
+        let key = resolve_catalog_key(&models, &acp::ModelId::new(model_id));
+        key.and_then(|k| models.get(k.0.as_ref()))
+            .map(|e| e.info().reasoning_effort_selection)
+            .unwrap_or_default()
+    }
+
+    /// Get the menu options for a model's reasoning effort selection.
+    ///
+    /// Returns the appropriate menu based on the model's normalized selection state:
+    /// - `Unknown` or `Unsupported`: empty vec (no menu shown)
+    /// - `LegacyFallback`: xhigh/high/medium/low historical menu
+    /// - `Exact`: the model's explicit `reasoning_efforts` list
+    /// - `Unrestricted`: all canonical values (max/xhigh/high/medium/low/minimal/none)
+    ///
+    /// Uses route-aware lookup for the model_id.
+    pub fn model_reasoning_effort_menu(&self, model_id: &str) -> Vec<ReasoningEffortOption> {
+        let models = self.inner.models.read();
+        let key = resolve_catalog_key(&models, &acp::ModelId::new(model_id));
+        let entry = key.and_then(|k| models.get(k.0.as_ref()));
+        let selection = entry
+            .map(|e| e.info().reasoning_effort_selection)
+            .unwrap_or_default();
+        let provided_options = entry
+            .map(|e| e.info().reasoning_efforts.clone())
+            .unwrap_or_default();
+        selection.menu_options(&provided_options)
+    }
+
+    // ── Validation methods ─────────────────────────────────────────────────────
+
+    /// Validate a raw reasoning effort token for a model.
+    ///
+    /// Returns `Ok(effort)` if the token is valid for the model's selection state,
+    /// or an error string describing the validation failure.
+    ///
+    /// Validation rules:
+    /// - `Unsupported` selection: rejects all tokens
+    /// - `Unknown` selection: accepts explicit canonical tokens (none/minimal/low/medium/high/xhigh/max)
+    /// - `LegacyFallback`: accepts xhigh/high/medium/low only
+    /// - `Exact`: accepts only menu option IDs or values present in the model's menu
+    /// - `Unrestricted`: accepts all canonical tokens
+    pub fn validate_reasoning_effort_for_model(
+        &self,
+        model_id: &str,
+        token: &str,
+    ) -> Result<ReasoningEffort, String> {
+        let models = self.inner.models.read();
+        let key = resolve_catalog_key(&models, &acp::ModelId::new(model_id));
+        let entry = key.and_then(|k| models.get(k.0.as_ref()));
+
+        let selection = entry
+            .map(|e| e.info().reasoning_effort_selection)
+            .unwrap_or_default();
+        let provided_options = entry
+            .map(|e| e.info().reasoning_efforts.clone())
+            .unwrap_or_default();
+
+        selection.resolve_token(token, &provided_options)
+    }
+
+    /// Check if a reasoning effort token is supported for a model.
+    ///
+    /// Returns `true` if the model accepts reasoning effort at all (not `Unsupported`),
+    /// and the token is valid for the model's selection state.
+    pub fn is_reasoning_effort_supported_for_model(&self, model_id: &str) -> bool {
+        let models = self.inner.models.read();
+        let key = resolve_catalog_key(&models, &acp::ModelId::new(model_id));
+        let entry = key.and_then(|k| models.get(k.0.as_ref()));
+
+        let selection = entry
+            .map(|e| e.info().reasoning_effort_selection)
+            .unwrap_or_default();
+        !matches!(selection, ReasoningEffortSelection::Unsupported)
+    }
+
+    /// Resolve a reasoning effort token to its canonical value for a model.
+    ///
+    /// Returns `None` if the token is not supported by the model.
+    pub fn resolve_reasoning_effort_token_for_model(
+        &self,
+        model_id: &str,
+        token: &str,
+    ) -> Option<ReasoningEffort> {
+        self.validate_reasoning_effort_for_model(model_id, token)
+            .ok()
     }
 
     /// Resolved next-prompt-suggestion model pin from the live config
@@ -1303,11 +1392,14 @@ pub enum RefreshStrategy {
 // ── Disk cache ──────────────────────────────────────────────────────────────
 
 const MODELS_CACHE_FILE: &str = "models_cache.json";
+const MODELS_CAPABILITY_SCHEMA_VERSION: u8 = 2;
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ModelsCache {
     fetched_at: DateTime<Utc>,
+    #[serde(default)]
+    capability_schema_version: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grok_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1368,6 +1460,14 @@ impl ModelsCacheManager {
             tracing::debug!("models cache version mismatch");
             return None;
         }
+        if cache.capability_schema_version != MODELS_CAPABILITY_SCHEMA_VERSION {
+            tracing::debug!(
+                cached = cache.capability_schema_version,
+                expected = MODELS_CAPABILITY_SCHEMA_VERSION,
+                "models cache capability schema mismatch"
+            );
+            return None;
+        }
         if cache.auth_method.as_ref() != Some(expected_auth) {
             tracing::debug!("models cache auth method mismatch");
             return None;
@@ -1401,6 +1501,7 @@ impl ModelsCacheManager {
     ) {
         let cache = ModelsCache {
             fetched_at: Utc::now(),
+            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION,
             grok_version: Some(xai_grok_version::VERSION.to_string()),
             auth_method: Some(auth_method),
             origin: Some(origin.to_string()),
@@ -1422,6 +1523,10 @@ impl ModelsCacheManager {
         let Ok(mut cache) = serde_json::from_slice::<ModelsCache>(&data) else {
             return;
         };
+        if cache.capability_schema_version != MODELS_CAPABILITY_SCHEMA_VERSION {
+            tracing::debug!("models cache TTL renewal skipped: capability schema mismatch");
+            return;
+        }
         if cache.auth_method.as_ref() != Some(expected_auth) {
             tracing::debug!("models cache TTL renewal skipped: auth method mismatch");
             return;
@@ -1994,7 +2099,7 @@ pub fn resolve_model_catalog(
     if let Some(effort) = cfg.models.default_reasoning_effort
         && let Some(default_id) = cfg.models.default.as_deref()
         && let Some(entry) = catalog.get_mut(default_id)
-        && entry.info.supports_reasoning_effort_ui()
+        && model_offers_reasoning_effort(&entry.info, effort)
     {
         entry.info.reasoning_effort = Some(effort);
     }
@@ -2019,20 +2124,9 @@ pub fn resolve_model_catalog(
 /// built-in low/medium/high/xhigh set (same as the pager legacy menu — no
 /// `none`/`minimal`).
 fn model_offers_reasoning_effort(info: &config::ModelInfo, effort: ReasoningEffort) -> bool {
-    if !info.supports_reasoning_effort_ui() {
-        return false;
-    }
-    if info.reasoning_efforts.is_empty() {
-        matches!(
-            effort,
-            ReasoningEffort::Low
-                | ReasoningEffort::Medium
-                | ReasoningEffort::High
-                | ReasoningEffort::Xhigh
-        )
-    } else {
-        info.reasoning_efforts.iter().any(|opt| opt.value == effort)
-    }
+    info.reasoning_effort_selection
+        .resolve_token(effort.as_str(), &info.reasoning_efforts)
+        .is_ok()
 }
 
 /// True when an active `allowed_models` allowlist leaves no selectable model.
@@ -2345,6 +2439,70 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_validation_is_route_aware_and_fail_closed_for_exact_empty() {
+        let mgr = test_manager();
+        let mut exact = ModelEntry {
+            info: config::ModelInfo::fallback("routing-slug"),
+            model_provider: None,
+            api_key: None,
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        };
+        exact.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
+        exact.info.reasoning_efforts = vec![ReasoningEffortOption {
+            id: "deep".into(),
+            value: ReasoningEffort::Xhigh,
+            label: "Deep".into(),
+            description: None,
+            default: false,
+        }];
+        mgr.insert_test_entry("catalog-key", exact);
+
+        assert_eq!(
+            mgr.model_reasoning_effort_selection("routing-slug"),
+            ReasoningEffortSelection::Exact
+        );
+        assert_eq!(
+            mgr.model_reasoning_effort_menu("routing-slug")
+                .into_iter()
+                .map(|option| option.id)
+                .collect::<Vec<_>>(),
+            ["deep"]
+        );
+        assert_eq!(
+            mgr.validate_reasoning_effort_for_model("routing-slug", "deep")
+                .unwrap(),
+            ReasoningEffort::Xhigh
+        );
+        assert!(
+            mgr.validate_reasoning_effort_for_model("catalog-key", "high")
+                .is_err()
+        );
+        assert_eq!(
+            mgr.model_reasoning_effort_selection("missing-model"),
+            ReasoningEffortSelection::Unknown
+        );
+
+        let mut exact_empty = ModelEntry {
+            info: config::ModelInfo::fallback("exact-empty"),
+            model_provider: None,
+            api_key: None,
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        };
+        exact_empty.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
+        mgr.insert_test_entry("exact-empty", exact_empty);
+        assert!(
+            mgr.validate_reasoning_effort_for_model("exact-empty", "high")
+                .is_err(),
+            "an exact selector without usable options must fail closed"
+        );
+        assert!(mgr.model_reasoning_effort_menu("exact-empty").is_empty());
+    }
+
+    #[test]
     fn current_reasoning_effort_round_trip() {
         let mgr = test_manager();
         assert_eq!(mgr.current_reasoning_effort(), None);
@@ -2391,6 +2549,7 @@ mod tests {
             api_base_url: None,
         };
         reasoning_entry.info.supports_reasoning_effort = Some(true);
+        reasoning_entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
 
         let catalog = resolve_model_catalog(&cfg, Some(prefetched));
@@ -2406,7 +2565,7 @@ mod tests {
         cfg.models.default_reasoning_effort = Some(ReasoningEffort::High);
 
         let mut prefetched = IndexMap::new();
-        let plain_entry = ModelEntry {
+        let mut plain_entry = ModelEntry {
             info: config::ModelInfo::fallback("plain-model"),
             model_provider: None,
             api_key: None,
@@ -2414,6 +2573,8 @@ mod tests {
             auth_provider: None,
             api_base_url: None,
         };
+        plain_entry.info.supports_reasoning_effort = Some(false);
+        plain_entry.info.reasoning_effort_selection = ReasoningEffortSelection::Unsupported;
         prefetched.insert("plain-model".to_string(), plain_entry);
 
         let catalog = resolve_model_catalog(&cfg, Some(prefetched));
@@ -2444,6 +2605,7 @@ mod tests {
             api_base_url: None,
         };
         no_none.info.supports_reasoning_effort = Some(true);
+        no_none.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
         no_none.info.reasoning_efforts = vec![ReasoningEffortOption {
             id: "high".into(),
             value: ReasoningEffort::High,
@@ -2464,6 +2626,7 @@ mod tests {
             api_base_url: None,
         };
         with_none.info.supports_reasoning_effort = Some(true);
+        with_none.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
         with_none.info.reasoning_efforts = vec![ReasoningEffortOption {
             id: "none".into(),
             value: ReasoningEffort::None,
@@ -2572,9 +2735,10 @@ mod tests {
             api_base_url: None,
         };
         reasoning_entry.info.supports_reasoning_effort = Some(true);
+        reasoning_entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
 
-        let plain_entry = ModelEntry {
+        let mut plain_entry = ModelEntry {
             info: config::ModelInfo::fallback("plain-model"),
             model_provider: None,
             api_key: None,
@@ -2582,6 +2746,8 @@ mod tests {
             auth_provider: None,
             api_base_url: None,
         };
+        plain_entry.info.supports_reasoning_effort = Some(false);
+        plain_entry.info.reasoning_effort_selection = ReasoningEffortSelection::Unsupported;
         prefetched.insert("plain-model".to_string(), plain_entry);
 
         let catalog = resolve_model_catalog(&cfg, Some(prefetched));
@@ -3006,6 +3172,7 @@ mod tests {
         let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
         let stale = ModelsCache {
             fetched_at: Utc::now() - ChronoDuration::seconds(3600),
+            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION,
             grok_version: Some(xai_grok_version::VERSION.to_string()),
             auth_method: Some(auth_method),
             origin: Some(mgr.cache_origin()),
@@ -3017,6 +3184,31 @@ mod tests {
         mgr.reload_from_cache_manager(&cache);
 
         assert!(!mgr.models().contains_key("grok-stale"));
+        assert!(mgr.inner.etag.read().is_none());
+    }
+
+    /// A cache written by the previous capability schema must be treated as a
+    /// miss even when every other cache guard matches.
+    #[test]
+    fn reasoning_effort_cache_ignores_capability_schema_mismatch() {
+        let mgr = test_manager();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache = test_cache_manager(tmp.path());
+        let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
+        let old_schema = ModelsCache {
+            fetched_at: Utc::now(),
+            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION - 1,
+            grok_version: Some(xai_grok_version::VERSION.to_string()),
+            auth_method: Some(auth_method),
+            origin: Some(mgr.cache_origin()),
+            etag: Some("etag-old-capabilities".into()),
+            models: make_prefetched(&["grok-old-capabilities"]),
+        };
+        cache.atomic_write(&old_schema);
+
+        mgr.reload_from_cache_manager(&cache);
+
+        assert!(!mgr.models().contains_key("grok-old-capabilities"));
         assert!(mgr.inner.etag.read().is_none());
     }
 
@@ -3082,6 +3274,7 @@ mod tests {
         let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
         let legacy = ModelsCache {
             fetched_at: Utc::now(),
+            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION,
             grok_version: Some(xai_grok_version::VERSION.to_string()),
             auth_method: Some(auth_method),
             origin: None,
@@ -3570,6 +3763,7 @@ mod tests {
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: ReasoningEffortSelection::Unsupported,
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,

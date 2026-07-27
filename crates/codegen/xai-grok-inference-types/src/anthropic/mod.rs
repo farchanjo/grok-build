@@ -19,7 +19,8 @@ pub use files::{
     DeleteFileResponse, FileListPage, FileMetadata, FileUploadSource, ListFilesParams,
 };
 pub use models::{
-    CapabilitySupport, ListModelsParams, ModelCapabilities, ModelInfo, ModelListPage,
+    CapabilitySupport, EffortCapability, ListModelsParams, ModelCapabilities, ModelInfo,
+    ModelListPage,
 };
 pub use rate_limit::AnthropicRateLimitHeaders;
 pub use version::ANTHROPIC_VERSION;

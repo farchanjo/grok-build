@@ -4719,6 +4719,56 @@ fn display_provider_status(
     }
 }
 
+async fn claude_cli_display_status() -> crate::views::providers_modal::ClaudeCliStatus {
+    use crate::views::providers_modal::ClaudeCliStatus;
+    use xai_grok_shell::agent::external_runtime::{gates, probe_cache};
+
+    if !gates::claude_cli_feature_compiled() {
+        return ClaudeCliStatus::FeatureNotCompiled;
+    }
+    if !gates::claude_cli_runtime_opt_in() {
+        return ClaudeCliStatus::OptInMissing;
+    }
+
+    xai_grok_shell::agent::external_runtime::bootstrap_claude_cli_probe_if_gated().await;
+    let version = match probe_cache::probe_cache_state() {
+        probe_cache::ClaudeCliProbeCacheState::Ok { version } => version,
+        probe_cache::ClaudeCliProbeCacheState::Failed { message } => {
+            return ClaudeCliStatus::ProbeFailed(message);
+        }
+        probe_cache::ClaudeCliProbeCacheState::NotProbed => {
+            return ClaudeCliStatus::ProbeFailed(
+                "Claude CLI probe did not produce a result; hidden from /model".to_owned(),
+            );
+        }
+    };
+
+    #[cfg(feature = "claude-cli-runtime")]
+    {
+        match xai_grok_shell::agent::external_runtime::claude_cli::runtime::auth_status_for_ui(None)
+            .await
+        {
+            Ok(auth) if auth.logged_in => ClaudeCliStatus::Ready {
+                version,
+                auth_summary: auth.summary,
+            },
+            Ok(auth) => ClaudeCliStatus::AuthRequired {
+                version,
+                detail: auth.summary,
+            },
+            Err(error) => ClaudeCliStatus::AuthUnknown {
+                version,
+                detail: error.message,
+            },
+        }
+    }
+    #[cfg(not(feature = "claude-cli-runtime"))]
+    {
+        let _ = version;
+        ClaudeCliStatus::FeatureNotCompiled
+    }
+}
+
 async fn run_provider_operation(
     agent_id: agent::AgentId,
     operation: actions::ProviderOperation,
@@ -4772,8 +4822,14 @@ async fn run_provider_operation(
     }
 
     let manager = ProviderManager::default();
+    let mut claude_cli_status = None;
     let (provider, status) = match operation {
         ProviderOperation::Refresh(provider) => {
+            if provider == ProviderKind::Anthropic {
+                // The subscription-backed CLI is independent of the Messages
+                // API key, so always probe it when its shared card refreshes.
+                claude_cli_status = Some(claude_cli_display_status().await);
+            }
             let status = if matches!(
                 provider,
                 ProviderKind::OpenAi | ProviderKind::OpenRouter | ProviderKind::Anthropic
@@ -4796,11 +4852,6 @@ async fn run_provider_operation(
                         }
                         ProviderKind::Anthropic => {
                             let _ = manager.refresh_anthropic_catalog().await;
-                            // Async probe bootstrap for experimental Claude Agent CLI
-                            // (gated; does not use Anthropic API key).
-                            xai_grok_shell::agent::external_runtime::bootstrap_claude_cli_probe_if_gated(
-                            )
-                            .await;
                         }
                         ProviderKind::Xai | ProviderKind::Configured(_) => unreachable!(),
                     }
@@ -4949,6 +5000,7 @@ async fn run_provider_operation(
         agent_id,
         provider,
         status,
+        claude_cli_status,
         repair,
     }
 }
