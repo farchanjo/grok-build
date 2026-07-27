@@ -3,11 +3,17 @@
 These instructions apply to the entire repository. They are mandatory for every
 agent, automation, and development session that reads this file.
 
+This file contains the mandatory operational rules. The canonical detailed
+architecture and development guide is [`GROK.md`](GROK.md). A concise
+compatibility entry point for Claude-compatible agents is [`CLAUDE.md`](CLAUDE.md).
+
 ## Required Reference
 
 Read [`GROK.md`](GROK.md) in full before analyzing code, proposing changes,
 running commands, or editing files. `GROK.md` is the canonical development and
-architecture reference for this checkout.
+architecture reference. Claude-compatible agents may start at
+[`CLAUDE.md`](CLAUDE.md), but still must read `AGENTS.md` and `GROK.md` in
+full before editing.
 
 ## Language Policy
 
@@ -156,7 +162,9 @@ again in the same command invocation.
 Install DotSlash first because `bin/protoc` uses it for hermetic protobuf
 tooling.
 
-Prefer crate-targeted validation:
+### Preferred local workflow
+
+For ordinary development, use direct crate-targeted Cargo commands:
 
 ```sh
 cargo check -p xai-grok-pager-bin
@@ -166,9 +174,30 @@ cargo fmt --all --check
 cargo build -p xai-grok-pager-bin --release
 ```
 
-The examples assume the mandatory `~/.grokdev` environment has already been
-set in the same shell invocation. The release artifact is
-`target/release/xai-grok-pager`.
+Use `./grok-test.sh` as the fast local `cargo-nextest` wrapper.
+
+```sh
+./grok-test.sh -p xai-grok-shell
+./grok-test.sh -p xai-grok-shell -- session_runtime_family
+./grok-test.sh -p xai-grok-shell --run-ignored all
+./grok-test.sh -p xai-grok-shell --no-run
+```
+
+`grok-dev-runner.sh` runs the console with the experimental
+`claude-cli-runtime` feature and stores its artifacts in `./target-dev`. Use it
+only when that feature is needed; otherwise prefer direct `cargo run`.
+
+`grok-test.sh` stores test artifacts in `./target-test`.
+
+### Makefile
+
+`Makefile` targets are release-dist and deployment-oriented. Default `make build`
+uses `--profile release-dist`, plus `--locked`, `--timings`, sccache/jobs, and
+optional `FEATURES=`. Do not use
+`make deploy`, `make deploy-binary`, `make deploy-wrapper`, or `make verify`
+unless the task explicitly requests deployment.
+
+### Validation practices
 
 - Start with the narrowest affected crate.
 - Check direct consumers after the focused tests pass.
@@ -178,6 +207,25 @@ set in the same shell invocation. The release artifact is
   coverage.
 - Permission, sandbox, session, leader, and MCP changes require failure-path
   tests in addition to happy-path tests.
+
+### Cargo.lock discipline
+
+`Cargo.lock` is tracked and must remain deterministic. Use `--locked` for
+reproducible builds and release verification. Ordinary source-only changes must
+not modify `Cargo.lock`. When a dependency, feature, or manifest change
+intentionally alters resolution, regenerate the lockfile with the pinned
+toolchain in the canonical isolated environment, review the diff, and include
+it. Never hand-edit `Cargo.lock`. Do not run `cargo update` broadly; use a
+targeted `cargo update -p <name> --precise <version>` instead. If `--locked`
+fails, diagnose the manifest/lock mismatch rather than removing `--locked` or
+deleting the lockfile.
+
+Concurrent Cargo work can contend on package and target directory locks. Do
+not delete `.cargo` file locks or kill other users' builds. Use separate
+`CARGO_TARGET_DIR` for independent worktrees or runners (for example,
+`./grok-test.sh` uses `./target-test` and `grok-dev-runner.sh` uses
+`./target-dev`) and let sccache share compilation artifacts. Distinguish the
+persistent `Cargo.lock` dependency lockfile from transient Cargo file locks.
 
 ## Editing Rules
 
