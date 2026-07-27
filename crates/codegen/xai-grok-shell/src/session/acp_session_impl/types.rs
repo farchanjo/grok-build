@@ -104,7 +104,7 @@ pub enum TodoGateReason {
 /// telemetry without re-deriving the reason from the input.
 ///
 /// Exposed as `pub` solely so the replay-trace integration test in
-/// `tests/trace_replay.rs` can match against the decision. Not part of
+/// `tests/session_runtime_family/trace_replay.rs` can match against the decision. Not part of
 /// the public API.
 #[doc(hidden)]
 pub enum TodoGateDecision {

@@ -329,11 +329,43 @@ is relevant to the task.
 
 ### Test and Lint
 
+The repository uses `cargo-nextest` as the fast local default. `cargo test`
+remains fully supported (`cargo test` ignores `.config/nextest.toml`; `cargo
+nextest` honors it), and both runners use the same isolated `~/.grokdev`
+profile.
+
 ```sh
-cargo test -p xai-grok-config
+# Default: one affected crate with nextest.
+./grok-test.sh -p xai-grok-config
+./grok-test.sh -p xai-grok-shell
+
+# Run a specific integration-test family or test function. Nextest filters use
+# the test module path, so the family module prefix narrows scheduling.
+./grok-test.sh -p xai-grok-shell -- session_runtime_family
+./grok-test.sh -p xai-grok-shell -- session_runtime_family::test_fork_session
+./grok-test.sh -p xai-grok-shell -- session_runtime_family::test_fork_session::test_fork_session_creates_new_session_with_parent_tracking
+
+# Include ignored acceptance / perf tests when you have the needed fixture or
+# pre-built binary.
+./grok-test.sh -p xai-grok-shell --run-ignored all
+
+# Cargo-test compatibility and quick lints.
 cargo test -p xai-grok-shell
 cargo clippy -p xai-grok-shell
 cargo fmt --all --check
+```
+
+`./grok-test.sh` is a thin wrapper that:
+* sets the canonical development profile;
+* disables discovery of Cursor / Claude / Codex state;
+* enables `sccache` when present;
+* invokes `cargo nextest run` with any trailing arguments.
+
+For a no-build metadata check or to list matching tests without running them:
+
+```sh
+cargo nextest list -p xai-grok-shell
+cargo nextest run -p xai-grok-shell --no-run
 ```
 
 Prefer the narrowest affected crate, then validate direct consumers. Full
@@ -345,6 +377,27 @@ Install DotSlash before commands that require `bin/protoc`:
 cargo install dotslash
 /usr/bin/env dotslash --help
 ```
+
+### Measuring Test Compile/Link Cost
+
+When changing the test layout, measure the impact before adding linker
+replacements. Rust link times are usually the bottleneck for multi-binary
+integration-test suites.
+
+```sh
+# cargo-test: compile every test target without executing.
+cargo test -p xai-grok-shell --no-run --timings
+
+# nextest: build and resolve test metadata without executing tests.
+./grok-test.sh -p xai-grok-shell --no-run
+
+# Inspect shared-cache hit rate for the current shell.
+sccache --show-stats
+```
+
+The repository-wide `.config/nextest.toml` keeps timeouts conservative
+(`retries = 0`, `slow-timeout` enforces a 300s per-test ceiling) and reports
+slow tests; it does not blanket-retry failures.
 
 ## Testing Strategy
 

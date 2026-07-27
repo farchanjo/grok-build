@@ -15,10 +15,9 @@
 //! cargo test -p xai-grok-shell --test test_refusal_stop_reason -- --ignored
 //! ```
 
-use std::future::Future;
-
-#[cfg(unix)]
 mod common;
+
+use std::future::Future;
 
 use agent_client_protocol as acp;
 use xai_grok_test_support::*;
@@ -128,7 +127,8 @@ mod leader {
     use xai_grok_test_support::leader::{LeaderFixture, wait_for_live_leader};
     use xai_grok_test_support::*;
 
-    use super::{common, refusal_messages_server, turn_messages_request_count, with_local_set};
+    use super::{refusal_messages_server, turn_messages_request_count, with_local_set};
+    use crate::common::leader::run_with_cleanup;
 
     /// Leader-mode variant of the regression: the refusal-terminated turn
     /// must complete cleanly (single request, prompt response delivered)
@@ -144,7 +144,7 @@ mod leader {
                 .await
                 .expect("start persistent leader fixture");
             let mut clients = Vec::new();
-            common::leader::run_with_cleanup(
+            run_with_cleanup(
                 &fixture,
                 &mut clients,
                 |fixture, clients| {

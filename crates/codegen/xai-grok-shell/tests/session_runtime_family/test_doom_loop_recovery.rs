@@ -9,9 +9,7 @@
 //! `response`, `low_logprob`, or over-threshold) so they stay orthogonal to
 //! the recovery, which acts only on confident signals.
 
-mod common;
-
-use common::{create_test_client, test_inference_config};
+use crate::common::{create_test_client, test_inference_config};
 use xai_grok_inference::RetryPolicy;
 use xai_grok_inference_types::doom_loop::{DoomLoopSignalKind, SAMPLE_CHECK_EVENT_DATA_CUMULATIVE};
 use xai_grok_shell::inference::{
@@ -527,7 +525,7 @@ async fn doomed_then_reasoning_only_empty_coexist() {
 ///
 /// `#[ignore]` (needs a built binary). Run locally (auto-builds the pager):
 /// ```bash
-/// cargo test -p xai-grok-shell --test test_doom_loop_recovery -- --ignored
+/// cargo test -p xai-grok-shell --test session_runtime_family -- test_doom_loop_recovery::headless_config_enables_doom_loop_check_header --ignored
 /// ```
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored

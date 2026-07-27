@@ -1,0 +1,32 @@
+# Repository-level nextest configuration.
+#
+# cargo-nextest is the preferred fast local test runner. This file keeps the
+# default profile conservative: tests must finish quickly, failures are shown
+# clearly, and retries are disabled so flaky tests surface instead of being
+# hidden by re-runs.
+#
+# For crate-targeted runs from the canonical isolated profile:
+#   export GROK_HOME="${HOME}/.grokdev"
+#   cargo nextest run -p xai-grok-shell
+#
+# To include ignored acceptance/perf tests:
+#   cargo nextest run -p xai-grok-shell --run-ignored all
+#
+# `cargo test` compatibility is preserved; `cargo test` simply ignores this file.
+
+[profile.default]
+# Zero retries: if a test is flaky, re-running it silently hides the defect.
+retries = 0
+
+# Mark tests that take longer than this as SLOW, then enforce a 300s
+# per-test ceiling by terminating after three slow periods.
+slow-timeout = { period = "100s", terminate-after = 3 }
+
+# Show skipped tests too so it is obvious when an important family is missing.
+status-level = "skip"
+
+# Only summarize failures; keep successful output from flooding the terminal.
+final-status-level = "fail"
+
+[profile.default.junit]
+path = "target/nextest-results.xml"

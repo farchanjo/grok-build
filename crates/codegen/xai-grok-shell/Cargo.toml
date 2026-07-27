@@ -3,6 +3,9 @@ license = "Apache-2.0"
 name = "xai-grok-shell"
 version = "0.2.110"
 edition.workspace = true
+# Explicit integration-test targets below. This keeps the consolidated
+# scheduling families from being double-discovered as their own binaries.
+autotests = false
 
 [features]
 default = []
@@ -190,7 +193,7 @@ windows = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 filetime = { workspace = true }
-tempfile = { workspace = true }
+pretty_assertions = { workspace = true }
 xai-grok-memory = { workspace = true, features = ["test-support"] }
 xai-grok-workspace = { workspace = true, features = ["test-support"] }
 xai-grok-config = { workspace = true, features = [] }
@@ -216,6 +219,103 @@ workspace = true
 [[bench]]
 name = "session_list"
 harness = false
+
+# Consolidated scheduling families (see comments in each root for boundaries).
+[[test]]
+name = "session_runtime_family"
+path = "tests/session_runtime_family.rs"
+
+[[test]]
+name = "config_family"
+path = "tests/config_family.rs"
+
+[[test]]
+name = "mcp_family"
+path = "tests/mcp_family.rs"
+
+# Standalone integration-test targets.
+#
+# Kept separate because they require a pre-built binary, process-global env,
+# ignored acceptance resources, perf measurement, or a special host resource.
+[[test]]
+name = "git_contention_e2e"
+path = "tests/git_contention_e2e.rs"
+
+[[test]]
+name = "session_load_perf"
+path = "tests/session_load_perf.rs"
+
+[[test]]
+name = "team_managed_config"
+path = "tests/team_managed_config.rs"
+
+[[test]]
+name = "test_agent_type_invariant"
+path = "tests/test_agent_type_invariant.rs"
+
+[[test]]
+name = "test_auth_provider_e2e"
+path = "tests/test_auth_provider_e2e.rs"
+
+[[test]]
+name = "test_built_binary_e2e"
+path = "tests/test_built_binary_e2e.rs"
+
+[[test]]
+name = "test_config_update_isolation"
+path = "tests/test_config_update_isolation.rs"
+
+[[test]]
+name = "test_debug_logging"
+path = "tests/test_debug_logging.rs"
+
+[[test]]
+name = "test_global_extra_headers_e2e"
+path = "tests/test_global_extra_headers_e2e.rs"
+
+[[test]]
+name = "test_heap_profile_monitor"
+path = "tests/test_heap_profile_monitor.rs"
+
+[[test]]
+name = "test_inference_client"
+path = "tests/test_inference_client.rs"
+
+[[test]]
+name = "test_leader_stdio_integration"
+path = "tests/test_leader_stdio_integration.rs"
+
+[[test]]
+name = "test_leader_death_repro"
+path = "tests/test_leader_death_repro.rs"
+
+[[test]]
+name = "test_leader_soak"
+path = "tests/test_leader_soak.rs"
+
+[[test]]
+name = "test_leader_version_skew"
+path = "tests/test_leader_version_skew.rs"
+
+[[test]]
+name = "test_trusted_local_plugin_refresh_e2e"
+path = "tests/test_trusted_local_plugin_refresh_e2e.rs"
+
+[[test]]
+name = "test_vendor_compat"
+path = "tests/test_vendor_compat.rs"
+
+[[test]]
+name = "test_refusal_stop_reason"
+path = "tests/test_refusal_stop_reason.rs"
+
+[[test]]
+name = "test_stop_hook_e2e"
+path = "tests/test_stop_hook_e2e.rs"
+
+[[test]]
+name = "test_subagent_orphan_reconcile"
+path = "tests/test_subagent_orphan_reconcile.rs"
 
 [lints]
 workspace = true

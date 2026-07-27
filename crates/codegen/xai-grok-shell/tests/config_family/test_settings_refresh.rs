@@ -7,7 +7,7 @@
 //!
 //! Run locally:
 //! ```bash
-//! cargo test -p xai-grok-shell --test test_settings_refresh
+//! cargo test -p xai-grok-shell --test config_family -- test_settings_refresh
 //! ```
 
 use std::future::Future;

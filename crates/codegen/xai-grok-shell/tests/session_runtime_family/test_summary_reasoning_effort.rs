@@ -10,7 +10,7 @@
 //!
 //! Run locally:
 //! ```bash
-//! cargo test -p xai-grok-shell --test test_summary_reasoning_effort -- --ignored
+//! cargo test -p xai-grok-shell --test session_runtime_family -- --ignored
 //! ```
 
 use std::future::Future;

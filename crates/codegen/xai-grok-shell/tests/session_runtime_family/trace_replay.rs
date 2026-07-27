@@ -11,6 +11,7 @@
 //! Data-driven: dropping a new `synthetic_*.json` fixture into
 //! `tests/fixtures/` enrolls it in the harness automatically.
 
+use pretty_assertions::assert_eq;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

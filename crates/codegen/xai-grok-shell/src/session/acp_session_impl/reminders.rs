@@ -9,7 +9,7 @@ use super::*;
 /// the "first N in_progress are backed" insertion-order partition.
 ///
 /// Exposed as `pub` solely so the replay-trace integration test in
-/// `tests/trace_replay.rs` can drive the gate against synthetic JSON
+/// `tests/session_runtime_family/trace_replay.rs` can drive the gate against synthetic JSON
 /// fixtures. Not part of the public API.
 #[doc(hidden)]
 pub struct CollectedTodoGateInput {
@@ -55,7 +55,7 @@ impl CollectedTodoGateInput {
 /// borrows from the gate's call-site so the helper is a pure function.
 ///
 /// The struct itself is `pub` (with `#[doc(hidden)]`) only so the
-/// replay-trace integration test in `tests/trace_replay.rs` can name
+/// replay-trace integration test in `tests/session_runtime_family/trace_replay.rs` can name
 /// the type as `&TodoGateInput<'_>` when calling `evaluate_todo_gate`.
 /// Fields stay crate-private — the test never constructs the struct
 /// directly; it obtains an instance via `CollectedTodoGateInput::as_input()`.
@@ -82,7 +82,7 @@ impl TodoGateReason {
 /// trivially testable.
 ///
 /// Exposed as `pub` solely so the replay-trace integration test in
-/// `tests/trace_replay.rs` can call the gate directly. Not part of the
+/// `tests/session_runtime_family/trace_replay.rs` can call the gate directly. Not part of the
 /// public API.
 #[doc(hidden)]
 pub fn evaluate_todo_gate(input: &TodoGateInput<'_>) -> TodoGateDecision {

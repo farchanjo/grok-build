@@ -2396,7 +2396,7 @@ impl Config {
     /// state and fresh `raw_config`. Builds a [`RuntimeResolutionContext`] from
     /// the CLI flags already stored on this `Config`.
     ///
-    /// Integration test coverage: `tests/test_settings_refresh.rs`.
+    /// Integration test coverage: `tests/config_family/test_settings_refresh.rs`.
     pub fn re_resolve_runtime_fields(&mut self, raw_config: &toml::Value) {
         let remote_settings = self.remote_settings.clone();
         let cli_web_search_model = self.web_search_model_override.clone();

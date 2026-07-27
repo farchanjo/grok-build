@@ -9,9 +9,7 @@
 //! (and accumulate the out-of-band streaming-capture segments verified by the
 //! actor-level capture test).
 
-mod common;
-
-use common::create_test_client;
+use crate::common::create_test_client;
 use xai_grok_inference_types::EmptyReason;
 use xai_grok_shell::inference::{ApiBackend, ConversationItem, ConversationRequest};
 use xai_grok_test_support::sse::responses_api_reasoning_only_events;

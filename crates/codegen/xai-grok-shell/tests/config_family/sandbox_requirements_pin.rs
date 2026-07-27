@@ -1,5 +1,6 @@
 //! Verify `requirements.toml` can pin the base sandbox `profile`.
 
+use pretty_assertions::assert_eq;
 use xai_grok_shell::agent::config::{ConfigSource, SandboxSettingsConfig};
 
 #[test]

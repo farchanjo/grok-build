@@ -6,6 +6,7 @@
 //! 3. When a session is loaded, the notifications are replayed with `isReplay: true`
 
 use agent_client_protocol as acp;
+use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::PathBuf;
 use tempfile::TempDir;
