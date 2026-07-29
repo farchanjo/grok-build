@@ -39,6 +39,9 @@ your response.
 /// retries without re-parsing free-form error strings.
 #[derive(Debug)]
 pub(crate) enum CompactFailure {
+    /// An image-specific provider rejection eligible for one sanitized retry
+    /// at the compaction sampler boundary.
+    ImageSanitization(acp::Error),
     /// Retrying the same payload will hit the same failure. The retry loop
     /// in `run_compact_inner` should bail without sleeping or re-issuing.
     Deterministic(acp::Error),
@@ -78,7 +81,9 @@ pub(super) fn classify_sampling_error(err: InferenceError) -> CompactFailure {
             message,
         } => response_event_error_is_retryable(Some(error_type), message),
     };
-    if retryable {
+    if err.is_payload_too_large() || err.is_image_processing_error() {
+        CompactFailure::ImageSanitization(acp_err)
+    } else if retryable {
         CompactFailure::Transient(acp_err)
     } else {
         CompactFailure::Deterministic(acp_err)
@@ -120,12 +125,34 @@ fn response_event_error_is_retryable(code: Option<&str>, message: &str) -> bool 
     )
 }
 
+/// Return whether a structured Responses error identifies an image-processing
+/// rejection. Providers do not share a single code, so keep this small,
+/// normalized allowlist specific to image processing rather than treating all
+/// 4xx errors as recoverable.
+fn response_event_is_image_rejection(code: Option<&str>, message: &str) -> bool {
+    if code.is_some_and(|code| code.trim() == "413") {
+        return true;
+    }
+    let message = message.trim().to_ascii_lowercase();
+    [
+        "could not process image",
+        "failed to process image",
+        "unable to process image",
+        "image processing error",
+        "image processing failed",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+}
+
 fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(match code {
         Some(c) => format!("compact failed: {c}: {message}"),
         None => format!("compact failed: {message}"),
     });
-    if response_event_error_is_retryable(code, message) {
+    if response_event_is_image_rejection(code, message) {
+        CompactFailure::ImageSanitization(acp_err)
+    } else if response_event_error_is_retryable(code, message) {
         CompactFailure::Transient(acp_err)
     } else {
         CompactFailure::Deterministic(acp_err)
@@ -576,7 +603,15 @@ pub(crate) async fn generate_session_compact(
                                     status = ?failed_event.response.status,
                                     "compact: response.failed event"
                                 );
-                                return Err(classify_response_event_error(code, message));
+                                // Responses' status is an enum rather than an HTTP
+                                // status; preserve its structured value when no error
+                                // code is supplied, while the image allowlist still
+                                // examines the normalized message.
+                                let status = format!("{:?}", failed_event.response.status);
+                                return Err(classify_response_event_error(
+                                    code.or(Some(status.as_str())),
+                                    message,
+                                ));
                             }
                             ResponseStreamEvent::ResponseError(error_event) => {
                                 let code = error_event.code.as_deref();
@@ -786,8 +821,11 @@ mod classify_tests {
     fn is_det(failure: &CompactFailure) -> bool {
         matches!(failure, CompactFailure::Deterministic(_))
     }
+    fn is_image_recovery(failure: &CompactFailure) -> bool {
+        matches!(failure, CompactFailure::ImageSanitization(_))
+    }
     #[test]
-    fn sampling_api_4xx_is_deterministic_except_408_and_429() {
+    fn sampling_api_4xx_is_deterministic_except_408_429_and_image_rejections() {
         let det = |s: StatusCode| {
             is_det(&classify_sampling_error(InferenceError::Api {
                 status: s,
@@ -802,12 +840,58 @@ mod classify_tests {
         assert!(det(StatusCode::UNAUTHORIZED));
         assert!(det(StatusCode::FORBIDDEN));
         assert!(det(StatusCode::NOT_FOUND));
-        assert!(det(StatusCode::PAYLOAD_TOO_LARGE));
+        assert!(matches!(
+            classify_sampling_error(InferenceError::Api {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                message: "payload too large".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                diagnostics: None,
+            }),
+            CompactFailure::ImageSanitization(_)
+        ));
         assert!(!det(StatusCode::REQUEST_TIMEOUT));
         assert!(!det(StatusCode::TOO_MANY_REQUESTS));
         assert!(!det(StatusCode::INTERNAL_SERVER_ERROR));
         assert!(!det(StatusCode::BAD_GATEWAY));
         assert!(!det(StatusCode::SERVICE_UNAVAILABLE));
+    }
+    #[test]
+    fn image_processing_errors_are_reserved_for_sanitized_recovery() {
+        for (status, message) in [
+            (
+                StatusCode::BAD_REQUEST,
+                "Could not process image: unsupported format",
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not process image: proxy failure",
+            ),
+        ] {
+            assert!(matches!(
+                classify_sampling_error(InferenceError::Api {
+                    status,
+                    message: message.into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    diagnostics: None,
+                }),
+                CompactFailure::ImageSanitization(_)
+            ));
+        }
+        assert!(matches!(
+            classify_sampling_error(InferenceError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message: "invalid request payload".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                diagnostics: None,
+            }),
+            CompactFailure::Deterministic(_)
+        ));
     }
     #[test]
     fn sampling_non_api_variants_classify_correctly() {
@@ -866,6 +950,14 @@ mod classify_tests {
         assert!(is_det(&classify_response_event_error(
             Some("400"),
             "Provider returned invalid_request_error: messages.X..."
+        )));
+        assert!(is_image_recovery(&classify_response_event_error(
+            Some("413"),
+            "payload too large"
+        )));
+        assert!(is_image_recovery(&classify_response_event_error(
+            Some("500"),
+            "Could not process image: proxy rejection"
         )));
     }
     #[test]
@@ -2542,8 +2634,8 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::Deterministic(_)) => {
-                panic!("a stalled stream must be retryable (Transient), not Deterministic")
+            Err(CompactFailure::ImageSanitization(_)) | Err(CompactFailure::Deterministic(_)) => {
+                panic!("a stalled stream must be retryable (Transient), not deterministic")
             }
             Ok(_) => panic!("a stalled stream must not produce a summary"),
         }
@@ -2621,8 +2713,8 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::Deterministic(_)) => {
-                panic!("a stalled stream must be retryable (Transient), not Deterministic")
+            Err(CompactFailure::ImageSanitization(_)) | Err(CompactFailure::Deterministic(_)) => {
+                panic!("a stalled stream must be retryable (Transient), not deterministic")
             }
             Ok(_) => {
                 panic!(
@@ -2699,8 +2791,8 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::Deterministic(_)) => {
-                panic!("a stalled stream must be retryable (Transient), not Deterministic")
+            Err(CompactFailure::ImageSanitization(_)) | Err(CompactFailure::Deterministic(_)) => {
+                panic!("a stalled stream must be retryable (Transient), not deterministic")
             }
             Ok(_) => {
                 panic!("salvage removed: a substantial partial must error, not be returned")

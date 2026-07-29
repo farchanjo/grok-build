@@ -175,6 +175,7 @@ impl SessionActor {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            xai_chat_state::compaction_utils::conversation_contains_images(&job.source_items),
             Vec::new(),
             Vec::new(),
             routes,

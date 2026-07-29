@@ -36,6 +36,7 @@ use xai_grok_telemetry::events::{CompactionRetryDegraded, CompactionTrigger};
 
 use xai_chat_state::compaction_utils::{
     CompactionAttempt, MAX_CAPTURED_SUMMARY_CHARS, bound_captured_output,
+    conversation_contains_images, sanitize_compaction_images,
 };
 
 use crate::inference::Client as OaiCompatClient;
@@ -66,6 +67,9 @@ pub(crate) struct ShellCompactionSampler {
     use_short_prompt: bool,
     user_context: Option<String>,
     use_supplied_prompt: bool,
+    /// Whether the original compaction source contained image payloads before
+    /// caller-side preparation made it text-only.
+    source_had_images: bool,
     tools: Vec<ToolSpec>,
     hosted_tools: Vec<HostedTool>,
     routes: Vec<CompactionRoute>,
@@ -88,6 +92,7 @@ impl ShellCompactionSampler {
     pub(crate) fn new(
         use_short_prompt: bool,
         user_context: Option<String>,
+        source_had_images: bool,
         tools: Vec<ToolSpec>,
         hosted_tools: Vec<HostedTool>,
         routes: Vec<CompactionRoute>,
@@ -100,6 +105,7 @@ impl ShellCompactionSampler {
             use_short_prompt,
             user_context,
             use_supplied_prompt: false,
+            source_had_images,
             tools,
             hosted_tools,
             routes,
@@ -160,15 +166,36 @@ impl CompactionSampler for ShellCompactionSampler {
             )
         };
 
+        let history_had_images =
+            self.source_had_images || conversation_contains_images(&chat_history);
+        // This boundary is deliberately defensive: every compaction route sees
+        // text-only history even if a new caller bypasses a preparation helper.
+        let text_only_history = sanitize_compaction_images(chat_history);
+        // The recovery request intentionally rebuilds the text-only history rather
+        // than reusing the first request's value. This keeps recovery bounded while
+        // ensuring no provider-specific request artifacts can carry over.
+        let mut recovery_history: Option<Vec<ConversationItem>> = None;
         let mut route_index = self.route_index.load(Ordering::Acquire);
+        let mut image_recovery_used = false;
         loop {
             let route = self.routes.get(route_index).ok_or_else(|| {
                 CompactionSampleError::Build("no usable compaction route configured".to_owned())
             })?;
             match generate_session_compact(
-                chat_history.clone(),
-                self.tools.clone(),
-                self.hosted_tools.clone(),
+                recovery_history
+                    .as_ref()
+                    .unwrap_or(&text_only_history)
+                    .clone(),
+                if image_recovery_used {
+                    Vec::new()
+                } else {
+                    self.tools.clone()
+                },
+                if image_recovery_used {
+                    Vec::new()
+                } else {
+                    self.hosted_tools.clone()
+                },
                 route.client.clone(),
                 self.session_id.clone(),
                 &route.inference_config,
@@ -201,6 +228,22 @@ impl CompactionSampler for ShellCompactionSampler {
                         thinking: String::new(),
                     });
                 }
+                Err(CompactFailure::ImageSanitization(error))
+                    if history_had_images && !image_recovery_used =>
+                {
+                    image_recovery_used = true;
+                    recovery_history = Some(sanitize_compaction_images(text_only_history.clone()));
+                    tracing::warn!(
+                        model = %route.inference_config.model,
+                        error = %acp_error_message(&error),
+                        "compaction image rejection received; rebuilding text-only history and retrying the same route once"
+                    );
+                }
+                Err(CompactFailure::ImageSanitization(error)) => {
+                    return Err(compact_failure_to_sample_error(
+                        CompactFailure::Deterministic(error),
+                    ));
+                }
                 Err(CompactFailure::Transient(error)) if route_index + 1 < self.routes.len() => {
                     tracing::warn!(
                         failed_model = %route.inference_config.model,
@@ -229,7 +272,7 @@ impl CompactionSampler for ShellCompactionSampler {
 ///   `false`), so the engine retries it.
 fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleError {
     let (deterministic, err) = match failure {
-        CompactFailure::Deterministic(err) => (true, err),
+        CompactFailure::ImageSanitization(err) | CompactFailure::Deterministic(err) => (true, err),
         CompactFailure::Transient(err) => (false, err),
     };
     let message = acp_error_message(&err);
@@ -487,7 +530,10 @@ impl FullReplaceObserver for ShellFullReplaceObserver {
 mod compaction_route_tests {
     use super::*;
     use crate::inference::{ApiBackend, Client, InferenceConfig, ToolChoice};
-    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    };
     use axum::routing::post;
     use axum::{Json, Router};
     use futures_util::stream;
@@ -656,6 +702,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -742,6 +789,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -838,6 +886,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -931,6 +980,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -1024,6 +1074,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -1118,6 +1169,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -1219,6 +1271,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -1327,6 +1380,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -1432,6 +1486,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -1510,7 +1565,6 @@ mod compaction_route_tests {
             StatusCode::UNAUTHORIZED,
             StatusCode::FORBIDDEN,
             StatusCode::NOT_FOUND,
-            StatusCode::PAYLOAD_TOO_LARGE,
         ];
 
         for status in unsupported_codes {
@@ -1530,6 +1584,23 @@ mod compaction_route_tests {
                 status
             );
         }
+    }
+
+    /// Test that payload-too-large is reserved for bounded image recovery,
+    /// rather than route fallback.
+    #[test]
+    fn payload_too_large_is_an_image_sanitization_failure() {
+        let result = crate::session::helpers::session_compact::classify_sampling_error(
+            crate::inference::InferenceError::Api {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                message: "payload too large".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                diagnostics: None,
+            },
+        );
+        assert!(matches!(result, CompactFailure::ImageSanitization(_)));
     }
 
     /// Test that context overflow is deterministic and does NOT trigger fallback.
@@ -1844,6 +1915,7 @@ mod compaction_route_tests {
         let sampler = ShellCompactionSampler::new(
             false,
             None,
+            false,
             vec![],
             vec![],
             routes,
@@ -1873,5 +1945,146 @@ mod compaction_route_tests {
 
         let _ = shutdown_tx1.send(());
         let _ = shutdown_tx2.send(());
+    }
+
+    #[tokio::test]
+    async fn image_rejection_rebuilds_text_only_request_once_without_fallback() {
+        use std::sync::atomic::AtomicUsize;
+
+        let route_hits = Arc::new(AtomicUsize::new(0));
+        let first_request = Arc::new(Mutex::new(None));
+        let second_request = Arc::new(Mutex::new(None));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let route_hits = Arc::clone(&route_hits);
+                let first_request = Arc::clone(&first_request);
+                let second_request = Arc::clone(&second_request);
+                move |Json(body): Json<serde_json::Value>| {
+                    let route_hits = Arc::clone(&route_hits);
+                    let first_request = Arc::clone(&first_request);
+                    let second_request = Arc::clone(&second_request);
+                    async move {
+                        let hit = route_hits.fetch_add(1, Ordering::SeqCst);
+                        if hit == 0 {
+                            *first_request.lock().unwrap() = Some(body);
+                            api_error_response(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "Could not process image: payload too large",
+                            )
+                            .into_response()
+                        } else {
+                            *second_request.lock().unwrap() = Some(body);
+                            Sse::new(stream::iter(
+                                usable_summary_stream("recovered text-only summary")
+                                    .into_iter()
+                                    .map(Ok::<_, std::convert::Infallible>),
+                            ))
+                            .keep_alive(KeepAlive::default())
+                            .into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+
+        let fallback_hits = Arc::new(AtomicUsize::new(0));
+        let fallback_app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let fallback_hits = Arc::clone(&fallback_hits);
+                move || {
+                    let fallback_hits = Arc::clone(&fallback_hits);
+                    async move {
+                        fallback_hits.fetch_add(1, Ordering::SeqCst);
+                        api_error_response(StatusCode::INTERNAL_SERVER_ERROR, "fallback used")
+                    }
+                }
+            }),
+        );
+        let fallback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fallback_addr = fallback_listener.local_addr().unwrap();
+        let (fallback_shutdown_tx, fallback_shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(fallback_listener, fallback_app)
+                .with_graceful_shutdown(async {
+                    let _ = fallback_shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let fallback_url = format!("http://{fallback_addr}/v1");
+
+        let sampler = ShellCompactionSampler::new(
+            false,
+            None,
+            true,
+            vec![],
+            vec![],
+            vec![
+                CompactionRoute {
+                    client: create_client(&base_url, ProviderIdentity::Xai),
+                    inference_config: make_test_config(&base_url, ProviderIdentity::Xai),
+                },
+                CompactionRoute {
+                    client: create_client(&fallback_url, ProviderIdentity::Xai),
+                    inference_config: make_test_config(&fallback_url, ProviderIdentity::Xai),
+                },
+            ],
+            acp::SessionId::new("test-session"),
+            Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::Auto,
+        );
+        let mut user = ConversationItem::user("describe the image");
+        user.add_image("data:image/png;base64,user-image");
+        let history = vec![
+            user,
+            ConversationItem::tool_result_with_images(
+                "call_1",
+                "tool text remains",
+                vec![xai_grok_inference_types::ContentPart::Image {
+                    url: "data:image/png;base64,tool-image".into(),
+                }],
+            ),
+        ];
+
+        let result = sampler
+            .sample_compaction(
+                &history,
+                &CompactionPrompt {
+                    system: String::new(),
+                    user: "summarize".to_string(),
+                },
+                Duration::from_secs(30),
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "the one rebuilt text-only retry should succeed"
+        );
+        assert_eq!(route_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(fallback_hits.load(Ordering::SeqCst), 0);
+        let first = first_request.lock().unwrap().clone().unwrap().to_string();
+        let second = second_request.lock().unwrap().clone().unwrap().to_string();
+        assert!(first.contains("[image]") && second.contains("[image]"));
+        assert!(!first.contains("user-image") && !second.contains("user-image"));
+        assert!(!first.contains("tool-image") && !second.contains("tool-image"));
+
+        let _ = shutdown_tx.send(());
+        let _ = fallback_shutdown_tx.send(());
     }
 }

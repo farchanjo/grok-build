@@ -173,6 +173,7 @@ impl SessionActor {
     /// the turn loop; a long-lived borrow would race with turn/compact/cancel
     /// and panic on double-borrow.
     async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
+        let history = xai_chat_state::compaction_utils::sanitize_compaction_images(history);
         let inference_config = self.reconstruct_full_config().await;
         let client = match self.prepare_chat_completion(false).await {
             Ok(c) => c,
@@ -1079,6 +1080,8 @@ impl SessionActor {
             acp::Error::internal_error()
                 .data(format!("failed to fingerprint compaction source: {error}"))
         })?;
+        let source_had_images =
+            xai_chat_state::compaction_utils::conversation_contains_images(&full_conversation);
         let segment_messages = if self.compaction.compaction_mode.writes_segments() {
             xai_chat_state::compaction_utils::prepare_conversation_for_segment(
                 full_conversation.clone(),
@@ -1219,6 +1222,7 @@ impl SessionActor {
         let sampler = crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
             use_short_prompt,
             user_context.clone(),
+            source_had_images,
             compaction_tools.clone(),
             compaction_hosted_tools.clone(),
             compaction_routes,

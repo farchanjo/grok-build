@@ -67,21 +67,40 @@ pub fn strip_reasoning_blocks(conversation: Vec<ConversationItem>) -> Vec<Conver
         })
         .collect()
 }
-/// Replace `ContentPart::Image` entries with `"[image]"` so downstream
-/// consumers (summary model, segment store) don't carry megabytes of base64.
-pub(crate) fn strip_images(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
+/// Return whether a conversation contains any raw image payload.
+pub fn conversation_contains_images(conversation: &[ConversationItem]) -> bool {
+    conversation.iter().any(|item| match item {
+        ConversationItem::User(user) => user
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. })),
+        ConversationItem::ToolResult(result) => !result.images.is_empty(),
+        _ => false,
+    })
+}
+
+/// Build a text-only compaction view without mutating the live conversation.
+///
+/// User image parts become the stable `"[image]"` placeholder. Tool-result
+/// image payloads are removed while their textual content, call IDs, error
+/// state, ordering, and all tool-call/result relationships remain unchanged.
+pub fn sanitize_compaction_images(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
     conversation
         .into_iter()
         .map(|item| match item {
-            ConversationItem::User(mut u) => {
-                for part in &mut u.content {
+            ConversationItem::User(mut user) => {
+                for part in &mut user.content {
                     if matches!(part, ContentPart::Image { .. }) {
                         *part = ContentPart::Text {
                             text: std::sync::Arc::<str>::from("[image]"),
                         };
                     }
                 }
-                ConversationItem::User(u)
+                ConversationItem::User(user)
+            }
+            ConversationItem::ToolResult(mut result) => {
+                result.images.clear();
+                ConversationItem::ToolResult(result)
             }
             other => other,
         })
@@ -91,7 +110,7 @@ pub(crate) fn strip_images(conversation: Vec<ConversationItem>) -> Vec<Conversat
 ///
 /// Combines `strip_tool_messages_for_conversation_item` (drops tool
 /// results, flattens `tool_calls` into text annotations),
-/// `strip_reasoning_blocks`, and `strip_images`.
+/// `strip_reasoning_blocks`, and [`sanitize_compaction_images`].
 ///
 /// The reasoning strip is required because the text mutation in the
 /// tool-message step would invalidate signed `thinking` blocks, which
@@ -102,7 +121,7 @@ pub(crate) fn strip_images(conversation: Vec<ConversationItem>) -> Vec<Conversat
 pub fn prepare_conversation_for_summarization(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(
+    sanitize_compaction_images(strip_reasoning_blocks(
         strip_tool_messages_for_conversation_item(conversation),
     ))
 }
@@ -110,7 +129,7 @@ pub fn prepare_conversation_for_summarization(
 pub fn prepare_conversation_for_segment(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(conversation))
+    sanitize_compaction_images(strip_reasoning_blocks(conversation))
 }
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(
@@ -124,7 +143,9 @@ pub fn truncate_trailing_incomplete_tool_call(
     }
     conversation
 }
-/// Cache-aligned summarizer prep: keep tool I/O + images so the prefix matches the engine cache; set `strip_reasoning` when the provider rejects mutated thinking blocks.
+/// Cache-aligned summarizer prep: keep tool I/O while making the request
+/// provider-agnostic and text-only; set `strip_reasoning` when the provider
+/// rejects mutated thinking blocks.
 pub fn prepare_conversation_for_verbatim_summarization(
     conversation: Vec<ConversationItem>,
     strip_reasoning: bool,
@@ -134,7 +155,7 @@ pub fn prepare_conversation_for_verbatim_summarization(
     } else {
         conversation
     };
-    truncate_trailing_incomplete_tool_call(conversation)
+    sanitize_compaction_images(truncate_trailing_incomplete_tool_call(conversation))
 }
 /// Per-item token estimate via the trigger-side estimator, so `fit`'s budget matches what fired the compaction (counts images + encrypted reasoning).
 fn estimate_item_tokens(item: &ConversationItem) -> u64 {
@@ -3405,7 +3426,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         assert_eq!(once_json, twice_json, "second pass must be a no-op");
     }
     #[test]
-    fn test_strip_images_replaces_with_placeholder() {
+    fn sanitize_compaction_images_replaces_user_images_with_placeholder() {
         let mut user = ConversationItem::user("describe this");
         user.add_image("data:image/png;base64,iVBORw0KGgo=");
         let input = vec![
@@ -3413,7 +3434,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             user,
             ConversationItem::assistant("I see an image"),
         ];
-        let result = strip_images(input);
+        let result = sanitize_compaction_images(input);
         match &result[1] {
             ConversationItem::User(u) => {
                 assert_eq!(u.content.len(), 2);
@@ -3428,13 +3449,58 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         }
     }
     #[test]
-    fn test_strip_images_leaves_text_only_messages_unchanged() {
+    fn sanitize_compaction_images_leaves_text_only_messages_unchanged() {
         let input = vec![
             ConversationItem::user("just text"),
             ConversationItem::assistant("reply"),
         ];
-        let result = strip_images(input);
+        let result = sanitize_compaction_images(input);
         assert_eq!(result[0].text_content(), "just text");
+    }
+    #[test]
+    fn sanitize_compaction_images_clears_tool_result_images_without_changing_pairing() {
+        use xai_grok_inference_types::ToolCall;
+        let mut user = ConversationItem::user("inspect this image");
+        user.add_image("data:image/png;base64,user-image");
+        let input = vec![
+            user,
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{\"target_file\":\"saved.png\"}"#.into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "call_1",
+                "saved at /tmp/saved.png; textual description survives",
+                vec![ContentPart::Image {
+                    url: "data:image/png;base64,tool-image".into(),
+                }],
+            ),
+        ];
+        assert!(conversation_contains_images(&input));
+        let result = sanitize_compaction_images(input.clone());
+        assert!(!conversation_contains_images(&result));
+        assert!(validate_compacted_history(&result).is_empty());
+        assert_eq!(result[0].text_content(), "inspect this image\n[image]");
+        let ConversationItem::ToolResult(tool_result) = &result[2] else {
+            panic!("tool result must retain its position");
+        };
+        assert_eq!(tool_result.tool_call_id, "call_1");
+        assert_eq!(
+            tool_result.content.as_ref(),
+            "saved at /tmp/saved.png; textual description survives"
+        );
+        assert!(tool_result.images.is_empty());
+        assert!(
+            conversation_contains_images(&input),
+            "source must stay unchanged"
+        );
+        let twice = sanitize_compaction_images(result.clone());
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::to_value(twice).unwrap(),
+            "sanitization must be idempotent"
+        );
     }
     #[test]
     fn test_prepare_for_summarization_strips_images() {
@@ -3499,6 +3565,10 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
         );
         assert!(has_tool_result(&seg), "segment view must keep tool results");
         assert!(!has_image(&seg), "segment view must strip base64 images");
+        assert!(
+            !conversation_contains_images(&seg),
+            "segment view must also clear tool-result images"
+        );
         let summ = prepare_conversation_for_summarization(conv);
         assert!(!has_tool_calls(&summ), "summary view flattens tool calls");
         assert!(!has_tool_result(&summ), "summary view drops tool results");
@@ -3539,6 +3609,38 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             }
             _ => panic!("expected ToolResult to survive"),
         }
+    }
+    #[test]
+    fn verbatim_preparation_is_text_only_and_preserves_tool_result_text() {
+        use xai_grok_inference_types::ToolCall;
+        let mut user = ConversationItem::user("inspect");
+        user.add_image("data:image/png;base64,user-image");
+        let input = vec![
+            user,
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: r#"{\"target_file\":\"kept.png\"}"#.into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "c1",
+                "description and /tmp/kept.png",
+                vec![ContentPart::Image {
+                    url: "data:image/png;base64,tool-image".into(),
+                }],
+            ),
+        ];
+        let result = prepare_conversation_for_verbatim_summarization(input, false);
+        assert!(!conversation_contains_images(&result));
+        assert!(validate_compacted_history(&result).is_empty());
+        let ConversationItem::ToolResult(tool_result) = &result[2] else {
+            panic!("expected tool result");
+        };
+        assert_eq!(
+            tool_result.content.as_ref(),
+            "description and /tmp/kept.png"
+        );
+        assert_eq!(tool_result.tool_call_id, "c1");
     }
     /// Reasoning kept on non-Messages backends, stripped on Messages — tool I/O survives either way.
     #[test]
