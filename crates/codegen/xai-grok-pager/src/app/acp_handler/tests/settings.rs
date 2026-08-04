@@ -634,3 +634,75 @@
             "gated-off Auto must display as Ask"
         );
     }
+
+    /// A `x.ai/config_changed` broadcast for the media_understanding section
+    /// re-loads the in-memory media config and refreshes open settings modals.
+    #[test]
+    fn config_changed_media_section_reloads_media_config() {
+        let mut app = make_app_with_agent("sess-1");
+        // Seed a non-default in-memory value that the reload must replace.
+        app.media_understanding_config.enabled = Some(true);
+
+        let notif = acp::ExtNotification::new(
+            "x.ai/config_changed",
+            std::sync::Arc::from(
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "section": "media_understanding",
+                    "changes": { "enabled": true },
+                }))
+                .unwrap(),
+            ),
+        );
+        assert!(
+            handle_ext_notification(&notif, &mut app),
+            "media_understanding section must be handled"
+        );
+        // The dev test profile has no `[media_understanding]` section, so the
+        // reload restores the field-less default (enabled unset) — proving the
+        // seeded in-memory value was replaced by the accepted disk state.
+        assert!(
+            app.media_understanding_config.enabled.is_none(),
+            "reload must read the accepted disk state"
+        );
+    }
+
+    /// Non-media sections are no-ops for the pager's config_changed handler.
+    #[test]
+    fn config_changed_other_section_is_noop() {
+        let mut app = make_app_with_agent("sess-1");
+        let notif = acp::ExtNotification::new(
+            "x.ai/config_changed",
+            std::sync::Arc::from(
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "section": "ui",
+                    "changes": { "theme": "grokday" },
+                }))
+                .unwrap(),
+            ),
+        );
+        assert!(
+            !handle_ext_notification(&notif, &mut app),
+            "non-media sections must be ignored"
+        );
+    }
+
+    /// The optional `x.ai/media/update` notification refreshes the media
+    /// availability/config snapshot for leader-client UI.
+    #[test]
+    fn media_update_refreshes_config() {
+        let mut app = make_app_with_agent("sess-1");
+        let notif = acp::ExtNotification::new(
+            "x.ai/media/update",
+            std::sync::Arc::from(
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "enabled": true,
+                }))
+                .unwrap(),
+            ),
+        );
+        assert!(handle_ext_notification(&notif, &mut app));
+        assert!(
+            app.media_understanding_config.enabled.is_none(),
+            "media/update must re-read the accepted disk state"
+        );
+    }

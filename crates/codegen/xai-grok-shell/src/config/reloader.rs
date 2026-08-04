@@ -80,6 +80,10 @@ pub enum ConfigUpdate {
     /// band count, and model routes. Broadcasts to all sessions for
     /// live policy mutation.
     Compaction(Box<crate::agent::config::CompactionConfig>),
+    /// Updated `[media_understanding]` configuration — routes, policies,
+    /// limits, and circuit breaker. Broadcasts to all sessions for live
+    /// policy mutation (PR 6 hot-swaps the backend route/config snapshot).
+    MediaUnderstanding(Box<crate::agent::config::MediaUnderstandingConfig>),
 }
 
 /// Runs on `tokio::spawn` (`Send`). Receives raw [`ConfigChangeEvent`]s from
@@ -94,6 +98,9 @@ pub struct ConfigReloader {
     last_project_mcp_hashes: HashMap<PathBuf, u64>,
     /// Content hash of the `[compaction]` section for dedup.
     last_compaction_hash: u64,
+    /// Content hash of the last ACCEPTED `[media_understanding]` section
+    /// (process-local last-known-good; see `maybe_reload_media_understanding`).
+    last_media_understanding_hash: u64,
     grok_home: PathBuf,
     auth_scope: String,
     remote_settings: Option<crate::util::config::RemoteSettings>,
@@ -117,11 +124,14 @@ impl ConfigReloader {
     ) -> Self {
         // Compute initial compaction hash from the initial config
         let initial_compaction_hash = hash_compaction_config(&initial_config);
+        // Compute the initial media-understanding hash from the initial config
+        let initial_media_understanding_hash = hash_media_understanding_config(&initial_config);
         Self {
             last_auth_key_hash: initial_auth_key_hash,
             last_global_config: initial_config,
             last_project_mcp_hashes: HashMap::new(),
             last_compaction_hash: initial_compaction_hash,
+            last_media_understanding_hash: initial_media_understanding_hash,
             grok_home,
             auth_scope,
             remote_settings,
@@ -421,6 +431,8 @@ impl ConfigReloader {
 
         self.maybe_reload_compaction(&new_global);
 
+        self.maybe_reload_media_understanding(&new_global);
+
         self.last_global_config = new_global;
         Ok(())
     }
@@ -448,6 +460,38 @@ impl ConfigReloader {
                 );
                 // Do not update the accepted hash. A corrected write with the
                 // same prior good value must still be reconsidered.
+            }
+        }
+    }
+
+    /// Apply a changed `[media_understanding]` section only after both
+    /// deserialization and semantic validation succeed. The hash tracks the
+    /// last ACCEPTED value, not merely the last observed bytes, preserving
+    /// last-known-good (mirrors `maybe_reload_compaction`).
+    ///
+    /// No `.lkg` sidecar: this is process-local LKG. A corrupt disk config
+    /// cannot be recovered across a process restart without a sidecar; that
+    /// limitation is accepted by design (plan §5.5 / §15).
+    fn maybe_reload_media_understanding(&mut self, config: &toml::Value) {
+        let new_hash = hash_media_understanding_config(config);
+        if self.last_media_understanding_hash == new_hash {
+            return;
+        }
+        match parse_media_understanding_config(config) {
+            Ok(media) => {
+                info!("media understanding config change detected");
+                let _ = self
+                    .config_update_tx
+                    .send(ConfigUpdate::MediaUnderstanding(Box::new(media)));
+                self.last_media_understanding_hash = new_hash;
+            }
+            Err(error) => {
+                error!(
+                    %error,
+                    "invalid media understanding config, keeping last-known-good"
+                );
+                // Do not update the accepted hash. A corrected write with a
+                // valid value must still be reconsidered.
             }
         }
     }
@@ -607,6 +651,42 @@ fn hash_compaction_config(config: &toml::Value) -> u64 {
         })
         .unwrap_or_else(|| {
             // No compaction section → hash of empty
+            0u8.hash(&mut hasher);
+        });
+    hasher.finish()
+}
+
+fn parse_media_understanding_config(
+    config: &toml::Value,
+) -> anyhow::Result<crate::agent::config::MediaUnderstandingConfig> {
+    let parsed = match config.get("media_understanding") {
+        Some(value) => {
+            let parsed: crate::agent::config::MediaUnderstandingConfig =
+                value.clone().try_into().map_err(|error| {
+                    anyhow::anyhow!("could not deserialize [media_understanding]: {error}")
+                })?;
+            parsed
+        }
+        None => crate::agent::config::MediaUnderstandingConfig::default(),
+    };
+    parsed
+        .normalize_validate()
+        .map_err(|error| anyhow::anyhow!("could not validate [media_understanding]: {error}"))?;
+    Ok(parsed)
+}
+
+/// Hash the `[media_understanding]` section for change detection.
+/// Uses the table's byte representation for stable hashing.
+fn hash_media_understanding_config(config: &toml::Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    config
+        .get("media_understanding")
+        .map(|v| {
+            let bytes = toml::to_string(v).unwrap_or_default();
+            bytes.hash(&mut hasher);
+        })
+        .unwrap_or_else(|| {
+            // No media_understanding section → hash of empty
             0u8.hash(&mut hasher);
         });
     hasher.finish()
@@ -1002,6 +1082,157 @@ models = ["@session", "custom:summarizer"]
         assert_eq!(
             reloader.last_compaction_hash, accepted_hash,
             "invalid observations must not replace the accepted hash"
+        );
+    }
+
+    #[test]
+    fn media_understanding_reload_dedupes_last_accepted_value() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let initial = toml::Value::Table(toml::map::Map::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_owned(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let configured: toml::Value = toml::from_str(
+            r#"
+[media_understanding]
+enabled = true
+
+[media_understanding.image]
+routes = [{ model = "grok-4.5", strategy = "auto" }]
+"#,
+        )
+        .unwrap();
+
+        reloader.maybe_reload_media_understanding(&configured);
+        let update = rx.try_recv().expect("changed valid config should dispatch");
+        let ConfigUpdate::MediaUnderstanding(media) = update else {
+            panic!("expected media understanding update");
+        };
+        assert_eq!(media.enabled, Some(true));
+        assert_eq!(media.image.as_ref().unwrap().routes[0].model, "grok-4.5");
+
+        reloader.maybe_reload_media_understanding(&configured);
+        assert!(
+            rx.try_recv().is_err(),
+            "unchanged accepted config must not dispatch twice"
+        );
+    }
+
+    #[test]
+    fn invalid_media_understanding_reload_keeps_last_known_good() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let initial: toml::Value = toml::from_str(
+            r#"
+[media_understanding]
+enabled = true
+
+[media_understanding.image]
+routes = [{ model = "grok-4.5" }]
+"#,
+        )
+        .unwrap();
+        let accepted_hash = hash_media_understanding_config(&initial);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_owned(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let invalid_enum: toml::Value =
+            toml::from_str("[media_understanding]\nenabled = \"not-a-bool\"").unwrap();
+        let invalid_duplicate: toml::Value = toml::from_str(
+            r#"
+[media_understanding.image]
+routes = [{ model = "grok-4.5" }, { model = "grok-4.5" }]
+"#,
+        )
+        .unwrap();
+        let invalid_strategy: toml::Value = toml::from_str(
+            r#"
+[media_understanding.video]
+routes = [{ model = "grok-video", strategy = "transcription" }]
+"#,
+        )
+        .unwrap();
+
+        reloader.maybe_reload_media_understanding(&invalid_enum);
+        reloader.maybe_reload_media_understanding(&invalid_duplicate);
+        reloader.maybe_reload_media_understanding(&invalid_strategy);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid media understanding config must not dispatch"
+        );
+        assert_eq!(
+            reloader.last_media_understanding_hash, accepted_hash,
+            "invalid observations must not replace the accepted hash"
+        );
+
+        // A corrected write with a DIFFERENT valid value must be reconsidered.
+        let corrected: toml::Value = toml::from_str(
+            r#"
+[media_understanding]
+enabled = true
+
+[media_understanding.image]
+routes = [{ model = "grok-4.5", strategy = "native" }]
+"#,
+        )
+        .unwrap();
+        reloader.maybe_reload_media_understanding(&corrected);
+        assert!(
+            matches!(rx.try_recv(), Ok(ConfigUpdate::MediaUnderstanding(_))),
+            "a corrected valid write after invalid observations must dispatch"
+        );
+    }
+
+    #[test]
+    fn media_understanding_reload_creates_no_lkg_sidecar() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let initial = toml::Value::Table(toml::map::Map::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut reloader = ConfigReloader::new(
+            tmp.path().to_path_buf(),
+            0,
+            initial,
+            "https://test.example.com".to_owned(),
+            None,
+            tx,
+            false,
+            false,
+        );
+        let configured: toml::Value = toml::from_str(
+            r#"
+[media_understanding]
+enabled = true
+"#,
+        )
+        .unwrap();
+        reloader.maybe_reload_media_understanding(&configured);
+        reloader.maybe_reload_media_understanding(&configured);
+
+        let mut entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        entries.retain(|e| e.ends_with(".lkg"));
+        assert!(
+            entries.is_empty(),
+            "media understanding reload must never create a .lkg sidecar"
         );
     }
 

@@ -2,10 +2,48 @@
 
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
+use xai_grok_shell::agent::config::{
+    acp_media_auth_status_meta, acp_media_catalog_stale_meta, acp_media_fetched_at_meta,
+    acp_media_source_meta, parse_acp_media_meta, parse_acp_media_transport_meta,
+};
 use xai_grok_shell::inference::types::{
     ReasoningEffort, ReasoningEffortOption, ReasoningEffortSelection, parse_reasoning_effort_meta,
     parse_reasoning_effort_selection_meta, parse_reasoning_efforts_meta,
 };
+use xai_grok_tools::media::{MediaCapabilities, MediaModalitySupport, MediaTransportCapabilities};
+
+/// Per-model media metadata parsed from the ACP `_meta` media projection
+/// (PR 2). The shell writes these keys; the pager reads them for the model
+/// picker badges and the clipboard-image tip gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ModelMediaState {
+    /// Per-category modality support (all `Unknown` when absent).
+    pub capabilities: MediaCapabilities,
+    /// Concrete wire-transport flags (all-`false` when absent).
+    pub transport: MediaTransportCapabilities,
+    /// Catalog source (`bundled` | `remote` | `live_cache` | `stale_cache`).
+    pub source: Option<String>,
+    /// Catalog fetch timestamp (RFC 3339 UTC).
+    pub fetched_at: Option<String>,
+    /// Whether the catalog is considered stale.
+    pub catalog_stale: bool,
+    /// Credential status (`credentialed` | `missing` | `unknown`).
+    pub auth_status: Option<String>,
+}
+
+impl ModelMediaState {
+    /// Parse the media projection out of an ACP model row's `_meta`.
+    fn from_meta(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> Self {
+        Self {
+            capabilities: parse_acp_media_meta(meta),
+            transport: parse_acp_media_transport_meta(meta),
+            source: acp_media_source_meta(meta),
+            fetched_at: acp_media_fetched_at_meta(meta),
+            catalog_stale: acp_media_catalog_stale_meta(meta),
+            auth_status: acp_media_auth_status_meta(meta),
+        }
+    }
+}
 
 /// Why an effort token could not be applied to a model. Shared by every effort
 /// surface (`/effort`, the CLI deferred switch, and headless) so they classify
@@ -93,12 +131,13 @@ impl ModelState {
     /// Whether the current model accepts image input, read from the model's
     /// `meta` (the ACP extension point — same source as `totalContextTokens`).
     ///
-    /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array
-    /// containing `"image"`. DEFAULTS TO `true` when neither key is present:
-    /// correct today (all current Grok models accept images, so nothing is
-    /// suppressed) and forward-compatible (suppresses non-vision models once the
-    /// ACP server populates the key). Populating that key server-side is a
-    /// separate change.
+    /// PR 2: an explicit `media.image` tri-state wins. `Supported` accepts,
+    /// `Unsupported` rejects. `Unknown` — and an absent `media` object — fall
+    /// through to the legacy `acceptsImages` / `inputModalities` checks, whose
+    /// final default is `true`. That keeps the today-permissive default for
+    /// absent metadata and for servers that report modality `Unknown`, so the
+    /// clipboard-image tip is not suppressed until enrichment logic (PR 6/7)
+    /// replaces this gate.
     pub fn current_model_accepts_images(&self) -> bool {
         let Some(meta) = self
             .current
@@ -108,6 +147,11 @@ impl ModelState {
         else {
             return true;
         };
+        match parse_acp_media_meta(Some(meta)).image {
+            MediaModalitySupport::Supported => return true,
+            MediaModalitySupport::Unsupported => return false,
+            MediaModalitySupport::Unknown => {}
+        }
         if let Some(accepts) = meta.get("acceptsImages").and_then(|v| v.as_bool()) {
             return accepts;
         }
@@ -117,6 +161,33 @@ impl ModelState {
                 .any(|m| m.as_str().is_some_and(|s| s.eq_ignore_ascii_case("image")));
         }
         true
+    }
+
+    /// Media metadata for the current model, parsed from ACP `_meta`.
+    pub(crate) fn current_media_state(&self) -> ModelMediaState {
+        let meta = self
+            .current
+            .as_ref()
+            .and_then(|id| self.available.get(id))
+            .and_then(|info| info.meta.as_ref());
+        ModelMediaState::from_meta(meta)
+    }
+
+    /// Media metadata for a specific catalog model id.
+    pub(crate) fn media_state_for(&self, id: &acp::ModelId) -> ModelMediaState {
+        let meta = self.available.get(id).and_then(|info| info.meta.as_ref());
+        ModelMediaState::from_meta(meta)
+    }
+
+    /// Per-category media capability of the current model (all-`Unknown` when
+    /// the projection is absent).
+    pub fn current_media_capabilities(&self) -> MediaCapabilities {
+        self.current_media_state().capabilities
+    }
+
+    /// Concrete transport flags of the current model (all-`false` when absent).
+    pub fn current_media_transport(&self) -> MediaTransportCapabilities {
+        self.current_media_state().transport
     }
 
     /// Get the effective context window size (tokens).
@@ -896,6 +967,81 @@ mod tests {
         assert_eq!(
             state.resolve_effort_token("xhigh"),
             Some(ReasoningEffort::Xhigh)
+        );
+    }
+
+    // ── Media projection parsing (PR 2) ────────────────────────────────────
+
+    fn state_with_media_meta(meta: serde_json::Value) -> ModelState {
+        state_with_meta(Some(meta))
+    }
+
+    #[test]
+    fn media_state_parses_projection_from_meta() {
+        let state = state_with_media_meta(serde_json::json!({
+            "media": { "image": "supported", "audio": "unknown", "video": "unsupported" },
+            "mediaSource": "live_cache",
+            "mediaFetchedAt": "2026-01-01T00:00:00Z",
+            "mediaCatalogStale": false,
+            "mediaAuthStatus": "credentialed",
+            "mediaTransport": {
+                "imageInline": true,
+                "transcriptionEndpoint": true,
+                "nativeVideo": false,
+            },
+        }));
+        let media = state.current_media_state();
+        assert_eq!(media.capabilities.image, MediaModalitySupport::Supported);
+        assert_eq!(media.capabilities.audio, MediaModalitySupport::Unknown);
+        assert_eq!(media.capabilities.video, MediaModalitySupport::Unsupported);
+        assert!(media.transport.image_inline);
+        assert!(media.transport.transcription_endpoint);
+        assert!(!media.transport.native_video);
+        assert_eq!(media.source.as_deref(), Some("live_cache"));
+        assert_eq!(media.fetched_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert!(!media.catalog_stale);
+        assert_eq!(media.auth_status.as_deref(), Some("credentialed"));
+    }
+
+    #[test]
+    fn media_state_defaults_when_meta_absent() {
+        let state = state_with_meta(None);
+        let media = state.current_media_state();
+        assert_eq!(media.capabilities, MediaCapabilities::default());
+        assert_eq!(media.transport, MediaTransportCapabilities::default());
+        assert_eq!(media.source, None);
+        assert_eq!(media.fetched_at, None);
+        assert!(!media.catalog_stale);
+        assert_eq!(media.auth_status, None);
+        // Per-model lookup for an unknown id defaults the same way.
+        let missing = acp::ModelId::new(Arc::from("missing"));
+        assert_eq!(state.media_state_for(&missing), ModelMediaState::default());
+    }
+
+    #[test]
+    fn accepts_images_prefers_explicit_media_image() {
+        // Explicit Unsupported wins over the permissive default.
+        assert!(
+            !state_with_media_meta(serde_json::json!({ "media": { "image": "unsupported" } }))
+                .current_model_accepts_images()
+        );
+        // Explicit Supported accepts.
+        assert!(
+            state_with_media_meta(serde_json::json!({ "media": { "image": "supported" } }))
+                .current_model_accepts_images()
+        );
+        // Unknown falls through to legacy checks: no legacy keys -> permissive.
+        assert!(
+            state_with_media_meta(serde_json::json!({ "media": { "image": "unknown" } }))
+                .current_model_accepts_images()
+        );
+        // Unknown with an explicit legacy `acceptsImages: false` rejects.
+        assert!(
+            !state_with_media_meta(serde_json::json!({
+                "media": { "image": "unknown" },
+                "acceptsImages": false,
+            }))
+            .current_model_accepts_images()
         );
     }
 }

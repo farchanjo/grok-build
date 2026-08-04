@@ -1504,6 +1504,15 @@ impl JsonlStorageAdapter {
                 compaction_checkpoints_copied += 1;
             }
         }
+        let media_artifacts_copied = if options.copy_media_artifacts {
+            // Copy the session-local media artifact store: immutable objects
+            // are hard-linked when possible and copied otherwise; refs and
+            // index.json ride along verbatim; the child gets fresh
+            // journal.jsonl/usage.jsonl journals seeded with a Fork marker.
+            crate::session::media::artifacts::copy_media_store(&source_session_dir, &target_dir)?
+        } else {
+            0
+        };
         Ok(super::CopySessionResult {
             chat_messages_copied: num_chat_messages,
             updates_copied: num_messages,
@@ -1514,6 +1523,7 @@ impl JsonlStorageAdapter {
             announcement_state_copied,
             compaction_segments_copied,
             compaction_checkpoints_copied,
+            media_artifacts_copied,
         })
     }
 }

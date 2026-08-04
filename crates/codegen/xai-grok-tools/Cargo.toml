@@ -38,6 +38,11 @@ pdf_oxide = { workspace = true }
 zip = { version = "3", default-features = false, features = ["deflate-flate2"] }
 quick-xml = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
+# PR 4 (native FFmpeg layer): runtime `dlopen` of user-installed FFmpeg 8.
+# The Grok binary must have no link-time FFmpeg dependency, so the native
+# shim calls FFmpeg only through a per-context function-pointer table that
+# this crate populates lazily via libloading.
+libloading = "0.8"
 minijinja = { version = "2", features = ["custom_syntax"] }
 parking_lot = { workspace = true }
 htmd = { workspace = true }
@@ -109,6 +114,11 @@ xai-test-utils = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
 flate2 = { workspace = true }
 tar = { workspace = true }
+# PR 4 (native FFmpeg layer): `cc` compiles the Grok-owned C shim;
+# `pkg-config` discovers FFmpeg 8 include dirs and versions with
+# `cargo_metadata(false)` only, so no FFmpeg link metadata is ever emitted.
+cc = "1"
+pkg-config = "0.3"
 
 [lints]
 workspace = true

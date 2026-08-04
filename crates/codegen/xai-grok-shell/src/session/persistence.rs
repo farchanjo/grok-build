@@ -1819,6 +1819,23 @@ impl SessionPersistence {
             .await
             .map_err(CompactionPersistenceError::NotCommitted)?;
 
+        // Media artifacts that entered the checkpoint lifecycle (plan 11.3)
+        // are snapshotted under a checkpoint-named ref so conservative GC at
+        // session close retains everything the checkpoint replay can
+        // reference. Best-effort: a bookkeeping failure must not fail the
+        // already-committed checkpoint.
+        if let Ok(store) = crate::session::media::MediaArtifactStore::open(&session_dir(&self.info))
+        {
+            if let Err(error) = store.pin_checkpoint(&checkpoint_id) {
+                tracing::warn!(
+                    ?error,
+                    checkpoint_id = %checkpoint_id,
+                    session_id = %self.info.id,
+                    "failed to reference media artifacts for compaction checkpoint",
+                );
+            }
+        }
+
         // The chat history may lead the marker, but never the checkpoint. If the
         // marker append fails, restore the previous history before reporting a
         // non-commit so restart behavior remains deterministic.
@@ -2308,13 +2325,73 @@ impl SessionPersistence {
                 return Ok(SessionStateCopy { files });
             }
 
+            // Full session-state copies include `assets/media/` automatically:
+            // `collect_session_files_recursive` walks the whole session tree,
+            // so immutable BLAKE3 objects, refs, index.json, journal.jsonl and
+            // usage.jsonl all ride along for archive/backup workflows (plan
+            // section 11.3). We additionally attach the media redaction
+            // manifest so a consumer producing a redacted/text export can drop
+            // `objects/` and keep semantics + provenance + manifest.
             collect_session_files_recursive(&session_dir, &session_dir, &mut files);
+            collect_media_redaction_manifest(&session_dir, &mut files);
             collect_mcp_stderr_logs(&mut files);
 
             Ok(SessionStateCopy { files })
         })
         .await?
     }
+}
+
+/// Append the session's media artifact redaction manifest to an archive file
+/// list. The manifest describes exactly which raw media objects (`objects/`)
+/// a redacted/text export omits, while the semantic results (`objects/results`)
+/// and provenance are retained. The manifest lives at its natural location
+/// (`assets/media/redaction-manifest.json`) so a redacted export keeps it in
+/// place when `objects/blobs` and `objects/derived` are stripped.
+fn collect_media_redaction_manifest(session_dir: &Path, files: &mut Vec<CopiedSessionFile>) {
+    let manifest = match crate::session::media::artifacts::MediaArtifactStore::open(session_dir) {
+        Ok(store) => match store.redaction_manifest() {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    session_dir = %session_dir.display(),
+                    "failed to build media redaction manifest during session copy",
+                );
+                return;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                session_dir = %session_dir.display(),
+                "failed to open media artifact store during session copy",
+            );
+            return;
+        }
+    };
+    if manifest.omitted_blob_hashes.is_empty()
+        && manifest.omitted_derived_keys.is_empty()
+        && manifest.included_result_keys.is_empty()
+    {
+        // No media objects at all; do not synthesize an empty manifest.
+        return;
+    }
+    let bytes = match serde_json::to_vec_pretty(&manifest) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                session_dir = %session_dir.display(),
+                "failed to serialize media redaction manifest during session copy",
+            );
+            return;
+        }
+    };
+    files.push(CopiedSessionFile {
+        name: "assets/media/redaction-manifest.json".to_string(),
+        data: bytes,
+    });
 }
 
 /// Collect MCP server stderr logs from `~/.grok/logs/mcp/` for inclusion in the session archive.
@@ -3567,6 +3644,61 @@ mod collect_session_files_tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "file.txt");
+    }
+
+    #[test]
+    fn media_archive_includes_media_store_and_redaction_manifest() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::session::media::artifacts::MediaArtifactStore::open(dir.path()).unwrap();
+        let hash = store.put_blob(b"archived media bytes").unwrap();
+        let result_key = blake3::hash(b"result key").to_hex().to_string();
+        store
+            .put_result(
+                &result_key,
+                &xai_grok_tools::media::backend::MediaUnderstandingResult {
+                    results: vec![xai_grok_tools::media::backend::MediaSemantics {
+                        source: xai_grok_tools::media::domain::MediaSource::Path {
+                            path: "assets/x.png".to_string(),
+                        },
+                        category: xai_grok_tools::media::domain::MediaCategory::Image,
+                        text: "semantics".to_string(),
+                        provenance: xai_grok_tools::media::backend::MediaProvenance {
+                            provider: "xai".to_string(),
+                            model: "grok-4.5".to_string(),
+                            strategy: xai_grok_tools::media::domain::MediaCategoryStrategy::Native,
+                        },
+                    }],
+                    attempts: vec![],
+                },
+            )
+            .unwrap();
+
+        // Full archive: the recursive walk picks up the whole assets/media tree.
+        let mut files = Vec::new();
+        collect_session_files_recursive(dir.path(), dir.path(), &mut files);
+        let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+        assert!(
+            names.contains(&format!("assets/media/objects/blobs/{hash}")),
+            "blob must ride the session-state archive"
+        );
+        assert!(
+            names.contains(&format!("assets/media/objects/results/{result_key}.json")),
+            "semantic result must ride the session-state archive"
+        );
+        assert!(
+            names.contains(&"assets/media/journal.jsonl".to_string()),
+            "media journal must ride the session-state archive"
+        );
+
+        // Redacted/text export metadata: the redaction manifest is attached.
+        let mut redacted = Vec::new();
+        collect_media_redaction_manifest(dir.path(), &mut redacted);
+        assert_eq!(redacted.len(), 1);
+        assert_eq!(redacted[0].name, "assets/media/redaction-manifest.json");
+        let manifest: crate::session::media::artifacts::MediaRedactionManifest =
+            serde_json::from_slice(&redacted[0].data).unwrap();
+        assert_eq!(manifest.omitted_blob_hashes, vec![hash]);
+        assert_eq!(manifest.included_result_keys, vec![result_key]);
     }
 }
 

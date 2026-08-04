@@ -1,0 +1,37 @@
+[package]
+name = "xai-grok-tools-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Standalone workspace, mirroring `xai-grok-markdown/fuzz`: this directory is
+# NOT a member of the root workspace (the root member list is explicit), so
+# adding it requires no root `Cargo.toml` change and no root `Cargo.lock`
+# change. Its own lockfile is generated on first `cargo fuzz` use.
+[workspace]
+members = ["."]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.xai-grok-tools]
+path = ".."
+
+# Header discovery only: mirrors xai-grok-tools/build.rs invariants (no
+# FFmpeg link metadata is ever emitted; see build.rs in this directory).
+[build-dependencies]
+pkg-config = "0.3"
+
+# The decode target fuzzes the public native FFmpeg preprocessing API
+# (`DecodeSession` + limits) when compatible FFmpeg 8 headers are available,
+# plus the always-on content-only request/source deserialization surface.
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false

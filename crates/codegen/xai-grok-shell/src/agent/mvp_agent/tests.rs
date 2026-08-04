@@ -1088,6 +1088,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         auth_provider: None,
         attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+        media_understanding_backend: None,
     };
     let toolset = builder
         .finalize(def.tool_config, ctx)
@@ -2158,6 +2159,8 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             supports_native_schema: None,
             supports_strict_tools: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: config::MediaCapabilities::default(),
+            media_transport: config::MediaTransportCapabilities::default(),
         },
         model_provider: None,
         api_key: None,
@@ -3076,6 +3079,82 @@ fn ext_method_rewind_uses_local_dispatch_without_bridge() {
             .await
             .expect_err("local rewind with no session must error");
         assert_eq!(err.code, acp::Error::resource_not_found(None).code);
+    });
+}
+/// PR 9 blocker regression: `x.ai/media/test_route` must reach the media
+/// extension handler (not the `method_not_found` fallback the shell used
+/// before PR 9). With an absent session the handler reports
+/// `resource_not_found`, proving the dispatch arm routes into
+/// `extensions::media::handle`.
+#[test]
+fn ext_method_media_test_route_reaches_media_handler() {
+    use acp::Agent as _;
+    let _env = crate::env::EnvVarGuard::remove(crate::env::GROK_DISABLE_CUSTOM_BRIDGE_ENV);
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let params = serde_json::json!({
+            "sessionId": "sess-media-absent",
+            "category": "image",
+            "routeIndex": 0,
+            "path": "assets/sample.png",
+        });
+        let err = agent
+            .ext_method(acp::ExtRequest::new(
+                "x.ai/media/test_route",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+            ))
+            .await
+            .expect_err("media route test with absent session must error");
+        assert_eq!(
+            err.code,
+            acp::Error::resource_not_found(None).code,
+            "the media dispatch arm must be reached (not method_not_found)"
+        );
+    });
+}
+/// Content-only contract: URL paths are rejected as `invalid_params` before
+/// any session lookup, so the handler is defensive even against malformed
+/// clients.
+#[test]
+fn ext_method_media_test_route_rejects_url_path() {
+    use acp::Agent as _;
+    let _env = crate::env::EnvVarGuard::remove(crate::env::GROK_DISABLE_CUSTOM_BRIDGE_ENV);
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let params = serde_json::json!({
+            "sessionId": "sess-media-absent",
+            "category": "image",
+            "routeIndex": 0,
+            "path": "https://example.com/pic.png",
+        });
+        let err = agent
+            .ext_method(acp::ExtRequest::new(
+                "x.ai/media/test_route",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+            ))
+            .await
+            .expect_err("URL path must be rejected as invalid params");
+        assert_eq!(err.code, acp::Error::invalid_params().code);
+    });
+}
+/// Unknown methods inside the `x.ai/media/` namespace fall back to
+/// `method_not_found` from the media handler itself (matching every other
+/// extension namespace).
+#[test]
+fn ext_method_media_unknown_method_is_method_not_found() {
+    use acp::Agent as _;
+    let _env = crate::env::EnvVarGuard::remove(crate::env::GROK_DISABLE_CUSTOM_BRIDGE_ENV);
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let params = serde_json::json!({ "sessionId": "sess-media-absent" });
+        let err = agent
+            .ext_method(acp::ExtRequest::new(
+                "x.ai/media/unknown_method",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+            ))
+            .await
+            .expect_err("unknown media method must be method_not_found");
+        assert_eq!(err.code, acp::Error::method_not_found().code);
     });
 }
 #[test]

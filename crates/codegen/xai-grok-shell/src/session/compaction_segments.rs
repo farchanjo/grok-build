@@ -8,6 +8,12 @@
 //!
 //! To add a mode: add the variant + hint to [`CompactionMode`], extend the match
 //! in both methods, and add a `StorageAdapter` writer for any new artifact.
+//!
+//! PR 8: `run_compact_inner` prepares `segment_messages` from the single
+//! enriched snapshot, so the segment store receives text-only history with
+//! media semantics embedded as provenance envelopes. The final defensive
+//! `sanitize_compaction_images` step in `prepare_conversation_for_segment`
+//! remains a no-op on correctly enriched conversations (see the test below).
 use super::SessionActor;
 use crate::extensions::notification::CompactionSegmentFile;
 use crate::session::persistence::PersistenceMsg;
@@ -55,5 +61,49 @@ impl SessionActor {
             ),
         };
         mode.transcript_hint(location.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_grok_inference_types::ContentPart;
+
+    /// PR 8: the segment store receives `segment_messages` prepared from the
+    /// single enriched snapshot, and the defensive
+    /// `sanitize_compaction_images` step stays a no-op on that input.
+    #[test]
+    fn segment_prep_is_a_no_op_on_enriched_conversation() {
+        let user = ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: std::sync::Arc::<str>::from("look at the error"),
+            },
+            ContentPart::Text {
+                text: std::sync::Arc::<str>::from(
+                    "<media_semantics category=\"image\" provider=\"xai\" model=\"vision\" \
+                     strategy=\"native\"><description>stack trace</description></media_semantics>",
+                ),
+            },
+        ]);
+        let enriched = vec![
+            ConversationItem::system("sys"),
+            user,
+            ConversationItem::tool_result(
+                "tc-1",
+                "output\n\n<media_semantics category=\"image\" provider=\"xai\" model=\"vision\" \
+                 strategy=\"native\"><description>build log</description></media_semantics>",
+            ),
+        ];
+        assert!(
+            !xai_chat_state::compaction_utils::conversation_contains_images(&enriched),
+            "correctly enriched conversations carry no image parts"
+        );
+        let prepared =
+            xai_chat_state::compaction_utils::prepare_conversation_for_segment(enriched.clone());
+        assert_eq!(
+            serde_json::to_value(&prepared).unwrap(),
+            serde_json::to_value(&enriched).unwrap(),
+            "segment prep is a no-op on enriched input"
+        );
     }
 }

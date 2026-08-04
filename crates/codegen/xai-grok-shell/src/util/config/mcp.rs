@@ -54,6 +54,9 @@ pub struct Config {
     /// `[compaction]` section — round-tripped so the pager's live compaction
     /// config updates persist and future sessions adopt them.
     pub compaction: crate::agent::config::CompactionConfig,
+    /// `[media_understanding]` section — round-tripped so the pager's live
+    /// media route-list updates persist and future sessions adopt them.
+    pub media_understanding: crate::agent::config::MediaUnderstandingConfig,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

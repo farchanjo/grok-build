@@ -10,9 +10,12 @@ use super::setters::{
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
-    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
-    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_media_auto_enrich_inner, set_media_compaction_enrichment_inner,
+    set_media_preflight_policy_inner, set_media_routes_inner,
+    set_media_understanding_enabled_inner, set_media_unknown_policy_inner, set_multiline_mode,
+    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
+    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
+    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
     set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
     set_voice_capture_mode_inner, set_voice_stt_language_inner,
@@ -56,6 +59,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let compaction_config_from_app = app.compaction_config.clone();
+    let media_config_from_app = app.media_understanding_config.clone();
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -97,6 +101,8 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 ..compaction_snapshot_fields(
                     &compaction_config_from_app,
                     agent.session.tracker.activity(),
+                    &media_config_from_app,
+                    media_badges_from_models(&agent.session.models),
                 )
             };
         }
@@ -347,6 +353,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let compaction_config_from_app = app.compaction_config.clone();
+    let media_config_from_app = app.media_understanding_config.clone();
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -396,6 +403,8 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         ..compaction_snapshot_fields(
             &compaction_config_from_app,
             agent.session.tracker.activity(),
+            &media_config_from_app,
+            media_badges_from_models(&agent.session.models),
         )
     };
     let mut state = Box::new(SettingsModalState::new(
@@ -877,6 +886,8 @@ fn external_model_ids(
 fn compaction_snapshot_fields(
     config: &xai_grok_shell::agent::config::CompactionConfig,
     activity: Option<crate::acp::tracker::TurnActivity>,
+    media_config: &xai_grok_shell::agent::config::MediaUnderstandingConfig,
+    media_badges: std::collections::HashMap<String, crate::settings::MediaModelBadge>,
 ) -> crate::settings::PagerLocalSnapshot {
     use xai_grok_shell::agent::config::{CompactionStrategy, CompactionTriggerPolicy};
     let resolved = config.normalize_validate().unwrap_or_else(|_| {
@@ -884,6 +895,7 @@ fn compaction_snapshot_fields(
             .normalize_validate()
             .expect("default compaction config is valid")
     });
+    let media = crate::settings::media_snapshot_fields(media_config);
     crate::settings::PagerLocalSnapshot {
         compaction_strategy: match resolved.strategy {
             CompactionStrategy::Auto => "auto",
@@ -911,6 +923,19 @@ fn compaction_snapshot_fields(
             activity,
             Some(crate::acp::tracker::TurnActivity::AutoCompacting)
         ),
+        // Media-understanding snapshot fields (see `media_snapshot_fields`).
+        media_enabled: media.media_enabled,
+        media_auto_enrich: media.media_auto_enrich,
+        media_compaction_enrichment: media.media_compaction_enrichment,
+        media_unknown_policy: media.media_unknown_policy,
+        media_preflight_policy: media.media_preflight_policy,
+        media_max_output_chars: media.media_max_output_chars,
+        media_max_aux_tokens_per_call: media.media_max_aux_tokens_per_call,
+        media_max_media_bytes: media.media_max_media_bytes,
+        media_image_routes: media.media_image_routes,
+        media_audio_routes: media.media_audio_routes,
+        media_video_routes: media.media_video_routes,
+        media_badges,
         ..Default::default()
     }
 }
@@ -950,8 +975,40 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
                     .and_then(|agent| agent.session.tracker.activity()),
                 _ => None,
             },
+            &app.media_understanding_config,
+            match app.active_view {
+                ActiveView::Agent(id) => app
+                    .agents
+                    .get(&id)
+                    .map(|agent| media_badges_from_models(&agent.session.models))
+                    .unwrap_or_default(),
+                _ => Default::default(),
+            },
         )
     }
+}
+
+/// Project the ACP media `_meta` status for every catalog model into a
+/// `HashMap<model_id, MediaModelBadge>` for the route-editor badges.
+fn media_badges_from_models(
+    models: &crate::acp::model_state::ModelState,
+) -> std::collections::HashMap<String, crate::settings::MediaModelBadge> {
+    use crate::settings::MediaModelBadge;
+    let mut map = std::collections::HashMap::new();
+    for (id, _info) in &models.available {
+        let media = models.media_state_for(id);
+        map.insert(
+            id.0.to_string(),
+            MediaModelBadge {
+                capabilities: media.capabilities,
+                transport: media.transport,
+                source: media.source,
+                catalog_stale: media.catalog_stale,
+                auth_status: media.auth_status,
+            },
+        );
+    }
+    map
 }
 
 /// Map a `(SettingKey, SettingValue)` to the matching typed
@@ -1163,6 +1220,40 @@ pub(in crate::app::dispatch) fn action_for_reset(
                 )))
             }
         }
+        // --- Media-understanding settings ---
+        ("media_understanding_enabled", SettingValue::Bool(b)) => {
+            Some(Action::SetMediaUnderstandingEnabled(*b))
+        }
+        ("media_auto_enrich", SettingValue::Bool(b)) => Some(Action::SetMediaAutoEnrich(*b)),
+        ("media_compaction_enrichment", SettingValue::Bool(b)) => {
+            Some(Action::SetMediaCompactionEnrichment(*b))
+        }
+        ("media_unknown_policy", SettingValue::Enum(s)) => {
+            Some(Action::SetMediaUnknownPolicy(s.to_string()))
+        }
+        ("media_preflight_policy", SettingValue::Enum(s)) => {
+            Some(Action::SetMediaPreflightPolicy(s.to_string()))
+        }
+        ("media_max_output_chars", SettingValue::Int(i)) => {
+            Some(Action::SetMediaMaxOutputChars(*i))
+        }
+        ("media_max_aux_tokens_per_call", SettingValue::Int(i)) => {
+            Some(Action::SetMediaMaxAuxTokensPerCall(*i))
+        }
+        ("media_max_media_bytes", SettingValue::Int(i)) => Some(Action::SetMediaMaxMediaBytes(*i)),
+        // Route-list editors reset to an empty route list (default).
+        ("media_image_routes", SettingValue::String(_)) => Some(Action::SetMediaRoutes {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            routes: vec![],
+        }),
+        ("media_audio_routes", SettingValue::String(_)) => Some(Action::SetMediaRoutes {
+            category: xai_grok_tools::media::domain::MediaCategory::Audio,
+            routes: vec![],
+        }),
+        ("media_video_routes", SettingValue::String(_)) => Some(Action::SetMediaRoutes {
+            category: xai_grok_tools::media::domain::MediaCategory::Video,
+            routes: vec![],
+        }),
 
         _ => None,
     }
@@ -1455,6 +1546,56 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("compaction_fallback_model", SettingValue::String(s)) => {
             set_compaction_fallback_model_inner(app, s.clone());
+        }
+        // --- Media-understanding settings rollback ---
+        ("media_understanding_enabled", SettingValue::Bool(b)) => {
+            set_media_understanding_enabled_inner(app, *b);
+        }
+        ("media_auto_enrich", SettingValue::Bool(b)) => set_media_auto_enrich_inner(app, *b),
+        ("media_compaction_enrichment", SettingValue::Bool(b)) => {
+            set_media_compaction_enrichment_inner(app, *b);
+        }
+        ("media_unknown_policy", SettingValue::Enum(s)) => {
+            set_media_unknown_policy_inner(app, s);
+        }
+        ("media_preflight_policy", SettingValue::Enum(s)) => {
+            set_media_preflight_policy_inner(app, s);
+        }
+        ("media_max_output_chars", SettingValue::Int(i)) => {
+            app.media_understanding_config.max_output_chars = Some(*i as u64);
+        }
+        ("media_max_aux_tokens_per_call", SettingValue::Int(i)) => {
+            app.media_understanding_config.max_aux_tokens_per_call = Some(*i as u64);
+        }
+        ("media_max_media_bytes", SettingValue::Int(i)) => {
+            app.media_understanding_config.max_media_bytes = Some(*i as u64);
+        }
+        ("media_image_routes", SettingValue::String(s)) => {
+            let routes: Vec<crate::settings::MediaRouteEdit> =
+                serde_json::from_str(s).unwrap_or_default();
+            set_media_routes_inner(
+                app,
+                xai_grok_tools::media::domain::MediaCategory::Image,
+                routes,
+            );
+        }
+        ("media_audio_routes", SettingValue::String(s)) => {
+            let routes: Vec<crate::settings::MediaRouteEdit> =
+                serde_json::from_str(s).unwrap_or_default();
+            set_media_routes_inner(
+                app,
+                xai_grok_tools::media::domain::MediaCategory::Audio,
+                routes,
+            );
+        }
+        ("media_video_routes", SettingValue::String(s)) => {
+            let routes: Vec<crate::settings::MediaRouteEdit> =
+                serde_json::from_str(s).unwrap_or_default();
+            set_media_routes_inner(
+                app,
+                xai_grok_tools::media::domain::MediaCategory::Video,
+                routes,
+            );
         }
 
         _ => {

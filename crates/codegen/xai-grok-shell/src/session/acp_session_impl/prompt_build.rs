@@ -1,8 +1,16 @@
 //! User-message construction concern for `SessionActor`: templated prefix
 //! building, rules partitioning, large-prompt offload/truncation, and image
-//! payload preparation.
+//! payload preparation (including the PR 7 automatic-attachment enrichment
+//! decision point, plan section 13).
 #![allow(clippy::items_after_test_module)]
 use super::*;
+use crate::session::media::{
+    DisclosurePurpose, EnrichDecision, EnrichedUserMessage, auto_enrich_kill_switched, decide,
+    render_semantics_envelope,
+};
+use base64::Engine as _;
+use xai_grok_tools::media::backend::MediaUnderstandingRequest;
+use xai_grok_tools::media::domain::{MediaCategory, MediaDetailLevel, MediaSource};
 /// Normalize a free-form name (e.g. an MCP server identifier) into a
 /// single safe filesystem segment.
 ///
@@ -812,12 +820,198 @@ impl SessionActor {
         )
         .await;
     }
-    /// Run the image-transcription pipeline for a turn that contains
+    /// Run the automatic attachment enrichment pipeline for a turn that
+    /// contains user-supplied images (PR 7, plan section 13).
+    ///
+    /// When media understanding auto-enrichment is available and enabled for
+    /// the active session model's capabilities, images are delegated through
+    /// the configured category routes and replaced with scrubbed provenance
+    /// envelopes. Otherwise the legacy paths are preserved exactly: cursor
+    /// harnesses transcribe through the image-describe pipeline
+    /// (`IMAGE_DESCRIPTION_PROCESSING_LIMIT`, `persist_user_images`,
+    /// `render_image_user_message`), and other harnesses persist the images
+    /// and prepend an `<image_files>` block plus structural image parts.
+    ///
+    /// Recursion prevention: this pipeline handles user-attached
+    /// `ImageContent` only, never delegated output; the backend delegates
+    /// through dedicated clients with no application tool set and caps
+    /// video→audio nesting at depth 1 by construction.
+    pub(super) async fn enrich_user_media(
+        &self,
+        original_user_message: String,
+        images: &[agent_client_protocol::ImageContent],
+    ) -> Result<EnrichedUserMessage, acp::Error> {
+        let session_dir = crate::session::persistence::session_dir(&crate::session::info::Info {
+            id: self.session_info.id.clone(),
+            cwd: self.session_info.cwd.clone(),
+        });
+        let legacy = self
+            .legacy_image_path(&session_dir, &original_user_message, images)
+            .await?;
+
+        // Media understanding unavailable, auto-enrich disabled, or the
+        // kill switch set → the legacy path is authoritative.
+        let Some(context) = self.media_understanding_context.as_ref() else {
+            return Ok(legacy);
+        };
+        if !context.config.read().auto_enrich || auto_enrich_kill_switched() {
+            return Ok(legacy);
+        }
+        let availability = context.backend.availability_snapshot();
+        if !availability.enabled || !availability.has_eligible_route() {
+            return Ok(legacy);
+        }
+
+        let model_id = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|c| c.model)
+            .unwrap_or_default();
+        let caps = self
+            .models_manager
+            .models()
+            .get(&model_id)
+            .map(|entry| entry.info.media_capabilities.clone())
+            .unwrap_or_default();
+        let decision = decide(
+            MediaCategory::Image,
+            &caps,
+            context.config.read().active_model_unknown_policy,
+        );
+        match decision {
+            EnrichDecision::PassThrough | EnrichDecision::Prompt => {
+                // Pass through (or, for the interactive Prompt UX that lands
+                // in PR 9, fall back to today's behavior).
+                Ok(legacy)
+            }
+            EnrichDecision::Block => {
+                let notice = "\n\n[Note: the attached image(s) were not sent or \
+                              delegated because the active model's media policy \
+                              blocks them in this session.]";
+                Ok(EnrichedUserMessage {
+                    text: format!("{original_user_message}{notice}"),
+                    media_superseded: true,
+                })
+            }
+            EnrichDecision::Delegate => {
+                // Persist the image bytes into the session artifact store so
+                // artifact refs resolve; the backend's policy gate enforces
+                // containment and bounds.
+                let store =
+                    crate::session::media::MediaArtifactStore::open(&session_dir).map_err(|e| {
+                        acp::Error::internal_error()
+                            .data(format!("failed to open media artifact store: {e}"))
+                    })?;
+                let mut sources = Vec::with_capacity(images.len());
+                for image in images {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&image.data)
+                        .map_err(|e| {
+                            acp::Error::internal_error().data(format!("invalid image data: {e}"))
+                        })?;
+                    let blob_hash = store.put_blob(&bytes).map_err(|e| {
+                        acp::Error::internal_error()
+                            .data(format!("failed to store media blob: {e}"))
+                    })?;
+                    // The source artifact entered the current conversation
+                    // lifecycle (plan 11.3): reference it so conservative GC
+                    // at session close retains it even if delegation below
+                    // falls back to the legacy image path.
+                    let _ = store.merge_ref(
+                        crate::session::media::RefKind::Attachments,
+                        crate::session::media::LIVE_ATTACHMENT_REF,
+                        &[crate::session::media::ObjectRef {
+                            kind: crate::session::media::ArtifactKind::Blob,
+                            hash: blob_hash.clone(),
+                        }],
+                    );
+                    sources.push(MediaSource::ArtifactRef { blob_hash });
+                }
+                let request = MediaUnderstandingRequest {
+                    media: sources,
+                    category: MediaCategory::Image,
+                    instruction: None,
+                    detail: MediaDetailLevel::default(),
+                    focus: vec![],
+                };
+                match context
+                    .backend
+                    .analyze_for(request, DisclosurePurpose::AutoAttachment)
+                    .await
+                {
+                    Ok(result) => {
+                        let envelopes: Vec<String> = result
+                            .results
+                            .iter()
+                            .map(render_semantics_envelope)
+                            .collect();
+                        let text = if envelopes.is_empty() {
+                            legacy.text
+                        } else {
+                            format!("{}\n\n{}", envelopes.join("\n\n"), original_user_message)
+                        };
+                        Ok(EnrichedUserMessage {
+                            text,
+                            media_superseded: true,
+                        })
+                    }
+                    Err(error) => {
+                        // Delegation failed (consent denied, all routes
+                        // exhausted, ...). Fall back to the legacy path so the
+                        // user's image context is never silently dropped.
+                        tracing::warn!(
+                            session_id = %self.session_info.id,
+                            %error,
+                            "media auto-enrich delegation failed; falling back to legacy image path",
+                        );
+                        Ok(legacy)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The legacy image path, preserved exactly:
+    /// - cursor harness → image-describe transcription pipeline;
+    /// - other harnesses → persist + `<image_files>` block prepend.
+    async fn legacy_image_path(
+        &self,
+        session_dir: &std::path::Path,
+        original_user_message: &str,
+        images: &[agent_client_protocol::ImageContent],
+    ) -> Result<EnrichedUserMessage, acp::Error> {
+        if self.is_cursor_harness() {
+            let text = self
+                .transcribe_user_images(original_user_message.to_string(), images)
+                .await?;
+            Ok(EnrichedUserMessage {
+                text,
+                media_superseded: true,
+            })
+        } else {
+            let text = crate::session::image_describe::persist_and_prepend_image_files(
+                session_dir,
+                images,
+                original_user_message,
+            )
+            .map_err(|e| {
+                acp::Error::internal_error()
+                    .data(format!("failed to save user images to assets dir: {e}"))
+            })?;
+            Ok(EnrichedUserMessage {
+                text,
+                media_superseded: false,
+            })
+        }
+    }
+
+    /// Run the image-describe transcription pipeline for a turn that contains
     /// user-supplied images. Returns the new `user_message` text with the
     /// `<image>` / `<image_files>` envelopes prepended; on any failure
     /// returns an `acp::Error` so the entire turn is aborted (per product
     /// decision -- we never silently drop image context).
-    pub(super) async fn transcribe_user_images(
+    async fn transcribe_user_images(
         &self,
         original_user_message: String,
         images: &[agent_client_protocol::ImageContent],

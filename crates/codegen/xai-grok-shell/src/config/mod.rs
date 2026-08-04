@@ -710,6 +710,33 @@ impl ModelOverrideConfig {
         result
     }
 }
+
+/// Parse a media route list from a plural route env var.
+///
+/// The value must be a TOML inline array of route tables; JSON arrays are a
+/// subset of TOML inline arrays, so both spellings work. For example:
+///
+/// ```text
+/// GROK_MEDIA_IMAGE_ROUTES='[{ model = "grok-4.5", strategy = "auto" }]'
+/// GROK_MEDIA_IMAGE_ROUTES='[{"model":"grok-4.5","strategy":"auto"}]'
+/// ```
+///
+/// There is no list-env precedent in the codebase, so this format is the
+/// canonical definition. A malformed value returns `None` (the caller keeps
+/// the config.toml value / legacy chain and logs); this function never
+/// panics and never blocks.
+pub fn parse_media_route_list_env(value: &str) -> Option<Vec<crate::agent::config::MediaRoute>> {
+    // TOML inline array (covers JSON arrays). Wrapped in a synthetic key
+    // because TOML documents must be tables.
+    let wrapped = format!("routes = {value}");
+    if let Ok(parsed) = toml::from_str::<toml::Value>(&wrapped)
+        && let Some(routes) = parsed.get("routes").and_then(|v| v.clone().try_into().ok())
+    {
+        return Some(routes);
+    }
+    serde_json::from_str(value).ok()
+}
+
 /// Tool behavior configuration (`[tools]` in config.toml).
 ///
 /// Controls cross-cutting tool behavior such as `.gitignore` filtering.

@@ -1,8 +1,15 @@
 //! Rolling-compaction job and result types.
 //!
-//! These values move through a bounded capacity-one Tokio lane. They contain a
-//! snapshot solely as immutable sampling input; `xai-chat-state` remains the
-//! only authoritative live conversation and applies results with CAS.
+//! These values move through a bounded capacity-one Tokio lane. They contain
+//! a snapshot solely as immutable sampling input; `xai-chat-state` remains
+//! the only authoritative live conversation and applies results with CAS.
+//!
+//! Media enrichment (plan §14.3) is wired in `acp_session_impl/rolling.rs`:
+//! `sample_rolling_source` enriches `source_items` exactly once per job via
+//! the canonical preflight (`SessionActor::prepare_compaction_source`) and
+//! reuses that enriched snapshot for chunks, bisections, merges, and route
+//! fallbacks. The `identity` fingerprint stays on the raw items so CAS
+//! staleness detection is unaffected by enrichment.
 
 use xai_grok_inference_types::ConversationItem;
 

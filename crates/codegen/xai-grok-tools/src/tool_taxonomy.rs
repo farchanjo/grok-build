@@ -70,6 +70,7 @@ impl ToolKind {
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
             ToolKind::Workflow => "Workflow",
+            ToolKind::AnalyzeMedia => "Analyze Media",
             ToolKind::Other => "Tool",
         }
     }
@@ -90,7 +91,8 @@ impl ToolKind {
             | ToolKind::WebFetch
             | ToolKind::EnterPlan
             | ToolKind::ExitPlan
-            | ToolKind::AskUser => true,
+            | ToolKind::AskUser
+            | ToolKind::AnalyzeMedia => true,
             ToolKind::Edit
             | ToolKind::Delete
             | ToolKind::Write
@@ -265,6 +267,15 @@ mod tests {
         assert!(!ToolKind::Delete.is_read_only());
     }
     #[test]
+    fn analyze_media_classified_read_only() {
+        // `analyze_media` performs no workspace or external mutation: it
+        // reads workspace-relative paths / session artifacts and returns
+        // semantics, so the read-only classification must hold at the kind
+        // level (PR 7 permission classification).
+        assert!(ToolKind::AnalyzeMedia.is_read_only());
+        assert_eq!(ToolKind::AnalyzeMedia.presentation_name(), "Analyze Media");
+    }
+    #[test]
     fn namespace_round_trips_snake_case_with_pascal_aliases() {
         use strum::IntoEnumIterator;
         fn wire_and_pascal(ns: ToolNamespace) -> (&'static str, &'static str) {
@@ -310,7 +321,14 @@ mod tests {
             "known values must be listed in the description"
         );
         let ns = serde_json::to_value(schemars::schema_for!(ToolNamespace)).unwrap();
-        assert!(ns.get("enum").is_some(), "namespace is a closed enum");
+        // `schemars` emits a flat `enum` while every variant serializes under
+        // `rename_all`, but switches to a `oneOf` once a variant carries an
+        // explicit serde `rename` (the `Archanjo` const branch). Both shapes
+        // enumerate the full closed set, so either satisfies the contract.
+        assert!(
+            ns.get("enum").is_some() || ns.get("oneOf").is_some(),
+            "namespace is a closed enum"
+        );
     }
     #[test]
     fn canonical_meta_wire_shape_round_trips() {
@@ -350,23 +368,102 @@ mod tests {
         }
         let mut expected: serde_json::Value =
             serde_json::from_str(tool_meta_json_schema_str()).expect("checked-in schema parses");
-        if let Some(values) = expected["definitions"]["ToolNamespace"]["enum"].as_array_mut() {
-            use std::collections::HashSet;
-            use strum::IntoEnumIterator;
-            let compiled: HashSet<String> = ToolNamespace::iter()
-                .filter_map(|ns| {
-                    serde_json::to_value(ns)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_owned))
-                })
-                .collect();
-            values.retain(|v| matches!(v.as_str(), Some(s) if compiled.contains(s)));
+        // The checked-in schema may retain deprecated namespace values that were
+        // removed from the enum; drop them before comparing so the schema can
+        // keep parsing legacy wire values. `schemars` emits a flat `enum` while
+        // every variant serializes under `rename_all`, but switches to a `oneOf`
+        // (with `enum` arrays and `const` branches) once a variant carries an
+        // explicit serde `rename` (`Archanjo`). Handle both shapes.
+        if let Some(ns) = expected
+            .get_mut("definitions")
+            .and_then(|definitions| definitions.get_mut("ToolNamespace"))
+        {
+            retain_compiled_namespace_values(ns);
         }
         let expected = format!("{}\n", serde_json::to_string_pretty(&expected).unwrap());
         assert_eq!(
             generated, expected,
             "tool_meta.schema.json is stale; regenerate with UPDATE_TOOL_META_SCHEMA=1"
         );
+    }
+    /// Drop `ToolNamespace` schema values that are no longer present in the
+    /// compiled enum, so the checked-in schema may retain deprecated values
+    /// without failing the freshness comparison. Handles both the flat `enum`
+    /// shape and the `oneOf` shape `schemars` emits when a variant carries an
+    /// explicit serde `rename` (`Archanjo` becomes a `const` branch).
+    fn retain_compiled_namespace_values(ns_schema: &mut serde_json::Value) {
+        use std::collections::HashSet;
+        use strum::IntoEnumIterator;
+        let compiled: HashSet<String> = ToolNamespace::iter()
+            .filter_map(|ns| {
+                serde_json::to_value(ns)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+            })
+            .collect();
+        let is_compiled =
+            |v: &serde_json::Value| matches!(v.as_str(), Some(s) if compiled.contains(s));
+        // Flat `enum` shape.
+        if let Some(values) = ns_schema.get_mut("enum").and_then(|v| v.as_array_mut()) {
+            values.retain(is_compiled);
+        }
+        // `oneOf` shape: filter `enum` arrays inside branches and drop `const`
+        // branches whose value was removed from the enum.
+        if let Some(branches) = ns_schema.get_mut("oneOf").and_then(|v| v.as_array_mut()) {
+            let mut kept = Vec::with_capacity(branches.len());
+            for branch in branches.drain(..) {
+                let mut branch = branch;
+                if let Some(values) = branch.get_mut("enum").and_then(|v| v.as_array_mut()) {
+                    values.retain(is_compiled);
+                }
+                let keep = match branch.get("const").and_then(|v| v.as_str()) {
+                    Some(value) => compiled.contains(value),
+                    None => true,
+                };
+                if keep {
+                    kept.push(branch);
+                }
+            }
+            *branches = kept;
+        }
+    }
+    /// Regression: the `oneOf` `ToolNamespace` shape (serde-renamed variant)
+    /// must be filtered the same way as the legacy flat `enum`, without the
+    /// `IndexMut`-inserted `"enum": null` that used to break the freshness
+    /// comparison. Deprecated values in `enum` arrays and `const` branches are
+    /// dropped, while current values survive.
+    #[test]
+    fn namespace_filter_handles_one_of_shape() {
+        let mut one_of = serde_json::json!({
+            "type": "string",
+            "oneOf": [
+                {
+                    "type": "string",
+                    "enum": ["grok_build", "mcp", "retired_namespace"]
+                },
+                {
+                    "type": "string",
+                    "const": "archanjo"
+                },
+                {
+                    "type": "string",
+                    "const": "retired_pack"
+                }
+            ]
+        });
+        retain_compiled_namespace_values(&mut one_of);
+        assert!(
+            one_of.get("enum").is_none(),
+            "no spurious `enum` key may be inserted on the oneOf shape"
+        );
+        let branches = one_of["oneOf"].as_array().expect("oneOf preserved");
+        assert_eq!(branches.len(), 2, "deprecated const branch dropped");
+        assert_eq!(
+            branches[0]["enum"],
+            serde_json::json!(["grok_build", "mcp"]),
+            "deprecated enum value dropped"
+        );
+        assert_eq!(branches[1]["const"], "archanjo", "current const kept");
     }
     #[test]
     fn merge_into_nests_under_one_key_and_preserves_existing() {

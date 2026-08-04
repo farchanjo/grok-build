@@ -3665,6 +3665,8 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             supports_native_schema: None,
             supports_strict_tools: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: crate::agent::config::MediaCapabilities::default(),
+            media_transport: crate::agent::config::MediaTransportCapabilities::default(),
         },
         model_provider: None,
         api_key: None,

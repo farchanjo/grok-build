@@ -4,6 +4,7 @@ use crate::hub::HubConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use xai_grok_tools::media::backend::MediaUnderstandingBackend;
 use xai_grok_tools::registry::types::{SessionContext, ToolRegistryBuilder, ToolServerConfig};
 /// Default capacity for the workspace event broadcast channel.
 pub const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 64;
@@ -91,6 +92,14 @@ pub trait SessionContextFactory: Send + Sync {
     fn registry_builder(&self) -> ToolRegistryBuilder;
     fn known_tool_ids(&self) -> Arc<std::collections::HashSet<String>> {
         Arc::new(self.registry_builder().known_tool_ids())
+    }
+    /// Optional session-scoped media-understanding backend.
+    ///
+    /// Defaults to `None` — media understanding unavailable. Factories that
+    /// own a backend (shell, PR 6+) override this so every session toolset
+    /// resolves with the backend resource injected.
+    fn media_understanding_backend(&self) -> Option<Arc<dyn MediaUnderstandingBackend>> {
+        None
     }
 }
 /// Placeholder for the cross-session memory backend config.

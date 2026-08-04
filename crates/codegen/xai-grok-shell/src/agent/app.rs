@@ -1698,6 +1698,47 @@ pub async fn run_leader(
                             });
                             let _ = ipc_tx_for_config.send(notification.to_string());
                         }
+                        ConfigUpdate::MediaUnderstanding(media) => {
+                            // Accepted `[media_understanding]` section: inject the
+                            // internal reload into the agent's ACP stream so every
+                            // live session hot-swaps its backend route/policy
+                            // snapshot at a safe actor mailbox point (mirrors
+                            // `ConfigUpdate::Compaction`), and broadcast the
+                            // sanitized section to IPC clients for UI refresh.
+                            info!(
+                                "Media understanding config change detected — updating active sessions"
+                            );
+                            let line = internal_reload_request_line(
+                                "config-reload-media-understanding",
+                                "x.ai/internal/reload_media_understanding",
+                                serde_json::to_value(&*media).unwrap_or_default(),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(error) = tx.write_all(line.as_bytes()).await {
+                                warn!(
+                                    %error,
+                                    "failed to inject media understanding reload into ACP stream"
+                                );
+                            }
+                            let notification = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "x.ai/config_changed",
+                                "params": {
+                                    "section": "media_understanding",
+                                    "changes": serde_json::to_value(&*media).unwrap_or_default(),
+                                }
+                            });
+                            let _ = ipc_tx_for_config.send(notification.to_string());
+                            // Machine-wide media notification for leader-client UI
+                            // refresh (route editors + status badges). Same
+                            // sanitized payload as config_changed.
+                            let media_update = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "x.ai/media/update",
+                                "params": serde_json::to_value(&*media).unwrap_or_default(),
+                            });
+                            let _ = ipc_tx_for_config.send(media_update.to_string());
+                        }
                     }
                 }
             });

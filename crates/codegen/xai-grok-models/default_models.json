@@ -19,6 +19,21 @@
       "auto_compact_threshold_percent": 80,
       "compaction_at_tokens": true,
       "compactions_remaining": 1,
+      "media_capabilities": {
+        "image": "supported",
+        "audio": "unknown",
+        "video": "unknown"
+      },
+      "media_transport": {
+        "image_inline": true,
+        "audio_inline": false,
+        "audio_upload": false,
+        "transcription_endpoint": false,
+        "video_inline": false,
+        "video_upload": false,
+        "native_video": false,
+        "json_schema": false
+      },
       "reasoning_efforts": [
         {
           "value": "high",

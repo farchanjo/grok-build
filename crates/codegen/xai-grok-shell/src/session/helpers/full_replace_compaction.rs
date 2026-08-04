@@ -2087,4 +2087,42 @@ mod compaction_route_tests {
         let _ = shutdown_tx.send(());
         let _ = fallback_shutdown_tx.send(());
     }
+
+    /// PR 8 invariant: `sanitize_compaction_images` remains the final
+    /// defensive net at this sampler boundary, and it is a no-op on a
+    /// correctly enriched conversation (the pairing-safe preflight output has
+    /// no remaining image parts: user images became Text envelopes and
+    /// `ToolResultItem::images` is empty with the envelope riding in the
+    /// textual content).
+    #[test]
+    fn sanitizer_is_a_no_op_on_correctly_enriched_conversation() {
+        let user =
+            ConversationItem::user_with_parts(vec![xai_grok_inference_types::ContentPart::Text {
+                text: std::sync::Arc::<str>::from(
+                    "<media_semantics category=\"image\" provider=\"xai\" model=\"vision\" \
+                 strategy=\"native\">\n<description>\nA terminal showing a syntax error.\n\
+                 </description>\n</media_semantics>",
+                ),
+            }]);
+        let conversation = vec![
+            user,
+            ConversationItem::tool_result(
+                "tc-1",
+                "file contents\n\n<media_semantics category=\"image\" provider=\"xai\" \
+                 model=\"vision\" strategy=\"native\">\n<description>\nA screenshot of build \
+                 output.\n</description>\n</media_semantics>",
+            ),
+        ];
+
+        assert!(
+            !conversation_contains_images(&conversation),
+            "correctly enriched conversations carry no image parts"
+        );
+        let sanitized = sanitize_compaction_images(conversation.clone());
+        assert_eq!(
+            serde_json::to_value(&sanitized).unwrap(),
+            serde_json::to_value(&conversation).unwrap(),
+            "the defensive sanitizer is a no-op on correctly enriched input"
+        );
+    }
 }

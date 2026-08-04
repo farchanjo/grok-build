@@ -24,6 +24,13 @@ use xai_grok_inference_types::{
 use xai_grok_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
 };
+// Media-understanding domain vocabulary (PR 1 seam). `xai-grok-tools` stays
+// inference-free; the shell config layer only reuses its category/strategy
+// enums for structural validation (`MediaCategoryStrategy::allowed_for`).
+pub use xai_grok_tools::media::{
+    MediaCapabilities, MediaCategory, MediaCategoryStrategy, MediaModalitySupport,
+    MediaTransportCapabilities,
+};
 /// The mode in which the agent is running.
 /// Determines behavior like relay sync enablement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1176,6 +1183,539 @@ pub struct ResolvedCompactionConfig {
     pub trigger_policy: CompactionTriggerPolicy,
     /// Rolling band count (validated 3..=8).
     pub rolling_band_count: usize,
+}
+
+/// Error type for media-understanding configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaUnderstandingConfigError {
+    /// A route model ID is blank after trimming.
+    BlankModelId,
+    /// The same model ID appears more than once in one category.
+    DuplicateRoute {
+        category: MediaCategory,
+        model: String,
+    },
+    /// A strategy is not allowed for its category.
+    InvalidStrategy {
+        category: MediaCategory,
+        strategy: MediaCategoryStrategy,
+    },
+    /// A numeric limit is degenerate (zero) or out of bounds.
+    InvalidLimit(&'static str),
+    /// A numeric limit exceeds its maximum supported value.
+    LimitExceedsMaximum {
+        name: &'static str,
+        value: u64,
+        max: u64,
+    },
+}
+
+impl std::fmt::Display for MediaUnderstandingConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BlankModelId => write!(f, "media route model cannot be blank"),
+            Self::DuplicateRoute { category, model } => {
+                write!(
+                    f,
+                    "duplicate media route model `{model}` in category `{category:?}`"
+                )
+            }
+            Self::InvalidStrategy { category, strategy } => write!(
+                f,
+                "strategy `{strategy:?}` is not allowed for media category `{category:?}`"
+            ),
+            Self::InvalidLimit(name) => {
+                write!(f, "media understanding limit `{name}` must be positive")
+            }
+            Self::LimitExceedsMaximum { name, value, max } => {
+                write!(
+                    f,
+                    "media understanding limit `{name}` must be at most {max} (got {value})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MediaUnderstandingConfigError {}
+
+/// Policy applied when the active session model's modality support is unknown.
+///
+/// Mirrors the plan's `active_model_unknown_policy` (plan §5 / §13).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveModelUnknownPolicy {
+    /// Pass media through to the model (image-compatibility default).
+    #[default]
+    PassThrough,
+    /// Delegate through the configured category routes.
+    Delegate,
+    /// Ask the user what to do.
+    Prompt,
+    /// Send neither the media nor a delegation.
+    Block,
+}
+
+/// Policy for compaction preflight enrichment failures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionPreflightPolicy {
+    /// Use cached/fresh semantics where available; preserve placeholders on failure.
+    #[default]
+    BestEffort,
+    /// Fail the compaction attempt when required semantics cannot be produced.
+    Strict,
+}
+
+/// `[media_understanding.circuit_breaker]` sub-section.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaCircuitBreakerConfig {
+    /// Consecutive auxiliary failures that trip the breaker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failures: Option<u64>,
+    /// Window (seconds) over which the failure count is tracked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<u64>,
+}
+
+/// One ordered delegate route within a media category.
+///
+/// Stores the catalog model ID only — never credentials or derived secrets.
+/// Unresolved catalog IDs are preserved opaquely; catalog resolution is a
+/// runtime concern (plan §5.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaRoute {
+    /// Catalog model ID of the delegate route.
+    pub model: String,
+    /// Optional strategy; `None` resolves to `Auto` on validation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<MediaCategoryStrategy>,
+    /// TUI-user-only: accept semantic capability uncertainty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_unknown_capability: Option<bool>,
+    /// TUI-user-only: force an unsupported-capability route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_unsupported_capability: Option<bool>,
+}
+
+/// Per-category route list and per-category limits.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaCategoryConfig {
+    /// Ordered route list; `routes[0]` is primary, remaining entries are fallbacks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<MediaRoute>,
+    /// Per-category duration cap override (seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_seconds: Option<u64>,
+    /// Per-category frame cap override (video only). The plan's canonical
+    /// TOML spells this `frames` (§5); `max_frames` is the schema name.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "frames")]
+    pub max_frames: Option<u64>,
+}
+
+/// `[media_understanding]` top-level section.
+///
+/// Optional fields so defaults never leak into the user's `config.toml`
+/// (mirrors `CompactionConfig`); [`MediaUnderstandingConfig::normalize_validate`]
+/// resolves defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaUnderstandingConfig {
+    /// Master switch; `false` (default) omits the `analyze_media` tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Automatically enrich unsupported/unknown attachments through routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_enrich: Option<bool>,
+    /// Enrich media semantics before text-only compaction requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_enrichment: Option<bool>,
+    /// Behavior when the active model's modality support is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_model_unknown_policy: Option<ActiveModelUnknownPolicy>,
+    /// Compaction preflight failure policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_preflight_policy: Option<CompactionPreflightPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_chars: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_aux_tokens_per_call: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_aux_budget_usd_ticks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_media_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_audio_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_video_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_video_frames: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_contact_sheet_side_px: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_preprocess_wallclock_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preprocess_concurrency: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<MediaCircuitBreakerConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<MediaCategoryConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<MediaCategoryConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video: Option<MediaCategoryConfig>,
+}
+
+/// Upper bounds for `[media_understanding]` numeric limits.
+///
+/// Sanity ceilings that reject absurd hand-edited values (for example
+/// `u64::MAX`) before any downstream arithmetic can wrap or saturate, while
+/// staying far above every built-in default and every value the settings UI
+/// can produce. They are ceilings, not policy limits.
+const MEDIA_LIMIT_MAX_OUTPUT_CHARS: u64 = 1_000_000;
+const MEDIA_LIMIT_MAX_AUX_TOKENS_PER_CALL: u64 = 100_000;
+const MEDIA_LIMIT_MAX_AUX_BUDGET_USD_TICKS: u64 = 10_000_000_000_000;
+const MEDIA_LIMIT_MAX_MEDIA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MEDIA_LIMIT_MAX_AUDIO_SECONDS: u64 = 86_400;
+const MEDIA_LIMIT_MAX_VIDEO_SECONDS: u64 = 86_400;
+const MEDIA_LIMIT_MAX_VIDEO_FRAMES: u64 = 1_000_000;
+const MEDIA_LIMIT_MAX_CONTACT_SHEET_SIDE_PX: u64 = 16_384;
+const MEDIA_LIMIT_MAX_PREPROCESS_WALLCLOCK_MS: u64 = 3_600_000;
+const MEDIA_LIMIT_PREPROCESS_CONCURRENCY: u64 = 64;
+const MEDIA_LIMIT_CIRCUIT_BREAKER_FAILURES: u64 = 1_000_000;
+const MEDIA_LIMIT_CIRCUIT_BREAKER_WINDOW_SECS: u64 = 31_536_000;
+
+/// Per-category override ceilings (same ceilings as the top-level caps).
+const MEDIA_LIMIT_CATEGORY_MAX_SECONDS: u64 = 86_400;
+const MEDIA_LIMIT_CATEGORY_MAX_FRAMES: u64 = 1_000_000;
+
+/// Validate one numeric limit: positive and within its sane ceiling.
+fn check_media_limit(
+    name: &'static str,
+    value: u64,
+    max: u64,
+) -> Result<(), MediaUnderstandingConfigError> {
+    if value == 0 {
+        return Err(MediaUnderstandingConfigError::InvalidLimit(name));
+    }
+    if value > max {
+        return Err(MediaUnderstandingConfigError::LimitExceedsMaximum { name, value, max });
+    }
+    Ok(())
+}
+
+impl MediaUnderstandingConfig {
+    /// Resolve and validate the media-understanding configuration.
+    ///
+    /// Enforces (plan §5.2):
+    /// - non-empty model IDs;
+    /// - no duplicate model IDs within one category (the same model ID may
+    ///   appear across image/audio/video);
+    /// - category-appropriate strategy;
+    /// - limits that are positive and within their sane upper bounds
+    ///   (absurd hand-edited values such as `u64::MAX` are rejected).
+    ///
+    /// Unresolved catalog IDs are NOT rejected — catalog completeness is
+    /// transient; the route is preserved and may become valid after refresh.
+    pub fn normalize_validate(
+        &self,
+    ) -> Result<ResolvedMediaUnderstandingConfig, MediaUnderstandingConfigError> {
+        let image = self.resolve_category(MediaCategory::Image)?;
+        let audio = self.resolve_category(MediaCategory::Audio)?;
+        let video = self.resolve_category(MediaCategory::Video)?;
+
+        let max_output_chars = self.max_output_chars.unwrap_or(20_000);
+        let max_aux_tokens_per_call = self.max_aux_tokens_per_call.unwrap_or(8_192);
+        let max_aux_budget_usd_ticks = self.max_aux_budget_usd_ticks.unwrap_or(1_000_000_000);
+        let max_media_bytes = self.max_media_bytes.unwrap_or(256 * 1024 * 1024);
+        let max_audio_seconds = self.max_audio_seconds.unwrap_or(1_800);
+        let max_video_seconds = self.max_video_seconds.unwrap_or(900);
+        let max_video_frames = self.max_video_frames.unwrap_or(32);
+        let max_contact_sheet_side_px = self.max_contact_sheet_side_px.unwrap_or(2_048);
+        let max_preprocess_wallclock_ms = self.max_preprocess_wallclock_ms.unwrap_or(120_000);
+        let preprocess_concurrency = self.preprocess_concurrency.unwrap_or(2);
+
+        check_media_limit(
+            "max_output_chars",
+            max_output_chars,
+            MEDIA_LIMIT_MAX_OUTPUT_CHARS,
+        )?;
+        check_media_limit(
+            "max_aux_tokens_per_call",
+            max_aux_tokens_per_call,
+            MEDIA_LIMIT_MAX_AUX_TOKENS_PER_CALL,
+        )?;
+        check_media_limit(
+            "max_aux_budget_usd_ticks",
+            max_aux_budget_usd_ticks,
+            MEDIA_LIMIT_MAX_AUX_BUDGET_USD_TICKS,
+        )?;
+        check_media_limit(
+            "max_media_bytes",
+            max_media_bytes,
+            MEDIA_LIMIT_MAX_MEDIA_BYTES,
+        )?;
+        check_media_limit(
+            "max_audio_seconds",
+            max_audio_seconds,
+            MEDIA_LIMIT_MAX_AUDIO_SECONDS,
+        )?;
+        check_media_limit(
+            "max_video_seconds",
+            max_video_seconds,
+            MEDIA_LIMIT_MAX_VIDEO_SECONDS,
+        )?;
+        check_media_limit(
+            "max_video_frames",
+            max_video_frames,
+            MEDIA_LIMIT_MAX_VIDEO_FRAMES,
+        )?;
+        check_media_limit(
+            "max_contact_sheet_side_px",
+            max_contact_sheet_side_px,
+            MEDIA_LIMIT_MAX_CONTACT_SHEET_SIDE_PX,
+        )?;
+        check_media_limit(
+            "max_preprocess_wallclock_ms",
+            max_preprocess_wallclock_ms,
+            MEDIA_LIMIT_MAX_PREPROCESS_WALLCLOCK_MS,
+        )?;
+        check_media_limit(
+            "preprocess_concurrency",
+            preprocess_concurrency,
+            MEDIA_LIMIT_PREPROCESS_CONCURRENCY,
+        )?;
+
+        let breaker_failures = self
+            .circuit_breaker
+            .as_ref()
+            .and_then(|c| c.failures)
+            .unwrap_or(5);
+        let breaker_window_secs = self
+            .circuit_breaker
+            .as_ref()
+            .and_then(|c| c.window_secs)
+            .unwrap_or(300);
+        check_media_limit(
+            "circuit_breaker.failures",
+            breaker_failures,
+            MEDIA_LIMIT_CIRCUIT_BREAKER_FAILURES,
+        )?;
+        check_media_limit(
+            "circuit_breaker.window_secs",
+            breaker_window_secs,
+            MEDIA_LIMIT_CIRCUIT_BREAKER_WINDOW_SECS,
+        )?;
+
+        Ok(ResolvedMediaUnderstandingConfig {
+            enabled: self.enabled.unwrap_or(false),
+            auto_enrich: self.auto_enrich.unwrap_or(false),
+            compaction_enrichment: self.compaction_enrichment.unwrap_or(false),
+            active_model_unknown_policy: self.active_model_unknown_policy.unwrap_or_default(),
+            compaction_preflight_policy: self.compaction_preflight_policy.unwrap_or_default(),
+            max_output_chars,
+            max_aux_tokens_per_call,
+            max_aux_budget_usd_ticks,
+            max_media_bytes,
+            max_audio_seconds,
+            max_video_seconds,
+            max_video_frames,
+            max_contact_sheet_side_px,
+            max_preprocess_wallclock_ms,
+            preprocess_concurrency,
+            circuit_breaker: ResolvedMediaCircuitBreakerConfig {
+                failures: breaker_failures,
+                window_secs: breaker_window_secs,
+            },
+            image,
+            audio,
+            video,
+        })
+    }
+
+    fn resolve_category(
+        &self,
+        category: MediaCategory,
+    ) -> Result<ResolvedMediaCategoryConfig, MediaUnderstandingConfigError> {
+        let raw = match category {
+            MediaCategory::Image => self.image.as_ref(),
+            MediaCategory::Audio => self.audio.as_ref(),
+            MediaCategory::Video => self.video.as_ref(),
+            MediaCategory::Auto => None,
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut routes = Vec::new();
+        for route in raw.map(|c| c.routes.as_slice()).unwrap_or(&[]) {
+            let model = route.model.trim().to_owned();
+            if model.is_empty() {
+                return Err(MediaUnderstandingConfigError::BlankModelId);
+            }
+            if !seen.insert(model.clone()) {
+                return Err(MediaUnderstandingConfigError::DuplicateRoute { category, model });
+            }
+            let strategy = route.strategy.unwrap_or(MediaCategoryStrategy::Auto);
+            if !strategy.allowed_for(category) {
+                return Err(MediaUnderstandingConfigError::InvalidStrategy { category, strategy });
+            }
+            routes.push(ResolvedMediaRoute {
+                model,
+                strategy,
+                allow_unknown_capability: route.allow_unknown_capability.unwrap_or(false),
+                force_unsupported_capability: route.force_unsupported_capability.unwrap_or(false),
+            });
+        }
+        // Per-category override ceilings: reject absurd hand-edited values
+        // just like the top-level limits.
+        let (max_seconds_name, max_frames_name) = match category {
+            MediaCategory::Image => ("image.max_seconds", "image.max_frames"),
+            MediaCategory::Audio => ("audio.max_seconds", "audio.max_frames"),
+            MediaCategory::Video => ("video.max_seconds", "video.max_frames"),
+            // Unreachable: `raw` is `None` for `Auto`, so no check runs.
+            MediaCategory::Auto => ("auto.max_seconds", "auto.max_frames"),
+        };
+        if let Some(seconds) = raw.and_then(|c| c.max_seconds) {
+            check_media_limit(max_seconds_name, seconds, MEDIA_LIMIT_CATEGORY_MAX_SECONDS)?;
+        }
+        if let Some(frames) = raw.and_then(|c| c.max_frames) {
+            check_media_limit(max_frames_name, frames, MEDIA_LIMIT_CATEGORY_MAX_FRAMES)?;
+        }
+        Ok(ResolvedMediaCategoryConfig {
+            routes,
+            max_seconds: raw.and_then(|c| c.max_seconds),
+            max_frames: raw.and_then(|c| c.max_frames),
+        })
+    }
+
+    /// Apply the plural route-list env vars and the legacy image-route chain.
+    ///
+    /// Precedence (highest first):
+    /// 1. `GROK_MEDIA_IMAGE_ROUTES` / `GROK_MEDIA_AUDIO_ROUTES` /
+    ///    `GROK_MEDIA_VIDEO_ROUTES`
+    /// 2. `[media_understanding]` in config.toml
+    /// 3. For image only, the legacy chain
+    ///    `GROK_IMAGE_DESCRIPTION_MODEL` > `[models].image_description` >
+    ///    remote `image_description_model` > `default_image_description_model()`
+    ///    (plan §5.4).
+    ///
+    /// Absent audio/video routes mean those categories are disabled.
+    ///
+    /// A malformed plural env var degrades gracefully: the config.toml value
+    /// (or the legacy chain) is kept and a warning is logged. This function
+    /// never panics and never starts any process.
+    pub fn resolve_with_env(
+        &self,
+        config: &toml::Value,
+        remote: Option<&crate::util::config::RemoteSettings>,
+    ) -> Self {
+        let mut result = self.clone();
+        result.apply_env_route_overrides();
+        result.apply_legacy_image_chain(config, remote);
+        result
+    }
+
+    fn apply_env_route_overrides(&mut self) {
+        apply_env_route_list("GROK_MEDIA_IMAGE_ROUTES", &mut self.image);
+        apply_env_route_list("GROK_MEDIA_AUDIO_ROUTES", &mut self.audio);
+        apply_env_route_list("GROK_MEDIA_VIDEO_ROUTES", &mut self.video);
+    }
+
+    fn apply_legacy_image_chain(
+        &mut self,
+        config: &toml::Value,
+        remote: Option<&crate::util::config::RemoteSettings>,
+    ) {
+        // Only when no explicit image routes came from env or config.toml.
+        let has_explicit = self.image.as_ref().is_some_and(|c| !c.routes.is_empty());
+        if has_explicit {
+            return;
+        }
+        let Some(model) = crate::config::ModelOverrideConfig::resolve(None, None, config, remote)
+            .image_description
+        else {
+            return;
+        };
+        let category = self.image.get_or_insert_with(MediaCategoryConfig::default);
+        category.routes = vec![MediaRoute {
+            model,
+            strategy: Some(MediaCategoryStrategy::Auto),
+            ..MediaRoute::default()
+        }];
+    }
+}
+
+/// Resolved media-understanding circuit breaker (defaults applied).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMediaCircuitBreakerConfig {
+    pub failures: u64,
+    pub window_secs: u64,
+}
+
+/// Resolved delegate route (strategy and capability flags applied).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMediaRoute {
+    pub model: String,
+    pub strategy: MediaCategoryStrategy,
+    pub allow_unknown_capability: bool,
+    pub force_unsupported_capability: bool,
+}
+
+/// Resolved per-category media config (defaults applied).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMediaCategoryConfig {
+    pub routes: Vec<ResolvedMediaRoute>,
+    pub max_seconds: Option<u64>,
+    pub max_frames: Option<u64>,
+}
+
+/// Resolved `[media_understanding]` config with defaults applied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMediaUnderstandingConfig {
+    pub enabled: bool,
+    pub auto_enrich: bool,
+    pub compaction_enrichment: bool,
+    pub active_model_unknown_policy: ActiveModelUnknownPolicy,
+    pub compaction_preflight_policy: CompactionPreflightPolicy,
+    pub max_output_chars: u64,
+    pub max_aux_tokens_per_call: u64,
+    pub max_aux_budget_usd_ticks: u64,
+    pub max_media_bytes: u64,
+    pub max_audio_seconds: u64,
+    pub max_video_seconds: u64,
+    pub max_video_frames: u64,
+    pub max_contact_sheet_side_px: u64,
+    pub max_preprocess_wallclock_ms: u64,
+    pub preprocess_concurrency: u64,
+    pub circuit_breaker: ResolvedMediaCircuitBreakerConfig,
+    pub image: ResolvedMediaCategoryConfig,
+    pub audio: ResolvedMediaCategoryConfig,
+    pub video: ResolvedMediaCategoryConfig,
+}
+
+/// Apply one plural route-list env var to a category slot. Malformed input
+/// degrades to the config.toml value (warning logged), never panics.
+fn apply_env_route_list(name: &str, slot: &mut Option<MediaCategoryConfig>) {
+    let Ok(raw) = std::env::var(name) else {
+        return;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return;
+    }
+    match crate::config::parse_media_route_list_env(raw) {
+        Some(routes) => {
+            let category = slot.get_or_insert_with(MediaCategoryConfig::default);
+            category.routes = routes;
+        }
+        None => {
+            tracing::warn!(
+                var = name,
+                "invalid media route list in environment variable; ignoring and keeping config.toml value"
+            );
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -3947,6 +4487,23 @@ struct DefaultModelJson {
     auto_compact_threshold_percent: Option<u8>,
     #[serde(default)]
     system_prompt_label: Option<String>,
+    /// Per-category media modality support (tri-state, `Unknown` default).
+    #[serde(default, skip_serializing_if = "is_unknown_media_capabilities")]
+    media_capabilities: MediaCapabilities,
+    /// Concrete wire-transport capability flags (all-`false` default).
+    #[serde(default, skip_serializing_if = "is_default_media_transport")]
+    media_transport: MediaTransportCapabilities,
+}
+/// True when every modality is `Unknown` (the serde default). Used as
+/// `skip_serializing_if` so all-`Unknown` models serialize compactly.
+fn is_unknown_media_capabilities(caps: &MediaCapabilities) -> bool {
+    caps.image == MediaModalitySupport::Unknown
+        && caps.audio == MediaModalitySupport::Unknown
+        && caps.video == MediaModalitySupport::Unknown
+}
+/// True when every transport flag is `false` (the serde default).
+fn is_default_media_transport(transport: &MediaTransportCapabilities) -> bool {
+    *transport == MediaTransportCapabilities::default()
 }
 fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryConfig> {
     let root: serde_json::Value = serde_json::from_str(crate::models::DEFAULT_MODELS_JSON)
@@ -4015,6 +4572,8 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 show_model_fingerprint: m.show_model_fingerprint,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                media_capabilities: m.media_capabilities,
+                media_transport: m.media_transport,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
             };
@@ -4158,6 +4717,14 @@ pub struct ModelEntryConfig {
         skip_serializing_if = "crate::agent::execution_backend::ExecutionBackend::is_native"
     )]
     pub execution_backend: crate::agent::execution_backend::ExecutionBackend,
+    /// Per-category media modality support (tri-state, `Unknown` default).
+    /// Populated from bundled defaults, remote catalog media metadata, or the
+    /// `models_cache.json` round-trip. See [`ModelInfo::media_capabilities`].
+    #[serde(default, skip_serializing_if = "is_unknown_media_capabilities")]
+    pub media_capabilities: MediaCapabilities,
+    /// Concrete wire-transport capability flags (all-`false` default).
+    #[serde(default, skip_serializing_if = "is_default_media_transport")]
+    pub media_transport: MediaTransportCapabilities,
 }
 /// True when `cfg` equals the all-disabled default. Derives `PartialEq`
 /// on `f32`, which is fine for the current shape because both `f32`
@@ -4540,6 +5107,21 @@ pub struct ModelInfo {
         skip_serializing_if = "crate::agent::execution_backend::ExecutionBackend::is_native"
     )]
     pub execution_backend: crate::agent::execution_backend::ExecutionBackend,
+    /// Per-category media modality support (tri-state, `Unknown` default).
+    ///
+    /// `Unknown` is the serde default so older `models_cache.json` files
+    /// (schema v2) and pre-modality remote metadata deserialize with every
+    /// modality unknown. Runtime eligibility also consults
+    /// [`Self::media_transport`]: semantic support alone never authorizes
+    /// bytes leaving the host.
+    #[serde(default, skip_serializing_if = "is_unknown_media_capabilities")]
+    pub media_capabilities: MediaCapabilities,
+    /// Concrete wire-transport capability flags (all-`false` default).
+    ///
+    /// Tracked separately from semantic capability: a route is eligible only
+    /// when a concrete provider transport is known before any bytes leave.
+    #[serde(default, skip_serializing_if = "is_default_media_transport")]
+    pub media_transport: MediaTransportCapabilities,
 }
 impl ModelInfo {
     /// Minimal fallback descriptor for an unknown model slug.
@@ -4581,6 +5163,8 @@ impl ModelInfo {
             supports_native_schema: None,
             supports_strict_tools: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: MediaCapabilities::default(),
+            media_transport: MediaTransportCapabilities::default(),
         }
     }
     /// Extract shared model metadata from a flat config entry.
@@ -4624,6 +5208,8 @@ impl ModelInfo {
             supports_native_schema: entry.supports_native_schema,
             supports_strict_tools: entry.supports_strict_tools,
             execution_backend: entry.execution_backend,
+            media_capabilities: entry.media_capabilities.clone(),
+            media_transport: entry.media_transport,
         }
     }
     /// Project normalized selector state into the legacy support/list/default
@@ -5469,6 +6055,8 @@ pub fn resolve_aux_model_inference_config(
                 supports_strict_tools: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                media_capabilities: MediaCapabilities::default(),
+                media_transport: MediaTransportCapabilities::default(),
             },
             model_provider: None,
             api_key: Some(bearer),
@@ -5818,6 +6406,8 @@ fn resolve_hidden_default_web_search_inference_config(
             supports_native_schema: None,
             supports_strict_tools: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: MediaCapabilities::default(),
+            media_transport: MediaTransportCapabilities::default(),
         },
         model_provider: None,
         api_key: None,
@@ -5883,7 +6473,13 @@ pub fn resolve_web_search_inference_config(
 }
 pub fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
+    media_projection: Option<&AcpMediaProjection>,
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+    // Catalog-level media metadata is per-catalog, not per-model; it is
+    // projected onto every ACP row so the pager can render source/staleness/
+    // auth badges without a second channel. `None` defaults to the bundled
+    // catalog story (source `bundled`, not stale, no fetch/auth detail).
+    let projection = media_projection.cloned().unwrap_or_default();
     models
         .iter()
         .map(|(key, model)| {
@@ -5954,6 +6550,45 @@ pub fn to_acp_model_info(
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
                     );
                 }
+                // Media projection (additive; PR 2). The `media` object is
+                // always emitted (values default to `unknown`), transport
+                // only when a concrete transport is known, and the
+                // catalog-level source/staleness/auth detail when present.
+                map.insert(
+                    ACP_MEDIA_META_KEY.to_string(),
+                    acp_media_meta_value(&info.media_capabilities),
+                );
+                if !is_default_media_transport(&info.media_transport) {
+                    map.insert(
+                        ACP_MEDIA_TRANSPORT_META_KEY.to_string(),
+                        acp_media_transport_meta_value(&info.media_transport),
+                    );
+                }
+                map.insert(
+                    ACP_MEDIA_SOURCE_META_KEY.to_string(),
+                    serde_json::Value::String(
+                        projection
+                            .source
+                            .clone()
+                            .unwrap_or_else(|| ACP_MEDIA_SOURCE_BUNDLED.to_string()),
+                    ),
+                );
+                map.insert(
+                    ACP_MEDIA_CATALOG_STALE_META_KEY.to_string(),
+                    serde_json::Value::Bool(projection.catalog_stale),
+                );
+                if let Some(fetched_at) = &projection.fetched_at {
+                    map.insert(
+                        ACP_MEDIA_FETCHED_AT_META_KEY.to_string(),
+                        serde_json::Value::String(fetched_at.clone()),
+                    );
+                }
+                if let Some(auth_status) = &projection.auth_status {
+                    map.insert(
+                        ACP_MEDIA_AUTH_STATUS_META_KEY.to_string(),
+                        serde_json::Value::String(auth_status.clone()),
+                    );
+                }
                 if map.is_empty() { None } else { Some(map) }
             };
             (
@@ -5968,6 +6603,165 @@ pub fn to_acp_model_info(
         })
         .collect()
 }
+
+// ── ACP `_meta` media projection (PR 2) ────────────────────────────────────
+
+/// `_meta.media` — per-model media modality object (`{image, audio, video}`
+/// with `supported` | `unknown` | `unsupported` values). Camel-case key, free
+/// form JSON; the shell write and the pager read must agree exactly.
+pub const ACP_MEDIA_META_KEY: &str = "media";
+/// `_meta.mediaTransport` — concrete transport flags (camel-case inner keys).
+pub const ACP_MEDIA_TRANSPORT_META_KEY: &str = "mediaTransport";
+/// `_meta.mediaSource` — catalog source: `bundled` | `remote` |
+/// `live_cache` | `stale_cache`.
+pub const ACP_MEDIA_SOURCE_META_KEY: &str = "mediaSource";
+/// The default catalog source when no projection detail is available.
+pub const ACP_MEDIA_SOURCE_BUNDLED: &str = "bundled";
+/// `_meta.mediaCatalogStale` — whether the catalog is considered stale.
+pub const ACP_MEDIA_CATALOG_STALE_META_KEY: &str = "mediaCatalogStale";
+/// `_meta.mediaFetchedAt` — catalog fetch timestamp (RFC 3339 UTC).
+pub const ACP_MEDIA_FETCHED_AT_META_KEY: &str = "mediaFetchedAt";
+/// `_meta.mediaAuthStatus` — credential status: `credentialed` | `missing` |
+/// `unknown`.
+pub const ACP_MEDIA_AUTH_STATUS_META_KEY: &str = "mediaAuthStatus";
+
+/// Catalog-level media metadata projected onto every ACP model row's `_meta`.
+///
+/// These describe the catalog, not an individual model. `None` fields are
+/// omitted from the projection; the pager defaults source to `bundled` and
+/// staleness to `false` when absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpMediaProjection {
+    /// Catalog source: `bundled` | `remote` | `live_cache` | `stale_cache`.
+    pub source: Option<String>,
+    /// When the catalog was fetched (RFC 3339 UTC).
+    pub fetched_at: Option<String>,
+    /// Whether the catalog is considered stale.
+    pub catalog_stale: bool,
+    /// Credential status: `credentialed` | `missing` | `unknown`.
+    pub auth_status: Option<String>,
+}
+
+/// Serialize `MediaCapabilities` into the `_meta.media` value.
+pub fn acp_media_meta_value(caps: &MediaCapabilities) -> serde_json::Value {
+    serde_json::json!({
+        "image": modality_str(caps.image),
+        "audio": modality_str(caps.audio),
+        "video": modality_str(caps.video),
+    })
+}
+
+fn modality_str(support: MediaModalitySupport) -> &'static str {
+    match support {
+        MediaModalitySupport::Unknown => "unknown",
+        MediaModalitySupport::Supported => "supported",
+        MediaModalitySupport::Unsupported => "unsupported",
+    }
+}
+
+/// Serialize `MediaTransportCapabilities` into the `_meta.mediaTransport`
+/// value. Inner keys are camel case; the pager reads the same spellings.
+pub fn acp_media_transport_meta_value(transport: &MediaTransportCapabilities) -> serde_json::Value {
+    serde_json::json!({
+        "imageInline": transport.image_inline,
+        "audioInline": transport.audio_inline,
+        "audioUpload": transport.audio_upload,
+        "transcriptionEndpoint": transport.transcription_endpoint,
+        "videoInline": transport.video_inline,
+        "videoUpload": transport.video_upload,
+        "nativeVideo": transport.native_video,
+        "jsonSchema": transport.json_schema,
+    })
+}
+
+/// Parse `_meta.media` back into `MediaCapabilities`. Absent or malformed
+/// metadata yields the all-`Unknown` default.
+pub fn parse_acp_media_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> MediaCapabilities {
+    meta.and_then(|m| m.get(ACP_MEDIA_META_KEY))
+        .and_then(|v| serde_json::from_value::<MediaCapabilities>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Parse `_meta.mediaTransport` back into `MediaTransportCapabilities`.
+/// Accepts camel-case keys (the projection's own spellings) and snake_case
+/// aliases, and the plan-documented `transcription` shorthand. Absent or
+/// malformed metadata yields the all-`false` default.
+pub fn parse_acp_media_transport_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> MediaTransportCapabilities {
+    let Some(value) = meta.and_then(|m| m.get(ACP_MEDIA_TRANSPORT_META_KEY)) else {
+        return MediaTransportCapabilities::default();
+    };
+    parse_media_transport_value(value)
+}
+
+/// Parse a JSON object into `MediaTransportCapabilities`, accepting both
+/// camel-case (projection) and snake_case (serde-native) key spellings.
+pub fn parse_media_transport_value(value: &serde_json::Value) -> MediaTransportCapabilities {
+    let Some(obj) = value.as_object() else {
+        return MediaTransportCapabilities::default();
+    };
+    let flag = |camel: &str, snake: &str, alias: &str| -> bool {
+        obj.get(camel)
+            .or_else(|| obj.get(snake))
+            .or_else(|| obj.get(alias))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    MediaTransportCapabilities {
+        image_inline: flag("imageInline", "image_inline", ""),
+        audio_inline: flag("audioInline", "audio_inline", ""),
+        audio_upload: flag("audioUpload", "audio_upload", ""),
+        transcription_endpoint: flag(
+            "transcriptionEndpoint",
+            "transcription_endpoint",
+            "transcription",
+        ),
+        video_inline: flag("videoInline", "video_inline", ""),
+        video_upload: flag("videoUpload", "video_upload", ""),
+        native_video: flag("nativeVideo", "native_video", ""),
+        json_schema: flag("jsonSchema", "json_schema", ""),
+    }
+}
+
+/// Read `_meta.mediaSource` (catalog source string).
+pub fn acp_media_source_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    meta.and_then(|m| m.get(ACP_MEDIA_SOURCE_META_KEY))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Read `_meta.mediaFetchedAt` (RFC 3339 UTC timestamp).
+pub fn acp_media_fetched_at_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    meta.and_then(|m| m.get(ACP_MEDIA_FETCHED_AT_META_KEY))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Read `_meta.mediaCatalogStale` (defaults `false`).
+pub fn acp_media_catalog_stale_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    meta.and_then(|m| m.get(ACP_MEDIA_CATALOG_STALE_META_KEY))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Read `_meta.mediaAuthStatus` (credential status string).
+pub fn acp_media_auth_status_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    meta.and_then(|m| m.get(ACP_MEDIA_AUTH_STATUS_META_KEY))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Error code for model switch rejection due to agent type mismatch.
 pub const MODEL_SWITCH_INCOMPATIBLE_AGENT: &str = "MODEL_SWITCH_INCOMPATIBLE_AGENT";
 /// Error code for model switch failure during the zero-turn full harness
@@ -7006,6 +7800,8 @@ reasoning_effort = "low"
                 supports_strict_tools: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                media_capabilities: MediaCapabilities::default(),
+                media_transport: MediaTransportCapabilities::default(),
             },
             model_provider: None,
             api_key: api_key.map(|s| s.to_string()),
@@ -8377,6 +9173,8 @@ reasoning_effort = "low"
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: MediaCapabilities::default(),
+            media_transport: MediaTransportCapabilities::default(),
         };
         let info = ModelInfo::from_config(&entry);
         assert!(info.use_concise);
@@ -8540,6 +9338,8 @@ reasoning_effort = "low"
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: MediaCapabilities::default(),
+            media_transport: MediaTransportCapabilities::default(),
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
@@ -8552,7 +9352,7 @@ reasoning_effort = "low"
         entry.info.context_window = NonZeroU64::new(256_000).unwrap();
         entry.info.agent_type = "codex".to_string();
         models.insert("test-model".to_string(), entry);
-        let acp_models = to_acp_model_info(&models);
+        let acp_models = to_acp_model_info(&models, None);
         let acp_model = acp_models.values().next().expect("should have one model");
         let meta = acp_model.meta.as_ref().expect("meta should be present");
         assert_eq!(meta["agentType"], "codex");
@@ -8565,7 +9365,7 @@ reasoning_effort = "low"
         entry.info.name = Some("Plain Model".to_string());
         entry.info.context_window = NonZeroU64::new(256_000).unwrap();
         models.insert("plain-model".to_string(), entry);
-        let acp_models = to_acp_model_info(&models);
+        let acp_models = to_acp_model_info(&models, None);
         let acp_model = acp_models.values().next().expect("should have one model");
         let meta = acp_model.meta.as_ref().expect("meta should be present");
         assert_eq!(meta["totalContextTokens"], 256_000);
@@ -8582,7 +9382,7 @@ reasoning_effort = "low"
         entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         entry.info.reasoning_effort = Some(ReasoningEffort::High);
         models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
+        let meta = to_acp_model_info(&models, None)
             .values()
             .next()
             .unwrap()
@@ -8599,7 +9399,7 @@ reasoning_effort = "low"
         entry.info.supports_reasoning_effort = Some(true);
         entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
+        let meta = to_acp_model_info(&models, None)
             .values()
             .next()
             .unwrap()
@@ -8632,7 +9432,7 @@ reasoning_effort = "low"
         ];
         entry.info.derive_reasoning_effort_fields();
         models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
+        let meta = to_acp_model_info(&models, None)
             .values()
             .next()
             .unwrap()
@@ -8652,7 +9452,7 @@ reasoning_effort = "low"
         entry.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         entry.info.reasoning_effort = Some(ReasoningEffort::Medium);
         models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
+        let meta = to_acp_model_info(&models, None)
             .values()
             .next()
             .unwrap()
@@ -8678,7 +9478,7 @@ reasoning_effort = "low"
         }];
         entry.info.derive_reasoning_effort_fields();
         models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
+        let meta = to_acp_model_info(&models, None)
             .values()
             .next()
             .unwrap()
@@ -8713,7 +9513,7 @@ reasoning_effort = "low"
         ];
         entry.info.derive_reasoning_effort_fields();
         models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
+        let meta = to_acp_model_info(&models, None)
             .values()
             .next()
             .unwrap()
@@ -8729,7 +9529,7 @@ reasoning_effort = "low"
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
         entry.info.reasoning_effort = Some(ReasoningEffort::High);
         models.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&models)
+        let meta = to_acp_model_info(&models, None)
             .values()
             .next()
             .unwrap()
@@ -8746,9 +9546,176 @@ reasoning_effort = "low"
         let mut entry = test_model_entry("unknown-model", "https://test.api/v1", None, None, None);
         entry.info.name = Some("Unknown Model".to_string());
         models.insert("unknown-model".to_string(), entry);
-        let acp_models = to_acp_model_info(&models);
+        let acp_models = to_acp_model_info(&models, None);
         let meta = acp_models.values().next().unwrap().meta.as_ref().unwrap();
         assert_eq!(meta["totalContextTokens"], 200_000);
+    }
+    #[test]
+    fn acp_model_meta_projects_media_capabilities_and_transport() {
+        use xai_grok_tools::media::{MediaCapabilities, MediaModalitySupport as M};
+        let mut models = IndexMap::new();
+        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        entry.info.media_capabilities = MediaCapabilities {
+            image: M::Supported,
+            audio: M::Unknown,
+            video: M::Unsupported,
+        };
+        entry.info.media_transport = xai_grok_tools::media::MediaTransportCapabilities {
+            image_inline: true,
+            transcription_endpoint: true,
+            ..Default::default()
+        };
+        models.insert("m".to_string(), entry);
+
+        let meta = to_acp_model_info(&models, None)
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .clone()
+            .unwrap();
+        // `media` object always present with canonical spellings.
+        assert_eq!(meta["media"]["image"], "supported");
+        assert_eq!(meta["media"]["audio"], "unknown");
+        assert_eq!(meta["media"]["video"], "unsupported");
+        // `mediaTransport` camel-case keys.
+        assert_eq!(meta["mediaTransport"]["imageInline"], true);
+        assert_eq!(meta["mediaTransport"]["transcriptionEndpoint"], true);
+        assert_eq!(meta["mediaTransport"]["nativeVideo"], false);
+        // Catalog-level projection defaults for `None`.
+        assert_eq!(meta["mediaSource"], "bundled");
+        assert_eq!(meta["mediaCatalogStale"], false);
+        assert!(meta.get("mediaFetchedAt").is_none());
+        assert!(meta.get("mediaAuthStatus").is_none());
+    }
+    #[test]
+    fn acp_model_meta_projects_source_staleness_auth() {
+        let mut models = IndexMap::new();
+        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        models.insert("m".to_string(), entry);
+        let projection = AcpMediaProjection {
+            source: Some("remote".to_string()),
+            fetched_at: Some("2026-01-01T00:00:00Z".to_string()),
+            catalog_stale: true,
+            auth_status: Some("credentialed".to_string()),
+        };
+        let meta = to_acp_model_info(&models, Some(&projection))
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .clone()
+            .unwrap();
+        assert_eq!(meta["mediaSource"], "remote");
+        assert_eq!(meta["mediaFetchedAt"], "2026-01-01T00:00:00Z");
+        assert_eq!(meta["mediaCatalogStale"], true);
+        assert_eq!(meta["mediaAuthStatus"], "credentialed");
+    }
+    #[test]
+    fn acp_meta_media_round_trips_through_parse_helpers() {
+        use xai_grok_tools::media::{MediaCapabilities, MediaModalitySupport as M};
+        let mut models = IndexMap::new();
+        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        entry.info.media_capabilities = MediaCapabilities {
+            image: M::Supported,
+            audio: M::Unknown,
+            video: M::Unsupported,
+        };
+        entry.info.media_transport = xai_grok_tools::media::MediaTransportCapabilities {
+            image_inline: true,
+            native_video: false,
+            ..Default::default()
+        };
+        models.insert("m".to_string(), entry);
+        let meta = to_acp_model_info(&models, None)
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .clone()
+            .unwrap();
+
+        assert_eq!(
+            parse_acp_media_meta(Some(&meta)),
+            MediaCapabilities {
+                image: M::Supported,
+                audio: M::Unknown,
+                video: M::Unsupported,
+            }
+        );
+        let transport = parse_acp_media_transport_meta(Some(&meta));
+        assert!(transport.image_inline);
+        assert!(!transport.native_video);
+        assert_eq!(
+            acp_media_source_meta(Some(&meta)).as_deref(),
+            Some("bundled")
+        );
+        assert_eq!(acp_media_catalog_stale_meta(Some(&meta)), false);
+        assert_eq!(acp_media_auth_status_meta(Some(&meta)), None);
+    }
+    #[test]
+    fn unknown_media_serde_defaults_round_trip() {
+        use xai_grok_tools::media::{MediaCapabilities, MediaModalitySupport as M};
+        // A model with no media metadata serializes with the media fields
+        // omitted entirely (skip_serializing_if), and deserializes back to
+        // all-Unknown / all-false.
+        let entry = ModelEntryConfig {
+            id: None,
+            model: "test".to_string(),
+            base_url: "https://test.api/v1".to_string(),
+            name: None,
+            description: None,
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            api_key: None,
+            env_key: None,
+            api_backend: ApiBackend::default(),
+            auth_scheme: None,
+            extra_headers: IndexMap::new(),
+            context_window: NonZeroU64::new(200_000).unwrap(),
+            auto_compact_threshold_percent: None,
+            system_prompt_label: None,
+            api_base_url: None,
+            use_concise: false,
+            agent_type: default_agent_type(),
+            inference_idle_timeout_secs: None,
+            max_retries: None,
+            hidden: false,
+            supported_in_api: true,
+            reasoning_effort: None,
+            supports_reasoning_effort: false,
+            reasoning_efforts: Vec::new(),
+            reasoning_effort_selection: ReasoningEffortSelection::Unknown,
+            supports_backend_search: false,
+            supports_native_schema: None,
+            supports_strict_tools: None,
+            compactions_remaining: None,
+            compaction_at_tokens: None,
+            show_model_fingerprint: false,
+            stream_tool_calls: None,
+            laziness_detector: LazinessDetectorPerModelConfig::default(),
+            execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: MediaCapabilities::default(),
+            media_transport: xai_grok_tools::media::MediaTransportCapabilities::default(),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(
+            json.get("media_capabilities").is_none(),
+            "all-Unknown media_capabilities must be omitted from serialization"
+        );
+        assert!(
+            json.get("media_transport").is_none(),
+            "all-false media_transport must be omitted from serialization"
+        );
+        let back: ModelEntryConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.media_capabilities.image, M::Unknown);
+        assert_eq!(back.media_capabilities.audio, M::Unknown);
+        assert_eq!(back.media_capabilities.video, M::Unknown);
+        assert_eq!(
+            back.media_transport,
+            xai_grok_tools::media::MediaTransportCapabilities::default()
+        );
     }
     #[test]
     fn hidden_model_excluded_from_acp_but_kept_in_catalog() {
@@ -8770,7 +9737,7 @@ reasoning_effort = "low"
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw_config).unwrap();
         let catalog = resolve_model_catalog(&cfg, None);
-        let available = available_models(&catalog, true);
+        let available = available_models(&catalog, true, None);
         assert!(
             catalog.contains_key("visible-model"),
             "visible model missing from catalog"
@@ -8820,7 +9787,7 @@ reasoning_effort = "low"
         )
         .unwrap();
         let catalog = resolve_model_catalog(&Config::new_from_toml_cfg(&raw).unwrap(), None);
-        let available = available_models(&catalog, true);
+        let available = available_models(&catalog, true, None);
         assert!(catalog.contains_key("to-hide"));
         assert!(catalog["to-hide"].info.hidden);
         assert!(!available.values().any(|m| m.name == "to-hide"));
@@ -8920,10 +9887,10 @@ reasoning_effort = "low"
         let catalog = resolve_model_catalog(&cfg, None);
         assert!(catalog.contains_key("oauth-only-model"));
         assert!(catalog.contains_key("public-model"));
-        let api_available = available_models(&catalog, false);
+        let api_available = available_models(&catalog, false, None);
         assert!(!api_available.values().any(|m| m.name == "oauth-only-model"));
         assert!(api_available.values().any(|m| m.name == "public-model"));
-        let oauth_available = available_models(&catalog, true);
+        let oauth_available = available_models(&catalog, true, None);
         assert!(
             oauth_available
                 .values()
@@ -9003,6 +9970,8 @@ reasoning_effort = "low"
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: MediaCapabilities::default(),
+            media_transport: MediaTransportCapabilities::default(),
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
@@ -9550,7 +10519,7 @@ reasoning_effort = "low"
                 None,
             ),
         );
-        let acp_models = to_acp_model_info(&models);
+        let acp_models = to_acp_model_info(&models, None);
         assert_eq!(
             acp_models.len(),
             2,
@@ -12740,6 +13709,8 @@ default = "grok-4.5"
                 supports_strict_tools: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
+                media_capabilities: MediaCapabilities::default(),
+                media_transport: MediaTransportCapabilities::default(),
             },
             model_provider: None,
             api_key: None,
@@ -13764,5 +14735,360 @@ default = "grok-4.5"
         assert_eq!(back.strategy, Some(CompactionStrategy::Rolling));
         assert_eq!(back.trigger_policy, Some(CompactionTriggerPolicy::Dynamic));
         assert_eq!(back.rolling_band_count, Some(6));
+    }
+
+    #[test]
+    fn media_understanding_resolves_safe_defaults() {
+        let cfg = MediaUnderstandingConfig::default();
+        let resolved = cfg.normalize_validate().unwrap();
+        // A brand-new feature must default to disabled; enabling it is opt-in.
+        assert!(!resolved.enabled);
+        assert!(!resolved.auto_enrich);
+        assert!(!resolved.compaction_enrichment);
+        assert_eq!(
+            resolved.active_model_unknown_policy,
+            ActiveModelUnknownPolicy::PassThrough
+        );
+        assert_eq!(
+            resolved.compaction_preflight_policy,
+            CompactionPreflightPolicy::BestEffort
+        );
+        assert_eq!(resolved.max_output_chars, 20_000);
+        assert_eq!(resolved.max_aux_tokens_per_call, 8_192);
+        assert_eq!(resolved.max_media_bytes, 256 * 1024 * 1024);
+        assert_eq!(resolved.max_video_frames, 32);
+        assert_eq!(resolved.preprocess_concurrency, 2);
+        assert_eq!(resolved.circuit_breaker.failures, 5);
+        assert_eq!(resolved.circuit_breaker.window_secs, 300);
+        // No legacy image chain here (that is `resolve_with_env`'s job):
+        // absent audio/video routes mean those categories are disabled.
+        assert!(resolved.image.routes.is_empty());
+        assert!(resolved.audio.routes.is_empty());
+        assert!(resolved.video.routes.is_empty());
+    }
+
+    #[test]
+    fn media_understanding_parses_canonical_section() {
+        let src = r#"
+[media_understanding]
+enabled = true
+auto_enrich = true
+compaction_enrichment = true
+active_model_unknown_policy = "pass_through"
+compaction_preflight_policy = "best_effort"
+max_output_chars = 20000
+max_aux_tokens_per_call = 8192
+max_media_bytes = 268435456
+preprocess_concurrency = 2
+
+[media_understanding.circuit_breaker]
+failures = 5
+window_secs = 300
+
+[media_understanding.image]
+routes = [
+  { model = "grok-4.5", strategy = "auto" },
+  { model = "grok-vision-model", strategy = "native" },
+]
+
+[media_understanding.audio]
+routes = [
+  { model = "grok-audio-model", strategy = "transcription" },
+]
+
+[media_understanding.video]
+routes = [
+  { model = "grok-video-model", strategy = "native" },
+  { model = "grok-vision-model", strategy = "frames" },
+]
+max_seconds = 900
+frames = 16
+"#;
+        let root: toml::Value = toml::from_str(src).unwrap();
+        let cfg: MediaUnderstandingConfig = root
+            .get("media_understanding")
+            .cloned()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(cfg.enabled, Some(true));
+        assert_eq!(cfg.image.as_ref().unwrap().routes.len(), 2);
+        assert_eq!(cfg.image.as_ref().unwrap().routes[0].model, "grok-4.5");
+        assert_eq!(
+            cfg.image.as_ref().unwrap().routes[0].strategy,
+            Some(MediaCategoryStrategy::Auto)
+        );
+        assert_eq!(
+            cfg.audio.as_ref().unwrap().routes[0].strategy,
+            Some(MediaCategoryStrategy::Transcription)
+        );
+        assert_eq!(cfg.video.as_ref().unwrap().max_seconds, Some(900));
+        assert_eq!(cfg.video.as_ref().unwrap().max_frames, Some(16));
+        let resolved = cfg.normalize_validate().unwrap();
+        assert!(resolved.enabled);
+        assert_eq!(resolved.image.routes.len(), 2);
+        assert_eq!(resolved.video.routes.len(), 2);
+        // The same model ID is allowed across categories.
+        assert_eq!(resolved.image.routes[1].model, "grok-vision-model");
+        assert_eq!(resolved.video.routes[1].model, "grok-vision-model");
+    }
+
+    #[test]
+    fn media_understanding_rejects_duplicate_model_within_category() {
+        let cfg = MediaUnderstandingConfig {
+            image: Some(MediaCategoryConfig {
+                routes: vec![
+                    MediaRoute {
+                        model: "grok-4.5".into(),
+                        ..Default::default()
+                    },
+                    MediaRoute {
+                        model: "grok-4.5".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = cfg.normalize_validate().unwrap_err();
+        assert!(matches!(
+            err,
+            MediaUnderstandingConfigError::DuplicateRoute {
+                category: MediaCategory::Image,
+                model,
+            } if model == "grok-4.5"
+        ));
+    }
+
+    #[test]
+    fn media_understanding_allows_same_model_across_categories() {
+        let route = || MediaRoute {
+            model: "grok-4.5".into(),
+            strategy: Some(MediaCategoryStrategy::Auto),
+            ..Default::default()
+        };
+        let cfg = MediaUnderstandingConfig {
+            image: Some(MediaCategoryConfig {
+                routes: vec![route()],
+                ..Default::default()
+            }),
+            audio: Some(MediaCategoryConfig {
+                routes: vec![route()],
+                ..Default::default()
+            }),
+            video: Some(MediaCategoryConfig {
+                routes: vec![route()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.image.routes.len(), 1);
+        assert_eq!(resolved.audio.routes.len(), 1);
+        assert_eq!(resolved.video.routes.len(), 1);
+    }
+
+    #[test]
+    fn media_understanding_preserves_unresolved_model_ids() {
+        // Catalog resolution is a runtime concern (PR 6); an ID absent from
+        // the catalog must be preserved, not rejected.
+        let cfg = MediaUnderstandingConfig {
+            image: Some(MediaCategoryConfig {
+                routes: vec![MediaRoute {
+                    model: "future-not-yet-in-catalog".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.image.routes[0].model, "future-not-yet-in-catalog");
+        assert_eq!(
+            resolved.image.routes[0].strategy,
+            MediaCategoryStrategy::Auto
+        );
+    }
+
+    #[test]
+    fn media_understanding_rejects_strategy_not_allowed_for_category() {
+        let cfg = MediaUnderstandingConfig {
+            video: Some(MediaCategoryConfig {
+                routes: vec![MediaRoute {
+                    model: "grok-video-model".into(),
+                    strategy: Some(MediaCategoryStrategy::Transcription),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = cfg.normalize_validate().unwrap_err();
+        assert!(matches!(
+            err,
+            MediaUnderstandingConfigError::InvalidStrategy {
+                category: MediaCategory::Video,
+                strategy: MediaCategoryStrategy::Transcription,
+            }
+        ));
+    }
+
+    #[test]
+    fn media_understanding_rejects_blank_model() {
+        let cfg = MediaUnderstandingConfig {
+            image: Some(MediaCategoryConfig {
+                routes: vec![MediaRoute {
+                    model: "   ".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cfg.normalize_validate().unwrap_err(),
+            MediaUnderstandingConfigError::BlankModelId
+        ));
+    }
+
+    #[test]
+    fn media_understanding_rejects_zero_limit() {
+        let cfg = MediaUnderstandingConfig {
+            max_media_bytes: Some(0),
+            ..Default::default()
+        };
+        let err = cfg.normalize_validate().unwrap_err();
+        assert!(matches!(
+            err,
+            MediaUnderstandingConfigError::InvalidLimit("max_media_bytes")
+        ));
+    }
+
+    #[test]
+    fn media_understanding_rejects_limit_above_maximum() {
+        let cfg = MediaUnderstandingConfig {
+            max_media_bytes: Some(1 << 62),
+            ..Default::default()
+        };
+        let err = cfg.normalize_validate().unwrap_err();
+        match err {
+            MediaUnderstandingConfigError::LimitExceedsMaximum {
+                name: "max_media_bytes",
+                value,
+                max,
+            } => {
+                assert_eq!(value, 1 << 62);
+                assert_eq!(max, 4 * 1024 * 1024 * 1024);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn media_understanding_rejects_absurd_hand_edited_values() {
+        // Absurd values must be rejected for every limit family.
+        let absurd = MediaUnderstandingConfig {
+            max_output_chars: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert!(absurd.normalize_validate().is_err());
+
+        let absurd = MediaUnderstandingConfig {
+            preprocess_concurrency: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert!(absurd.normalize_validate().is_err());
+
+        let absurd = MediaUnderstandingConfig {
+            circuit_breaker: Some(MediaCircuitBreakerConfig {
+                window_secs: Some(u64::MAX),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(absurd.normalize_validate().is_err());
+    }
+
+    #[test]
+    fn media_understanding_rejects_category_override_above_maximum() {
+        let cfg = MediaUnderstandingConfig {
+            video: Some(MediaCategoryConfig {
+                max_seconds: Some(1 << 50),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = cfg.normalize_validate().unwrap_err();
+        assert!(matches!(
+            err,
+            MediaUnderstandingConfigError::LimitExceedsMaximum {
+                name: "video.max_seconds",
+                ..
+            }
+        ));
+
+        let cfg = MediaUnderstandingConfig {
+            image: Some(MediaCategoryConfig {
+                max_frames: Some(1 << 40),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = cfg.normalize_validate().unwrap_err();
+        assert!(matches!(
+            err,
+            MediaUnderstandingConfigError::LimitExceedsMaximum {
+                name: "image.max_frames",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn media_understanding_accepts_limits_at_maximum() {
+        let cfg = MediaUnderstandingConfig {
+            max_output_chars: Some(MEDIA_LIMIT_MAX_OUTPUT_CHARS),
+            max_aux_tokens_per_call: Some(MEDIA_LIMIT_MAX_AUX_TOKENS_PER_CALL),
+            max_media_bytes: Some(MEDIA_LIMIT_MAX_MEDIA_BYTES),
+            preprocess_concurrency: Some(MEDIA_LIMIT_PREPROCESS_CONCURRENCY),
+            video: Some(MediaCategoryConfig {
+                max_seconds: Some(MEDIA_LIMIT_CATEGORY_MAX_SECONDS),
+                max_frames: Some(MEDIA_LIMIT_CATEGORY_MAX_FRAMES),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = cfg.normalize_validate().unwrap();
+        assert_eq!(resolved.max_media_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(
+            resolved.video.max_seconds,
+            Some(MEDIA_LIMIT_CATEGORY_MAX_SECONDS)
+        );
+        assert_eq!(
+            resolved.video.max_frames,
+            Some(MEDIA_LIMIT_CATEGORY_MAX_FRAMES)
+        );
+    }
+
+    #[test]
+    fn media_route_serde_round_trip_preserves_only_model_and_flags() {
+        let route = MediaRoute {
+            model: "grok-4.5".into(),
+            strategy: Some(MediaCategoryStrategy::Native),
+            allow_unknown_capability: Some(true),
+            force_unsupported_capability: None,
+        };
+        let toml_str = toml::to_string(&route).unwrap();
+        let back: MediaRoute = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.model, "grok-4.5");
+        assert_eq!(back.strategy, Some(MediaCategoryStrategy::Native));
+        assert_eq!(back.allow_unknown_capability, Some(true));
+        assert_eq!(back.force_unsupported_capability, None);
+        // No secret or provider field may ever be serialized.
+        assert!(!toml_str.to_lowercase().contains("key"));
+        assert!(!toml_str.to_lowercase().contains("token"));
+        assert!(!toml_str.to_lowercase().contains("secret"));
+        assert!(!toml_str.to_lowercase().contains("password"));
     }
 }

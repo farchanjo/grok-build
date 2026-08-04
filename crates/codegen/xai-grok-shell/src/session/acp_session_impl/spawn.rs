@@ -458,6 +458,28 @@ pub(crate) async fn spawn_session_actor(
         snap.last_compaction_prompt_index = initial_last_compaction;
         chat_state_handle.restore_snapshot(snap);
     }
+    // PR 7: construct the session-scoped media-understanding context. When
+    // media understanding is disabled, unconfigured, or its store cannot be
+    // opened, the session runs with the legacy image path and no
+    // `analyze_media` tool. Constructed here (while the session credentials
+    // are still live) so the resolved config snapshot and the shell backend
+    // are ready before the AgentRebuildSpec and the SessionActor literal.
+    let (user_question_tx, user_question_rx) = tokio::sync::mpsc::unbounded_channel::<
+        xai_grok_tools::implementations::grok_build::ask_user_question::types::UserQuestionRequest,
+    >();
+    let media_understanding = build_media_understanding_context(
+        &session_info,
+        tool_context.cwd.as_path(),
+        permissions.clone(),
+        &models_manager,
+        auth_manager.clone(),
+        &inference_config,
+        &credentials,
+        session_client_identifier.clone(),
+        max_retries,
+        remote_settings.as_ref(),
+        user_question_tx.clone(),
+    );
     chat_state_handle.update_credentials(credentials);
     let state = TokioMutex::new(State {
         running_task: None,
@@ -697,9 +719,6 @@ pub(crate) async fn spawn_session_actor(
         two_pass_enabled,
     };
     let reminder_policy = resolve_reminder_policy(remote_settings.as_ref(), todo_gate);
-    let (user_question_tx, user_question_rx) = tokio::sync::mpsc::unbounded_channel::<
-        xai_grok_tools::implementations::grok_build::ask_user_question::types::UserQuestionRequest,
-    >();
     let attribution_callback_for_spec = auth_manager.as_ref().map(|am| {
         crate::auth::attribution::ShellAttribution::new_tool_callback(
             am.clone(),
@@ -936,6 +955,13 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         },
+        // The shell-owned media backend constructed above (PR 7); the trait
+        // object is injected into the toolset's resources so the
+        // conditionally-listed `analyze_media` tool can delegate.
+        media_understanding_backend: media_understanding.as_ref().map(|ctx| {
+            ctx.backend.clone()
+                as std::sync::Arc<dyn xai_grok_tools::media::backend::MediaUnderstandingBackend>
+        }),
     });
     let agent = rebuild_spec
         .build_agent_with_initial_overrides(
@@ -1568,6 +1594,7 @@ pub(crate) async fn spawn_session_actor(
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
         models_manager,
+        media_understanding_context: media_understanding.clone(),
         display_cwd: {
             let lock = std::sync::OnceLock::new();
             if let Some(ref cwd) = prompt_display_cwd {
@@ -2487,6 +2514,91 @@ fn resumed_prefix_carries_fallback_date(
         };
         contains("<user_info>") && contains(crate::session::user_message::USER_INFO_DATE_MARKER)
     })
+}
+/// Build the session-scoped media-understanding context (PR 7).
+///
+/// Resolves the effective `[media_understanding]` config, constructs the
+/// shell-owned backend when enabled, and bundles both. `None` when media
+/// understanding is disabled, the config is invalid, or the session store
+/// cannot be opened — the session then preserves the legacy image path and
+/// never lists `analyze_media`.
+#[allow(clippy::too_many_arguments)]
+fn build_media_understanding_context(
+    session_info: &SessionInfo,
+    cwd: &std::path::Path,
+    permission: xai_grok_workspace::permission::PermissionHandle,
+    models_manager: &crate::agent::models::ModelsManager,
+    auth_manager: Option<Arc<AuthManager>>,
+    inference_config: &InferenceConfig,
+    credentials: &xai_chat_state::Credentials,
+    client_identifier: Option<String>,
+    max_retries: Option<u32>,
+    remote_settings: Option<&crate::util::config::RemoteSettings>,
+    user_question_tx: tokio::sync::mpsc::UnboundedSender<
+        xai_grok_tools::implementations::grok_build::ask_user_question::types::UserQuestionRequest,
+    >,
+) -> Option<std::sync::Arc<crate::session::media::SessionMediaContext>> {
+    use crate::agent::config::MediaUnderstandingConfig;
+    use crate::session::media::{InteractiveMediaConsentProvider, ShellMediaBackendContext};
+
+    let root = crate::config::load_effective_config().ok()?;
+    let raw: MediaUnderstandingConfig = root
+        .get("media_understanding")
+        .cloned()
+        .map(|v| v.try_into().unwrap_or_default())
+        .unwrap_or_default();
+    let resolved = raw
+        .resolve_with_env(&root, remote_settings)
+        .normalize_validate()
+        .ok()?;
+    if !resolved.enabled {
+        return None;
+    }
+    let session_dir = crate::session::persistence::session_dir(session_info);
+    let workspace_root = xai_grok_workspace::session::git::find_git_root_from_path(cwd)
+        .unwrap_or_else(|_| cwd.to_path_buf());
+    let media_dir = session_dir.join("assets").join("media");
+    let consent: std::sync::Arc<dyn crate::session::media::MediaConsentProvider> =
+        std::sync::Arc::new(InteractiveMediaConsentProvider::new(
+            media_dir,
+            Some(user_question_tx),
+        ));
+    let context = ShellMediaBackendContext {
+        config: resolved.clone(),
+        models: models_manager.clone(),
+        auth: auth_manager.clone(),
+        current_auth: auth_manager
+            .as_ref()
+            .and_then(|manager| manager.current_or_expired()),
+        session_dir,
+        workspace_root,
+        permission: Some(permission),
+        session_id: Some(session_info.id.0.to_string()),
+        consent: Some(consent),
+        credentials: crate::session::media::backend::InvokerCredentialSnapshot {
+            alpha_test_key: credentials.alpha_test_key.clone(),
+            client_version: credentials.client_version.clone(),
+            active_session_config: inference_config.clone(),
+            client_identifier,
+            max_retries,
+        },
+    };
+    let backend = match crate::session::media::ShellMediaUnderstandingBackend::new(context) {
+        Ok(backend) => std::sync::Arc::new(backend),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "media understanding store unavailable; disabled for this session"
+            );
+            return None;
+        }
+    };
+    Some(std::sync::Arc::new(
+        crate::session::media::SessionMediaContext {
+            backend,
+            config: parking_lot::RwLock::new(resolved),
+        },
+    ))
 }
 #[cfg(test)]
 mod resumed_prefix_fallback_tests {

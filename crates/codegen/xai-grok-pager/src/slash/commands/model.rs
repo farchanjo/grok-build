@@ -172,14 +172,72 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             info.name.clone()
         };
 
+        // Compact media badge (PR 2): modality/source/auth/transport hint in
+        // the row description. Empty when the model carries no media metadata.
+        let base_description = info.description.clone().unwrap_or_default();
+        let media_badge = media_badge(models, id);
+        let description = if media_badge.is_empty() {
+            base_description
+        } else if base_description.is_empty() {
+            media_badge
+        } else {
+            format!("{base_description} {media_badge}")
+        };
+
         items.push(ArgItem {
             display,
             match_text: info.name.clone(),
             insert_text,
-            description: info.description.clone().unwrap_or_default(),
+            description,
         });
     }
     items
+}
+
+/// Compact media metadata badge for one `/model` dropdown row. Shows only
+/// non-`Unknown` modalities, plus the catalog source / staleness / auth /
+/// transport hints when present. Empty when the model carries no media
+/// metadata at all (PR 9 owns the full route-list TUI).
+fn media_badge(models: &ModelState, id: &acp::ModelId) -> String {
+    let media = models.media_state_for(id);
+    let mut parts: Vec<String> = Vec::new();
+    for (category, support) in [
+        ("image", media.capabilities.image),
+        ("audio", media.capabilities.audio),
+        ("video", media.capabilities.video),
+    ] {
+        if support != xai_grok_tools::media::MediaModalitySupport::Unknown {
+            parts.push(format!("{category}={}", support_str(support)));
+        }
+    }
+    if let Some(source) = &media.source {
+        parts.push(format!("src={source}"));
+    }
+    if media.catalog_stale {
+        parts.push("stale".to_string());
+    }
+    if let Some(auth) = &media.auth_status {
+        parts.push(format!("auth={auth}"));
+    }
+    if media.transport.image_inline {
+        parts.push("img-inline".to_string());
+    }
+    if media.transport.json_schema {
+        parts.push("json-schema".to_string());
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("[{}]", parts.join(" "))
+}
+
+fn support_str(support: xai_grok_tools::media::MediaModalitySupport) -> &'static str {
+    use xai_grok_tools::media::MediaModalitySupport;
+    match support {
+        MediaModalitySupport::Unknown => "unknown",
+        MediaModalitySupport::Supported => "supported",
+        MediaModalitySupport::Unsupported => "unsupported",
+    }
 }
 
 /// One row per effort level for the `/model` chained effort phase.
@@ -221,6 +279,21 @@ mod tests {
     fn plain_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));
         let info = acp::ModelInfo::new(id.clone(), name.to_string());
+        (id, info)
+    }
+
+    fn media_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(Arc::from(id));
+        let info = acp::ModelInfo::new(id.clone(), name.to_string()).meta(
+            serde_json::json!({
+                "media": { "image": "supported", "audio": "unknown", "video": "unsupported" },
+                "mediaSource": "remote",
+                "mediaAuthStatus": "credentialed",
+                "mediaTransport": { "imageInline": true },
+            })
+            .as_object()
+            .cloned(),
+        );
         (id, info)
     }
 
@@ -296,6 +369,50 @@ mod tests {
         // Plain model has no trailing space -- Enter commits immediately.
         let plain = items.iter().find(|i| i.match_text == "Grok 4.5").unwrap();
         assert_eq!(plain.insert_text, "Grok 4.5");
+    }
+
+    #[test]
+    fn build_model_items_renders_media_badge() {
+        let mut state = ModelState::default();
+        let (mid, minfo) = media_model("vision-x", "Vision X");
+        let (pid, pinfo) = plain_model("plain-x", "Plain X");
+        state.available.insert(mid, minfo);
+        state.available.insert(pid, pinfo);
+
+        let items = build_model_items(&state);
+        let media_item = items.iter().find(|i| i.match_text == "Vision X").unwrap();
+        assert!(
+            media_item.description.contains("image=supported"),
+            "badge must show image modality, got: {}",
+            media_item.description
+        );
+        assert!(
+            media_item.description.contains("video=unsupported"),
+            "badge must show video modality, got: {}",
+            media_item.description
+        );
+        assert!(
+            media_item.description.contains("src=remote"),
+            "badge must show catalog source, got: {}",
+            media_item.description
+        );
+        assert!(
+            media_item.description.contains("auth=credentialed"),
+            "badge must show auth status, got: {}",
+            media_item.description
+        );
+        assert!(
+            media_item.description.contains("img-inline"),
+            "badge must show inline-image transport, got: {}",
+            media_item.description
+        );
+        // A model without media metadata renders no badge.
+        let plain_item = items.iter().find(|i| i.match_text == "Plain X").unwrap();
+        assert!(
+            plain_item.description.is_empty(),
+            "models without media metadata must not render a badge, got: {}",
+            plain_item.description
+        );
     }
 
     #[test]

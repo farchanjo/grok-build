@@ -135,8 +135,8 @@ impl SessionActor {
             return images;
         }
         if !images.is_empty() {
-            match self.transcribe_user_images(wrapped.clone(), &images).await {
-                Ok(new_text) => *wrapped = new_text,
+            match self.enrich_user_media(wrapped.clone(), &images).await {
+                Ok(enriched) => *wrapped = enriched.text,
                 Err(e) => {
                     tracing::warn!(?e, "interjection image processing failed; dropping images");
                     wrapped.push_str(

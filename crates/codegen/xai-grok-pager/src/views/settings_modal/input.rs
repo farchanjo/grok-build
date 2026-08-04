@@ -7,7 +7,8 @@ use super::render::int_step_sizes;
 use super::state::{
     RowEntry, SettingsKeyOutcome, SettingsModalState, SettingsMode, SettingsModeKind,
     action_for_bool, action_for_enum, action_for_enum_commit, action_for_int, action_for_string,
-    effective_enum_choices, group_children, validate_string,
+    cycle_media_strategy, effective_enum_choices, group_children, media_route_edits_from_snapshot,
+    media_route_subpane_rows, media_routes_from_snapshot, validate_string,
 };
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditOutcome;
@@ -46,9 +47,12 @@ pub fn handle_settings_key(state: &mut SettingsModalState, key: &KeyEvent) -> Se
         SettingsModeKind::FilterFocused => handle_filter_focused(state, key),
         SettingsModeKind::PickingEnum => handle_picking_enum(state, key),
         SettingsModeKind::PickingGroup => handle_picking_group(state, key),
+        SettingsModeKind::PickingMediaRoutes => handle_picking_media_routes(state, key),
         SettingsModeKind::EditingString | SettingsModeKind::EditingInt => {
             handle_editing_value(state, key)
         }
+        SettingsModeKind::EditingMediaRouteModel => handle_editing_media_route_model(state, key),
+        SettingsModeKind::EditingMediaTestPath => handle_editing_media_test_path(state, key),
     }
 }
 
@@ -73,9 +77,41 @@ pub fn handle_settings_paste(state: &mut SettingsModalState, text: &str) -> Sett
             };
             apply_string_edit(state, validator, outcome)
         }
+        SettingsModeKind::EditingMediaRouteModel => {
+            let outcome = {
+                let SettingsMode::EditingMediaRouteModel { editor, .. } = &mut state.state.mode
+                else {
+                    unreachable!("mode kind changed before paste")
+                };
+                editor.insert_paste_with_policy(text, safe_settings_char, usize::MAX)
+            };
+            apply_media_route_model_edit(state, outcome)
+        }
+        SettingsModeKind::EditingMediaTestPath => {
+            let outcome = {
+                let SettingsMode::EditingMediaTestPath { editor, .. } = &mut state.state.mode
+                else {
+                    unreachable!("mode kind changed before paste")
+                };
+                editor.insert_paste_with_policy(text, safe_settings_char, usize::MAX)
+            };
+            let SettingsMode::EditingMediaTestPath { consent_armed, .. } = &mut state.state.mode
+            else {
+                unreachable!("media test path state changed after paste")
+            };
+            // A pasted path is a new disclosure decision.
+            *consent_armed = false;
+            match outcome {
+                LineEditOutcome::TextChanged
+                | LineEditOutcome::HandledNoChange
+                | LineEditOutcome::CursorChanged => SettingsKeyOutcome::Changed,
+                LineEditOutcome::Unhandled => SettingsKeyOutcome::Unchanged,
+            }
+        }
         SettingsModeKind::Browse
         | SettingsModeKind::PickingEnum
         | SettingsModeKind::PickingGroup
+        | SettingsModeKind::PickingMediaRoutes
         | SettingsModeKind::EditingInt => SettingsKeyOutcome::Unchanged,
     }
 }
@@ -248,6 +284,332 @@ fn handle_picking_group(state: &mut SettingsModalState, key: &KeyEvent) -> Setti
             SettingsKeyOutcome::Changed
         }
         _ => SettingsKeyOutcome::Unchanged,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Media route-list editor (sub-pane) + route model / test-path editors
+// ---------------------------------------------------------------------------
+
+fn set_media_subpane_idx(
+    state: &mut SettingsModalState,
+    category: xai_grok_tools::media::domain::MediaCategory,
+    idx: usize,
+    force_armed: bool,
+) {
+    state.state.mode = SettingsMode::PickingMediaRoutes {
+        category,
+        selected: idx,
+        force_armed,
+    };
+}
+
+/// Route sub-pane key routing. j/k navigate route rows (plus the trailing
+/// "Add route" row); Enter/e edits the model; s cycles the strategy; x
+/// toggles allow-unknown; f arms+commits Force-Unsupported (two-press);
+/// d removes; p/n reorder; t opens the consented sample-media test; Esc
+/// returns to Browse.
+fn handle_picking_media_routes(
+    state: &mut SettingsModalState,
+    key: &KeyEvent,
+) -> SettingsKeyOutcome {
+    let (category, selected, force_armed) = match &state.state.mode {
+        SettingsMode::PickingMediaRoutes {
+            category,
+            selected,
+            force_armed,
+            ..
+        } => (*category, *selected, *force_armed),
+        _ => unreachable!("media routes handler requires PickingMediaRoutes state"),
+    };
+    let routes = media_routes_from_snapshot(&state.pager_snapshot, category);
+    let row_count = routes.len() + 1;
+    let on_route = selected < routes.len();
+
+    // Any key other than the confirmation sequence disarms the two-press
+    // Force-Unsupported confirmation.
+    let disarm = |state: &mut SettingsModalState| {
+        if let SettingsMode::PickingMediaRoutes {
+            force_armed: armed, ..
+        } = &mut state.state.mode
+        {
+            *armed = false;
+        }
+    };
+
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            if selected + 1 >= row_count {
+                return SettingsKeyOutcome::Unchanged;
+            }
+            set_media_subpane_idx(state, category, selected + 1, false);
+            SettingsKeyOutcome::Changed
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            if selected == 0 {
+                return SettingsKeyOutcome::Unchanged;
+            }
+            set_media_subpane_idx(state, category, selected - 1, false);
+            SettingsKeyOutcome::Changed
+        }
+        // Edit the route's model id (opens a string editor, Esc cancels).
+        KeyCode::Enter | KeyCode::Char('r') if key.modifiers.is_empty() && on_route => {
+            state.transition_to_editing_media_route_model(category, Some(selected));
+            SettingsKeyOutcome::Changed
+        }
+        // Add a new route (append; model editor starts empty).
+        KeyCode::Char('a') if key.modifiers.is_empty() => {
+            state.transition_to_editing_media_route_model(category, None);
+            SettingsKeyOutcome::Changed
+        }
+        // Cycle the strategy to the next allowed canonical for the category.
+        KeyCode::Char('s') if key.modifiers.is_empty() && on_route => {
+            disarm(state);
+            let route = &routes[selected];
+            let next = cycle_media_strategy(category, route.canonical_strategy());
+            let mut edits = media_route_edits_from_snapshot(&state.pager_snapshot, category);
+            edits[selected].strategy = Some(next.to_string());
+            SettingsKeyOutcome::Action(Action::SetMediaRoutes {
+                category,
+                routes: edits,
+            })
+        }
+        // Toggle allow_unknown_capability (Unknown-acknowledge).
+        KeyCode::Char('x') if key.modifiers.is_empty() && on_route => {
+            disarm(state);
+            let mut edits = media_route_edits_from_snapshot(&state.pager_snapshot, category);
+            edits[selected].allow_unknown_capability = !edits[selected].allow_unknown_capability;
+            SettingsKeyOutcome::Action(Action::SetMediaRoutes {
+                category,
+                routes: edits,
+            })
+        }
+        // Force-Unsupported: high-friction two-press confirmation. First
+        // press arms the confirmation (the sub-pane header warns); second
+        // press commits. Never affects tool arguments, managed policy, ZDR,
+        // consent, credentials, transport, or budgets.
+        KeyCode::Char('f') if key.modifiers.is_empty() && on_route => {
+            if force_armed {
+                let mut edits = media_route_edits_from_snapshot(&state.pager_snapshot, category);
+                edits[selected].force_unsupported_capability =
+                    !edits[selected].force_unsupported_capability;
+                set_media_subpane_idx(state, category, selected, false);
+                SettingsKeyOutcome::Action(Action::SetMediaRoutes {
+                    category,
+                    routes: edits,
+                })
+            } else {
+                set_media_subpane_idx(state, category, selected, true);
+                SettingsKeyOutcome::Changed
+            }
+        }
+        // Remove the focused route.
+        KeyCode::Char('d') if key.modifiers.is_empty() && on_route => {
+            disarm(state);
+            let mut edits = media_route_edits_from_snapshot(&state.pager_snapshot, category);
+            edits.remove(selected);
+            let new_idx = if edits.is_empty() { 0 } else { selected };
+            set_media_subpane_idx(state, category, new_idx, false);
+            SettingsKeyOutcome::Action(Action::SetMediaRoutes {
+                category,
+                routes: edits,
+            })
+        }
+        // Reorder: p moves the route up, n moves it down (wrapping at ends
+        // is not allowed — a route at the top/bottom stays put).
+        KeyCode::Char('p') if key.modifiers.is_empty() && on_route => {
+            disarm(state);
+            if selected == 0 {
+                return SettingsKeyOutcome::Unchanged;
+            }
+            let mut edits = media_route_edits_from_snapshot(&state.pager_snapshot, category);
+            edits.swap(selected, selected - 1);
+            set_media_subpane_idx(state, category, selected - 1, false);
+            SettingsKeyOutcome::Action(Action::SetMediaRoutes {
+                category,
+                routes: edits,
+            })
+        }
+        KeyCode::Char('n') if key.modifiers.is_empty() && on_route => {
+            disarm(state);
+            if selected + 1 >= routes.len() {
+                return SettingsKeyOutcome::Unchanged;
+            }
+            let mut edits = media_route_edits_from_snapshot(&state.pager_snapshot, category);
+            edits.swap(selected, selected + 1);
+            set_media_subpane_idx(state, category, selected + 1, false);
+            SettingsKeyOutcome::Action(Action::SetMediaRoutes {
+                category,
+                routes: edits,
+            })
+        }
+        // Consented sample-media route test.
+        KeyCode::Char('t') if key.modifiers.is_empty() && on_route => {
+            disarm(state);
+            state.transition_to_editing_media_test_path(category, selected);
+            SettingsKeyOutcome::Changed
+        }
+        KeyCode::Esc => {
+            state.transition_to_browse();
+            SettingsKeyOutcome::Changed
+        }
+        _ => {
+            disarm(state);
+            SettingsKeyOutcome::Unchanged
+        }
+    }
+}
+
+fn apply_media_route_model_edit(
+    state: &mut SettingsModalState,
+    outcome: LineEditOutcome,
+) -> SettingsKeyOutcome {
+    match outcome {
+        LineEditOutcome::TextChanged => {
+            let SettingsMode::EditingMediaRouteModel {
+                validation_error, ..
+            } = &mut state.state.mode
+            else {
+                unreachable!("media route model state changed during edit");
+            };
+            *validation_error = None;
+            SettingsKeyOutcome::Changed
+        }
+        LineEditOutcome::HandledNoChange | LineEditOutcome::CursorChanged => {
+            SettingsKeyOutcome::Changed
+        }
+        LineEditOutcome::Unhandled => SettingsKeyOutcome::Unchanged,
+    }
+}
+
+/// Route model-id editor: Enter commits the model (non-empty, no
+/// whitespace), Esc cancels back to the route sub-pane.
+fn handle_editing_media_route_model(
+    state: &mut SettingsModalState,
+    key: &KeyEvent,
+) -> SettingsKeyOutcome {
+    let (category, index) = match &state.state.mode {
+        SettingsMode::EditingMediaRouteModel {
+            category, index, ..
+        } => (*category, *index),
+        _ => unreachable!("media route model handler requires EditingMediaRouteModel state"),
+    };
+
+    if key.code == KeyCode::Enter {
+        let SettingsMode::EditingMediaRouteModel { editor, .. } = &state.state.mode else {
+            unreachable!("media route model state changed during commit");
+        };
+        let text = editor.text().trim().to_owned();
+        if text.is_empty() || text.chars().any(|c| c.is_whitespace()) {
+            let SettingsMode::EditingMediaRouteModel {
+                validation_error, ..
+            } = &mut state.state.mode
+            else {
+                unreachable!("media route model state changed during validation");
+            };
+            *validation_error = Some("Model id cannot be empty or contain whitespace".to_string());
+            return SettingsKeyOutcome::Unchanged;
+        }
+        let mut edits = media_route_edits_from_snapshot(&state.pager_snapshot, category);
+        match index {
+            Some(i) => {
+                if let Some(route) = edits.get_mut(i) {
+                    route.model = text;
+                }
+            }
+            None => edits.push(crate::settings::MediaRouteEdit {
+                model: text,
+                strategy: None,
+                allow_unknown_capability: false,
+                force_unsupported_capability: false,
+            }),
+        }
+        state.transition_to_picking_media_routes(category);
+        SettingsKeyOutcome::Action(Action::SetMediaRoutes {
+            category,
+            routes: edits,
+        })
+    } else if key.code == KeyCode::Esc {
+        state.transition_to_picking_media_routes(category);
+        SettingsKeyOutcome::Changed
+    } else {
+        let outcome = {
+            let SettingsMode::EditingMediaRouteModel { editor, .. } = &mut state.state.mode else {
+                unreachable!("media route model state changed before key handling");
+            };
+            editor.handle_key_with_insert_policy(key, safe_settings_char)
+        };
+        apply_media_route_model_edit(state, outcome)
+    }
+}
+
+/// Consented sample-media route test editor. First Enter with a non-empty
+/// path arms the disclosure-consent confirmation (the modal header warns
+/// that bytes are sent to the route provider); second Enter dispatches
+/// `Action::TestMediaRoute`. Esc cancels back to the route sub-pane.
+fn handle_editing_media_test_path(
+    state: &mut SettingsModalState,
+    key: &KeyEvent,
+) -> SettingsKeyOutcome {
+    let (category, index, consent_armed) = match &state.state.mode {
+        SettingsMode::EditingMediaTestPath {
+            category,
+            index,
+            consent_armed,
+            ..
+        } => (*category, *index, *consent_armed),
+        _ => unreachable!("media test path handler requires EditingMediaTestPath state"),
+    };
+
+    if key.code == KeyCode::Enter {
+        let SettingsMode::EditingMediaTestPath { editor, .. } = &state.state.mode else {
+            unreachable!("media test path state changed during commit");
+        };
+        let path = editor.text().trim().to_owned();
+        if path.is_empty() {
+            return SettingsKeyOutcome::Unchanged;
+        }
+        if consent_armed {
+            state.transition_to_picking_media_routes(category);
+            return SettingsKeyOutcome::Action(Action::TestMediaRoute {
+                category,
+                index,
+                path,
+            });
+        }
+        // First Enter: arm the consent confirmation.
+        let SettingsMode::EditingMediaTestPath { consent_armed, .. } = &mut state.state.mode else {
+            unreachable!("media test path state changed during consent");
+        };
+        *consent_armed = true;
+        SettingsKeyOutcome::Changed
+    } else if key.code == KeyCode::Esc {
+        state.transition_to_picking_media_routes(category);
+        SettingsKeyOutcome::Changed
+    } else {
+        let outcome = {
+            let SettingsMode::EditingMediaTestPath { editor, .. } = &mut state.state.mode else {
+                unreachable!("media test path state changed before key handling");
+            };
+            editor.handle_key_with_insert_policy(key, safe_settings_char)
+        };
+        match outcome {
+            LineEditOutcome::TextChanged => {
+                let SettingsMode::EditingMediaTestPath { consent_armed, .. } =
+                    &mut state.state.mode
+                else {
+                    unreachable!("media test path state changed after text mutation");
+                };
+                // Editing the path re-arms consent (a new path is a new
+                // disclosure decision).
+                *consent_armed = false;
+                SettingsKeyOutcome::Changed
+            }
+            LineEditOutcome::HandledNoChange | LineEditOutcome::CursorChanged => {
+                SettingsKeyOutcome::Changed
+            }
+            LineEditOutcome::Unhandled => SettingsKeyOutcome::Unchanged,
+        }
     }
 }
 
@@ -690,6 +1052,10 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
             if state.try_enter_picking_group() {
                 return SettingsKeyOutcome::Changed;
             }
+            // Route-list row → open the media route editor sub-pane.
+            if state.try_enter_picking_media_routes() {
+                return SettingsKeyOutcome::Changed;
+            }
             // For Bool, Enter behaves like Space (the keyboard
             // map gives both keys the toggle semantics).
             if let Some(action) = state.toggle_focused_bool() {
@@ -881,9 +1247,21 @@ pub fn handle_settings_mouse(
             SettingsModeKind::PickingGroup => {
                 return handle_picking_group(state, &synthetic);
             }
-            SettingsModeKind::EditingString | SettingsModeKind::EditingInt => {
-                return handle_editing_value(state, &synthetic);
+            SettingsModeKind::PickingMediaRoutes => {
+                return handle_picking_media_routes(state, &synthetic);
             }
+            SettingsModeKind::EditingString
+            | SettingsModeKind::EditingInt
+            | SettingsModeKind::EditingMediaRouteModel
+            | SettingsModeKind::EditingMediaTestPath => match state.state.mode_kind() {
+                SettingsModeKind::EditingMediaRouteModel => {
+                    return handle_editing_media_route_model(state, &synthetic);
+                }
+                SettingsModeKind::EditingMediaTestPath => {
+                    return handle_editing_media_test_path(state, &synthetic);
+                }
+                _ => return handle_editing_value(state, &synthetic),
+            },
             _ => {}
         }
     }
@@ -920,7 +1298,10 @@ pub fn handle_settings_mouse(
     // no-ops.
     if matches!(
         state.state.mode_kind(),
-        SettingsModeKind::EditingString | SettingsModeKind::EditingInt
+        SettingsModeKind::EditingString
+            | SettingsModeKind::EditingInt
+            | SettingsModeKind::EditingMediaRouteModel
+            | SettingsModeKind::EditingMediaTestPath
     ) {
         let outcome = handle_editor_mouse(state, kind, column, row);
         return upgrade_if_breadcrumb_flipped(outcome, breadcrumb_hover_flipped);
@@ -937,6 +1318,13 @@ pub fn handle_settings_mouse(
     // child in place (same bounded-viewport, scroll-is-a-no-op contract).
     if state.state.mode_kind() == SettingsModeKind::PickingGroup {
         let outcome = handle_group_mouse(state, kind, column, row);
+        return upgrade_if_breadcrumb_flipped(outcome, breadcrumb_hover_flipped);
+    }
+
+    // PickingMediaRoutes: click selects a route row; clicks elsewhere are
+    // no-ops (same bounded-viewport contract as the group sub-sheet).
+    if state.state.mode_kind() == SettingsModeKind::PickingMediaRoutes {
+        let outcome = handle_media_routes_mouse(state, kind, column, row);
         return upgrade_if_breadcrumb_flipped(outcome, breadcrumb_hover_flipped);
     }
 
@@ -1189,6 +1577,51 @@ fn handle_group_mouse(
         Some(action) => SettingsKeyOutcome::Action(action),
         None => SettingsKeyOutcome::Changed,
     }
+}
+
+/// Mouse handling for the media route-list sub-pane: hover highlights the
+/// row under the cursor and a left click selects it (disarming any armed
+/// Force-Unsupported confirmation). Everything else is a no-op.
+fn handle_media_routes_mouse(
+    state: &mut SettingsModalState,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) -> SettingsKeyOutcome {
+    let (category, selected) = match &state.state.mode {
+        SettingsMode::PickingMediaRoutes {
+            category, selected, ..
+        } => (*category, *selected),
+        _ => unreachable!("media routes mouse handler requires PickingMediaRoutes state"),
+    };
+    if matches!(kind, MouseEventKind::Moved) {
+        let new_hover = state
+            .picker_choice_rects
+            .iter()
+            .position(|r| r.height > 0 && rect_contains(*r, column, row));
+        if new_hover != state.hover_row {
+            state.hover_row = new_hover;
+            return SettingsKeyOutcome::Changed;
+        }
+        return SettingsKeyOutcome::Unchanged;
+    }
+    let MouseEventKind::Down(crossterm::event::MouseButton::Left) = kind else {
+        return SettingsKeyOutcome::Unchanged;
+    };
+    let clicked_idx = state
+        .picker_choice_rects
+        .iter()
+        .position(|r| r.height > 0 && rect_contains(*r, column, row));
+    let Some(idx) = clicked_idx else {
+        return SettingsKeyOutcome::Unchanged;
+    };
+    if idx == selected {
+        return SettingsKeyOutcome::Unchanged;
+    }
+    let _ = media_route_subpane_rows(&state.pager_snapshot, category);
+    let idx = idx.min(media_route_subpane_rows(&state.pager_snapshot, category) - 1);
+    set_media_subpane_idx(state, category, idx, false);
+    SettingsKeyOutcome::Changed
 }
 
 /// Handle a mouse event while in `EditingValue` mode. Dispatches

@@ -118,6 +118,7 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
         auth_provider: None,
         attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+        media_understanding_backend: None,
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
         .await
@@ -187,6 +188,7 @@ async fn web_search_errors_when_configured_model_cannot_be_resolved() {
         auth_provider: None,
         attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
+        media_understanding_backend: None,
     };
     let bridge = crate::tools::bridge::ToolBridge::finalize_builder(builder, config, ctx)
         .await

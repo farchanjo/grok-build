@@ -84,6 +84,61 @@ pub(super) async fn fetch_plugin_cta_mcps(
         result,
     }
 }
+/// Run the consented sample-media route test against the shell's
+/// `x.ai/media/test_route` extension method.
+///
+/// The shell performs permission, disclosure-consent, ZDR, credential,
+/// transport, and budget gates before any bytes leave; this helper only
+/// forwards the user-selected workspace-relative path. When the server does
+/// not implement the method, the error is surfaced gracefully (never
+/// presented as a fake one-token modality result).
+pub(super) async fn send_media_route_test(
+    category: xai_grok_tools::media::domain::MediaCategory,
+    index: usize,
+    path: String,
+    session_id: Option<String>,
+    tx: AcpAgentTx,
+) -> TaskResult {
+    let params = serde_json::json!({
+        "category": serde_json::to_value(category).unwrap_or_default(),
+        "routeIndex": index,
+        "path": path,
+        "sessionId": session_id,
+    });
+    let req = acp::ExtRequest::new(
+        "x.ai/media/test_route",
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize media/test_route params")
+            .into(),
+    );
+    let result = match acp_send(req, &tx).await {
+        Ok(resp) => {
+            let wrapper: serde_json::Value = serde_json::from_str(resp.0.get())
+                .unwrap_or_default();
+            let inner = wrapper.get("result").unwrap_or(&wrapper);
+            // Accepted shapes: a plain summary string, or
+            // `{ "ok": true, "summary": "…" }` / `{ "error": "…" }`.
+            if let Some(err) = inner.get("error").and_then(|e| e.as_str()) {
+                Err(sanitize_user_error(err))
+            } else if let Some(summary) = inner.get("summary").and_then(|s| s.as_str()) {
+                Ok(summary.to_string())
+            } else if let Some(ok) = inner.get("ok").and_then(|v| v.as_bool()) {
+                if ok {
+                    Ok("Route test completed successfully".to_string())
+                } else {
+                    Err("Route test failed".to_string())
+                }
+            } else if let Some(s) = inner.as_str() {
+                Ok(s.to_string())
+            } else {
+                Ok(sanitize_user_error(&inner.to_string()))
+            }
+        }
+        Err(e) => Err(sanitize_user_error(&e.to_string())),
+    };
+    TaskResult::MediaRouteTestComplete { result }
+}
+
 /// Convert an ACP error to a user-friendly string for display.
 /// Rate-limit errors: free-usage paywall, else server detail (with API-key
 /// rewrite when the body pushes personal SuperGrok), else auth-aware fallback
@@ -1202,8 +1257,164 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        // Media-understanding settings. Route-list keys carry a JSON-encoded
+        // `Vec<MediaRouteEdit>`; the whole category is persisted atomically
+        // through the typed shell setters (which re-validate via
+        // `normalize_validate`), so an invalid list never reaches disk.
+        "media_understanding_enabled" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("media_understanding_enabled", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_media_understanding_enabled(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_auto_enrich" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("media_auto_enrich", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_media_understanding_auto_enrich(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_compaction_enrichment" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("media_compaction_enrichment", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_media_understanding_compaction_enrichment(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_unknown_policy" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("media_unknown_policy", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_media_unknown_policy(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_preflight_policy" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("media_preflight_policy", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_media_compaction_preflight_policy(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_max_output_chars" => {
+            let SettingValue::Int(v) = value else {
+                return Err(kind_mismatch("media_max_output_chars", "Int", &value));
+            };
+            xai_grok_shell::util::config::set_media_limit("max_output_chars".into(), v as u64)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_max_aux_tokens_per_call" => {
+            let SettingValue::Int(v) = value else {
+                return Err(
+                    kind_mismatch("media_max_aux_tokens_per_call", "Int", &value),
+                );
+            };
+            xai_grok_shell::util::config::set_media_limit(
+                "max_aux_tokens_per_call".into(),
+                v as u64,
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+        "media_max_media_bytes" => {
+            let SettingValue::Int(v) = value else {
+                return Err(kind_mismatch("media_max_media_bytes", "Int", &value));
+            };
+            xai_grok_shell::util::config::set_media_limit("max_media_bytes".into(), v as u64)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_image_routes" => {
+            let SettingValue::String(encoded) = value else {
+                return Err(kind_mismatch("media_image_routes", "String", &value));
+            };
+            persist_media_route_list(xai_grok_tools::media::domain::MediaCategory::Image, &encoded)
+                .await
+        }
+        "media_audio_routes" => {
+            let SettingValue::String(encoded) = value else {
+                return Err(kind_mismatch("media_audio_routes", "String", &value));
+            };
+            persist_media_route_list(xai_grok_tools::media::domain::MediaCategory::Audio, &encoded)
+                .await
+        }
+        "media_video_routes" => {
+            let SettingValue::String(encoded) = value else {
+                return Err(kind_mismatch("media_video_routes", "String", &value));
+            };
+            persist_media_route_list(xai_grok_tools::media::domain::MediaCategory::Video, &encoded)
+                .await
+        }
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
+}
+
+/// Persist a full category route list through the typed shell setters.
+///
+/// Each route is written with `set_media_route_at` (replace-or-append, in
+/// configured order), then any leftover routes beyond the new length are
+/// removed with `remove_media_route_at`. Every write re-validates the whole
+/// `[media_understanding]` section via `normalize_validate`, so a duplicate
+/// model or category-inappropriate strategy aborts before reaching disk.
+async fn persist_media_route_list(
+    category: xai_grok_tools::media::domain::MediaCategory,
+    encoded: &str,
+) -> Result<(), String> {
+    use crate::settings::MediaRouteEdit;
+    let routes: Vec<MediaRouteEdit> = serde_json::from_str(encoded)
+        .map_err(|e| format!("invalid media route list: {e}"))?;
+    let original_len = media_category_route_len(category).await;
+    for (idx, route) in routes.iter().enumerate() {
+        let strategy = route.strategy.clone();
+        xai_grok_shell::util::config::set_media_route_at(
+            category,
+            idx,
+            route.model.clone(),
+            strategy,
+            Some(route.allow_unknown_capability),
+            Some(route.force_unsupported_capability),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    let mut to_remove = original_len.saturating_sub(routes.len());
+    while to_remove > 0 {
+        xai_grok_shell::util::config::remove_media_route_at(category, routes.len())
+            .await
+            .map_err(|e| e.to_string())?;
+        to_remove -= 1;
+    }
+    Ok(())
+}
+
+/// Read the current on-disk route count for a media category (used to trim
+/// leftover routes when a persisted route list shrinks).
+async fn media_category_route_len(
+    category: xai_grok_tools::media::domain::MediaCategory,
+) -> usize {
+    use xai_grok_shell::agent::config::MediaUnderstandingConfig;
+    let Ok(root) = xai_grok_shell::config::load_from_disk() else {
+        return 0;
+    };
+    let Some(value) = root.get("media_understanding").cloned() else {
+        return 0;
+    };
+    let Ok(config) = value.try_into::<MediaUnderstandingConfig>() else {
+        return 0;
+    };
+    let routes = match category {
+        xai_grok_tools::media::domain::MediaCategory::Image => config.image,
+        xai_grok_tools::media::domain::MediaCategory::Audio => config.audio,
+        xai_grok_tools::media::domain::MediaCategory::Video => config.video,
+        xai_grok_tools::media::domain::MediaCategory::Auto => None,
+    };
+    routes.map(|c| c.routes.len()).unwrap_or(0)
 }
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///

@@ -4,6 +4,7 @@ use crate::{
         codex, grok_build, grok_build_concise, grok_build_hashline, opencode,
         skills::types::SkillInfo,
     },
+    media::analyze_media::AnalyzeMediaTool,
     notification::ToolNotificationHandle,
     persistence::ResourcesPersistence,
     reminders::SkillDiscoveryReminder,
@@ -297,6 +298,15 @@ pub struct SessionContext {
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
     /// Hosts that expect a different tag name may override this.
     pub system_reminder_tag: &'static str,
+    /// Optional media-understanding backend for the session.
+    ///
+    /// When `Some`, injected into `Resources` so the deferred `analyze_media`
+    /// tool can delegate to a separately configured capable model. The backend
+    /// trait is inference-free (plan section 4.1); the shell owns the concrete
+    /// implementation. Defaults to `None` so existing factories and tests
+    /// inherit an unavailable backend without change.
+    pub media_understanding_backend:
+        Option<Arc<dyn crate::media::backend::MediaUnderstandingBackend>>,
 }
 /// Default metadata for dynamically registered tools (e.g., MCP tools)
 /// that don't implement `ToolMetadata`.
@@ -707,6 +717,11 @@ impl ToolRegistryBuilder {
         b.register::<crate::implementations::memory::search_tool::MemorySearchImpl>();
         b.register::<crate::implementations::memory::get_tool::MemoryGetImpl>();
         b.register::<crate::implementations::search_tool::SearchTool>();
+        // `analyze_media` is always registered in the registry (so
+        // allowlist/validate_config resolution knows its id and kind); the
+        // shell-owned backend decides at agent build time whether it is
+        // conditionally LISTED (PR 7).
+        b.register::<AnalyzeMediaTool>();
         // SearchModelsTool lives in the out-of-tree `archanjo` pack
         // (`archanjo::register()` at composition root).
         b.register_with_params::<
@@ -1006,6 +1021,9 @@ impl ToolRegistryBuilder {
         }
         if let Some(lsp) = ctx.lsp {
             resources.insert(lsp);
+        }
+        if let Some(media_backend) = ctx.media_understanding_backend {
+            resources.insert(media_backend);
         }
         if ctx.image_gen_config.has_credentials() {
             match crate::implementations::grok_build::image_gen::ImageGenClient::new(
@@ -2056,7 +2074,105 @@ mod tests {
             auth_provider: None,
             attribution_callback: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
+            media_understanding_backend: None,
         }
+    }
+    /// The optional media backend carried by `SessionContext` is injected into
+    /// the finalized toolset's `Resources` so the deferred `analyze_media` tool
+    /// can find it at runtime.
+    #[tokio::test]
+    async fn media_backend_resource_injected_from_session_context() {
+        use crate::media::backend::{
+            MediaBackendAvailability, MediaUnderstandingBackend, MediaUnderstandingError,
+            MediaUnderstandingRequest, MediaUnderstandingResult,
+        };
+        use crate::media::domain::{MediaCategory, MediaCategoryStrategy};
+        use async_trait::async_trait;
+
+        struct StubBackend;
+        #[async_trait]
+        impl MediaUnderstandingBackend for StubBackend {
+            async fn analyze(
+                &self,
+                request: MediaUnderstandingRequest,
+            ) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
+                Ok(MediaUnderstandingResult {
+                    results: request
+                        .media
+                        .into_iter()
+                        .map(|source| crate::media::backend::MediaSemantics {
+                            source,
+                            category: MediaCategory::Image,
+                            text: "injected stub semantics".to_string(),
+                            provenance: crate::media::backend::MediaProvenance {
+                                provider: "stub".to_string(),
+                                model: "stub-model".to_string(),
+                                strategy: MediaCategoryStrategy::Native,
+                            },
+                        })
+                        .collect(),
+                    attempts: vec![],
+                })
+            }
+
+            fn availability(&self) -> MediaBackendAvailability {
+                MediaBackendAvailability {
+                    enabled: true,
+                    supported_categories: vec![MediaCategory::Image],
+                    routes: vec![],
+                }
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = test_session_context(&tmp);
+        ctx.media_understanding_backend = Some(Arc::new(StubBackend));
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![ToolConfig {
+                id: "GrokBuild:list_dir".to_string(),
+                params: None,
+                name_override: None,
+                params_name_overrides: None,
+                description_override: None,
+                behavior_version: None,
+                kind: None,
+            }],
+            behavior_preset: None,
+        };
+        let toolset = builder.finalize(config, ctx).expect("finalize succeeds");
+        let injected = toolset
+            .get_resource_cloned::<Arc<dyn MediaUnderstandingBackend>>()
+            .await
+            .expect("media backend must be injected into Resources");
+        assert!(injected.availability().has_eligible_route());
+
+        // Absent backend (default) must not inject the resource.
+        let tmp2 = TempDir::new().unwrap();
+        let toolset2 = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![ToolConfig {
+                        id: "GrokBuild:list_dir".to_string(),
+                        params: None,
+                        name_override: None,
+                        params_name_overrides: None,
+                        description_override: None,
+                        behavior_version: None,
+                        kind: None,
+                    }],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp2),
+            )
+            .expect("finalize succeeds");
+        assert!(
+            toolset2
+                .get_resource_cloned::<Arc<dyn MediaUnderstandingBackend>>()
+                .await
+                .is_none(),
+            "default SessionContext must not inject a media backend"
+        );
     }
     /// Regression test: `kind_params` must merge input params from ALL tools
     /// that share a `ToolKind`, not just the first one.

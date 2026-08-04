@@ -389,3 +389,234 @@ pub async fn set_compaction_primary_model(value: String) -> Result<()> {
 pub async fn set_compaction_fallback_model(value: String) -> Result<()> {
     set_compaction_model_at(1, value).await
 }
+
+// ---------------------------------------------------------------------------
+// Media-understanding settings helpers.
+// All route through `update_config_checked` → `normalize_validate` →
+// `merge_section` → `save_config`, so an invalid edit never reaches disk.
+// ---------------------------------------------------------------------------
+
+/// Persist `[media_understanding].enabled` after validating the section.
+pub async fn set_media_understanding_enabled(value: bool) -> Result<()> {
+    update_config_checked(|cfg| {
+        cfg.media_understanding.enabled = Some(value);
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist `[media_understanding].auto_enrich` after validating the section.
+pub async fn set_media_understanding_auto_enrich(value: bool) -> Result<()> {
+    update_config_checked(|cfg| {
+        cfg.media_understanding.auto_enrich = Some(value);
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist `[media_understanding].compaction_enrichment` after validating.
+pub async fn set_media_understanding_compaction_enrichment(value: bool) -> Result<()> {
+    update_config_checked(|cfg| {
+        cfg.media_understanding.compaction_enrichment = Some(value);
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist `[media_understanding].active_model_unknown_policy`; canonical
+/// values are `pass_through` | `delegate` | `prompt` | `block`.
+pub async fn set_media_unknown_policy(value: String) -> Result<()> {
+    let policy = match value.as_str() {
+        "pass_through" => crate::agent::config::ActiveModelUnknownPolicy::PassThrough,
+        "delegate" => crate::agent::config::ActiveModelUnknownPolicy::Delegate,
+        "prompt" => crate::agent::config::ActiveModelUnknownPolicy::Prompt,
+        "block" => crate::agent::config::ActiveModelUnknownPolicy::Block,
+        _ => anyhow::bail!("invalid active_model_unknown_policy `{value}`"),
+    };
+    update_config_checked(|cfg| {
+        cfg.media_understanding.active_model_unknown_policy = Some(policy);
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist `[media_understanding].compaction_preflight_policy`; canonical
+/// values are `best_effort` | `strict`.
+pub async fn set_media_compaction_preflight_policy(value: String) -> Result<()> {
+    let policy = match value.as_str() {
+        "best_effort" => crate::agent::config::CompactionPreflightPolicy::BestEffort,
+        "strict" => crate::agent::config::CompactionPreflightPolicy::Strict,
+        _ => anyhow::bail!("invalid compaction_preflight_policy `{value}`"),
+    };
+    update_config_checked(|cfg| {
+        cfg.media_understanding.compaction_preflight_policy = Some(policy);
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Persist a single `[media_understanding]` numeric limit after validating.
+/// Empty value clears the key back to the built-in default.
+pub async fn set_media_limit(key: String, value: u64) -> Result<()> {
+    update_config_checked(move |cfg| {
+        let mu = &mut cfg.media_understanding;
+        match key.as_str() {
+            "max_output_chars" => mu.max_output_chars = Some(value),
+            "max_aux_tokens_per_call" => mu.max_aux_tokens_per_call = Some(value),
+            "max_aux_budget_usd_ticks" => mu.max_aux_budget_usd_ticks = Some(value),
+            "max_media_bytes" => mu.max_media_bytes = Some(value),
+            "max_audio_seconds" => mu.max_audio_seconds = Some(value),
+            "max_video_seconds" => mu.max_video_seconds = Some(value),
+            "max_video_frames" => mu.max_video_frames = Some(value),
+            "max_contact_sheet_side_px" => mu.max_contact_sheet_side_px = Some(value),
+            "max_preprocess_wallclock_ms" => mu.max_preprocess_wallclock_ms = Some(value),
+            "preprocess_concurrency" => mu.preprocess_concurrency = Some(value),
+            other => anyhow::bail!("unknown media understanding limit `{other}`"),
+        }
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Set (insert or replace) a route at `index` within `category`.
+/// `strategy` may be `None`/empty (resolves to `auto`).
+pub async fn set_media_route_at(
+    category: crate::agent::config::MediaCategory,
+    index: usize,
+    model: String,
+    strategy: Option<String>,
+    allow_unknown_capability: Option<bool>,
+    force_unsupported_capability: Option<bool>,
+) -> Result<()> {
+    use crate::agent::config::MediaCategoryStrategy;
+    let strategy = match strategy.as_deref() {
+        None | Some("") => None,
+        Some("auto") => Some(MediaCategoryStrategy::Auto),
+        Some("native") => Some(MediaCategoryStrategy::Native),
+        Some("transcription") => Some(MediaCategoryStrategy::Transcription),
+        Some("frames") => Some(MediaCategoryStrategy::Frames),
+        Some(other) => anyhow::bail!("invalid media route strategy `{other}`"),
+    };
+    let model = model.trim().to_owned();
+    if model.is_empty() {
+        anyhow::bail!("media route model cannot be blank");
+    }
+    update_config_checked(move |cfg| {
+        let slot = match category {
+            crate::agent::config::MediaCategory::Image => &mut cfg.media_understanding.image,
+            crate::agent::config::MediaCategory::Audio => &mut cfg.media_understanding.audio,
+            crate::agent::config::MediaCategory::Video => &mut cfg.media_understanding.video,
+            crate::agent::config::MediaCategory::Auto => {
+                anyhow::bail!("routes cannot be configured for category `auto`")
+            }
+        };
+        let category_cfg = slot.get_or_insert_with(Default::default);
+        let route = crate::agent::config::MediaRoute {
+            model: model.clone(),
+            strategy,
+            allow_unknown_capability,
+            force_unsupported_capability,
+        };
+        if index < category_cfg.routes.len() {
+            category_cfg.routes[index] = route;
+        } else {
+            category_cfg.routes.push(route);
+        }
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+/// Remove the route at `index` within `category`. A missing index is a no-op.
+pub async fn remove_media_route_at(
+    category: crate::agent::config::MediaCategory,
+    index: usize,
+) -> Result<()> {
+    update_config_checked(move |cfg| {
+        let slot = match category {
+            crate::agent::config::MediaCategory::Image => &mut cfg.media_understanding.image,
+            crate::agent::config::MediaCategory::Audio => &mut cfg.media_understanding.audio,
+            crate::agent::config::MediaCategory::Video => &mut cfg.media_understanding.video,
+            crate::agent::config::MediaCategory::Auto => {
+                anyhow::bail!("routes cannot be configured for category `auto`")
+            }
+        };
+        if let Some(category_cfg) = slot
+            && index < category_cfg.routes.len()
+        {
+            category_cfg.routes.remove(index);
+        }
+        cfg.media_understanding.normalize_validate()?;
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Invalid canonical values fail fast — before any disk access.
+    #[tokio::test]
+    async fn media_writers_reject_invalid_canonical_values() {
+        assert!(set_media_unknown_policy("bogus".into()).await.is_err());
+        assert!(set_media_unknown_policy("".into()).await.is_err());
+        assert!(
+            set_media_compaction_preflight_policy("bogus".into())
+                .await
+                .is_err()
+        );
+        assert!(set_media_limit("not-a-limit".into(), 1).await.is_err());
+        assert!(set_media_limit("".into(), 1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn media_writers_reject_invalid_routes_before_disk() {
+        assert!(
+            set_media_route_at(
+                crate::agent::config::MediaCategory::Image,
+                0,
+                "".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .is_err(),
+            "blank route model must be rejected before any read-modify-write"
+        );
+        assert!(
+            set_media_route_at(
+                crate::agent::config::MediaCategory::Video,
+                0,
+                "grok-video".into(),
+                Some("transcription".into()),
+                None,
+                None,
+            )
+            .await
+            .is_err(),
+            "category-inappropriate strategy must fail validation (no write)"
+        );
+        assert!(
+            set_media_route_at(
+                crate::agent::config::MediaCategory::Auto,
+                0,
+                "grok-4.5".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .is_err(),
+            "category `auto` cannot hold configured routes"
+        );
+    }
+}

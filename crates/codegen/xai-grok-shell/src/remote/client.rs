@@ -972,7 +972,50 @@ pub fn parse_remote_model_value(
             .and_then(|v| v.as_bool()),
         execution_backend: parse_remote_execution_backend(obj, meta),
         reasoning_effort_selection,
+        media_capabilities: parse_remote_media_capabilities(obj, meta),
+        media_transport: parse_remote_media_transport(obj, meta),
     })
+}
+
+/// Parse the per-model media modality object from remote model JSON.
+///
+/// Agreed key names (camel case, shared with the ACP `_meta` projection):
+/// top-level `media` or `mediaCapabilities`, with a `_meta.media` fallback.
+/// The inner object uses the canonical spellings (`image`, `audio`, `video`
+/// with `supported` | `unknown` | `unsupported` values), so it deserializes
+/// directly into [`MediaCapabilities`]. Absent or malformed metadata yields
+/// the all-`Unknown` default.
+fn parse_remote_media_capabilities(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> xai_grok_tools::media::MediaCapabilities {
+    obj.get("media")
+        .or_else(|| obj.get("mediaCapabilities"))
+        .or_else(|| obj.get("media_capabilities"))
+        .or_else(|| meta.and_then(|m| m.get("media")))
+        .or_else(|| meta.and_then(|m| m.get("mediaCapabilities")))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Parse the per-model transport flag object from remote model JSON.
+///
+/// Agreed key name `mediaTransport` (camel case, shared with the ACP `_meta`
+/// projection); snake_case and `_meta.mediaTransport` are also accepted.
+/// Inner flags accept camel-case and snake_case spellings.
+fn parse_remote_media_transport(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> xai_grok_tools::media::MediaTransportCapabilities {
+    let value = obj
+        .get("mediaTransport")
+        .or_else(|| obj.get("media_transport"))
+        .or_else(|| meta.and_then(|m| m.get("mediaTransport")))
+        .or_else(|| meta.and_then(|m| m.get("media_transport")));
+    let Some(value) = value else {
+        return xai_grok_tools::media::MediaTransportCapabilities::default();
+    };
+    crate::agent::config::parse_media_transport_value(value)
 }
 
 /// Parse optional `executionBackend` / `execution_backend` from remote model JSON.
@@ -1640,6 +1683,61 @@ mod tests {
         assert_eq!(
             result.laziness_detector,
             crate::agent::config::LazinessDetectorPerModelConfig::default()
+        );
+    }
+
+    #[test]
+    fn parse_remote_model_value_reads_media_metadata() {
+        use xai_grok_tools::media::{MediaCapabilities, MediaModalitySupport as M};
+
+        // Camel-case top-level keys (the agreed remote + ACP `_meta` shape).
+        let value = serde_json::json!({
+            "model": "grok-4.5",
+            "context_window": 1_000_000,
+            "media": { "image": "supported", "audio": "unknown", "video": "unsupported" },
+            "mediaTransport": {
+                "imageInline": true,
+                "transcriptionEndpoint": true,
+                "nativeVideo": false,
+                "jsonSchema": true,
+            },
+        });
+        let result = parse_remote_model_value(&value, "https://default.url").unwrap();
+        assert_eq!(
+            result.media_capabilities,
+            MediaCapabilities {
+                image: M::Supported,
+                audio: M::Unknown,
+                video: M::Unsupported,
+            }
+        );
+        assert!(result.media_transport.image_inline);
+        assert!(result.media_transport.transcription_endpoint);
+        assert!(!result.media_transport.native_video);
+        assert!(result.media_transport.json_schema);
+
+        // `_meta` fallback + snake_case aliases.
+        let value = serde_json::json!({
+            "model": "m",
+            "context_window": 256_000,
+            "_meta": {
+                "media": { "image": "supported" },
+                "mediaTransport": { "image_inline": true },
+            },
+        });
+        let result = parse_remote_model_value(&value, "https://default.url").unwrap();
+        assert_eq!(result.media_capabilities.image, M::Supported);
+        assert_eq!(result.media_capabilities.audio, M::Unknown);
+        assert!(result.media_transport.image_inline);
+        assert!(!result.media_transport.audio_inline);
+
+        // Absent media metadata yields all-Unknown / all-false defaults.
+        let value = serde_json::json!({ "model": "x", "context_window": 256_000 });
+        let result = parse_remote_model_value(&value, "https://default.url").unwrap();
+        assert_eq!(result.media_capabilities, MediaCapabilities::default());
+        assert_eq!(
+            result.media_transport,
+            xai_grok_tools::media::MediaTransportCapabilities::default()
         );
     }
     #[test]

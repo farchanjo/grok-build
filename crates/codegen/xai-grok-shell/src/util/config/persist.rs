@@ -55,6 +55,11 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     } else {
         merge_section(table, "compaction", &config.compaction);
     }
+    if config.media_understanding == crate::agent::config::MediaUnderstandingConfig::default() {
+        table.remove("media_understanding");
+    } else {
+        merge_section(table, "media_understanding", &config.media_understanding);
+    }
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -1402,6 +1407,145 @@ custom_unknown_key = 42
             ui.get("custom_unknown_key").and_then(|v| v.as_integer()),
             Some(42),
             "unmodeled (unknown to the schema) field must survive"
+        );
+    }
+    /// PR 3: a default `[media_understanding]` struct must never leak default
+    /// values into the user's config.toml (mirrors the session load_envrc
+    /// regression above). Merging it into a fresh table creates no section;
+    /// merging into an existing section touches nothing.
+    #[test]
+    fn merge_section_media_understanding_default_does_not_leak() {
+        let mut table = TomlMap::new();
+        let cfg = crate::agent::config::MediaUnderstandingConfig::default();
+        merge_section(&mut table, "media_understanding", &cfg);
+        assert!(
+            table.get("media_understanding").is_none(),
+            "default media_understanding must not create a section"
+        );
+
+        // Pre-existing user section with hand-written keys must survive a
+        // default-config merge untouched.
+        let mut table = TomlMap::new();
+        let mut existing = TomlMap::new();
+        existing.insert("auto_enrich".into(), TomlValue::Boolean(true));
+        table.insert("media_understanding".into(), TomlValue::Table(existing));
+        merge_section(&mut table, "media_understanding", &cfg);
+        let section = table
+            .get("media_understanding")
+            .unwrap()
+            .as_table()
+            .unwrap();
+        assert_eq!(
+            section.get("auto_enrich").and_then(|v| v.as_bool()),
+            Some(true),
+            "hand-written sibling keys must survive a default merge"
+        );
+        assert!(
+            section.get("enabled").is_none(),
+            "defaults must not be injected into an existing section"
+        );
+    }
+    /// PR 3: an explicit media_understanding write round-trips routes as
+    /// model IDs + flags only — never credentials or provider fields.
+    #[test]
+    fn media_understanding_section_round_trips_routes_only() {
+        let raw_config: TomlValue = toml::from_str(
+            r#"
+            [media_understanding]
+            enabled = true
+
+            [media_understanding.image]
+            routes = [{ model = "grok-4.5", strategy = "auto" }]
+            "#,
+        )
+        .unwrap();
+        let cfg = load_config_from_toml(&raw_config);
+        assert_eq!(
+            cfg.media_understanding.enabled,
+            Some(true),
+            "enabled must load from the section"
+        );
+        let mut table = TomlMap::new();
+        merge_section(&mut table, "media_understanding", &cfg.media_understanding);
+        let section = table
+            .get("media_understanding")
+            .unwrap()
+            .as_table()
+            .unwrap();
+        let serialized = toml::to_string_pretty(&TomlValue::Table(table.clone())).unwrap();
+        assert_eq!(section.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        let image = section.get("image").unwrap().as_table().unwrap();
+        let routes = image.get("routes").unwrap().as_array().unwrap();
+        assert_eq!(routes.len(), 1);
+        let route = routes[0].as_table().unwrap();
+        assert_eq!(
+            route.get("model").and_then(|v| v.as_str()),
+            Some("grok-4.5")
+        );
+        assert_eq!(route.get("strategy").and_then(|v| v.as_str()), Some("auto"));
+        // No defaults leak, and no secret-like key is ever serialized.
+        assert!(
+            section.get("max_media_bytes").is_none(),
+            "unset limits must not be written"
+        );
+        assert!(
+            section.get("circuit_breaker").is_none(),
+            "unset circuit breaker must not be written"
+        );
+        let lower = serialized.to_lowercase();
+        for secret in ["key", "token", "secret", "password", "api_key"] {
+            assert!(
+                !lower.contains(secret),
+                "media understanding serialization must never contain `{secret}`"
+            );
+        }
+
+        // Re-parse the merged table and confirm identity.
+        let reparsed = load_config_from_toml(&TomlValue::Table(table));
+        assert_eq!(reparsed.media_understanding, cfg.media_understanding);
+    }
+    /// PR 3: a partial write (only `enabled`) must preserve hand-written
+    /// route lists and sibling keys already on disk.
+    #[test]
+    fn media_understanding_partial_write_preserves_existing_routes() {
+        let original = r#"
+[media_understanding]
+auto_enrich = true
+
+[media_understanding.video]
+routes = [{ model = "grok-video-model", strategy = "native" }]
+"#;
+        let root: TomlValue = toml::from_str(original).unwrap();
+        let mut cfg = load_config_from_toml(&root);
+        cfg.media_understanding.enabled = Some(false);
+        let mut table = root.as_table().unwrap().clone();
+        merge_section(&mut table, "media_understanding", &cfg.media_understanding);
+        let section = table
+            .get("media_understanding")
+            .unwrap()
+            .as_table()
+            .unwrap();
+        assert_eq!(
+            section.get("auto_enrich").and_then(|v| v.as_bool()),
+            Some(true),
+            "hand-written sibling must survive"
+        );
+        assert_eq!(
+            section.get("enabled").and_then(|v| v.as_bool()),
+            Some(false),
+            "the written field must land"
+        );
+        let video = section.get("video").unwrap().as_table().unwrap();
+        let routes = video.get("routes").unwrap().as_array().unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0]
+                .as_table()
+                .unwrap()
+                .get("model")
+                .and_then(|v| v.as_str()),
+            Some("grok-video-model"),
+            "pre-existing route list must survive a partial settings save"
         );
     }
 }

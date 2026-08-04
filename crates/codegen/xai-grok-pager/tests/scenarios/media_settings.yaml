@@ -1,0 +1,41 @@
+name: media-settings
+description: >
+  Opens the settings modal (F2), filters to the Media-understanding section,
+  and verifies the route-list editor rows render. Guards the PR 9 media page
+  end to end: registry registration, row building, filtering, and rendering
+  all agree in a real PTY.
+terminal:
+  rows: 32
+  cols: 100
+environment:
+  env:
+    - key: GROK_CONTEXTUAL_HINTS
+      value: "0"
+mock:
+  response: "MEDIA_SETTINGS_SENTINEL"
+steps:
+  - action: wait_for_text
+    text: Quit
+    timeout_ms: 20000
+  # F2 opens the settings modal.
+  - action: keys
+    keys: "<f2>"
+  - action: wait
+    millis: 400
+  # Type-to-filter to the media-understanding page.
+  - action: keys
+    keys: "/"
+  - action: wait
+    millis: 150
+  - action: type_text
+    text: media
+  - action: wait_for_text
+    text: "Enable media understanding"
+    timeout_ms: 10000
+  - action: assert_contains
+    text: "Media understanding"
+  - action: assert_not_contains
+    text: panicked
+  - action: screenshot
+    name: media-settings-page
+    note: Media Understanding settings page with the master switch row visible.

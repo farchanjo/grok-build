@@ -1,4 +1,11 @@
 //! Rolling-compaction planning, sampling, and CAS application.
+//!
+//! The rolling sampler enriches the job snapshot exactly once per job
+//! through the canonical media preflight
+//! ([`SessionActor::prepare_compaction_source`], plan §14.3) and reuses the
+//! pairing-safe enriched source for chunk planning, bisection, merge
+//! preparation, and every route fallback. The job identity stays
+//! fingerprinted on the raw items for CAS staleness detection.
 
 use super::*;
 use crate::session::helpers::full_replace_compaction::ShellCompactionSampler;
@@ -154,16 +161,45 @@ impl SessionActor {
         }
     }
 
+    /// One media-enrichment preflight per rolling job (plan §14.3).
+    ///
+    /// The raw job snapshot is the only input; the canonical preflight seam
+    /// ([`SessionActor::prepare_compaction_source`]) honors the
+    /// `GROK_DISABLE_MEDIA_COMPACTION_ENRICH` kill switch and the resolved
+    /// `compaction_enrichment` config flag with the same strict/best-effort
+    /// policy as full-replace. Best-effort failures return the raw snapshot
+    /// (placeholder path — the sampler's final sanitizer keeps its current
+    /// behavior); strict failures fail the rolling job. The returned items
+    /// are the pairing-safe enriched source reused for chunk planning,
+    /// bisection, merge preparation, and every route fallback.
+    async fn prepare_rolling_source(
+        &self,
+        job: &RollingCompactionJob,
+    ) -> Result<Vec<ConversationItem>, String> {
+        let prepared = self
+            .prepare_compaction_source(&job.source_items)
+            .await
+            .map_err(|error| format!("rolling media preflight failed: {error}"))?;
+        Ok(prepared.enriched)
+    }
+
     async fn sample_rolling_source(&self, job: &RollingCompactionJob) -> Result<String, String> {
         let routes = self
             .prepare_compaction_routes()
             .await
             .map_err(|error| error.to_string())?;
+        // One media-enrichment preflight per rolling job (plan §14.3): the
+        // raw job snapshot is enriched exactly once, and the enriched source
+        // is reused for chunk planning, bisection, merge preparation, and
+        // every route fallback. Live history is never re-fetched and never
+        // mutated; the CAS identity stays fingerprinted on the raw items
+        // captured in the job.
+        let enriched_source = self.prepare_rolling_source(job).await?;
         let counter = xai_chat_state::actor::state::EstimatedItemTokenCounter;
         let chunks = xai_grok_compaction::plan_rolling_subchunks(
-            &job.source_items,
+            &enriched_source,
             &counter,
-            0..job.source_items.len(),
+            0..enriched_source.len(),
             job.compactor_input_capacity,
         )
         .map_err(|error| format!("rolling subchunk planning failed: {error:?}"))?;
@@ -196,7 +232,7 @@ impl SessionActor {
         let mut partial_summaries = Vec::new();
         while let Some(range) = pending.pop_front() {
             let prepared = xai_chat_state::compaction_utils::prepare_conversation_for_summarization(
-                job.source_items[range.clone()].to_vec(),
+                enriched_source[range.clone()].to_vec(),
             );
             match sampler
                 .sample_compaction(&prepared, &chunk_prompt, self.inference_idle_timeout)
@@ -208,7 +244,7 @@ impl SessionActor {
                 }
                 Err(error) if xai_grok_compaction::is_context_length_error(&error.to_string()) => {
                     let split = xai_grok_compaction::plan_rolling_bisect(
-                        &job.source_items,
+                        &enriched_source,
                         &counter,
                         range,
                     )
@@ -405,12 +441,29 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::{SessionActor, rolling_fixed_prefix_count};
+    use crate::agent::config::CompactionPreflightPolicy;
     use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
+    use crate::session::media::{
+        CompactionAnalyzer, CompactionEnrichmentMode, fingerprint_snapshot,
+        run_compaction_preflight,
+    };
     use crate::session::persistence::PersistenceMsg;
-    use crate::session::rolling_compaction::RollingCompactionResult;
+    use crate::session::rolling_compaction::{RollingCompactionJob, RollingCompactionResult};
+    use async_trait::async_trait;
+    use base64::Engine as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
+    use xai_chat_state::compaction_utils::{
+        conversation_contains_images, prepare_conversation_for_summarization,
+    };
     use xai_chat_state::types::CompactSourceIdentity;
-    use xai_grok_inference_types::ConversationItem;
+    use xai_grok_compaction::{plan_rolling_bisect, plan_rolling_subchunks};
+    use xai_grok_inference_types::{ContentPart, ConversationItem, ToolCall};
+    use xai_grok_tools::media::backend::{
+        MediaProvenance, MediaSemantics, MediaUnderstandingError, MediaUnderstandingRequest,
+        MediaUnderstandingResult,
+    };
+    use xai_grok_tools::media::domain::{MediaCategory, MediaCategoryStrategy, MediaSource};
 
     async fn create_test_actor_for_rolling(
         total_tokens: u64,
@@ -921,6 +974,384 @@ mod tests {
                     error.contains("invalid source range"),
                     "error should mention invalid source range: {error}"
                 );
+            })
+            .await;
+    }
+
+    // ── Rolling media-enrichment wiring (plan §14.3) ─────────────────────
+    //
+    // The rolling sampler must enrich the stable job snapshot exactly once
+    // via the canonical preflight and reuse that enriched source for chunk
+    // planning, bisection, merge preparation, and every route fallback.
+
+    struct StubAnalyzer {
+        calls: AtomicUsize,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl CompactionAnalyzer for StubAnalyzer {
+        async fn analyze_for_compaction(
+            &self,
+            request: MediaUnderstandingRequest,
+        ) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(MediaUnderstandingError::AllRoutesExhausted(
+                    "stub failure".to_string(),
+                ));
+            }
+            let mut results = Vec::with_capacity(request.media.len());
+            for source in &request.media {
+                let digest = match source {
+                    MediaSource::ArtifactRef { blob_hash } => blob_hash.clone(),
+                    _ => String::new(),
+                };
+                results.push(MediaSemantics {
+                    source: source.clone(),
+                    category: MediaCategory::Image,
+                    text: format!("semantics for {digest}"),
+                    provenance: MediaProvenance {
+                        provider: "stub".to_string(),
+                        model: "stub-model".to_string(),
+                        strategy: MediaCategoryStrategy::Native,
+                    },
+                });
+            }
+            Ok(MediaUnderstandingResult {
+                results,
+                attempts: vec![],
+            })
+        }
+    }
+
+    fn analyzer(fail: bool) -> StubAnalyzer {
+        StubAnalyzer {
+            calls: AtomicUsize::new(0),
+            fail,
+        }
+    }
+
+    fn data_url(seed: u8) -> String {
+        let bytes = [seed; 64];
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }
+
+    fn user_with_image(text: &str, seed: u8) -> ConversationItem {
+        let mut user = ConversationItem::user(text);
+        user.add_image(data_url(seed));
+        user
+    }
+
+    fn tool_result_with_image(id: &str, seed: u8) -> ConversationItem {
+        ConversationItem::tool_result_with_images(
+            id,
+            "tool text",
+            vec![ContentPart::Image {
+                url: std::sync::Arc::<str>::from(data_url(seed)),
+            }],
+        )
+    }
+
+    fn item_has_image_parts(item: &ConversationItem) -> bool {
+        match item {
+            ConversationItem::User(user) => user
+                .content
+                .iter()
+                .any(|part| matches!(part, ContentPart::Image { .. })),
+            ConversationItem::ToolResult(result) => !result.images.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// The rolling job snapshot is enriched exactly once per job, and the
+    /// enriched source is reused for chunk planning, bisection, merge
+    /// preparation, and sampler-input preparation with zero additional
+    /// backend calls.
+    #[tokio::test]
+    async fn rolling_job_preflight_enriches_once_and_reuses_source_for_chunk_bisect_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let analyzer = analyzer(false);
+
+        // The rolling job snapshot: a system item, two user items and a tool
+        // result that all share the SAME image bytes, and a valid
+        // assistant/tool-result pair.
+        let source_items = vec![
+            ConversationItem::system("sys"),
+            user_with_image("look at this", 1),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: std::sync::Arc::<str>::from("tc-1"),
+                name: "bash".to_string(),
+                arguments: std::sync::Arc::<str>::from("{}"),
+            }]),
+            tool_result_with_image("tc-1", 1),
+            user_with_image("same image again", 1),
+        ];
+        let job = RollingCompactionJob {
+            identity: CompactSourceIdentity {
+                expected_epoch: 0,
+                source_start: 0,
+                source_end: source_items.len(),
+                source_fingerprint: [0; 32],
+            },
+            source_items: source_items.clone(),
+            compactor_input_capacity: 100_000,
+            prompt_index: 0,
+            original_user_info: None,
+        };
+
+        // Exactly ONE canonical preflight for the whole job; the same image
+        // bytes across user and tool-result items are deduplicated into a
+        // single backend call.
+        let prepared = run_compaction_preflight(
+            &analyzer,
+            tmp.path(),
+            &job.source_items,
+            CompactionEnrichmentMode::Enabled {
+                policy: CompactionPreflightPolicy::BestEffort,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            analyzer.calls.load(Ordering::SeqCst),
+            1,
+            "one preflight per job: duplicate image bytes across items share one backend call"
+        );
+        // The fingerprint stays on the RAW snapshot so CAS staleness
+        // detection is unaffected by enrichment.
+        assert_eq!(
+            prepared.snapshot_fingerprint,
+            fingerprint_snapshot(&job.source_items)
+        );
+
+        let enriched = prepared.enriched;
+        assert_eq!(
+            enriched.len(),
+            source_items.len(),
+            "pairing-safe enrichment preserves item count"
+        );
+        // Tool-call/result pairing is preserved.
+        match &enriched[3] {
+            ConversationItem::ToolResult(result) => {
+                assert_eq!(result.tool_call_id, "tc-1");
+                assert!(result.images.is_empty(), "tool result images cleared");
+                assert!(result.content.starts_with("tool text"));
+                assert!(
+                    result.content.contains("<media_semantics"),
+                    "semantic envelope rides in the tool result content"
+                );
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+        assert!(
+            !conversation_contains_images(&enriched),
+            "the enriched rolling source is text-only"
+        );
+        // The caller's raw job snapshot is never mutated.
+        assert!(
+            conversation_contains_images(&job.source_items),
+            "the preflight only transforms its own copy of the job snapshot"
+        );
+
+        // The rolling sampler's input pipeline reuses the ONE enriched
+        // source: chunk planning, bisection, sampler-input preparation, and
+        // merge preparation add ZERO backend calls.
+        let counter = xai_chat_state::actor::state::EstimatedItemTokenCounter;
+        let chunks = plan_rolling_subchunks(
+            &enriched,
+            &counter,
+            0..enriched.len(),
+            job.compactor_input_capacity,
+        )
+        .unwrap();
+        assert!(!chunks.is_empty());
+        let mut any_envelope = false;
+        for chunk in &chunks {
+            let prepared =
+                prepare_conversation_for_summarization(enriched[chunk.range.clone()].to_vec());
+            any_envelope |= prepared
+                .iter()
+                .any(|item| item.text_content().contains("<media_semantics"));
+        }
+        assert!(
+            any_envelope,
+            "media semantics reach the text-only rolling sampler"
+        );
+
+        let bisect = plan_rolling_bisect(&enriched, &counter, 0..enriched.len()).unwrap();
+        assert!(
+            bisect.left.range.start < bisect.right.range.end,
+            "bisection stays valid on the enriched source"
+        );
+
+        // Merge preparation derives text-only summary items from the
+        // enriched lineage and plans fine.
+        let merge_items = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                ConversationItem::compaction_summary(format!(
+                    "Chronological partial summary {}:\n{}",
+                    index + 1,
+                    enriched[chunk.range.clone()]
+                        .first()
+                        .map(|item| item.text_content())
+                        .unwrap_or_default()
+                ))
+            })
+            .collect::<Vec<_>>();
+        let merge_chunks = plan_rolling_subchunks(
+            &merge_items,
+            &counter,
+            0..merge_items.len(),
+            job.compactor_input_capacity,
+        )
+        .unwrap();
+        assert!(!merge_chunks.is_empty());
+
+        assert_eq!(
+            analyzer.calls.load(Ordering::SeqCst),
+            1,
+            "enriched-source reuse across chunking/bisection/merge adds no backend calls"
+        );
+    }
+
+    /// Failure policy through the canonical preflight the rolling path
+    /// calls: strict fails the job when semantics cannot be produced;
+    /// best-effort and the disabled (kill-switch) path keep the raw
+    /// placeholder behavior.
+    #[tokio::test]
+    async fn rolling_source_strict_fails_job_best_effort_falls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let failing = analyzer(true);
+        let raw = vec![user_with_image("u", 1)];
+
+        // strict: required media semantics cannot be produced -> job fails.
+        let error = run_compaction_preflight(
+            &failing,
+            tmp.path(),
+            &raw,
+            CompactionEnrichmentMode::Enabled {
+                policy: CompactionPreflightPolicy::Strict,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("preflight"),
+            "strict surfaces a preflight error, got {error}"
+        );
+
+        // best_effort: the same backend failure keeps the placeholder path.
+        let prepared = run_compaction_preflight(
+            &failing,
+            tmp.path(),
+            &raw,
+            CompactionEnrichmentMode::Enabled {
+                policy: CompactionPreflightPolicy::BestEffort,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&prepared.enriched).unwrap(),
+            serde_json::to_value(&raw).unwrap(),
+            "best_effort falls back to the raw snapshot"
+        );
+        assert!(
+            item_has_image_parts(&prepared.enriched[0]),
+            "best_effort keeps image parts for the final sanitizer"
+        );
+
+        // disabled: raw flow-through, exactly like the kill-switch path.
+        let disabled = run_compaction_preflight(
+            &failing,
+            tmp.path(),
+            &raw,
+            CompactionEnrichmentMode::Disabled,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&disabled.enriched).unwrap(),
+            serde_json::to_value(&raw).unwrap()
+        );
+    }
+
+    /// The actor-level rolling seam routes through the canonical preflight:
+    /// with no media context (enrichment unavailable), the raw job snapshot
+    /// flows through unchanged and the sampler's final sanitizer remains the
+    /// safety net.
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_rolling_source_preserves_placeholder_path_when_enrichment_unavailable() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor =
+                    create_test_actor_for_rolling(0, 256_000, gateway_tx, persistence_tx).await;
+
+                // The test actor has no media context: enrichment is
+                // unavailable and the canonical seam returns the raw job
+                // snapshot (placeholder path).
+                let raw = vec![
+                    ConversationItem::system("sys"),
+                    user_with_image("u1", 1),
+                    ConversationItem::assistant("a"),
+                    user_with_image("u2", 2),
+                ];
+                let job = RollingCompactionJob {
+                    identity: CompactSourceIdentity {
+                        expected_epoch: 0,
+                        source_start: 0,
+                        source_end: raw.len(),
+                        source_fingerprint: [0; 32],
+                    },
+                    source_items: raw.clone(),
+                    compactor_input_capacity: 100_000,
+                    prompt_index: 0,
+                    original_user_info: None,
+                };
+
+                let enriched = actor.prepare_rolling_source(&job).await.unwrap();
+                assert_eq!(
+                    serde_json::to_value(&enriched).unwrap(),
+                    serde_json::to_value(&raw).unwrap(),
+                    "no enrichment: the raw snapshot flows through unchanged"
+                );
+                assert!(
+                    conversation_contains_images(&enriched),
+                    "image parts are preserved for the final sanitizer"
+                );
+                assert!(
+                    conversation_contains_images(&job.source_items),
+                    "the job snapshot itself is never mutated"
+                );
+
+                // Even on the placeholder path the sampler's input
+                // preparation strips images: the sanitizer stays the final
+                // safety net.
+                let counter = xai_chat_state::actor::state::EstimatedItemTokenCounter;
+                let chunks = plan_rolling_subchunks(
+                    &enriched,
+                    &counter,
+                    0..enriched.len(),
+                    job.compactor_input_capacity,
+                )
+                .unwrap();
+                for chunk in chunks {
+                    let prepared =
+                        prepare_conversation_for_summarization(enriched[chunk.range].to_vec());
+                    assert!(
+                        !conversation_contains_images(&prepared),
+                        "the final sanitizer keeps sampler input text-only on the placeholder path"
+                    );
+                }
             })
             .await;
     }

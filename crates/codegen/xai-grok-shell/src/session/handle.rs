@@ -290,6 +290,31 @@ impl SessionHandle {
         }
         rx.await.ok()
     }
+    /// Run a consented sample-media route test through the session actor.
+    /// The actor applies the full permission/consent/ZDR/credential/
+    /// transport/budget gate stack and returns a non-secret summary.
+    pub async fn test_media_route(
+        &self,
+        category: xai_grok_tools::media::domain::MediaCategory,
+        route_index: usize,
+        path: String,
+    ) -> Result<String, String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::TestMediaRoute {
+                category,
+                route_index,
+                path,
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return Err("session not found".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("session actor died".to_string()))
+    }
     /// Execute a plugins management action from the pager modal.
     pub async fn execute_plugins_action(
         &self,

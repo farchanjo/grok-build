@@ -510,6 +510,13 @@ async fn scripted_inline_edit_dismiss_returns_to_editor() {
     run_scenario("inline_edit_dismiss_returns_to_editor.yaml").await;
 }
 
+/// Media Understanding settings page renders its rows in a real PTY.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "scripted scenario; run with cargo test -- --ignored"]
+async fn scripted_media_settings() {
+    run_scenario("media_settings.yaml").await;
+}
+
 /// Sanity-check: every scenario YAML in the list below must parse. Runs at
 /// `cargo test` time without `--ignored` so a malformed YAML breaks CI
 /// immediately rather than only when the scripted runner is opted in.
@@ -543,6 +550,7 @@ fn scenarios_parse() {
         "inline_edit_resubmit.yaml",
         "inline_edit_unchanged_exit.yaml",
         "inline_edit_dismiss_returns_to_editor.yaml",
+        "media_settings.yaml",
     ] {
         let path = scenario_path(name);
         let scenario =

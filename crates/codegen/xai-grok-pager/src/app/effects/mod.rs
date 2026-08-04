@@ -2030,6 +2030,17 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::TestMediaRoute {
+            category,
+            index,
+            path,
+            session_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                send_media_route_test(category, index, path, session_id, tx).await
+            });
+        }
         Effect::Authenticate {
             request_seq,
             method_id,

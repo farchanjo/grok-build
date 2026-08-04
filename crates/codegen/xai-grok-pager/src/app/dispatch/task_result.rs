@@ -1300,6 +1300,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             vec![]
         }
+        TaskResult::MediaRouteTestComplete { result } => {
+            match result {
+                Ok(summary) => {
+                    app.show_toast(&format!("\u{2713} Media route test: {summary}"));
+                }
+                Err(error) => {
+                    let scrubbed = scrub_error_for_toast(&error);
+                    app.show_toast(&format!("\u{2717} Media route test failed: {scrubbed}"));
+                }
+            }
+            vec![]
+        }
         TaskResult::ProviderOperationComplete {
             agent_id,
             provider,

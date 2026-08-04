@@ -631,6 +631,8 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             &SettingCategory::Compaction,
             // The Session category has no registered settings, so its
             // header is not emitted.
+            // Media-understanding category (image/audio/video editors).
+            &SettingCategory::Media,
             // Advanced category (first entries:
             // `show_tips`, `auto_update`).
             &SettingCategory::Advanced,
@@ -728,6 +730,19 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "compaction_primary_model",
             "compaction_fallback_model",
             "compaction_status",
+            // Dedicated Media-understanding category (in declaration order:
+            // toggles, policies, limits, then the three route editors).
+            "media_understanding_enabled",
+            "media_auto_enrich",
+            "media_compaction_enrichment",
+            "media_unknown_policy",
+            "media_preflight_policy",
+            "media_max_output_chars",
+            "media_max_aux_tokens_per_call",
+            "media_max_media_bytes",
+            "media_image_routes",
+            "media_audio_routes",
+            "media_video_routes",
             // `auto_compact_threshold_percent` (Session category) is
             // not exposed in the modal.
             // Advanced category.

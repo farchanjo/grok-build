@@ -14,6 +14,7 @@
 //! - `x.ai/internal/reload_models`          model list hot-reload from config.toml
 //! - `x.ai/internal/reload_models_cache`    model catalog hot-reload from disk cache
 //! - `x.ai/internal/reload_compaction`      compaction policy fan-out
+//! - `x.ai/internal/reload_media_understanding` media route/policy fan-out
 //! - `x.ai/internal/auth_cleared`           auth hot-clear cleanup
 //! - `x.ai/plugins/reload`                  rebuild shared plugin registry
 //! - `x.ai/commands/list`                   list slash commands
@@ -50,6 +51,9 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/internal/reload_models" => handle_reload_models(agent),
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
         "x.ai/internal/reload_compaction" => handle_reload_compaction(agent, args),
+        "x.ai/internal/reload_media_understanding" => {
+            handle_reload_media_understanding(agent, args)
+        }
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
         "x.ai/commands/list" => handle_commands_list(agent, args).await,
@@ -654,6 +658,51 @@ fn handle_reload_compaction(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResu
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))
 }
 
+fn fan_out_media_understanding_config<'a>(
+    command_senders: impl Iterator<Item = &'a tokio::sync::mpsc::UnboundedSender<SessionCommand>>,
+    config: &crate::agent::config::MediaUnderstandingConfig,
+) -> usize {
+    command_senders
+        .filter(|sender| {
+            sender
+                .send(SessionCommand::UpdateMediaUnderstandingConfig {
+                    media: Box::new(config.clone()),
+                })
+                .is_ok()
+        })
+        .count()
+}
+
+/// Reload `[media_understanding]` for ALL active sessions. Called by the
+/// config hot-reload watcher when the section changes (`ConfigUpdate::
+/// MediaUnderstanding` injects `x.ai/internal/reload_media_understanding`
+/// into the agent's ACP stream).
+///
+/// Mirrors `handle_reload_compaction`: the config is re-validated before any
+/// session is touched, so an invalid external edit never reaches a live
+/// backend. Each session adopts the accepted config at a safe actor mailbox
+/// point (see `SessionActor::update_media_understanding_config`).
+fn handle_reload_media_understanding(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let config: crate::agent::config::MediaUnderstandingConfig = parse_params(args)?;
+    config
+        .normalize_validate()
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    let sessions = agent.sessions.borrow();
+    let total = sessions.len();
+    let updated = fan_out_media_understanding_config(
+        sessions.values().map(|session| &session.cmd_tx),
+        &config,
+    );
+    tracing::info!(
+        updated,
+        total,
+        "reloaded media understanding policy for active sessions"
+    );
+    ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
+        .to_ext_response()
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))
+}
+
 fn handle_auth_cleared(agent: &MvpAgent) -> ExtResult {
     agent.disable_managed_gateway_tools_and_refresh_sessions();
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
@@ -786,6 +835,7 @@ async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
 #[cfg(test)]
 mod tests {
     use super::fan_out_compaction_config;
+    use super::fan_out_media_understanding_config;
     use crate::session::SessionCommand;
 
     #[test]
@@ -834,6 +884,52 @@ mod tests {
         assert!(matches!(
             live_rx.try_recv(),
             Ok(SessionCommand::UpdateCompactionConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn media_reload_fans_out_to_every_live_session() {
+        let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = crate::agent::config::MediaUnderstandingConfig {
+            enabled: Some(true),
+            auto_enrich: Some(true),
+            image: Some(crate::agent::config::MediaCategoryConfig {
+                routes: vec![crate::agent::config::MediaRoute {
+                    model: "vision-model".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let senders = [&first_tx, &second_tx].into_iter();
+        assert_eq!(fan_out_media_understanding_config(senders, &config), 2);
+        for receiver in [&mut first_rx, &mut second_rx] {
+            let SessionCommand::UpdateMediaUnderstandingConfig { media } = receiver
+                .try_recv()
+                .expect("each session receives one update")
+            else {
+                panic!("expected media understanding config update");
+            };
+            assert_eq!(*media, config);
+            assert!(receiver.try_recv().is_err(), "must send exactly one update");
+        }
+    }
+
+    #[test]
+    fn media_reload_ignores_closed_session_mailboxes() {
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(closed_rx);
+        let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = crate::agent::config::MediaUnderstandingConfig::default();
+
+        let senders = [&closed_tx, &live_tx].into_iter();
+        assert_eq!(fan_out_media_understanding_config(senders, &config), 1);
+        assert!(matches!(
+            live_rx.try_recv(),
+            Ok(SessionCommand::UpdateMediaUnderstandingConfig { .. })
         ));
     }
 }

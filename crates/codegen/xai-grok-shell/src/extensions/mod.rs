@@ -14,6 +14,7 @@ pub mod interject;
 pub mod jj;
 pub mod marketplace;
 pub mod mcp;
+pub mod media;
 pub mod memory;
 pub mod notification;
 pub mod plugins;

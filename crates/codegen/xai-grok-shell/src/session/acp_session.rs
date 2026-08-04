@@ -758,6 +758,12 @@ pub(crate) struct SessionActor {
     git_head_enabled: bool,
     /// Shared models manager for etag-triggered refresh from response headers.
     pub(crate) models_manager: crate::agent::models::ModelsManager,
+    /// Session-scoped media-understanding context for automatic attachment
+    /// enrichment (PR 7). `None` when media understanding is unavailable —
+    /// the legacy image path stays authoritative and `analyze_media` is never
+    /// listed.
+    pub(crate) media_understanding_context:
+        Option<std::sync::Arc<crate::session::media::SessionMediaContext>>,
     /// Stable display path for forked sessions (original project path).
     ///
     /// Used by `build_user_message_prefix` (user-message `Workspace Path`),
@@ -1354,6 +1360,30 @@ impl SessionActor {
             models = ?resolved.models,
             "updated live compaction policy",
         );
+    }
+
+    /// Adopt a new `[media_understanding]` section live.
+    ///
+    /// The session-scoped media context (`SessionMediaContext::apply_config`)
+    /// re-validates the raw config and hot-swaps the backend route/policy
+    /// snapshot and the session decision snapshot in lock step at a safe
+    /// actor mailbox point. Invalid configs never reach the backend, so the
+    /// current accepted routes/policy stay live (mirrors
+    /// `update_compaction_config`).
+    ///
+    /// Sessions that spawned without a media backend (disabled at spawn, or
+    /// an unavailable store) have nothing to hot-swap: they keep the legacy
+    /// image path for their lifetime, and sessions spawned after the edit
+    /// pick the accepted config up from disk.
+    pub(crate) fn update_media_understanding_config(
+        &self,
+        new_config: crate::agent::config::MediaUnderstandingConfig,
+    ) {
+        let Some(context) = self.media_understanding_context.as_ref() else {
+            tracing::debug!("media understanding unavailable; skipping live media config update");
+            return;
+        };
+        context.apply_config(&new_config);
     }
 }
 const PROMPT_CONTEXT_FILENAME: &str = "prompt_context.json";

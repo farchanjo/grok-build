@@ -280,10 +280,19 @@ impl SessionActor {
         if conversation.len() < 4 {
             return PrefireOutcome::TooSmall.into();
         }
+        // The split is computed on the RAW conversation so the NOTE₁
+        // staleness fingerprint and the pass-2 live coordinates stay in the
+        // same item space; enrichment preserves item count and order (plan
+        // §14.3).
         let split = split_conversation_for_two_pass(&conversation, TWO_PASS_DEFAULT_SPLIT_FRACTION);
         if split.prefix.is_empty() || split.tail.is_empty() {
             return PrefireOutcome::EmptySplit.into();
         }
+        // One enrichment per stable prefire job.
+        let enriched = match self.prepare_compaction_source(&conversation).await {
+            Ok(prepared) => prepared.enriched,
+            Err(_) => return PrefireOutcome::SampleFailed.into(),
+        };
         let sampling_cfg = self.chat_state_handle.get_inference_settings().await;
         // Prefire is also a summarization call; provider-specific reasoning
         // replay is unnecessary and can make a later route reject the input.
@@ -292,8 +301,10 @@ impl SessionActor {
             .as_ref()
             .map(|c| c.model.to_string())
             .unwrap_or_default();
-        let prefix_prepared =
-            prepare_conversation_for_verbatim_summarization(split.prefix.to_vec(), strips);
+        let prefix_prepared = prepare_conversation_for_verbatim_summarization(
+            enriched[..split.split_idx.min(enriched.len())].to_vec(),
+            strips,
+        );
         let prefix_est_tokens = prefix_prepared
             .iter()
             .map(xai_chat_state::estimate_item_tokens)
@@ -392,8 +403,16 @@ impl SessionActor {
             );
             return None;
         }
-        let prefix = &live[..cache.prefix_len];
-        let tail = &live[cache.prefix_len..];
+        // One enrichment per stable pass-2 job; the stale-snapshot
+        // fingerprint stays on the RAW live items above, and the enriched
+        // snapshot preserves the item count so `cache.prefix_len` stays a
+        // valid boundary.
+        let enriched = match self.prepare_compaction_source(&live).await {
+            Ok(prepared) => prepared.enriched,
+            Err(_) => return None,
+        };
+        let prefix = &enriched[..cache.prefix_len];
+        let tail = &enriched[cache.prefix_len..];
         let prepared_tail =
             prepare_conversation_for_verbatim_summarization(tail.to_vec(), strips_reasoning);
         let prompt = build_two_pass_compaction_prompt(user_context);
@@ -1069,19 +1088,27 @@ impl SessionActor {
             .iter()
             .find(|item| matches!(item, ConversationItem::System(_)))
             .cloned();
-        let full_conversation = source_snapshot.conversation.clone();
+        let raw_conversation = source_snapshot.conversation.clone();
         let source_identity = xai_chat_state::CompactSourceIdentity::new(
             source_snapshot.structural_epoch,
             0,
             conv_len,
-            &full_conversation,
+            &raw_conversation,
         )
         .map_err(|error| {
             acp::Error::internal_error()
                 .data(format!("failed to fingerprint compaction source: {error}"))
         })?;
+        // The CAS/staleness fingerprint and `source_had_images` stay on the
+        // RAW snapshot; enrichment only changes the summarization input.
         let source_had_images =
-            xai_chat_state::compaction_utils::conversation_contains_images(&full_conversation);
+            xai_chat_state::compaction_utils::conversation_contains_images(&raw_conversation);
+        // One media-enrichment preflight per stable job (plan §14.2). The
+        // enriched snapshot is shared by every input-ladder stage and route
+        // fallback; the live conversation is never re-fetched inside the
+        // ladder.
+        let prepared_source = self.prepare_compaction_source(&raw_conversation).await?;
+        let full_conversation = prepared_source.enriched;
         let segment_messages = if self.compaction.compaction_mode.writes_segments() {
             xai_chat_state::compaction_utils::prepare_conversation_for_segment(
                 full_conversation.clone(),
@@ -1093,12 +1120,12 @@ impl SessionActor {
         let verbatim_input_enabled = self.compaction.verbatim_input;
         let simplified_messages = if verbatim_input_enabled {
             xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
-                full_conversation,
+                full_conversation.clone(),
                 summary_strips_reasoning,
             )
         } else {
             xai_chat_state::compaction_utils::prepare_conversation_for_summarization(
-                full_conversation,
+                full_conversation.clone(),
             )
         };
         if conv_len == 0 {
@@ -1316,7 +1343,10 @@ impl SessionActor {
                                 error = %message,
                                 "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
                             );
-                            let conv = self.chat_state_handle.get_conversation().await;
+                            // One enriched snapshot feeds every ladder stage:
+                            // never refetch a newer live conversation inside
+                            // the input ladder (plan §14.2).
+                            let conv = full_conversation.clone();
                             request_turns = match stage {
                                 InputStage::VerbatimFitted => {
                                     let budget = context_window
@@ -2357,6 +2387,62 @@ impl SessionActor {
             );
         }
     }
+    /// One media-enrichment preflight per stable compaction job (plan §14).
+    ///
+    /// This is the canonical preflight seam shared by full-replace,
+    /// two-pass, and rolling compaction: it resolves the enrichment mode
+    /// from the session media context (honoring the
+    /// `GROK_DISABLE_MEDIA_COMPACTION_ENRICH` kill switch and the resolved
+    /// `compaction_enrichment` config flag) and delegates to
+    /// [`crate::session::media::run_compaction_preflight`]. When enrichment
+    /// is disabled or the backend is unavailable, the raw snapshot is
+    /// returned unchanged so the current placeholder behavior
+    /// ([`sanitize_compaction_images`](xai_chat_state::compaction_utils::sanitize_compaction_images))
+    /// is preserved exactly. `Err` is only returned for the `strict` policy,
+    /// which fails the compaction attempt when required media semantics
+    /// cannot be produced.
+    ///
+    /// `pub(super)` so the sibling rolling-compaction module
+    /// (`acp_session_impl::rolling`) reuses this exact seam.
+    pub(super) async fn prepare_compaction_source(
+        &self,
+        raw: &[ConversationItem],
+    ) -> Result<crate::session::media::PreparedCompactionSource, acp::Error> {
+        use crate::session::media::{
+            CompactionEnrichmentMode, compaction_enrich_kill_switched, compaction_enrichment_mode,
+            fingerprint_snapshot, run_compaction_preflight,
+        };
+        let context = self.media_understanding_context.as_ref();
+        let config = context.map(|ctx| ctx.config.read().clone());
+        let mode = compaction_enrichment_mode(config.as_ref(), compaction_enrich_kill_switched());
+        let CompactionEnrichmentMode::Enabled { policy } = mode else {
+            return Ok(crate::session::media::PreparedCompactionSource {
+                snapshot_fingerprint: fingerprint_snapshot(raw),
+                enriched: raw.to_vec(),
+            });
+        };
+        let Some(context) = context else {
+            return Ok(crate::session::media::PreparedCompactionSource {
+                snapshot_fingerprint: fingerprint_snapshot(raw),
+                enriched: raw.to_vec(),
+            });
+        };
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        match run_compaction_preflight(context.backend.as_ref(), &session_dir, raw, mode).await {
+            Ok(prepared) => Ok(prepared),
+            Err(error) => {
+                if policy == crate::agent::config::CompactionPreflightPolicy::Strict {
+                    return Err(acp::Error::internal_error()
+                        .data(format!("compaction media preflight failed: {error}")));
+                }
+                // best_effort: the placeholder path stays authoritative.
+                Ok(crate::session::media::PreparedCompactionSource {
+                    snapshot_fingerprint: fingerprint_snapshot(raw),
+                    enriched: raw.to_vec(),
+                })
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod inline_auto_compact_flow_tests {
@@ -2556,6 +2642,7 @@ mod inline_auto_compact_flow_tests {
             last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             git_head_enabled: false,
             models_manager: Default::default(),
+            media_understanding_context: None,
             display_cwd: std::sync::OnceLock::new(),
             active_agent_type: parking_lot::Mutex::new(None),
             queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(

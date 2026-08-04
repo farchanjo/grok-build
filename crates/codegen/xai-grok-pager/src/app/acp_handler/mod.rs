@@ -94,8 +94,8 @@ use mcp::{
     handle_mcp_tools_changed, push_server_status_enabled,
 };
 use settings::{
-    handle_announcements_update, handle_models_update, handle_sessions_changed,
-    handle_settings_update,
+    handle_announcements_update, handle_config_changed, handle_media_update, handle_models_update,
+    handle_sessions_changed, handle_settings_update,
 };
 
 // Test-only bare-name surface for `tests/*` (`use super::*`).
@@ -698,6 +698,8 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
             handle_mcp_server_status(notif, app)
         }
         "x.ai/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
+        "x.ai/config_changed" => handle_config_changed(notif, app),
+        "x.ai/media/update" => handle_media_update(notif, app),
         _ => false,
     }
 }

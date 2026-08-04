@@ -114,6 +114,13 @@ pub struct AgentBuilder {
     context_window_tokens: Option<u64>,
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
     attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
+    /// Optional media-understanding backend for the session toolset.
+    ///
+    /// When set, injected into the toolset's `Resources` so the deferred
+    /// `analyze_media` tool can delegate. Inference-free: the trait lives in
+    /// `xai_grok_tools::media` and never references inference internals.
+    media_understanding_backend:
+        Option<Arc<dyn xai_grok_tools::media::backend::MediaUnderstandingBackend>>,
     /// Session-scoped MCP tool-result inline cap (bytes). When `Some`, seeded
     /// into the toolset's `TruncationCfg` resource after finalize, where the
     /// MCP truncation path consults it before the process-global cap. The
@@ -177,6 +184,12 @@ fn ensure_search_models_tool(tool_config: &mut xai_grok_tools::registry::types::
         return;
     }
     tool_config.tools.push((&archanjo::SearchModelsTool).into());
+}
+/// Whether `GROK_DISABLE_MEDIA_ANALYZE` is set. When set, the
+/// `analyze_media` tool is omitted from every agent toolset regardless of
+/// backend availability (plan §5.5).
+fn media_analyze_kill_switched() -> bool {
+    std::env::var_os("GROK_DISABLE_MEDIA_ANALYZE").is_some()
 }
 /// Merge a shell-resolved params map into every matching tool's
 /// `ToolConfig.params` (single copy of the loop the per-tool injections share).
@@ -268,6 +281,7 @@ impl AgentBuilder {
             context_window_tokens: None,
             api_key_provider: None,
             attribution_callback: None,
+            media_understanding_backend: None,
             mcp_max_output_bytes: None,
             system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
@@ -544,6 +558,17 @@ impl AgentBuilder {
         self.attribution_callback = Some(callback);
         self
     }
+    /// Set the session-scoped media-understanding backend.
+    ///
+    /// Defaults to `None` (media understanding unavailable). The shell injects
+    /// its backend here once the shell-owned implementation lands (PR 6).
+    pub fn with_media_understanding_backend(
+        mut self,
+        backend: Arc<dyn xai_grok_tools::media::backend::MediaUnderstandingBackend>,
+    ) -> Self {
+        self.media_understanding_backend = Some(backend);
+        self
+    }
     /// Override the system-reminder tag name used in tool result text.
     ///
     /// Defaults to `"system-reminder"` (hyphen). Harnesses trained on a
@@ -772,6 +797,20 @@ impl AgentBuilder {
                 tool_config.tools.push(
                     (&xai_grok_tools::implementations::grok_build::ReferenceToVideoTool).into(),
                 );
+            }
+            // `analyze_media` is conditionally listed: it appears only when
+            // the session injected a media-understanding backend, that
+            // backend reports at least one eligible route, and the
+            // `GROK_DISABLE_MEDIA_ANALYZE` kill switch is not set (plan
+            // §4.2 / §5.5). A disabled or unconfigured backend must not
+            // expose a dead tool in the manifest.
+            if let Some(backend) = &self.media_understanding_backend
+                && !media_analyze_kill_switched()
+                && backend.availability().has_eligible_route()
+            {
+                tool_config
+                    .tools
+                    .push((&xai_grok_tools::media::analyze_media::AnalyzeMediaTool).into());
             }
             let has_write_tool = tool_config
                 .tools
@@ -1073,6 +1112,7 @@ impl AgentBuilder {
                 auth_provider: None,
                 attribution_callback: self.attribution_callback,
                 system_reminder_tag: self.system_reminder_tag,
+                media_understanding_backend: self.media_understanding_backend,
             },
         )
         .await

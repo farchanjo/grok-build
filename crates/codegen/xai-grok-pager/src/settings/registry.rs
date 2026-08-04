@@ -42,6 +42,10 @@ pub enum SettingCategory {
     Models,
     Compaction,
     Session,
+    /// Media-understanding delegation (image/audio/video route editors).
+    /// Sits between Session and Advanced; the section-order tests pin
+    /// `Compaction → Session → Media → Advanced`.
+    Media,
     Advanced,
 }
 
@@ -56,6 +60,7 @@ impl SettingCategory {
         Self::Models,
         Self::Compaction,
         Self::Session,
+        Self::Media,
         Self::Advanced,
     ];
 
@@ -70,6 +75,7 @@ impl SettingCategory {
             Self::Models => "Models",
             Self::Compaction => "Compaction",
             Self::Session => "Session",
+            Self::Media => "Media understanding",
             Self::Advanced => "Advanced",
         }
     }
@@ -322,6 +328,14 @@ pub enum SettingKind {
     Group {
         children: &'static [SettingKey],
     },
+    /// A media-understanding route-list editor for one concrete category
+    /// (image/audio/video). Enter opens a dedicated sub-pane that supports
+    /// add/remove/reorder, model and strategy editing, capability toggles,
+    /// and a consented sample-media route test. The value is a `String`
+    /// summary of the configured routes (e.g. `"3 routes"`).
+    RouteList {
+        category: xai_grok_tools::media::domain::MediaCategory,
+    },
 }
 
 /// One row in the registry. Pure metadata — no function pointers, no
@@ -357,6 +371,134 @@ pub enum SettingValue {
     String(String),
     Enum(&'static str),
     Int(i64),
+}
+
+/// One configured media-understanding route, projected into the settings
+/// snapshot for the route-list editors. Strategy is the canonical string
+/// (`auto` | `native` | `transcription` | `frames`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRouteSnapshot {
+    pub model: String,
+    pub strategy: String,
+    pub allow_unknown_capability: bool,
+    pub force_unsupported_capability: bool,
+}
+
+/// Per-model media status projection for the route-editor badges. Populated
+/// from the ACP `_meta` media projection (same source as the `/model` picker
+/// badges); absent means the model id is unresolved in the current catalog.
+/// Never carries credentials or provider secrets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaModelBadge {
+    /// Per-category modality support (all `Unknown` when absent).
+    pub capabilities: xai_grok_tools::media::domain::MediaCapabilities,
+    /// Concrete wire-transport flags (all-`false` when absent).
+    pub transport: xai_grok_tools::media::domain::MediaTransportCapabilities,
+    /// Catalog source (`bundled` | `remote` | `live_cache` | `stale_cache`).
+    pub source: Option<String>,
+    /// Whether the catalog is considered stale.
+    pub catalog_stale: bool,
+    /// Credential status (`credentialed` | `missing` | `unknown`).
+    pub auth_status: Option<String>,
+}
+
+impl MediaRouteSnapshot {
+    /// The strategy canonical, falling back to `auto` for blank/unset values.
+    pub fn canonical_strategy(&self) -> &str {
+        match self.strategy.as_str() {
+            "native" => "native",
+            "transcription" => "transcription",
+            "frames" => "frames",
+            _ => "auto",
+        }
+    }
+
+    /// Human display for the strategy (used by the route editor rows).
+    pub fn display_strategy(&self) -> &'static str {
+        match self.canonical_strategy() {
+            "native" => "native",
+            "transcription" => "transcription",
+            "frames" => "frames",
+            _ => "auto",
+        }
+    }
+}
+
+/// Display summary for an unconfigured media route list. Shared by the
+/// row value renderer and the registered default so reset round-trips.
+pub const MEDIA_ROUTE_LIST_EMPTY: &str = "Not configured";
+
+/// Canonical summary shown in the route-list setting row's value column.
+pub fn media_route_list_summary(routes: &[MediaRouteSnapshot]) -> String {
+    match routes.len() {
+        0 => MEDIA_ROUTE_LIST_EMPTY.to_string(),
+        1 => {
+            let model = &routes[0].model;
+            if model.is_empty() {
+                "1 route".to_string()
+            } else {
+                format!("{model} (1 route)")
+            }
+        }
+        n => format!("{n} routes"),
+    }
+}
+
+/// Resolve `[media_understanding]` into the snapshot fields the settings
+/// modal renders. Falls back to defaults when the section is absent or
+/// invalid — same fail-open posture as the compaction snapshot fields.
+pub fn media_snapshot_fields(
+    config: &xai_grok_shell::agent::config::MediaUnderstandingConfig,
+) -> PagerLocalSnapshot {
+    let resolved = config.normalize_validate().unwrap_or_else(|_| {
+        xai_grok_shell::agent::config::MediaUnderstandingConfig::default()
+            .normalize_validate()
+            .expect("default media understanding config is valid")
+    });
+    let route_snapshots = |routes: &[xai_grok_shell::agent::config::ResolvedMediaRoute]| {
+        routes
+            .iter()
+            .map(|r| MediaRouteSnapshot {
+                model: r.model.clone(),
+                strategy: match r.strategy {
+                    xai_grok_tools::media::domain::MediaCategoryStrategy::Auto => "auto",
+                    xai_grok_tools::media::domain::MediaCategoryStrategy::Native => "native",
+                    xai_grok_tools::media::domain::MediaCategoryStrategy::Transcription => {
+                        "transcription"
+                    }
+                    xai_grok_tools::media::domain::MediaCategoryStrategy::Frames => "frames",
+                }
+                .to_string(),
+                allow_unknown_capability: r.allow_unknown_capability,
+                force_unsupported_capability: r.force_unsupported_capability,
+            })
+            .collect()
+    };
+    use xai_grok_shell::agent::config::{ActiveModelUnknownPolicy, CompactionPreflightPolicy};
+    PagerLocalSnapshot {
+        media_enabled: resolved.enabled,
+        media_auto_enrich: resolved.auto_enrich,
+        media_compaction_enrichment: resolved.compaction_enrichment,
+        media_unknown_policy: match resolved.active_model_unknown_policy {
+            ActiveModelUnknownPolicy::PassThrough => "pass_through",
+            ActiveModelUnknownPolicy::Delegate => "delegate",
+            ActiveModelUnknownPolicy::Prompt => "prompt",
+            ActiveModelUnknownPolicy::Block => "block",
+        }
+        .to_string(),
+        media_preflight_policy: match resolved.compaction_preflight_policy {
+            CompactionPreflightPolicy::BestEffort => "best_effort",
+            CompactionPreflightPolicy::Strict => "strict",
+        }
+        .to_string(),
+        media_max_output_chars: resolved.max_output_chars as i64,
+        media_max_aux_tokens_per_call: resolved.max_aux_tokens_per_call as i64,
+        media_max_media_bytes: resolved.max_media_bytes as i64,
+        media_image_routes: route_snapshots(&resolved.image.routes),
+        media_audio_routes: route_snapshots(&resolved.audio.routes),
+        media_video_routes: route_snapshots(&resolved.video.routes),
+        ..Default::default()
+    }
 }
 
 /// Snapshot of pager-local state captured when the modal opens.
@@ -428,6 +570,45 @@ pub struct PagerLocalSnapshot {
     pub compaction_fallback_model: String,
     /// Whether compaction is currently in progress for the active session.
     pub compaction_in_progress: bool,
+    /// Media-understanding master switch (`[media_understanding].enabled`).
+    pub media_enabled: bool,
+    /// Automatic attachment enrichment through media routes.
+    pub media_auto_enrich: bool,
+    /// Compaction preflight enrichment through media routes.
+    pub media_compaction_enrichment: bool,
+    /// `active_model_unknown_policy` canonical
+    /// (`pass_through` | `delegate` | `prompt` | `block`).
+    pub media_unknown_policy: String,
+    /// `compaction_preflight_policy` canonical (`best_effort` | `strict`).
+    pub media_preflight_policy: String,
+    /// `max_output_chars` resolved value.
+    pub media_max_output_chars: i64,
+    /// `max_aux_tokens_per_call` resolved value.
+    pub media_max_aux_tokens_per_call: i64,
+    /// `max_media_bytes` resolved value.
+    pub media_max_media_bytes: i64,
+    /// Configured image routes, in ordered primary→fallback sequence.
+    pub media_image_routes: Vec<MediaRouteSnapshot>,
+    /// Configured audio routes, in ordered primary→fallback sequence.
+    pub media_audio_routes: Vec<MediaRouteSnapshot>,
+    /// Configured video routes, in ordered primary→fallback sequence.
+    pub media_video_routes: Vec<MediaRouteSnapshot>,
+    /// Per-model media status projections keyed by catalog model id. Used by
+    /// the route editors to render resolved/unresolved, modality, source,
+    /// staleness, auth, and transport badges.
+    pub media_badges: std::collections::HashMap<String, MediaModelBadge>,
+}
+
+/// Route list for a concrete media category, as configured in
+/// `[media_understanding]`. Used by the route-list editor to build the
+/// full-category replacement action, and serialized (JSON) as the
+/// `Effect::PersistSetting` payload for the route-list keys.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MediaRouteEdit {
+    pub model: String,
+    pub strategy: Option<String>,
+    pub allow_unknown_capability: bool,
+    pub force_unsupported_capability: bool,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -459,6 +640,20 @@ impl Default for PagerLocalSnapshot {
             compaction_primary_model: "@session".to_string(),
             compaction_fallback_model: String::new(),
             compaction_in_progress: false,
+            // Media-understanding config defaults — match registry defaults in
+            // defs.rs and the shell's `MediaUnderstandingConfig::default()`.
+            media_enabled: false,
+            media_auto_enrich: false,
+            media_compaction_enrichment: false,
+            media_unknown_policy: "pass_through".to_string(),
+            media_preflight_policy: "best_effort".to_string(),
+            media_max_output_chars: 20_000,
+            media_max_aux_tokens_per_call: 8_192,
+            media_max_media_bytes: 256 * 1024 * 1024,
+            media_image_routes: Vec::new(),
+            media_audio_routes: Vec::new(),
+            media_video_routes: Vec::new(),
+            media_badges: std::collections::HashMap::new(),
         }
     }
 }
@@ -855,6 +1050,42 @@ pub fn current_value_for(
         } else {
             "Idle".to_string()
         })),
+        // Media-understanding settings: SHELL-owned, snapshot-backed (no
+        // `UiConfig` mirror — the fields live in `[media_understanding]`).
+        "media_understanding_enabled" => Some(SettingValue::Bool(pager.media_enabled)),
+        "media_auto_enrich" => Some(SettingValue::Bool(pager.media_auto_enrich)),
+        "media_compaction_enrichment" => {
+            Some(SettingValue::Bool(pager.media_compaction_enrichment))
+        }
+        "media_unknown_policy" => Some(SettingValue::Enum(
+            match pager.media_unknown_policy.as_str() {
+                "delegate" => "delegate",
+                "prompt" => "prompt",
+                "block" => "block",
+                _ => "pass_through",
+            },
+        )),
+        "media_preflight_policy" => Some(SettingValue::Enum(
+            if pager.media_preflight_policy == "strict" {
+                "strict"
+            } else {
+                "best_effort"
+            },
+        )),
+        "media_max_output_chars" => Some(SettingValue::Int(pager.media_max_output_chars)),
+        "media_max_aux_tokens_per_call" => {
+            Some(SettingValue::Int(pager.media_max_aux_tokens_per_call))
+        }
+        "media_max_media_bytes" => Some(SettingValue::Int(pager.media_max_media_bytes)),
+        "media_image_routes" => Some(SettingValue::String(media_route_list_summary(
+            &pager.media_image_routes,
+        ))),
+        "media_audio_routes" => Some(SettingValue::String(media_route_list_summary(
+            &pager.media_audio_routes,
+        ))),
+        "media_video_routes" => Some(SettingValue::String(media_route_list_summary(
+            &pager.media_video_routes,
+        ))),
 
         _ => None,
     }
@@ -873,6 +1104,9 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
         // Group rows carry no scalar value; the render/reset paths special-case
         // them before calling this, so the returned value is never observed.
         SettingKind::Group { .. } => SettingValue::Bool(false),
+        // Route-list rows default to an unconfigured (empty) list; the
+        // summary equals the empty-list display so reset round-trips.
+        SettingKind::RouteList { .. } => SettingValue::String(MEDIA_ROUTE_LIST_EMPTY.to_string()),
     }
 }
 
@@ -1340,6 +1574,62 @@ mod tests {
                 }
                 ("compaction_status", SettingKind::Status) => {}
 
+                // Media-understanding settings: SHELL-owned, no UiConfig mirror.
+                // Defaults match `PagerLocalSnapshot::default()` and the shell's
+                // `MediaUnderstandingConfig::default()` resolution.
+                ("media_understanding_enabled", SettingKind::Bool { default }) => {
+                    assert!(
+                        !*default,
+                        "media_understanding_enabled registry default must be false"
+                    );
+                }
+                ("media_auto_enrich", SettingKind::Bool { default }) => {
+                    assert!(
+                        !*default,
+                        "media_auto_enrich registry default must be false"
+                    );
+                }
+                ("media_compaction_enrichment", SettingKind::Bool { default }) => {
+                    assert!(
+                        !*default,
+                        "media_compaction_enrichment registry default must be false"
+                    );
+                }
+                ("media_unknown_policy", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "pass_through",
+                        "media_unknown_policy registry default must be 'pass_through'"
+                    );
+                }
+                ("media_preflight_policy", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "best_effort",
+                        "media_preflight_policy registry default must be 'best_effort'"
+                    );
+                }
+                ("media_max_output_chars", SettingKind::Int { default, .. }) => {
+                    assert_eq!(
+                        *default, 20_000,
+                        "media_max_output_chars registry default must be 20000"
+                    );
+                }
+                ("media_max_aux_tokens_per_call", SettingKind::Int { default, .. }) => {
+                    assert_eq!(
+                        *default, 8_192,
+                        "media_max_aux_tokens_per_call registry default must be 8192"
+                    );
+                }
+                ("media_max_media_bytes", SettingKind::Int { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        256 * 1024 * 1024,
+                        "media_max_media_bytes registry default must be 256 MiB"
+                    );
+                }
+                ("media_image_routes", SettingKind::RouteList { .. }) => {}
+                ("media_audio_routes", SettingKind::RouteList { .. }) => {}
+                ("media_video_routes", SettingKind::RouteList { .. }) => {}
+
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
                      matching arm in defaults_match_ui_config_default. Add an arm.",
@@ -1427,6 +1717,8 @@ mod tests {
                     // `DynamicEnum` and read-only `Status` rows use strings.
                     | (SettingKind::DynamicEnum { .. }, SettingValue::String(_))
                     | (SettingKind::Status, SettingValue::String(_))
+                    // Route-list rows carry a string route summary.
+                    | (SettingKind::RouteList { .. }, SettingValue::String(_))
             );
             assert!(
                 kind_matches,
@@ -1704,8 +1996,11 @@ mod tests {
     fn default_value_for_returns_kind_default() {
         let reg = SettingsRegistry::defaults();
         for meta in reg.all() {
-            // Group/status rows have no meaningful configurable default.
-            if matches!(meta.kind, SettingKind::Group { .. } | SettingKind::Status) {
+            // Group/status/route-list rows have no meaningful configurable default.
+            if matches!(
+                meta.kind,
+                SettingKind::Group { .. } | SettingKind::Status | SettingKind::RouteList { .. }
+            ) {
                 continue;
             }
             let v = default_value_for(meta);

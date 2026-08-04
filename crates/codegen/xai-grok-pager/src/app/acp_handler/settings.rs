@@ -1,6 +1,47 @@
 use super::*;
 use serde::Deserialize;
 
+/// Handle `x.ai/config_changed` — the shell's watcher/reloader broadcasts an
+/// accepted configuration section to IPC clients. PR 9 consumes the
+/// `media_understanding` section to refresh open settings modals and the
+/// route editors without a restart; other sections are no-ops for now.
+///
+/// The shell only broadcasts ACCEPTED sections (post-`normalize_validate`,
+/// accepted-hash LKG), so re-reading from disk here cannot surface an invalid
+/// edit. No `.lkg` sidecar is involved.
+pub(super) fn handle_config_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
+        tracing::warn!("Failed to parse x.ai/config_changed");
+        return false;
+    };
+    if payload.get("section").and_then(|s| s.as_str()) != Some("media_understanding") {
+        return false;
+    }
+    // The reloader already validated and hot-swapped the shell-side backend;
+    // refresh the pager's in-memory snapshot so the settings modal and route
+    // editors reflect the accepted state.
+    app.media_understanding_config =
+        crate::app::event_loop::load_initial_media_understanding_config();
+    crate::app::dispatch::refresh_open_settings_modals(app);
+    tracing::info!("media understanding config refreshed via x.ai/config_changed");
+    true
+}
+
+/// Handle `x.ai/media/update` — optional machine-wide media availability
+/// refresh for leader-client UI. Re-reads the accepted config and refreshes
+/// open settings modals/availability; unknown payloads are no-ops.
+pub(super) fn handle_media_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(_payload) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
+        tracing::warn!("Failed to parse x.ai/media/update");
+        return false;
+    };
+    app.media_understanding_config =
+        crate::app::event_loop::load_initial_media_understanding_config();
+    crate::app::dispatch::refresh_open_settings_modals(app);
+    tracing::info!("media understanding config refreshed via x.ai/media/update");
+    true
+}
+
 /// Handle `x.ai/models/update` — model list changed (etag-triggered refresh).
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {

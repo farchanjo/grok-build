@@ -30,6 +30,34 @@ mod yolo_toggle_report_tests {
 /// Best-effort removal of this session's per-session scratch staging on
 /// teardown. A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
+
+/// Media artifact store housekeeping at a safe session save/close boundary
+/// (plan section 11.3).
+///
+/// Commits refs/index state, then runs conservative GC. Only ever called
+/// after every media write and ref update has been persisted (the actor loop
+/// serializes commands, so the last possible media write happens before a
+/// Shutdown command or channel close is processed). Never fails the
+/// shutdown: errors are logged and skipped.
+fn media_artifact_housekeeping(session: &SessionActor) {
+    let session_dir = crate::session::persistence::session_dir(&session.session_info);
+    let Ok(store) = crate::session::media::MediaArtifactStore::open(&session_dir) else {
+        return;
+    };
+    match store.housekeep_at_close() {
+        Ok(report) => tracing::info!(
+            session_id = %session.session_info.id,
+            removed_objects = report.removed_objects,
+            retained_objects = report.retained_objects,
+            "media artifact store housekeeping at session close",
+        ),
+        Err(error) => tracing::warn!(
+            session_id = %session.session_info.id,
+            %error,
+            "media artifact store housekeeping failed at session close",
+        ),
+    }
+}
 impl SessionActor {
     /// Serialize terminal task-wake admission with interactive cancellation.
     pub(super) async fn admit_task_completion_wake(
@@ -168,6 +196,9 @@ async fn stop_after_indeterminate_compaction(session: &SessionActor) {
         .feedback_manager
         .shutdown(session.upload_queue.get())
         .await;
+    // Commit refs/index and run conservative media GC at the safe save/close
+    // boundary (plan 11.3); never deletes store-written objects.
+    media_artifact_housekeeping(session);
     cleanup_session_scratch(session);
 }
 
@@ -201,6 +232,28 @@ async fn shutdown_workflows(session: &SessionActor) {
         }
         Err(_) => tracing::warn!("workflow shutdown persistence flush timed out"),
     }
+}
+/// Run a consented sample-media route test against one configured route.
+///
+/// Delegates to the session's media-understanding backend
+/// (`ShellMediaUnderstandingBackend::test_route`), which applies the full
+/// permission/consent/ZDR/credential/transport/budget gate stack and returns
+/// a non-secret summary. Fails closed when media understanding is not
+/// available for this session.
+pub(super) async fn test_media_route(
+    session: &SessionActor,
+    category: xai_grok_tools::media::domain::MediaCategory,
+    route_index: usize,
+    path: String,
+) -> Result<String, String> {
+    let Some(context) = session.media_understanding_context.as_ref() else {
+        return Err("media understanding is not available for this session".to_string());
+    };
+    context
+        .backend
+        .test_route(category, route_index, path)
+        .await
+        .map_err(|e| e.to_string())
 }
 pub(super) async fn run_session(
     session: Arc<SessionActor>,
@@ -539,6 +592,9 @@ pub(super) async fn run_session(
                         if let Some(cancel) = &session.sync_loop_cancel {
                             cancel.cancel();
                         }
+                        // Commit refs/index and run conservative media GC at
+                        // the safe save/close boundary (plan 11.3).
+                        media_artifact_housekeeping(&session);
                         cleanup_session_scratch(&session);
                         return;
                     };
@@ -700,6 +756,9 @@ pub(super) async fn run_session(
                         if !session.startup_hints.is_subagent {
                             session.persist_background_task_manifest().await;
                         }
+                        // Commit refs/index and run conservative media GC at
+                        // the safe save/close boundary (plan 11.3).
+                        media_artifact_housekeeping(&session);
                         cleanup_session_scratch(&session);
                         return;
                     };
@@ -1368,6 +1427,19 @@ pub(super) async fn run_session(
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
                                 let result = s.handle_repair_history(dry_run).await;
+                                let _ = respond_to.send(result);
+                            });
+                        }
+                        SessionCommand::TestMediaRoute {
+                            category,
+                            route_index,
+                            path,
+                            respond_to,
+                        } => {
+                            let s = session.clone();
+                            tokio::task::spawn_local(async move {
+                                let result =
+                                    test_media_route(&s, category, route_index, path).await;
                                 let _ = respond_to.send(result);
                             });
                         }
@@ -2449,6 +2521,9 @@ pub(super) async fn run_session(
                             if !session.startup_hints.is_subagent {
                                 session.persist_background_task_manifest().await;
                             }
+                            // Commit refs/index and run conservative media GC at
+                            // the safe save/close boundary (plan 11.3).
+                            media_artifact_housekeeping(&session);
                             // Clean up scratch directory (pre-edit file copies).
                             cleanup_session_scratch(&session);
                             return;
@@ -2457,6 +2532,12 @@ pub(super) async fn run_session(
                             // Adopt the new compaction config at a safe actor mailbox point.
                             // Preserves threshold/memory/timing/two-pass state.
                             session.update_compaction_config(*compaction);
+                        }
+                        SessionCommand::UpdateMediaUnderstandingConfig { media } => {
+                            // Adopt the new media understanding config at a safe actor
+                            // mailbox point. The session re-validates and hot-swaps the
+                            // backend route/policy snapshot and the decision snapshot.
+                            session.update_media_understanding_config(*media);
                         }
                     }
             }

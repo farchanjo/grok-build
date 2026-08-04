@@ -3,6 +3,12 @@
 //! Pass1 summarizes ~95% of history (by estimated-token weight) → NOTE₁.
 //! Pass2 rewrites NOTE₁ + the ~5% tail into the successor-visible NOTE₂.
 //! Sampling lives in [`super::compaction`]; this module has no I/O.
+//!
+//! PR 8 coordinate invariant: the split is computed on the RAW conversation
+//! (so the NOTE₁ staleness fingerprint and the pass-2 live coordinates stay
+//! in the same item space), and the media-enrichment preflight preserves item
+//! count and order — so the same split index is always a valid boundary on
+//! the enriched snapshot too.
 
 use xai_chat_state::estimate_item_tokens;
 use xai_grok_inference_types::ConversationItem;
@@ -271,6 +277,7 @@ pub(crate) fn build_two_pass_pass2_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_inference_types::ContentPart;
 
     #[test]
     fn split_leaves_tail_when_possible() {
@@ -381,5 +388,40 @@ mod tests {
                 .last()
                 .is_some_and(|t| t.contains("special compaction case"))
         );
+    }
+
+    #[test]
+    fn raw_computed_split_stays_valid_on_enriched_snapshot() {
+        let mut raw_user = ConversationItem::user("describe this");
+        raw_user.add_image("data:image/png;base64,AAAA");
+        let raw = vec![
+            ConversationItem::system("sys"),
+            raw_user,
+            ConversationItem::assistant("a"),
+            ConversationItem::user("tail"),
+        ];
+        let split = split_conversation_for_two_pass(&raw, TWO_PASS_DEFAULT_SPLIT_FRACTION);
+        assert!(!split.prefix.is_empty() && !split.tail.is_empty());
+
+        // A pairing-safe enrichment keeps item count and order, so the raw
+        // split index stays a valid boundary on the enriched snapshot (the
+        // PR 8 coordinate agreement pass1/pass2 relies on).
+        let enriched = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user_with_parts(vec![ContentPart::Text {
+                text: std::sync::Arc::<str>::from(
+                    "<media_semantics category=\"image\" provider=\"xai\" model=\"vision\" \
+                     strategy=\"native\"><description>syntax error</description></media_semantics>",
+                ),
+            }]),
+            ConversationItem::assistant("a"),
+            ConversationItem::user("tail"),
+        ];
+        assert_eq!(raw.len(), enriched.len(), "enrichment preserves item count");
+        assert!(split.split_idx <= enriched.len());
+        let prefix = &enriched[..split.split_idx];
+        let tail = &enriched[split.split_idx..];
+        assert_eq!(prefix.len(), split.prefix.len());
+        assert_eq!(tail.len(), split.tail.len());
     }
 }

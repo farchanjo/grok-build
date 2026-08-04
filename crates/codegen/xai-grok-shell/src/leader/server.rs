@@ -393,6 +393,7 @@ fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
                 | "x.ai/models/update"
                 | "x.ai/mcp/servers_updated"
                 | "x.ai/announcements/update"
+                | "x.ai/media/update"
         )
     )
 }
@@ -6328,6 +6329,11 @@ mod tests {
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"x.ai/announcements/update","params":{}}"#
+        )));
+        // PR 9: the optional machine-wide media notification is broadcast so
+        // route editors / status badges refresh on every leader client.
+        assert!(is_machine_wide_broadcast_notification(&pv(
+            r#"{"jsonrpc":"2.0","method":"x.ai/media/update","params":{}}"#
         )));
         assert!(is_machine_wide_broadcast_notification(&pv(
             r#"{"jsonrpc":"2.0","method":"_x.ai/sessions/changed","params":{}}"#

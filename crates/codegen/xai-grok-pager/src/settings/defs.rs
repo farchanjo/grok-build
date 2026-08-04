@@ -547,6 +547,54 @@ const COMPACTION_TRIGGER_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+/// Media-understanding `active_model_unknown_policy` catalog.
+/// Canonicals match the shell's `ActiveModelUnknownPolicy` serde names.
+const MEDIA_UNKNOWN_POLICY_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "pass_through",
+        display: "Pass through",
+        description: "Send media directly to the model when its modality support is unknown (image-compatibility default).",
+    },
+    EnumChoice {
+        canonical: "delegate",
+        display: "Delegate",
+        description: "Analyze through the configured routes when the active model's support is unknown.",
+    },
+    EnumChoice {
+        canonical: "prompt",
+        display: "Prompt",
+        description: "Ask you how to handle the media each time.",
+    },
+    EnumChoice {
+        canonical: "block",
+        display: "Block",
+        description: "Send neither the media nor a delegation.",
+    },
+];
+
+/// Media-understanding `compaction_preflight_policy` catalog.
+const MEDIA_PREFLIGHT_POLICY_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "best_effort",
+        display: "Best effort",
+        description: "Use cached or fresh semantics where available; preserve placeholders on failure.",
+    },
+    EnumChoice {
+        canonical: "strict",
+        display: "Strict",
+        description: "Fail the compaction attempt when required media semantics cannot be produced.",
+    },
+];
+
+// Int bounds for the media-understanding limits surfaced in the modal.
+// Positive, bounded, and consistent with the shell's u64 limit validation.
+pub(crate) const MEDIA_MAX_OUTPUT_CHARS_MIN: i64 = 512;
+pub(crate) const MEDIA_MAX_OUTPUT_CHARS_MAX: i64 = 1_000_000;
+pub(crate) const MEDIA_MAX_AUX_TOKENS_PER_CALL_MIN: i64 = 128;
+pub(crate) const MEDIA_MAX_AUX_TOKENS_PER_CALL_MAX: i64 = 100_000;
+pub(crate) const MEDIA_MAX_MEDIA_BYTES_MIN: i64 = 1024;
+pub(crate) const MEDIA_MAX_MEDIA_BYTES_MAX: i64 = 4 * 1024 * 1024 * 1024;
+
 /// Build the catalog. Called once at process start via
 /// `SettingsRegistry::defaults()`.
 pub fn default_settings() -> Vec<SettingMeta> {
@@ -1720,6 +1768,215 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Whether automatic compaction is currently idle or running.",
             keywords: &["status", "runtime", "live"],
             kind: SettingKind::Status,
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // ── Media understanding ──────────────────────────────────────────
+        //
+        // SHELL-owned: persisted to `[media_understanding]` in config.toml
+        // through the typed shell setters (`settings_writes.rs`). The
+        // reloader hot-swaps accepted changes live (`ConfigUpdate::MediaUnderstanding`),
+        // so nothing here is restart-required. Routes store catalog model IDs
+        // only — never credentials. `allow_unknown_capability` /
+        // `force_unsupported_capability` are TUI-user-only toggles that never
+        // appear in tool arguments and can never bypass managed policy, ZDR,
+        // disclosure consent, credentials, transport, or budgets.
+        SettingMeta {
+            key: "media_understanding_enabled",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Enable media understanding",
+            description: "Master switch for delegating media analysis to separately configured capable models. Off omits the analyze_media tool.",
+            keywords: &[
+                "media",
+                "understanding",
+                "image",
+                "audio",
+                "video",
+                "analysis",
+                "analyze",
+                "enabled",
+                "enable",
+            ],
+            kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_auto_enrich",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Auto-enrich attachments",
+            description: "When the active session model cannot natively understand an attachment, delegate it through the configured routes automatically.",
+            keywords: &[
+                "media",
+                "auto",
+                "enrich",
+                "enrichment",
+                "attachment",
+                "image",
+                "delegate",
+                "automatic",
+            ],
+            kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_compaction_enrichment",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Enrich before compaction",
+            description: "Convert media into durable semantics before text-only compaction requests are built.",
+            keywords: &[
+                "media",
+                "compaction",
+                "enrich",
+                "preflight",
+                "summarize",
+                "summary",
+            ],
+            kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_unknown_policy",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Unknown modality policy",
+            description: "What happens when the active session model's support for a media modality is unknown.",
+            keywords: &[
+                "media", "unknown", "policy", "modality", "pass", "delegate", "prompt", "block",
+            ],
+            kind: SettingKind::Enum {
+                default: "pass_through",
+                choices: MEDIA_UNKNOWN_POLICY_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_preflight_policy",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Compaction preflight policy",
+            description: "How compaction enrichment failures are handled.",
+            keywords: &[
+                "media",
+                "preflight",
+                "policy",
+                "compaction",
+                "best",
+                "effort",
+                "strict",
+            ],
+            kind: SettingKind::Enum {
+                default: "best_effort",
+                choices: MEDIA_PREFLIGHT_POLICY_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_max_output_chars",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Max output chars",
+            description: "Cap on the delegated semantics text produced per analysis.",
+            keywords: &["media", "max", "output", "chars", "limit", "semantics"],
+            kind: SettingKind::Int {
+                default: 20_000,
+                min: MEDIA_MAX_OUTPUT_CHARS_MIN,
+                max: MEDIA_MAX_OUTPUT_CHARS_MAX,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_max_aux_tokens_per_call",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Max auxiliary tokens",
+            description: "Per-delegate token budget for media analysis.",
+            keywords: &["media", "aux", "auxiliary", "tokens", "budget", "limit"],
+            kind: SettingKind::Int {
+                default: 8_192,
+                min: MEDIA_MAX_AUX_TOKENS_PER_CALL_MIN,
+                max: MEDIA_MAX_AUX_TOKENS_PER_CALL_MAX,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_max_media_bytes",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Max media bytes",
+            description: "Per-source byte cap accepted for analysis.",
+            keywords: &["media", "max", "bytes", "size", "limit"],
+            kind: SettingKind::Int {
+                default: 256 * 1024 * 1024,
+                min: MEDIA_MAX_MEDIA_BYTES_MIN,
+                max: MEDIA_MAX_MEDIA_BYTES_MAX,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // Three route-list editors: image, audio, video. Each opens a
+        // sub-pane supporting add/remove/reorder, model + strategy editing,
+        // Unknown-acknowledge, high-friction Force-Unsupported, status badges,
+        // and a consented sample-media route test.
+        SettingMeta {
+            key: "media_image_routes",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Image routes",
+            description: "Ordered delegate routes for image understanding. routes[0] is primary; later entries are fallbacks.",
+            keywords: &[
+                "media", "image", "routes", "route", "delegate", "vision", "model",
+            ],
+            kind: SettingKind::RouteList {
+                category: xai_grok_tools::media::domain::MediaCategory::Image,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_audio_routes",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Audio routes",
+            description: "Ordered delegate routes for audio understanding. routes[0] is primary; later entries are fallbacks.",
+            keywords: &[
+                "media",
+                "audio",
+                "routes",
+                "route",
+                "delegate",
+                "transcription",
+                "model",
+            ],
+            kind: SettingKind::RouteList {
+                category: xai_grok_tools::media::domain::MediaCategory::Audio,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_video_routes",
+            category: SettingCategory::Media,
+            owner: SettingOwner::Shell,
+            label: "Video routes",
+            description: "Ordered delegate routes for video understanding. routes[0] is primary; later entries are fallbacks.",
+            keywords: &[
+                "media", "video", "routes", "route", "delegate", "frames", "model",
+            ],
+            kind: SettingKind::RouteList {
+                category: xai_grok_tools::media::domain::MediaCategory::Video,
+            },
             restart_required: false,
             hidden_in_minimal: false,
         },

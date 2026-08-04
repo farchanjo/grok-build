@@ -9,17 +9,18 @@ use unicode_width::UnicodeWidthStr;
 use super::state::{
     CONTENT_MIN_WIDTH, MAX_THOUGHTS_WIDTH_WIDENED_MARGIN, MODAL_TITLE, RowEntry,
     STANDARD_MAX_WIDTH, SettingsModalState, SettingsMode, SettingsModeKind,
-    TITLE_LEADING_DECORATION_W, effective_enum_choices, group_children,
+    TITLE_LEADING_DECORATION_W, effective_enum_choices, group_children, media_routes_from_snapshot,
 };
 use crate::render::line_utils::truncate_str;
 use crate::settings::{
-    OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue, StringValidator,
-    dynamic_enum_choices,
+    MediaRouteSnapshot, OwnedEnumChoice, SettingKey, SettingKind, SettingMeta, SettingValue,
+    StringValidator, dynamic_enum_choices,
 };
 use crate::theme::Theme;
 use crate::views::modal_window::{
     self, ModalContentArea, ModalSizing, ModalWindowConfig, Shortcut,
 };
+use xai_grok_tools::media::domain::{MediaCategory, MediaModalitySupport};
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -90,6 +91,30 @@ pub fn render_settings_modal(
                     MODAL_TITLE
                 }
             }
+            SettingsMode::PickingMediaRoutes { category, .. } => {
+                breadcrumb_owned = format!(
+                    "{MODAL_TITLE} {} {}",
+                    crate::glyphs::chevron(),
+                    media_category_title(*category)
+                );
+                &breadcrumb_owned
+            }
+            SettingsMode::EditingMediaRouteModel { category, .. } => {
+                breadcrumb_owned = format!(
+                    "{MODAL_TITLE} {} {}",
+                    crate::glyphs::chevron(),
+                    media_category_title(*category)
+                );
+                &breadcrumb_owned
+            }
+            SettingsMode::EditingMediaTestPath { category, .. } => {
+                breadcrumb_owned = format!(
+                    "{MODAL_TITLE} {} {}",
+                    crate::glyphs::chevron(),
+                    media_category_title(*category)
+                );
+                &breadcrumb_owned
+            }
             _ => MODAL_TITLE,
         }
     };
@@ -124,7 +149,10 @@ pub fn render_settings_modal(
     .with_compact(compact);
     let has_tip_footer = !matches!(
         state.state.mode_kind(),
-        SettingsModeKind::EditingString | SettingsModeKind::EditingInt
+        SettingsModeKind::EditingString
+            | SettingsModeKind::EditingInt
+            | SettingsModeKind::EditingMediaRouteModel
+            | SettingsModeKind::EditingMediaTestPath
     );
     let footer_lines = if has_tip_footer {
         modal_window::footer_lines_with_tip_gap(full_area, &sizing, shortcuts)
@@ -169,7 +197,10 @@ pub fn render_settings_modal(
     }
 
     let (inner_area, docs_footer_area) = match state.state.mode_kind() {
-        SettingsModeKind::EditingString | SettingsModeKind::EditingInt => (content_area, None),
+        SettingsModeKind::EditingString
+        | SettingsModeKind::EditingInt
+        | SettingsModeKind::EditingMediaRouteModel
+        | SettingsModeKind::EditingMediaTestPath => (content_area, None),
         _ => modal_window::split_content_for_tip_footer(content_area),
     };
 
@@ -178,8 +209,11 @@ pub fn render_settings_modal(
         state.state.mode_kind(),
         SettingsModeKind::PickingEnum
             | SettingsModeKind::PickingGroup
+            | SettingsModeKind::PickingMediaRoutes
             | SettingsModeKind::EditingString
             | SettingsModeKind::EditingInt
+            | SettingsModeKind::EditingMediaRouteModel
+            | SettingsModeKind::EditingMediaTestPath
     );
     match state.state.mode_kind() {
         SettingsModeKind::PickingEnum => {
@@ -192,9 +226,22 @@ pub fn render_settings_modal(
             let rects = render_picking_group(buf, inner_area, state, &theme);
             state.picker_choice_rects = rects;
         }
+        SettingsModeKind::PickingMediaRoutes => {
+            state.reset_hit_rects();
+            let rects = render_picking_media_routes(buf, inner_area, state, &theme);
+            state.picker_choice_rects = rects;
+        }
         SettingsModeKind::EditingString | SettingsModeKind::EditingInt => {
             state.reset_hit_rects();
             render_editing_value(buf, inner_area, state, &theme);
+        }
+        SettingsModeKind::EditingMediaRouteModel => {
+            state.reset_hit_rects();
+            render_editing_media_route_model(buf, inner_area, state, &theme);
+        }
+        SettingsModeKind::EditingMediaTestPath => {
+            state.reset_hit_rects();
+            render_editing_media_test_path(buf, inner_area, state, &theme);
         }
         SettingsModeKind::Browse | SettingsModeKind::FilterFocused => {
             // Clear sub-pane hit-rects from prior frames.
@@ -1383,6 +1430,461 @@ fn render_picking_group(
     rects
 }
 
+// ---------------------------------------------------------------------------
+// Media route-list editor rendering
+// ---------------------------------------------------------------------------
+
+/// Human title for a media category's route editor sub-pane.
+fn media_category_title(category: MediaCategory) -> &'static str {
+    match category {
+        MediaCategory::Image => "Image routes",
+        MediaCategory::Audio => "Audio routes",
+        MediaCategory::Video => "Video routes",
+        MediaCategory::Auto => "Media routes",
+    }
+}
+
+/// Status badge for one configured route: resolved/unresolved, modality for
+/// the category, catalog source, staleness, and credential status. Never
+/// carries credentials or provider secrets.
+fn media_route_badge(
+    state: &SettingsModalState,
+    route: &MediaRouteSnapshot,
+    category: MediaCategory,
+) -> String {
+    let Some(badge) = state.pager_snapshot.media_badges.get(&route.model) else {
+        return "unresolved".to_string();
+    };
+    let support = match category {
+        MediaCategory::Image => badge.capabilities.image,
+        MediaCategory::Audio => badge.capabilities.audio,
+        MediaCategory::Video => badge.capabilities.video,
+        MediaCategory::Auto => MediaModalitySupport::Unknown,
+    };
+    let mut parts: Vec<String> = vec![
+        match support {
+            MediaModalitySupport::Supported => "supported",
+            MediaModalitySupport::Unsupported => "unsupported",
+            MediaModalitySupport::Unknown => "unknown",
+        }
+        .to_string(),
+    ];
+    if let Some(source) = &badge.source {
+        parts.push(format!("src={source}"));
+    }
+    if badge.catalog_stale {
+        parts.push("stale".to_string());
+    }
+    if let Some(auth) = &badge.auth_status {
+        parts.push(format!("auth={auth}"));
+        // PR 9 login CTA: a route whose catalog model lacks credentials
+        // needs an actionable path to add an API key instead of a bare
+        // `auth=missing` label.
+        if auth == "missing" {
+            parts.push("login: /providers or add an API key".to_string());
+        }
+    }
+    parts.join(" ")
+}
+
+/// Render the media route-list editor sub-pane: one row per route (with
+/// strategy, badges, and capability toggles) plus a trailing "Add route" row,
+/// and a hint header. Returns per-row hit-rects.
+fn render_picking_media_routes(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &SettingsModalState,
+    theme: &Theme,
+) -> Vec<Rect> {
+    let (category, selected, force_armed) = match &state.state.mode {
+        SettingsMode::PickingMediaRoutes {
+            category,
+            selected,
+            force_armed,
+            ..
+        } => (*category, *selected, *force_armed),
+        _ => unreachable!("media routes renderer requires PickingMediaRoutes state"),
+    };
+    let routes = media_routes_from_snapshot(&state.pager_snapshot, category);
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+
+    let description = format!(
+        "routes[0] is primary; later routes are fallbacks. \
+         j/k select · r edit model · s strategy · a add · d remove · p/n reorder · \
+         x acknowledge-unknown · f force-unsupported · t test route · Esc back"
+    );
+    let header_rows = render_sub_pane_header(
+        buf,
+        area,
+        theme,
+        media_category_title(category),
+        &description,
+        2,
+    );
+    if area.height <= header_rows {
+        return Vec::new();
+    }
+    let mut y = area.y + header_rows;
+    let area_end = area.y + area.height;
+
+    let mut rects: Vec<Rect> = Vec::with_capacity(routes.len() + 1);
+    for (i, route) in routes.iter().enumerate() {
+        if y >= area_end {
+            break;
+        }
+        let is_focused = i == selected;
+        let is_hovered = !is_focused && state.hover_row == Some(i);
+        let bg = settings_list_row_bg(theme, is_focused, is_hovered);
+        let row_rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        };
+        buf.set_style(row_rect, Style::default().bg(bg));
+        rects.push(row_rect);
+
+        let marker = if is_focused {
+            crate::glyphs::filled_dot()
+        } else {
+            "\u{25CB}"
+        };
+        let marker_style = if is_focused {
+            Style::default().fg(theme.accent_user).bg(bg)
+        } else {
+            Style::default().fg(theme.gray).bg(bg)
+        };
+        let label_style = if is_focused {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary).bg(bg)
+        };
+
+        let mut value_text = media_route_badge(state, route, category);
+        if route.allow_unknown_capability {
+            value_text.push_str(" \u{2713}unknown");
+        }
+        if route.force_unsupported_capability {
+            value_text.push_str(" \u{26A0}forced");
+        }
+        let value_style = Style::default().fg(theme.accent_user).bg(bg);
+
+        buf.set_span(
+            area.x,
+            y,
+            &Span::styled(" ", label_style),
+            1.min(area.width),
+        );
+        if area.width > 1 {
+            buf.set_span(
+                area.x + 1,
+                y,
+                &Span::styled(marker, marker_style),
+                PICKER_MARKER_W.min(area.width - 1),
+            );
+        }
+        let label_x = area.x.saturating_add(PICKER_PREFIX_W);
+        let value_w = value_text.width() as u16;
+        let value_x = (area.x + area.width)
+            .saturating_sub(value_w + 1)
+            .max(label_x);
+        if value_x > label_x {
+            let label_room = (value_x - label_x).saturating_sub(1) as usize;
+            let label = format!("{}. {}", i + 1, route.model);
+            let label_text: std::borrow::Cow<'_, str> = if label.width() <= label_room {
+                std::borrow::Cow::Owned(label)
+            } else {
+                std::borrow::Cow::Owned(truncate_str(&label, label_room))
+            };
+            let label_w = (label_text.width() as u16).min((value_x - label_x).saturating_sub(1));
+            buf.set_span(
+                label_x,
+                y,
+                &Span::styled(label_text.as_ref(), label_style),
+                label_w,
+            );
+        }
+        if value_x + value_w <= area.x + area.width {
+            buf.set_span(value_x, y, &Span::styled(value_text, value_style), value_w);
+        }
+        // Strategy shown after the model id (muted).
+        let strat = route.display_strategy();
+        if area.width > PICKER_PREFIX_W + 4
+            && label_x < value_x.saturating_sub(strat.width() as u16 + 2)
+        {
+            let strat_style = Style::default().fg(theme.gray).bg(bg);
+            buf.set_span(
+                value_x.saturating_sub(strat.width() as u16 + 2),
+                y,
+                &Span::styled(strat, strat_style),
+                strat.width() as u16,
+            );
+        }
+        y = y.saturating_add(1);
+    }
+
+    // Trailing "Add route" row.
+    if y < area_end {
+        let is_focused = routes.len() == selected;
+        let is_hovered = !is_focused && state.hover_row == Some(routes.len());
+        let bg = settings_list_row_bg(theme, is_focused, is_hovered);
+        let row_rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        };
+        buf.set_style(row_rect, Style::default().bg(bg));
+        rects.push(row_rect);
+        let marker = if is_focused {
+            crate::glyphs::filled_dot()
+        } else {
+            "\u{25CB}"
+        };
+        let marker_style = if is_focused {
+            Style::default().fg(theme.accent_user).bg(bg)
+        } else {
+            Style::default().fg(theme.gray).bg(bg)
+        };
+        let label_style = if is_focused {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary).bg(bg)
+        };
+        buf.set_span(
+            area.x,
+            y,
+            &Span::styled(" ", label_style),
+            1.min(area.width),
+        );
+        if area.width > 1 {
+            buf.set_span(
+                area.x + 1,
+                y,
+                &Span::styled(marker, marker_style),
+                PICKER_MARKER_W.min(area.width - 1),
+            );
+        }
+        let label_x = area.x.saturating_add(PICKER_PREFIX_W);
+        if label_x < area.x + area.width {
+            buf.set_span(
+                label_x,
+                y,
+                &Span::styled("+ Add route", label_style),
+                area.width.saturating_sub(PICKER_PREFIX_W),
+            );
+        }
+        y = y.saturating_add(1);
+    }
+
+    // Force-Unsupported confirmation banner (two-press flow).
+    if force_armed && y < area_end {
+        let warn_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
+        buf.set_span(
+            area.x,
+            y,
+            &Span::styled(
+                " Press f again to confirm force-unsupported for this route",
+                warn_style,
+            ),
+            area.width,
+        );
+    }
+    rects
+}
+
+/// Render the route model-id editor (opened from the route sub-pane).
+fn render_editing_media_route_model(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &SettingsModalState,
+    theme: &Theme,
+) {
+    let (category, index, editor, validation_error) = match &state.state.mode {
+        SettingsMode::EditingMediaRouteModel {
+            category,
+            index,
+            editor,
+            validation_error,
+        } => (*category, *index, editor, validation_error.as_deref()),
+        _ => unreachable!("media route model renderer requires EditingMediaRouteModel state"),
+    };
+    let verb = if index.is_some() {
+        "Edit model"
+    } else {
+        "Add route"
+    };
+    render_media_editor(
+        buf,
+        area,
+        theme,
+        &format!("{verb} \u{2014} {}", media_category_title(category)),
+        "Catalog model id (stable ID; unresolved ids are preserved and shown as unresolved).",
+        editor,
+        validation_error,
+        "<type a model id>",
+    );
+}
+
+/// Render the consented sample-media route test editor.
+fn render_editing_media_test_path(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &SettingsModalState,
+    theme: &Theme,
+) {
+    let (category, consent_armed, editor) = match &state.state.mode {
+        SettingsMode::EditingMediaTestPath {
+            category,
+            editor,
+            consent_armed,
+            ..
+        } => (*category, *consent_armed, editor),
+        _ => unreachable!("media test path renderer requires EditingMediaTestPath state"),
+    };
+    let warning = if consent_armed {
+        " Press Enter again to confirm: this media's bytes are disclosed to the route provider for a permissioned, consented, budgeted analysis."
+    } else {
+        " Workspace-relative path of the media file to analyze. External disclosure consent is required before any bytes leave."
+    };
+    render_media_editor(
+        buf,
+        area,
+        theme,
+        &format!("Test route \u{2014} {}", media_category_title(category)),
+        warning,
+        editor,
+        None,
+        "<workspace-relative path>",
+    );
+}
+
+/// Shared single-line editor rendering for the media route model and test
+/// path editors (title, description, input strip with cursor, error line).
+fn render_media_editor(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    title: &str,
+    description: &str,
+    editor: &crate::input::line_editor::LineEditor,
+    validation_error: Option<&str>,
+    placeholder: &str,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let header_rows = render_sub_pane_header(buf, area, theme, title, description, 2);
+    if area.height <= header_rows {
+        return;
+    }
+    let input_y = area.y + header_rows;
+    let input_bg = theme.bg_visual;
+    let has_error = validation_error.is_some();
+    let input_fg = if has_error {
+        theme.accent_error
+    } else {
+        theme.text_primary
+    };
+    let cursor_style = Style::default().fg(theme.accent_user).bg(input_bg);
+    let input_style = Style::default().fg(input_fg).bg(input_bg);
+
+    let input_row_rect = Rect {
+        x: area.x,
+        y: input_y,
+        width: area.width,
+        height: 1,
+    };
+    buf.set_style(input_row_rect, Style::default().bg(theme.bg_base));
+
+    let input_x = area.x;
+    let buffer_room_end_x = area.x + area.width;
+    let buffer_room = buffer_room_end_x.saturating_sub(input_x) as usize;
+    if buffer_room == 0 {
+        return;
+    }
+    let input_strip_rect = Rect {
+        x: input_x,
+        y: input_y,
+        width: buffer_room as u16,
+        height: 1,
+    };
+    buf.set_style(input_strip_rect, Style::default().bg(input_bg));
+
+    let cursor_reserve = 1usize;
+    let visible_buffer_w = buffer_room.saturating_sub(cursor_reserve);
+
+    let buffer = editor.text();
+    if buffer.is_empty() {
+        if visible_buffer_w > 0 {
+            let placeholder_text: std::borrow::Cow<'_, str> =
+                if placeholder.width() <= visible_buffer_w {
+                    std::borrow::Cow::Borrowed(placeholder)
+                } else {
+                    std::borrow::Cow::Owned(truncate_str(placeholder, visible_buffer_w))
+                };
+            let placeholder_w = (placeholder_text.width() as u16).min(visible_buffer_w as u16);
+            let placeholder_style = Style::default().fg(theme.gray_dim).bg(input_bg);
+            buf.set_span(
+                input_x,
+                input_y,
+                &Span::styled(placeholder_text.as_ref(), placeholder_style),
+                placeholder_w,
+            );
+        }
+        buf.set_span(
+            input_x,
+            input_y,
+            &Span::styled(crate::glyphs::selection_bar(), cursor_style),
+            1,
+        );
+    } else {
+        let viewport = editor.viewport(buffer_room);
+        let visible = &buffer[viewport.visible_byte_range];
+        let visible_width = (visible.width() as u16).min(buffer_room as u16);
+        buf.set_span(
+            input_x,
+            input_y,
+            &Span::styled(visible, input_style),
+            visible_width,
+        );
+        let cursor_x =
+            input_x + (viewport.cursor_display_column as u16).min(buffer_room as u16 - 1);
+        buf.set_span(
+            cursor_x,
+            input_y,
+            &Span::styled(crate::glyphs::selection_bar(), cursor_style),
+            1,
+        );
+    }
+
+    if area.height > header_rows + 1
+        && let Some(err) = validation_error
+    {
+        let err_y = input_y + 1;
+        let err_style = Style::default().fg(theme.accent_error).bg(theme.bg_base);
+        let err_text: std::borrow::Cow<'_, str> = if err.width() <= area.width as usize {
+            std::borrow::Cow::Borrowed(err)
+        } else {
+            std::borrow::Cow::Owned(truncate_str(err, area.width as usize))
+        };
+        buf.set_span(
+            area.x,
+            err_y,
+            &Span::styled(err_text.as_ref(), err_style),
+            area.width,
+        );
+    }
+}
+
 /// Layout metadata for one picker choice.
 struct PickerChoiceLayout {
     height: u16,
@@ -2360,12 +2862,13 @@ pub(super) fn render_setting_row(
         value_style
     };
 
-    // Chevron for Enum/String/DynamicEnum (opens picker/editor).
+    // Chevron for Enum/String/DynamicEnum/RouteList (opens picker/editor).
     let show_chevron = matches!(
         (&meta.kind, value),
         (SettingKind::Enum { .. }, _)
             | (SettingKind::String { .. }, _)
             | (SettingKind::DynamicEnum { .. }, _)
+            | (SettingKind::RouteList { .. }, _)
     ) && !matches!(meta.kind, SettingKind::Status);
     let chevron_str = format!(" {}", crate::glyphs::chevron()); // › → > on legacy ConHost
     let chevron_w = if show_chevron {
@@ -2902,5 +3405,186 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                 id: 0,
             },
         ],
+        SettingsMode::PickingMediaRoutes { .. } => vec![
+            Shortcut {
+                label: "\u{2191}/\u{2193}/j/k nav",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "r edit / a add",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "s strategy",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "d remove",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "p/n reorder",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "x unknown",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "f force",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "t test",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Esc back",
+                clickable: false,
+                id: 0,
+            },
+        ],
+        SettingsMode::EditingMediaRouteModel { .. } => vec![
+            Shortcut {
+                label: "type model id",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Enter commit",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Esc cancel",
+                clickable: false,
+                id: 0,
+            },
+        ],
+        SettingsMode::EditingMediaTestPath { .. } => vec![
+            Shortcut {
+                label: "type workspace path",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Enter confirm",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Esc cancel",
+                clickable: false,
+                id: 0,
+            },
+        ],
+    }
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use super::*;
+    use crate::settings::{MediaModelBadge, MediaRouteSnapshot, PagerLocalSnapshot};
+
+    fn badge_state() -> SettingsModalState {
+        let snapshot = PagerLocalSnapshot {
+            media_badges: std::collections::HashMap::from([(
+                "grok-4.5".to_string(),
+                MediaModelBadge {
+                    capabilities: xai_grok_tools::media::domain::MediaCapabilities {
+                        image: MediaModalitySupport::Supported,
+                        audio: MediaModalitySupport::Unknown,
+                        video: MediaModalitySupport::Unsupported,
+                    },
+                    transport: Default::default(),
+                    source: Some("live_cache".to_string()),
+                    catalog_stale: false,
+                    auth_status: Some("credentialed".to_string()),
+                },
+            )]),
+            ..PagerLocalSnapshot::default()
+        };
+        SettingsModalState::new(
+            std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
+            xai_grok_shell::agent::config::UiConfig::default(),
+            snapshot,
+        )
+    }
+
+    fn route(model: &str) -> MediaRouteSnapshot {
+        MediaRouteSnapshot {
+            model: model.to_string(),
+            strategy: "native".to_string(),
+            allow_unknown_capability: false,
+            force_unsupported_capability: false,
+        }
+    }
+
+    /// A route whose model is absent from the catalog badge map renders as
+    /// `unresolved` (the plan's resolved/unresolved status contract).
+    #[test]
+    fn media_route_badge_unresolved_for_unknown_model() {
+        let state = badge_state();
+        let badge = media_route_badge(&state, &route("ghost-model"), MediaCategory::Image);
+        assert_eq!(badge, "unresolved");
+    }
+
+    /// A resolved route shows modality, source, and auth status badges.
+    #[test]
+    fn media_route_badge_resolved_shows_modality_source_auth() {
+        let state = badge_state();
+        let badge = media_route_badge(&state, &route("grok-4.5"), MediaCategory::Image);
+        assert!(badge.contains("supported"), "badge={badge}");
+        assert!(badge.contains("src=live_cache"), "badge={badge}");
+        assert!(badge.contains("auth=credentialed"), "badge={badge}");
+
+        // Unsupported modality for video on the same model.
+        let video = media_route_badge(&state, &route("grok-4.5"), MediaCategory::Video);
+        assert!(video.contains("unsupported"), "badge={video}");
+    }
+
+    /// FFmpeg-dependent strategies degrade gracefully: the badge never
+    /// panics when the catalog projection is absent (no FFmpeg diagnostics
+    /// path is required at render time).
+    #[test]
+    fn media_route_badge_degrades_gracefully_without_catalog() {
+        let mut state = badge_state();
+        state.pager_snapshot.media_badges.clear();
+        let badge = media_route_badge(&state, &route("any"), MediaCategory::Audio);
+        assert_eq!(badge, "unresolved");
+    }
+
+    /// A route whose model lacks credentials renders an actionable login /
+    /// API-key CTA instead of a bare `auth=missing` label.
+    #[test]
+    fn media_route_badge_shows_login_cta_when_credentials_missing() {
+        let mut state = badge_state();
+        state.pager_snapshot.media_badges.insert(
+            "no-creds-model".to_string(),
+            MediaModelBadge {
+                capabilities: xai_grok_tools::media::domain::MediaCapabilities {
+                    image: MediaModalitySupport::Supported,
+                    ..Default::default()
+                },
+                transport: Default::default(),
+                source: Some("live_cache".to_string()),
+                catalog_stale: false,
+                auth_status: Some("missing".to_string()),
+            },
+        );
+        let badge = media_route_badge(&state, &route("no-creds-model"), MediaCategory::Image);
+        assert!(badge.contains("auth=missing"), "badge={badge}");
+        assert!(
+            badge.contains("/providers") && badge.contains("API key"),
+            "missing credentials must render a login CTA, badge={badge}"
+        );
     }
 }

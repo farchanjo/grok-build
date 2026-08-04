@@ -3,7 +3,9 @@
 use super::ui::{refresh_open_settings_modals, save_success_toast};
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
+use crate::settings::MediaRouteEdit;
 use agent_client_protocol as acp;
+use xai_grok_tools::media::domain::{MediaCategory, MediaCategoryStrategy};
 
 /// Set multiline input mode — swap Enter and Shift+Enter behavior.
 ///
@@ -2397,5 +2399,409 @@ pub(in crate::app::dispatch) fn clear_compaction_fallback_model(app: &mut AppVie
         key: "compaction_fallback_model",
         value: crate::settings::SettingValue::String(String::new()),
         rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+// ---------------------------------------------------------------------------
+// Media-understanding settings
+// ---------------------------------------------------------------------------
+
+/// Canonical registry key for a media category's route list.
+pub(super) fn media_routes_key(category: MediaCategory) -> &'static str {
+    match category {
+        MediaCategory::Image => "media_image_routes",
+        MediaCategory::Audio => "media_audio_routes",
+        MediaCategory::Video => "media_video_routes",
+        MediaCategory::Auto => "media_image_routes",
+    }
+}
+
+/// Human label for a media category (used in toasts).
+fn media_category_label(category: MediaCategory) -> &'static str {
+    match category {
+        MediaCategory::Image => "Image routes",
+        MediaCategory::Audio => "Audio routes",
+        MediaCategory::Video => "Video routes",
+        MediaCategory::Auto => "Media routes",
+    }
+}
+
+/// Parse a strategy canonical into the shell/tools enum (`None`-safe).
+fn parse_media_strategy(s: &str) -> Option<MediaCategoryStrategy> {
+    match s {
+        "native" => Some(MediaCategoryStrategy::Native),
+        "transcription" => Some(MediaCategoryStrategy::Transcription),
+        "frames" => Some(MediaCategoryStrategy::Frames),
+        _ => Some(MediaCategoryStrategy::Auto),
+    }
+}
+
+/// Project the app's in-memory `[media_understanding]` routes for a category
+/// into `MediaRouteEdit` (used for rollback encoding and equality checks).
+fn app_media_routes(app: &AppView, category: MediaCategory) -> Vec<MediaRouteEdit> {
+    let slot = match category {
+        MediaCategory::Image => &app.media_understanding_config.image,
+        MediaCategory::Audio => &app.media_understanding_config.audio,
+        MediaCategory::Video => &app.media_understanding_config.video,
+        MediaCategory::Auto => return Vec::new(),
+    };
+    slot.as_ref()
+        .map(|c| {
+            c.routes
+                .iter()
+                .map(|r| MediaRouteEdit {
+                    model: r.model.clone(),
+                    strategy: r.strategy.map(|s| {
+                        match s {
+                            xai_grok_tools::media::domain::MediaCategoryStrategy::Auto => "auto",
+                            xai_grok_tools::media::domain::MediaCategoryStrategy::Native => {
+                                "native"
+                            }
+                            xai_grok_tools::media::domain::MediaCategoryStrategy::Transcription => {
+                                "transcription"
+                            }
+                            xai_grok_tools::media::domain::MediaCategoryStrategy::Frames => {
+                                "frames"
+                            }
+                        }
+                        .to_string()
+                    }),
+                    allow_unknown_capability: r.allow_unknown_capability.unwrap_or(false),
+                    force_unsupported_capability: r.force_unsupported_capability.unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Encode a route list as the JSON string carried by `Effect::PersistSetting`.
+fn encode_media_routes(routes: &[MediaRouteEdit]) -> String {
+    serde_json::to_string(routes).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// State-only mutation: replace the full route list for one category.
+pub(super) fn set_media_routes_inner(
+    app: &mut AppView,
+    category: MediaCategory,
+    new_routes: Vec<MediaRouteEdit>,
+) {
+    let slot = match category {
+        MediaCategory::Image => &mut app.media_understanding_config.image,
+        MediaCategory::Audio => &mut app.media_understanding_config.audio,
+        MediaCategory::Video => &mut app.media_understanding_config.video,
+        MediaCategory::Auto => {
+            tracing::warn!("cannot set media routes for category `auto`");
+            return;
+        }
+    };
+    if new_routes.is_empty() {
+        *slot = None;
+        return;
+    }
+    let category_cfg = slot.get_or_insert_with(Default::default);
+    category_cfg.routes = new_routes
+        .into_iter()
+        .map(|r| xai_grok_shell::agent::config::MediaRoute {
+            model: r.model,
+            strategy: r.strategy.as_deref().and_then(parse_media_strategy),
+            allow_unknown_capability: Some(r.allow_unknown_capability),
+            force_unsupported_capability: Some(r.force_unsupported_capability),
+        })
+        .collect();
+}
+
+/// Outer dispatcher for `Action::SetMediaRoutes` — persists the full category
+/// atomically through the typed shell setters.
+pub(in crate::app::dispatch) fn set_media_routes(
+    app: &mut AppView,
+    category: MediaCategory,
+    new_routes: Vec<MediaRouteEdit>,
+) -> Vec<Effect> {
+    let key = media_routes_key(category);
+    let prev = app_media_routes(app, category);
+    let prev_encoded = encode_media_routes(&prev);
+    let new_encoded = encode_media_routes(&new_routes);
+    if prev_encoded == new_encoded {
+        return vec![];
+    }
+    set_media_routes_inner(app, category, new_routes);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} {}: {}",
+        media_category_label(category),
+        if prev_encoded == "[]" {
+            "configured".to_string()
+        } else {
+            "updated".to_string()
+        }
+    ));
+    vec![Effect::PersistSetting {
+        key,
+        value: crate::settings::SettingValue::String(new_encoded),
+        rollback_value: crate::settings::SettingValue::String(prev_encoded),
+    }]
+}
+
+/// State-only mutation for the media master switch.
+pub(super) fn set_media_understanding_enabled_inner(app: &mut AppView, new: bool) {
+    app.media_understanding_config.enabled = Some(new);
+}
+/// Outer dispatcher for `Action::SetMediaUnderstandingEnabled`.
+pub(in crate::app::dispatch) fn set_media_understanding_enabled(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.media_understanding_config.enabled.unwrap_or(false);
+    if prev == new {
+        return vec![];
+    }
+    set_media_understanding_enabled_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} Media understanding: {}",
+        if new { "on" } else { "off" }
+    ));
+    vec![Effect::PersistSetting {
+        key: "media_understanding_enabled",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// State-only mutation for auto-enrich.
+pub(super) fn set_media_auto_enrich_inner(app: &mut AppView, new: bool) {
+    app.media_understanding_config.auto_enrich = Some(new);
+}
+/// Outer dispatcher for `Action::SetMediaAutoEnrich`.
+pub(in crate::app::dispatch) fn set_media_auto_enrich(app: &mut AppView, new: bool) -> Vec<Effect> {
+    let prev = app.media_understanding_config.auto_enrich.unwrap_or(false);
+    if prev == new {
+        return vec![];
+    }
+    set_media_auto_enrich_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} Auto-enrich attachments: {}",
+        if new { "on" } else { "off" }
+    ));
+    vec![Effect::PersistSetting {
+        key: "media_auto_enrich",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// State-only mutation for compaction enrichment.
+pub(super) fn set_media_compaction_enrichment_inner(app: &mut AppView, new: bool) {
+    app.media_understanding_config.compaction_enrichment = Some(new);
+}
+/// Outer dispatcher for `Action::SetMediaCompactionEnrichment`.
+pub(in crate::app::dispatch) fn set_media_compaction_enrichment(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app
+        .media_understanding_config
+        .compaction_enrichment
+        .unwrap_or(false);
+    if prev == new {
+        return vec![];
+    }
+    set_media_compaction_enrichment_inner(app, new);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} Enrich before compaction: {}",
+        if new { "on" } else { "off" }
+    ));
+    vec![Effect::PersistSetting {
+        key: "media_compaction_enrichment",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
+/// State-only mutation for the unknown-modality policy.
+pub(super) fn set_media_unknown_policy_inner(app: &mut AppView, canonical: &str) {
+    use xai_grok_shell::agent::config::ActiveModelUnknownPolicy;
+    app.media_understanding_config.active_model_unknown_policy = Some(match canonical {
+        "delegate" => ActiveModelUnknownPolicy::Delegate,
+        "prompt" => ActiveModelUnknownPolicy::Prompt,
+        "block" => ActiveModelUnknownPolicy::Block,
+        _ => ActiveModelUnknownPolicy::PassThrough,
+    });
+}
+/// Outer dispatcher for `Action::SetMediaUnknownPolicy`.
+pub(in crate::app::dispatch) fn set_media_unknown_policy(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    use xai_grok_shell::agent::config::ActiveModelUnknownPolicy;
+    let canonical: &'static str = match new.as_str() {
+        "delegate" => "delegate",
+        "prompt" => "prompt",
+        "block" => "block",
+        _ => "pass_through",
+    };
+    let prev = match app.media_understanding_config.active_model_unknown_policy {
+        Some(ActiveModelUnknownPolicy::Delegate) => "delegate",
+        Some(ActiveModelUnknownPolicy::Prompt) => "prompt",
+        Some(ActiveModelUnknownPolicy::Block) => "block",
+        _ => "pass_through",
+    };
+    if prev == canonical {
+        return vec![];
+    }
+    set_media_unknown_policy_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} Unknown modality policy: {canonical}"));
+    vec![Effect::PersistSetting {
+        key: "media_unknown_policy",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+/// State-only mutation for the compaction preflight policy.
+pub(super) fn set_media_preflight_policy_inner(app: &mut AppView, canonical: &str) {
+    use xai_grok_shell::agent::config::CompactionPreflightPolicy;
+    app.media_understanding_config.compaction_preflight_policy = Some(match canonical {
+        "strict" => CompactionPreflightPolicy::Strict,
+        _ => CompactionPreflightPolicy::BestEffort,
+    });
+}
+/// Outer dispatcher for `Action::SetMediaPreflightPolicy`.
+pub(in crate::app::dispatch) fn set_media_preflight_policy(
+    app: &mut AppView,
+    new: String,
+) -> Vec<Effect> {
+    use xai_grok_shell::agent::config::CompactionPreflightPolicy;
+    let canonical: &'static str = if new == "strict" {
+        "strict"
+    } else {
+        "best_effort"
+    };
+    let prev = match app.media_understanding_config.compaction_preflight_policy {
+        Some(CompactionPreflightPolicy::Strict) => "strict",
+        _ => "best_effort",
+    };
+    if prev == canonical {
+        return vec![];
+    }
+    set_media_preflight_policy_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!(
+        "\u{2713} Compaction preflight policy: {canonical}"
+    ));
+    vec![Effect::PersistSetting {
+        key: "media_preflight_policy",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+/// Outer dispatcher for `Action::SetMediaMaxOutputChars`.
+pub(in crate::app::dispatch) fn set_media_max_output_chars(
+    app: &mut AppView,
+    new: i64,
+) -> Vec<Effect> {
+    let prev = app
+        .media_understanding_config
+        .max_output_chars
+        .unwrap_or(20_000) as i64;
+    let new = new.clamp(
+        crate::settings::defs::MEDIA_MAX_OUTPUT_CHARS_MIN,
+        crate::settings::defs::MEDIA_MAX_OUTPUT_CHARS_MAX,
+    );
+    if prev == new {
+        return vec![];
+    }
+    app.media_understanding_config.max_output_chars = Some(new as u64);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} Max output chars: {new}"));
+    vec![Effect::PersistSetting {
+        key: "media_max_output_chars",
+        value: crate::settings::SettingValue::Int(new),
+        rollback_value: crate::settings::SettingValue::Int(prev),
+    }]
+}
+
+/// Outer dispatcher for `Action::SetMediaMaxAuxTokensPerCall`.
+pub(in crate::app::dispatch) fn set_media_max_aux_tokens_per_call(
+    app: &mut AppView,
+    new: i64,
+) -> Vec<Effect> {
+    let prev = app
+        .media_understanding_config
+        .max_aux_tokens_per_call
+        .unwrap_or(8_192) as i64;
+    let new = new.clamp(
+        crate::settings::defs::MEDIA_MAX_AUX_TOKENS_PER_CALL_MIN,
+        crate::settings::defs::MEDIA_MAX_AUX_TOKENS_PER_CALL_MAX,
+    );
+    if prev == new {
+        return vec![];
+    }
+    app.media_understanding_config.max_aux_tokens_per_call = Some(new as u64);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} Max auxiliary tokens: {new}"));
+    vec![Effect::PersistSetting {
+        key: "media_max_aux_tokens_per_call",
+        value: crate::settings::SettingValue::Int(new),
+        rollback_value: crate::settings::SettingValue::Int(prev),
+    }]
+}
+
+/// Outer dispatcher for `Action::SetMediaMaxMediaBytes`.
+pub(in crate::app::dispatch) fn set_media_max_media_bytes(
+    app: &mut AppView,
+    new: i64,
+) -> Vec<Effect> {
+    let prev = app
+        .media_understanding_config
+        .max_media_bytes
+        .unwrap_or(256 * 1024 * 1024) as i64;
+    let new = new.clamp(
+        crate::settings::defs::MEDIA_MAX_MEDIA_BYTES_MIN,
+        crate::settings::defs::MEDIA_MAX_MEDIA_BYTES_MAX,
+    );
+    if prev == new {
+        return vec![];
+    }
+    app.media_understanding_config.max_media_bytes = Some(new as u64);
+    refresh_open_settings_modals(app);
+    app.show_toast(&format!("\u{2713} Max media bytes: {new}"));
+    vec![Effect::PersistSetting {
+        key: "media_max_media_bytes",
+        value: crate::settings::SettingValue::Int(new),
+        rollback_value: crate::settings::SettingValue::Int(prev),
+    }]
+}
+
+/// Outer dispatcher for `Action::TestMediaRoute`. The path is a
+/// workspace-relative media file; the shell performs the permission,
+/// consent, ZDR, credential, transport, and budget gates before any bytes
+/// leave. URL and absolute-path forms are rejected defensively — the
+/// content-only contract permits workspace-relative paths only.
+pub(in crate::app::dispatch) fn test_media_route(
+    app: &mut AppView,
+    category: MediaCategory,
+    index: usize,
+    path: String,
+) -> Vec<Effect> {
+    if path.trim().is_empty() {
+        app.show_toast("\u{2717} Media route test: choose a media file first");
+        return vec![];
+    }
+    if path.contains("://") || path.starts_with('/') {
+        app.show_toast(
+            "\u{2717} Media route test: use a workspace-relative path, not a URL or absolute path",
+        );
+        return vec![];
+    }
+    vec![Effect::TestMediaRoute {
+        category,
+        index,
+        path,
+        session_id: app.active_session_id().map(str::to_owned),
     }]
 }

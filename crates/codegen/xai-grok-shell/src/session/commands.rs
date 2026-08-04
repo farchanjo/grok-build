@@ -338,6 +338,16 @@ pub enum SessionCommand {
         respond_to:
             oneshot::Sender<anyhow::Result<xai_chat_state::compaction_utils::HistoryRepairReport>>,
     },
+    /// Run a consented sample-media route test for one configured route
+    /// (`x.ai/media/test_route`). The actor runs the real permissioned /
+    /// consented / budgeted pipeline through the session's media
+    /// understanding backend and responds with a non-secret summary.
+    TestMediaRoute {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        route_index: usize,
+        path: String,
+        respond_to: oneshot::Sender<Result<String, String>>,
+    },
     GetRewindPoints {
         respond_to: oneshot::Sender<RewindPointsResponse>,
     },
@@ -819,5 +829,12 @@ pub enum SessionCommand {
     /// while preserving threshold/memory/timing/two-pass state.
     UpdateCompactionConfig {
         compaction: Box<crate::agent::config::CompactionConfig>,
+    },
+    /// Update `[media_understanding]` configuration for live sessions.
+    /// Broadcast to all sessions for live route/policy mutation: the
+    /// session hot-swaps the media backend's route/config snapshot at a
+    /// safe actor mailbox point (mirrors `UpdateCompactionConfig`).
+    UpdateMediaUnderstandingConfig {
+        media: Box<crate::agent::config::MediaUnderstandingConfig>,
     },
 }

@@ -87,6 +87,8 @@ fn test_app() -> AppView {
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         compaction_config: xai_grok_shell::agent::config::CompactionConfig::default(),
+        media_understanding_config:
+            xai_grok_shell::agent::config::MediaUnderstandingConfig::default(),
         cwd: PathBuf::from("/tmp"),
         project_picker_shown: true,
         project_picker_disabled: false,

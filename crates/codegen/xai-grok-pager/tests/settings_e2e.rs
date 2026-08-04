@@ -84,6 +84,19 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "compaction_primary_model",
     "compaction_fallback_model",
     "compaction_status",
+    // Media-understanding page: toggles, policies, limits, and the three
+    // category route-list editors.
+    "media_understanding_enabled",
+    "media_auto_enrich",
+    "media_compaction_enrichment",
+    "media_unknown_policy",
+    "media_preflight_policy",
+    "media_max_output_chars",
+    "media_max_aux_tokens_per_call",
+    "media_max_media_bytes",
+    "media_image_routes",
+    "media_audio_routes",
+    "media_video_routes",
 ];
 
 #[test]
@@ -293,6 +306,24 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
             assert_eq!(
                 b, expected,
                 "SetDisplayRefreshAutoCadence value differs from expected"
+            )
+        }
+        ("media_understanding_enabled", Action::SetMediaUnderstandingEnabled(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetMediaUnderstandingEnabled value differs from expected"
+            )
+        }
+        ("media_auto_enrich", Action::SetMediaAutoEnrich(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetMediaAutoEnrich value differs from expected"
+            )
+        }
+        ("media_compaction_enrichment", Action::SetMediaCompactionEnrichment(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetMediaCompactionEnrichment value differs from expected"
             )
         }
         (key, action) => panic!(
@@ -1767,10 +1798,10 @@ fn registry_kind_membership_through_pr_14() {
             SettingKind::String { .. } => "String",
             SettingKind::Enum { .. } => "Enum",
             SettingKind::Int { .. } => "Int",
-
             SettingKind::DynamicEnum { .. } => "DynamicEnum",
             SettingKind::Group { .. } => "Group",
             SettingKind::Status => "Status",
+            SettingKind::RouteList { .. } => "RouteList",
             other => panic!(
                 "registry_kind_membership: setting `{}` has unknown kind {:?} — \
                  add an arm here AND a kind-membership assertion below",
@@ -1815,6 +1846,10 @@ fn registry_kind_membership_through_pr_14() {
             "contextual_hints.small_screen",
             "contextual_hints.word_select",
             "contextual_hints.ssh_wrap",
+            // Media-understanding toggles (order-independent via BTreeSet).
+            "media_auto_enrich",
+            "media_compaction_enrichment",
+            "media_understanding_enabled",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
@@ -1835,6 +1870,8 @@ fn registry_kind_membership_through_pr_14() {
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "media_preflight_policy",
+            "media_unknown_policy",
             "permission_mode",
             "plan_mode",
             "render_mermaid",
@@ -1874,6 +1911,9 @@ fn registry_kind_membership_through_pr_14() {
         vec![
             "compaction_band_count",
             "max_thoughts_width",
+            "media_max_aux_tokens_per_call",
+            "media_max_media_bytes",
+            "media_max_output_chars",
             "scroll_lines",
             "scroll_speed",
         ],
@@ -1892,6 +1932,17 @@ fn registry_kind_membership_through_pr_14() {
         status_keys,
         vec!["compaction_status"],
         "Status kind membership drift",
+    );
+
+    let route_list_keys = by_kind.remove("RouteList").unwrap_or_default();
+    assert_eq!(
+        route_list_keys,
+        vec![
+            "media_audio_routes",
+            "media_image_routes",
+            "media_video_routes",
+        ],
+        "RouteList kind membership drift (PR 9)",
     );
 
     // No unexpected kinds.
@@ -1923,6 +1974,8 @@ fn enum_settings_membership_through_pr_14() {
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "media_preflight_policy",
+            "media_unknown_policy",
             "permission_mode",
             "plan_mode",
             "render_mermaid",
@@ -2020,6 +2073,25 @@ fn defaults_round_trip_through_registry() {
             "contextual_hints.small_screen" => SettingValue::Bool(true),
             "contextual_hints.word_select" => SettingValue::Bool(true),
             "contextual_hints.ssh_wrap" => SettingValue::Bool(true),
+            // Media-understanding defaults (match PagerLocalSnapshot::default()
+            // and the shell's MediaUnderstandingConfig resolution).
+            "media_understanding_enabled" => SettingValue::Bool(false),
+            "media_auto_enrich" => SettingValue::Bool(false),
+            "media_compaction_enrichment" => SettingValue::Bool(false),
+            "media_unknown_policy" => SettingValue::Enum("pass_through"),
+            "media_preflight_policy" => SettingValue::Enum("best_effort"),
+            "media_max_output_chars" => SettingValue::Int(20_000),
+            "media_max_aux_tokens_per_call" => SettingValue::Int(8_192),
+            "media_max_media_bytes" => SettingValue::Int(256 * 1024 * 1024),
+            "media_image_routes" => {
+                SettingValue::String(xai_grok_pager::settings::MEDIA_ROUTE_LIST_EMPTY.to_string())
+            }
+            "media_audio_routes" => {
+                SettingValue::String(xai_grok_pager::settings::MEDIA_ROUTE_LIST_EMPTY.to_string())
+            }
+            "media_video_routes" => {
+                SettingValue::String(xai_grok_pager::settings::MEDIA_ROUTE_LIST_EMPTY.to_string())
+            }
             other => panic!("test must list expected default for `{other}`"),
         }
     };
@@ -2099,7 +2171,10 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetCollapsedEditBlocks(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
-            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_)) => {}
+            | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_))
+            | SettingsKeyOutcome::Action(Action::SetMediaUnderstandingEnabled(_))
+            | SettingsKeyOutcome::Action(Action::SetMediaAutoEnrich(_))
+            | SettingsKeyOutcome::Action(Action::SetMediaCompactionEnrichment(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other
@@ -8377,5 +8452,820 @@ fn no_duplicate_session_in_both_catalogs() {
             .iter()
             .any(|choice| choice.canonical == "@session"),
         "@session should be excluded from primary when it is the fallback"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Media-understanding settings tests
+// ---------------------------------------------------------------------------
+
+/// Helper to create a settings modal state with media-understanding fields
+/// seeded (routes + catalog models with media badges).
+fn make_settings_state_with_media() -> SettingsModalState {
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![
+            (
+                "Grok 4.5".to_string(),
+                acp::ModelId::new(Arc::from("grok-4.5")),
+            ),
+            (
+                "Grok Audio".to_string(),
+                acp::ModelId::new(Arc::from("grok-audio")),
+            ),
+        ],
+        external_model_ids: std::collections::HashSet::new(),
+        media_enabled: true,
+        media_auto_enrich: true,
+        media_compaction_enrichment: true,
+        media_unknown_policy: "delegate".to_string(),
+        media_preflight_policy: "strict".to_string(),
+        media_image_routes: vec![xai_grok_pager::settings::MediaRouteSnapshot {
+            model: "grok-4.5".to_string(),
+            strategy: "native".to_string(),
+            allow_unknown_capability: true,
+            force_unsupported_capability: false,
+        }],
+        media_audio_routes: vec![xai_grok_pager::settings::MediaRouteSnapshot {
+            model: "grok-audio".to_string(),
+            strategy: "transcription".to_string(),
+            allow_unknown_capability: false,
+            force_unsupported_capability: false,
+        }],
+        media_video_routes: vec![],
+        media_badges: std::collections::HashMap::from([(
+            "grok-4.5".to_string(),
+            xai_grok_pager::settings::MediaModelBadge {
+                capabilities: xai_grok_tools::media::domain::MediaCapabilities {
+                    image: xai_grok_tools::media::domain::MediaModalitySupport::Supported,
+                    audio: xai_grok_tools::media::domain::MediaModalitySupport::Unknown,
+                    video: xai_grok_tools::media::domain::MediaModalitySupport::Unknown,
+                },
+                transport: Default::default(),
+                source: Some("live_cache".to_string()),
+                catalog_stale: false,
+                auth_status: Some("credentialed".to_string()),
+            },
+        )]),
+        ..PagerLocalSnapshot::default()
+    };
+    SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        snapshot,
+    )
+}
+
+fn focus_row(state: &mut SettingsModalState, key: &str) {
+    let idx = state
+        .rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
+        .unwrap_or_else(|| panic!("row `{key}` must be present"));
+    state.selected = idx;
+}
+
+/// Convert a `MediaRouteEdit` back into a snapshot route (used to simulate
+/// the dispatch-side snapshot refresh between consecutive key presses).
+fn route_snapshot_from_edit(
+    edit: xai_grok_pager::settings::MediaRouteEdit,
+) -> xai_grok_pager::settings::MediaRouteSnapshot {
+    xai_grok_pager::settings::MediaRouteSnapshot {
+        model: edit.model,
+        strategy: edit.strategy.unwrap_or_else(|| "auto".to_string()),
+        allow_unknown_capability: edit.allow_unknown_capability,
+        force_unsupported_capability: edit.force_unsupported_capability,
+    }
+}
+
+/// Keyboard: Space on `media_understanding_enabled` dispatches the typed
+/// setter action.
+#[test]
+fn media_enabled_keyboard_space_dispatches_setter() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_understanding_enabled");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaUnderstandingEnabled(false)) => {}
+        other => panic!("expected SetMediaUnderstandingEnabled(false), got {other:?}"),
+    }
+}
+
+/// Mouse: clicking the value cell of the already-focused Bool row toggles it
+/// (two-stage click semantics).
+#[test]
+fn media_enabled_mouse_click_toggles_in_one_click() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_understanding_enabled");
+    state.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 10,
+    };
+    state.row_rects.resize(state.rows.len(), Rect::default());
+    state
+        .value_hit_rects
+        .resize(state.rows.len(), Rect::default());
+    // The focused row is the first selectable row (Media header is first in
+    // its section, but the modal's row list includes all categories).
+    let idx = state.selected;
+    state.row_rects[idx] = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+    state.value_hit_rects[idx] = Rect {
+        x: 60,
+        y: 0,
+        width: 20,
+        height: 1,
+    };
+    // Render must have been called to fill value_hit_rects; simulate by
+    // treating the click as an indicator-cell click (col 70).
+    let out = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        70,
+        0,
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaUnderstandingEnabled(false)) => {}
+        other => panic!("expected SetMediaUnderstandingEnabled(false), got {other:?}"),
+    }
+}
+
+/// The unknown-modality policy is an Enum with the four canonical choices and
+/// the pass_through default.
+#[test]
+fn media_unknown_policy_is_enum_with_correct_choices_and_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("media_unknown_policy")
+        .expect("media_unknown_policy registered");
+    let SettingKind::Enum {
+        choices,
+        default,
+        supports_preview,
+        ..
+    } = &meta.kind
+    else {
+        panic!("media_unknown_policy must be Enum");
+    };
+    assert!(!*supports_preview, "policy commits must not live-preview");
+    assert_eq!(*default, "pass_through");
+    let canonicals: Vec<&str> = choices.iter().map(|c| c.canonical).collect();
+    for expected in ["pass_through", "delegate", "prompt", "block"] {
+        assert!(canonicals.contains(&expected), "must offer `{expected}`");
+    }
+}
+
+/// Keyboard: Enter on `media_unknown_policy` opens the enum picker; choosing
+/// a choice commits the typed setter.
+#[test]
+fn media_unknown_policy_keyboard_opens_picker_and_commits() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_unknown_policy");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "Enter must open the picker: {out:?}"
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::PickingEnum { .. }
+        ),
+        "expected PickingEnum mode"
+    );
+    // Commit the currently focused choice (delegate in the seeded snapshot).
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaUnknownPolicy(_)) => {}
+        other => panic!("expected SetMediaUnknownPolicy, got {other:?}"),
+    }
+}
+
+/// Mouse: clicking the value cell of the already-focused enum row opens its
+/// picker.
+#[test]
+fn media_unknown_policy_mouse_click_opens_picker() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_unknown_policy");
+    state.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 10,
+    };
+    state.row_rects.resize(state.rows.len(), Rect::default());
+    let idx = state.selected;
+    state.row_rects[idx] = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+    // Click on the already-selected enum row's body opens the picker.
+    let out = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        5,
+        0,
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "click must open the picker: {out:?}"
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::PickingEnum { .. }
+        ),
+        "expected PickingEnum after click"
+    );
+}
+
+/// The max output chars limit is an Int with the documented bounds.
+#[test]
+fn media_max_output_chars_is_int_with_bounds_and_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("media_max_output_chars")
+        .expect("media_max_output_chars registered");
+    let SettingKind::Int {
+        default, min, max, ..
+    } = &meta.kind
+    else {
+        panic!("media_max_output_chars must be Int");
+    };
+    assert_eq!(*default, 20_000);
+    assert!(*min > 0, "limits must be positive");
+    assert!(*max > *min);
+}
+
+/// Keyboard: Enter on `media_max_output_chars` opens the int stepper; Enter
+/// commits a typed setter.
+#[test]
+fn media_max_output_chars_keyboard_opens_stepper_and_commits() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_max_output_chars");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "Enter must open the editor: {out:?}"
+    );
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaMaxOutputChars(_)) => {}
+        other => panic!("expected SetMediaMaxOutputChars, got {other:?}"),
+    }
+}
+
+/// Mouse: clicking the int row body opens the int editor.
+#[test]
+fn media_max_output_chars_mouse_click_opens_editor() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_max_output_chars");
+    state.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 10,
+    };
+    state.row_rects.resize(state.rows.len(), Rect::default());
+    let idx = state.selected;
+    state.row_rects[idx] = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+    let out = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        5,
+        0,
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "click must open the editor: {out:?}"
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::EditingValue { .. }
+        ),
+        "expected EditingValue after click"
+    );
+}
+
+/// Keyboard: Enter on `media_image_routes` opens the route-list sub-pane.
+#[test]
+fn media_image_routes_keyboard_opens_route_sub_pane() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_image_routes");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "Enter must open the route editor: {out:?}"
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::PickingMediaRoutes {
+                category,
+                ..
+            } if category == xai_grok_tools::media::domain::MediaCategory::Image
+        ),
+        "expected PickingMediaRoutes for image, got {:?}",
+        state.mode()
+    );
+}
+
+/// Keyboard: in the route sub-pane, `s` cycles the strategy and dispatches a
+/// full-category replacement action.
+#[test]
+fn media_image_route_strategy_cycle_dispatches_action() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_image_routes");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    // Focused on route 0 (grok-4.5, strategy native). Press s → auto.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaRoutes { routes, .. }) => {
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].strategy.as_deref(), Some("auto"));
+            assert_eq!(routes[0].model, "grok-4.5");
+        }
+        other => panic!("expected SetMediaRoutes on strategy cycle, got {other:?}"),
+    }
+}
+
+/// Keyboard: `d` removes the focused route and `a` opens the add-route
+/// model editor.
+#[test]
+fn media_image_route_remove_and_add_flow() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_image_routes");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    // Remove route 0 → empty list action.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaRoutes { routes, .. }) => {
+            assert!(routes.is_empty(), "removing the only route yields []");
+        }
+        other => panic!("expected SetMediaRoutes([]) on remove, got {other:?}"),
+    }
+    // Add a route → opens the model editor.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "a must open the model editor: {out:?}"
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::EditingValue { .. }
+        ),
+        "expected model editor after a"
+    );
+}
+
+/// Keyboard: `x` toggles allow_unknown_capability (Unknown-acknowledge) and
+/// `f` requires two presses before committing force-unsupported.
+#[test]
+fn media_image_route_capability_toggles_unknown_and_forced() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_image_routes");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    // allow_unknown is seeded true → x flips it off.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaRoutes { routes, .. }) => {
+            assert!(
+                !routes[0].allow_unknown_capability,
+                "x must toggle allow_unknown off"
+            );
+        }
+        other => panic!("expected SetMediaRoutes on x, got {other:?}"),
+    }
+
+    // First f press only arms the confirmation (Changed, no action).
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "first f press must only arm the confirmation: {out:?}"
+    );
+    // Second f press commits the force-unsupported toggle.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaRoutes { routes, .. }) => {
+            assert!(
+                routes[0].force_unsupported_capability,
+                "second f press must set force_unsupported"
+            );
+        }
+        other => panic!("expected SetMediaRoutes on confirmed f, got {other:?}"),
+    }
+}
+
+/// Keyboard: `p`/`n` reorder routes; `t` opens the consented sample-media
+/// test editor whose two-step Enter flow dispatches `TestMediaRoute`.
+#[test]
+fn media_image_route_reorder_and_consented_test_flow() {
+    let mut state = make_settings_state_with_media();
+    // Seed two image routes so reorder is meaningful.
+    state.pager_snapshot.media_image_routes = vec![
+        xai_grok_pager::settings::MediaRouteSnapshot {
+            model: "grok-4.5".to_string(),
+            strategy: "native".to_string(),
+            allow_unknown_capability: false,
+            force_unsupported_capability: false,
+        },
+        xai_grok_pager::settings::MediaRouteSnapshot {
+            model: "grok-vision".to_string(),
+            strategy: "auto".to_string(),
+            allow_unknown_capability: false,
+            force_unsupported_capability: false,
+        },
+    ];
+    focus_row(&mut state, "media_image_routes");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    // Move down (n) on route 0 swaps it with route 1.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaRoutes { routes, .. }) => {
+            assert_eq!(routes.len(), 2);
+            assert_eq!(routes[0].model, "grok-vision", "n must swap routes");
+            assert_eq!(routes[1].model, "grok-4.5");
+            // Simulate the dispatch-side snapshot refresh: the real flow
+            // applies the action to app config and refreshes the modal.
+            state.pager_snapshot.media_image_routes =
+                routes.into_iter().map(route_snapshot_from_edit).collect();
+        }
+        other => panic!("expected SetMediaRoutes on reorder, got {other:?}"),
+    }
+    // Move back up (p).
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaRoutes { routes, .. }) => {
+            assert_eq!(routes[0].model, "grok-4.5", "p must swap routes back");
+        }
+        other => panic!("expected SetMediaRoutes on reorder up, got {other:?}"),
+    }
+
+    // Consented sample-media route test: t opens the path editor.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "t must open the test editor: {out:?}"
+    );
+    // Type a workspace-relative path.
+    for ch in "assets/sample.png".chars() {
+        let _ = handle_settings_key(
+            &mut state,
+            &KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+        );
+    }
+    // First Enter arms the disclosure-consent confirmation (no action).
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "first Enter must arm consent, not dispatch: {out:?}"
+    );
+    // Second Enter dispatches the consented test action.
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::TestMediaRoute {
+            category,
+            index,
+            path,
+        }) => {
+            assert_eq!(
+                category,
+                xai_grok_tools::media::domain::MediaCategory::Image
+            );
+            assert_eq!(index, 0);
+            assert_eq!(path, "assets/sample.png");
+        }
+        other => panic!("expected TestMediaRoute after consent, got {other:?}"),
+    }
+}
+
+/// Mouse: clicking a route row in the sub-pane selects it (disarming any
+/// armed confirmation).
+#[test]
+fn media_image_route_mouse_click_selects_row() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_image_routes");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    // Seed two routes and pretend the renderer filled the hit-rects.
+    state.pager_snapshot.media_image_routes = vec![
+        xai_grok_pager::settings::MediaRouteSnapshot {
+            model: "grok-4.5".to_string(),
+            strategy: "native".to_string(),
+            allow_unknown_capability: false,
+            force_unsupported_capability: false,
+        },
+        xai_grok_pager::settings::MediaRouteSnapshot {
+            model: "grok-vision".to_string(),
+            strategy: "auto".to_string(),
+            allow_unknown_capability: false,
+            force_unsupported_capability: false,
+        },
+    ];
+    let rect1 = Rect {
+        x: 0,
+        y: 3,
+        width: 80,
+        height: 1,
+    };
+    let rect2 = Rect {
+        x: 0,
+        y: 4,
+        width: 80,
+        height: 1,
+    };
+    state.picker_choice_rects = vec![rect1, rect2];
+    let out = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        5,
+        4,
+    );
+    assert!(
+        matches!(out, SettingsKeyOutcome::Changed),
+        "click must select the second route row: {out:?}"
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::PickingMediaRoutes {
+                selected: 1,
+                ..
+            }
+        ),
+        "selection must move to route 1, got {:?}",
+        state.mode()
+    );
+}
+
+/// The auto_enrich and compaction_enrichment toggles dispatch typed setters.
+#[test]
+fn media_enrich_toggles_dispatch_typed_setters() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_auto_enrich");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaAutoEnrich(false)) => {}
+        other => panic!("expected SetMediaAutoEnrich(false), got {other:?}"),
+    }
+    focus_row(&mut state, "media_compaction_enrichment");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaCompactionEnrichment(false)) => {}
+        other => panic!("expected SetMediaCompactionEnrichment(false), got {other:?}"),
+    }
+}
+
+/// Keyboard: Enter on `media_preflight_policy` opens the picker; commit
+/// dispatches the typed setter.
+#[test]
+fn media_preflight_policy_keyboard_commits() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_preflight_policy");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaPreflightPolicy(_)) => {}
+        other => panic!("expected SetMediaPreflightPolicy, got {other:?}"),
+    }
+}
+
+/// Keyboard: the audio/video route-list rows open their sub-panes.
+#[test]
+fn media_audio_and_video_route_rows_open_sub_panes() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_audio_routes");
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::PickingMediaRoutes {
+                category,
+                ..
+            } if category == xai_grok_tools::media::domain::MediaCategory::Audio
+        ),
+        "expected audio sub-pane, got {:?}",
+        state.mode()
+    );
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    // Esc back to Browse, then open the video editor.
+    let _ = handle_settings_key(&mut state, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    focus_row(&mut state, "media_video_routes");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::PickingMediaRoutes {
+                category,
+                ..
+            } if category == xai_grok_tools::media::domain::MediaCategory::Video
+        ),
+        "expected video sub-pane, got {:?}",
+        state.mode()
+    );
+}
+
+/// Keyboard: the remaining media limit steppers commit typed setters.
+#[test]
+fn media_aux_and_bytes_limit_steppers_commit() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_max_aux_tokens_per_call");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaMaxAuxTokensPerCall(_)) => {}
+        other => panic!("expected SetMediaMaxAuxTokensPerCall, got {other:?}"),
+    }
+    focus_row(&mut state, "media_max_media_bytes");
+    let _ = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    let out = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaMaxMediaBytes(_)) => {}
+        other => panic!("expected SetMediaMaxMediaBytes, got {other:?}"),
+    }
+}
+
+/// Mouse: clicking the auto-enrich Bool row's indicator toggles it.
+#[test]
+fn media_auto_enrich_mouse_click_toggles() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_auto_enrich");
+    state.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 10,
+    };
+    state.row_rects.resize(state.rows.len(), Rect::default());
+    state
+        .value_hit_rects
+        .resize(state.rows.len(), Rect::default());
+    let idx = state.selected;
+    state.row_rects[idx] = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+    state.value_hit_rects[idx] = Rect {
+        x: 60,
+        y: 0,
+        width: 20,
+        height: 1,
+    };
+    let out = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        70,
+        0,
+    );
+    match out {
+        SettingsKeyOutcome::Action(Action::SetMediaAutoEnrich(false)) => {}
+        other => panic!("expected SetMediaAutoEnrich(false), got {other:?}"),
+    }
+}
+
+/// Mouse: clicking the preflight policy enum row opens its picker.
+#[test]
+fn media_preflight_policy_mouse_click_opens_picker() {
+    let mut state = make_settings_state_with_media();
+    focus_row(&mut state, "media_preflight_policy");
+    state.list_area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 10,
+    };
+    state.row_rects.resize(state.rows.len(), Rect::default());
+    let idx = state.selected;
+    state.row_rects[idx] = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+    let out = handle_settings_mouse(
+        &mut state,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        5,
+        0,
+    );
+    assert!(matches!(out, SettingsKeyOutcome::Changed));
+    assert!(
+        matches!(
+            state.mode(),
+            xai_grok_pager::views::settings_modal::SettingsModalMode::PickingEnum { .. }
+        ),
+        "expected PickingEnum after click"
     );
 }

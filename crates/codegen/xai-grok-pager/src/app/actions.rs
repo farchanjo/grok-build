@@ -593,6 +593,42 @@ pub enum Action {
     SetCompactionFallbackModel(acp::ModelId),
     /// Clear the persisted fallback compaction model.
     ClearCompactionFallbackModel,
+    /// Toggle `[media_understanding].enabled` (master switch). SHELL-owned:
+    /// persisted via `Effect::PersistSetting` through the typed shell setter.
+    SetMediaUnderstandingEnabled(bool),
+    /// Toggle `[media_understanding].auto_enrich`.
+    SetMediaAutoEnrich(bool),
+    /// Toggle `[media_understanding].compaction_enrichment`.
+    SetMediaCompactionEnrichment(bool),
+    /// Set `[media_understanding].active_model_unknown_policy`
+    /// (`pass_through` | `delegate` | `prompt` | `block`).
+    SetMediaUnknownPolicy(String),
+    /// Set `[media_understanding].compaction_preflight_policy`
+    /// (`best_effort` | `strict`).
+    SetMediaPreflightPolicy(String),
+    /// Set `[media_understanding].max_output_chars`.
+    SetMediaMaxOutputChars(i64),
+    /// Set `[media_understanding].max_aux_tokens_per_call`.
+    SetMediaMaxAuxTokensPerCall(i64),
+    /// Set `[media_understanding].max_media_bytes`.
+    SetMediaMaxMediaBytes(i64),
+    /// Replace the full ordered route list for one concrete media category.
+    /// The route-list editors build the modified list locally and dispatch
+    /// this single action; the dispatch setter persists the whole category
+    /// atomically through the typed shell setters.
+    SetMediaRoutes {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        routes: Vec<crate::settings::MediaRouteEdit>,
+    },
+    /// Run a consented sample-media route test through the `analyze_media`
+    /// backend path. `path` is a workspace-relative media file selected by
+    /// the user; dispatch fires the ACP `x.ai/media/test_route` extension
+    /// method, degrading gracefully when the server does not implement it.
+    TestMediaRoute {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        index: usize,
+        path: String,
+    },
     /// Commit the `show_tips` preference. Persisted to `[cli].show_tips`.
     /// Restart-required — tips are resolved once at startup.
     SetShowTips(bool),
@@ -1676,6 +1712,18 @@ pub enum Effect {
         key: crate::settings::SettingKey,
         value: crate::settings::SettingValue,
         rollback_value: crate::settings::SettingValue,
+    },
+    /// Run a consented sample-media route test: forwards the user-selected
+    /// media path to the shell's `x.ai/media/test_route` extension method.
+    /// The shell performs permission, disclosure-consent, ZDR, credential,
+    /// transport, and budget checks before any bytes leave. When the server
+    /// does not implement the method, the result carries a graceful error.
+    TestMediaRoute {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        index: usize,
+        path: String,
+        /// Target session for the shell's session-scoped media backend.
+        session_id: Option<String>,
     },
     /// Send structured prompt blocks to the agent.
     /// Used for skill injection where the prompt consists of
@@ -2905,6 +2953,12 @@ pub enum TaskResult {
         key: crate::settings::SettingKey,
         rollback_value: crate::settings::SettingValue,
         error: String,
+    },
+    /// Consented sample-media route test completed. `Ok` carries a
+    /// non-secret summary; `Err` a sanitized, user-safe error message.
+    /// Never carries media bytes, prompts, or provider secrets.
+    MediaRouteTestComplete {
+        result: Result<String, String>,
     },
     /// Best-effort persist failed (cycle_mode path). Logs + toasts but
     /// does NOT roll back in-memory state.

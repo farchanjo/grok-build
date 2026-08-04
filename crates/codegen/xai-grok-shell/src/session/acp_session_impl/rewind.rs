@@ -472,6 +472,29 @@ impl SessionActor {
                 target_prompt_index: target_index,
                 created_at: chrono::Utc::now().to_rfc3339(),
             });
+
+            // Media artifact store (plan 11.3): rewind never deletes objects —
+            // it only adjusts refs and appends journal state. Record the
+            // timeline branch so the append-only media journal preserves
+            // ordering. A later explicit GC may collect objects that became
+            // unreferenced, but this operation itself unlinks nothing.
+            if let Ok(store) =
+                crate::session::media::artifacts::MediaArtifactStore::open(&session_dir)
+            {
+                if let Err(error) =
+                    store.append_journal(crate::session::media::artifacts::JournalEvent::Rewind {
+                        ts: crate::session::media::now_ts(),
+                        target_prompt_index: target_index,
+                    })
+                {
+                    tracing::warn!(
+                        ?error,
+                        target_index,
+                        session_id = %self.session_info.id,
+                        "failed to append media journal rewind marker",
+                    );
+                }
+            }
         }
 
         // Update the file state tracker to reflect the rewind.

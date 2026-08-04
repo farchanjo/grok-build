@@ -1170,28 +1170,13 @@ impl SessionActor {
         }
         self.drain_between_turn_completions().await;
         self.inject_workflow_status_reminder().await;
-        let user_message = if user_images.is_empty() {
-            user_message
-        } else if self.is_cursor_harness() {
-            self.transcribe_user_images(user_message, &user_images)
-                .await?
+        let (user_message, media_superseded) = if user_images.is_empty() {
+            (user_message, false)
         } else {
-            let session_dir =
-                crate::session::persistence::session_dir(&crate::session::info::Info {
-                    id: self.session_info.id.clone(),
-                    cwd: self.session_info.cwd.clone(),
-                });
-            crate::session::image_describe::persist_and_prepend_image_files(
-                &session_dir,
-                &user_images,
-                &user_message,
-            )
-            .map_err(|e| {
-                acp::Error::internal_error()
-                    .data(format!("failed to save user images to assets dir: {e}"))
-            })?
+            let enriched = self.enrich_user_media(user_message, &user_images).await?;
+            (enriched.text, enriched.media_superseded)
         };
-        let attached_image_refs = if self.is_cursor_harness() {
+        let attached_image_refs = if self.is_cursor_harness() || media_superseded {
             Vec::new()
         } else {
             crate::session::placeholder_images::attached_image_references(&user_images)
@@ -1246,7 +1231,7 @@ impl SessionActor {
                 }
             };
             user_chat.set_prompt_index(current_prompt_index);
-            if !self.is_cursor_harness() {
+            if !self.is_cursor_harness() && !media_superseded {
                 for image in &user_images {
                     user_chat.add_image(pick_user_image_url(image));
                 }

@@ -51,6 +51,15 @@ pub struct ForkSessionResponse {
     /// The model ID of the forked session (may differ from source if overridden)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_model_id: Option<String>,
+    /// Number of media artifact object files copied/hard-linked from the
+    /// source session's `assets/media/` store. `0` when the source had no
+    /// media store.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub media_artifacts_copied: usize,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 /// Generate a forked session ID.
@@ -103,6 +112,10 @@ pub async fn fork_session(
         // child retains pre-compaction history (the live summary is already
         // copied via chat_history.jsonl).
         copy_compaction_segments: true,
+        // Carry the parent's BLAKE3 media artifact store into the fork:
+        // immutable objects are hard-linked when possible, refs/index ride
+        // along, and the child gets fresh journals.
+        copy_media_artifacts: true,
         ..Default::default()
     };
 
@@ -160,6 +173,7 @@ pub async fn fork_session(
         new_cwd: request.new_cwd,
         parent_session_id: request.source_session_id,
         new_model_id: request.new_model_id,
+        media_artifacts_copied: result.media_artifacts_copied,
     })
 }
 
@@ -293,6 +307,7 @@ mod tests {
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: Some("grok-3".to_string()),
+            media_artifacts_copied: 5,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -305,6 +320,7 @@ mod tests {
         assert_eq!(deserialized.new_cwd, "/new/project");
         assert_eq!(deserialized.parent_session_id, "abc123");
         assert_eq!(deserialized.new_model_id, Some("grok-3".to_string()));
+        assert_eq!(deserialized.media_artifacts_copied, 5);
     }
 
     #[test]
@@ -317,10 +333,13 @@ mod tests {
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: None,
+            media_artifacts_copied: 0,
         };
 
         let json = serde_json::to_string(&response).unwrap();
         // new_model_id should not be present in JSON when None
         assert!(!json.contains("new_model_id"));
+        // zero media count is omitted for wire backward compatibility
+        assert!(!json.contains("media_artifacts_copied"));
     }
 }

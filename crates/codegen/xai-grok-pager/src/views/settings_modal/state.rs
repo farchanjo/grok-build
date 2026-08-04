@@ -8,9 +8,9 @@ use ratatui::layout::Rect;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
-    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
-    dynamic_enum_choices,
+    EnumChoice, MediaRouteEdit, MediaRouteSnapshot, OwnedEnumChoice, PagerLocalSnapshot,
+    SettingCategory, SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry,
+    StringValidator, current_value_for, dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -95,6 +95,12 @@ pub enum SettingsModalMode {
         key: SettingKey,
         child_idx: usize,
     },
+    /// Media route-list editor sub-pane for one concrete category.
+    /// `selected` indexes the route rows plus the trailing "Add route" row.
+    PickingMediaRoutes {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        selected: usize,
+    },
     /// Inline string/int editor. No live preview; Esc is a pure cancel.
     EditingValue {
         key: SettingKey,
@@ -113,8 +119,11 @@ pub(super) enum SettingsModeKind {
     FilterFocused,
     PickingEnum,
     PickingGroup,
+    PickingMediaRoutes,
     EditingString,
     EditingInt,
+    EditingMediaRouteModel,
+    EditingMediaTestPath,
 }
 
 impl SettingsState {
@@ -124,8 +133,11 @@ impl SettingsState {
             SettingsMode::FilterFocused => SettingsModeKind::FilterFocused,
             SettingsMode::PickingEnum { .. } => SettingsModeKind::PickingEnum,
             SettingsMode::PickingGroup { .. } => SettingsModeKind::PickingGroup,
+            SettingsMode::PickingMediaRoutes { .. } => SettingsModeKind::PickingMediaRoutes,
             SettingsMode::EditingString { .. } => SettingsModeKind::EditingString,
             SettingsMode::EditingInt { .. } => SettingsModeKind::EditingInt,
+            SettingsMode::EditingMediaRouteModel { .. } => SettingsModeKind::EditingMediaRouteModel,
+            SettingsMode::EditingMediaTestPath { .. } => SettingsModeKind::EditingMediaTestPath,
         }
     }
 }
@@ -144,6 +156,14 @@ pub(super) enum SettingsMode {
         key: SettingKey,
         child_idx: usize,
     },
+    /// Media route-list editor sub-pane. `selected` indexes route rows plus
+    /// the trailing implicit "Add route" row. `force_armed` tracks the
+    /// two-press high-friction Force-Unsupported confirmation.
+    PickingMediaRoutes {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        selected: usize,
+        force_armed: bool,
+    },
     EditingString {
         key: SettingKey,
         editor: LineEditor,
@@ -155,6 +175,24 @@ pub(super) enum SettingsMode {
         buffer: String,
         min: i64,
         max: i64,
+    },
+    /// Model-id editor opened from the route sub-pane. `index: None` means a
+    /// new route is being appended.
+    EditingMediaRouteModel {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        index: Option<usize>,
+        editor: LineEditor,
+        validation_error: Option<String>,
+    },
+    /// Consented sample-media route test: a workspace-relative path editor
+    /// with a two-step disclosure-consent confirmation. First Enter with a
+    /// non-empty path arms the confirmation; second Enter dispatches
+    /// `Action::TestMediaRoute`.
+    EditingMediaTestPath {
+        category: xai_grok_tools::media::domain::MediaCategory,
+        index: usize,
+        editor: LineEditor,
+        consent_armed: bool,
     },
 }
 
@@ -284,6 +322,9 @@ impl SettingsModalState {
             | SettingsMode::PickingGroup { key, .. }
             | SettingsMode::EditingString { key, .. }
             | SettingsMode::EditingInt { key, .. } => Some(*key),
+            SettingsMode::PickingMediaRoutes { .. }
+            | SettingsMode::EditingMediaRouteModel { .. }
+            | SettingsMode::EditingMediaTestPath { .. } => None,
             SettingsMode::Browse | SettingsMode::FilterFocused => None,
         };
 
@@ -338,9 +379,21 @@ impl SettingsModalState {
                 key,
                 child_idx: *child_idx,
             },
+            SettingsMode::PickingMediaRoutes {
+                category, selected, ..
+            } => SettingsModalMode::PickingMediaRoutes {
+                category: *category,
+                selected: *selected,
+            },
             SettingsMode::EditingString { key, .. } | SettingsMode::EditingInt { key, .. } => {
                 SettingsModalMode::EditingValue { key }
             }
+            SettingsMode::EditingMediaRouteModel { .. } => SettingsModalMode::EditingValue {
+                key: "media_route_model",
+            },
+            SettingsMode::EditingMediaTestPath { .. } => SettingsModalMode::EditingValue {
+                key: "media_route_test_path",
+            },
         }
     }
 
@@ -362,6 +415,8 @@ impl SettingsModalState {
         match &self.state.mode {
             SettingsMode::EditingString { editor, .. } => Some(editor.text()),
             SettingsMode::EditingInt { buffer, .. } => Some(buffer),
+            SettingsMode::EditingMediaRouteModel { editor, .. } => Some(editor.text()),
+            SettingsMode::EditingMediaTestPath { editor, .. } => Some(editor.text()),
             _ => None,
         }
     }
@@ -369,6 +424,8 @@ impl SettingsModalState {
     pub fn editing_cursor_byte(&self) -> Option<usize> {
         match &self.state.mode {
             SettingsMode::EditingString { editor, .. } => Some(editor.cursor_byte()),
+            SettingsMode::EditingMediaRouteModel { editor, .. } => Some(editor.cursor_byte()),
+            SettingsMode::EditingMediaTestPath { editor, .. } => Some(editor.cursor_byte()),
             _ => None,
         }
     }
@@ -376,6 +433,9 @@ impl SettingsModalState {
     pub fn editing_validation_error(&self) -> Option<&str> {
         match &self.state.mode {
             SettingsMode::EditingString {
+                validation_error, ..
+            } => validation_error.as_deref(),
+            SettingsMode::EditingMediaRouteModel {
                 validation_error, ..
             } => validation_error.as_deref(),
             _ => None,
@@ -543,6 +603,72 @@ impl SettingsModalState {
             min,
             max,
         };
+    }
+
+    /// Transition to the media route-list editor sub-pane for a category.
+    pub(super) fn transition_to_picking_media_routes(
+        &mut self,
+        category: xai_grok_tools::media::domain::MediaCategory,
+    ) {
+        self.state.mode = SettingsMode::PickingMediaRoutes {
+            category,
+            selected: 0,
+            force_armed: false,
+        };
+        self.hover_row = None;
+    }
+
+    /// Transition to the media route model-id editor. `index: None` appends
+    /// a new route; `Some(i)` edits the existing route at `i`.
+    pub(super) fn transition_to_editing_media_route_model(
+        &mut self,
+        category: xai_grok_tools::media::domain::MediaCategory,
+        index: Option<usize>,
+    ) {
+        let current = match index {
+            Some(i) => media_routes_from_snapshot(&self.pager_snapshot, category)
+                .get(i)
+                .map(|r| r.model.clone())
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        let mut editor = LineEditor::default();
+        editor.set_text(current);
+        self.state.mode = SettingsMode::EditingMediaRouteModel {
+            category,
+            index,
+            editor,
+            validation_error: None,
+        };
+        self.hover_row = None;
+    }
+
+    /// Transition to the consented sample-media route test editor.
+    pub(super) fn transition_to_editing_media_test_path(
+        &mut self,
+        category: xai_grok_tools::media::domain::MediaCategory,
+        index: usize,
+    ) {
+        self.state.mode = SettingsMode::EditingMediaTestPath {
+            category,
+            index,
+            editor: LineEditor::default(),
+            consent_armed: false,
+        };
+        self.hover_row = None;
+    }
+
+    /// Transition to `PickingMediaRoutes` if the focused row is a RouteList
+    /// editor. Returns `false` for any other kind.
+    pub fn try_enter_picking_media_routes(&mut self) -> bool {
+        let Some((_key, meta)) = self.focused_setting() else {
+            return false;
+        };
+        let SettingKind::RouteList { category } = &meta.kind else {
+            return false;
+        };
+        self.transition_to_picking_media_routes(*category);
+        true
     }
 
     /// Transition to `PickingEnum` if the focused row is Enum/DynamicEnum.
@@ -880,6 +1006,10 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         }
         "auto_update" => None,
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
+        // Media-understanding toggles.
+        "media_understanding_enabled" => Some(Action::SetMediaUnderstandingEnabled(new)),
+        "media_auto_enrich" => Some(Action::SetMediaAutoEnrich(new)),
+        "media_compaction_enrichment" => Some(Action::SetMediaCompactionEnrichment(new)),
         _ => None,
     }
 }
@@ -961,6 +1091,9 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "compaction_strategy" => Some(Action::SetCompactionStrategy(choice.to_string())),
         // Trigger policy: enum round-trip.
         "compaction_trigger_policy" => Some(Action::SetCompactionTriggerPolicy(choice.to_string())),
+        // --- Media-understanding settings ---
+        "media_unknown_policy" => Some(Action::SetMediaUnknownPolicy(choice.to_string())),
+        "media_preflight_policy" => Some(Action::SetMediaPreflightPolicy(choice.to_string())),
         _ => None,
     }
 }
@@ -1026,6 +1159,10 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "scroll_lines" => Some(Action::SetScrollLines(value)),
         // Compaction band count: int round-trip.
         "compaction_band_count" => Some(Action::SetCompactionBandCount(value)),
+        // Media-understanding limits.
+        "media_max_output_chars" => Some(Action::SetMediaMaxOutputChars(value)),
+        "media_max_aux_tokens_per_call" => Some(Action::SetMediaMaxAuxTokensPerCall(value)),
+        "media_max_media_bytes" => Some(Action::SetMediaMaxMediaBytes(value)),
         _ => None,
     }
 }
@@ -1083,6 +1220,72 @@ pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'s
         Some(SettingKind::Group { children }) => children,
         _ => &[],
     }
+}
+
+// ---------------------------------------------------------------------------
+// Media route-list editor helpers
+// ---------------------------------------------------------------------------
+
+/// Snapshot route rows for a media category, in configured order.
+pub(super) fn media_routes_from_snapshot(
+    snapshot: &PagerLocalSnapshot,
+    category: xai_grok_tools::media::domain::MediaCategory,
+) -> Vec<MediaRouteSnapshot> {
+    match category {
+        xai_grok_tools::media::domain::MediaCategory::Image => snapshot.media_image_routes.clone(),
+        xai_grok_tools::media::domain::MediaCategory::Audio => snapshot.media_audio_routes.clone(),
+        xai_grok_tools::media::domain::MediaCategory::Video => snapshot.media_video_routes.clone(),
+        xai_grok_tools::media::domain::MediaCategory::Auto => Vec::new(),
+    }
+}
+
+/// Convert snapshot routes into `MediaRouteEdit` for a `SetMediaRoutes`
+/// action payload.
+pub(super) fn media_route_edits_from_snapshot(
+    snapshot: &PagerLocalSnapshot,
+    category: xai_grok_tools::media::domain::MediaCategory,
+) -> Vec<MediaRouteEdit> {
+    media_routes_from_snapshot(snapshot, category)
+        .into_iter()
+        .map(|r| MediaRouteEdit {
+            model: r.model,
+            strategy: Some(r.strategy),
+            allow_unknown_capability: r.allow_unknown_capability,
+            force_unsupported_capability: r.force_unsupported_capability,
+        })
+        .collect()
+}
+
+/// Number of rows in the route sub-pane: one per route plus the trailing
+/// implicit "Add route" row.
+pub(super) fn media_route_subpane_rows(
+    snapshot: &PagerLocalSnapshot,
+    category: xai_grok_tools::media::domain::MediaCategory,
+) -> usize {
+    media_routes_from_snapshot(snapshot, category).len() + 1
+}
+
+/// Strategy canonicals allowed for a media category, in picker order.
+pub(super) fn media_strategy_choices(
+    category: xai_grok_tools::media::domain::MediaCategory,
+) -> &'static [&'static str] {
+    use xai_grok_tools::media::domain::MediaCategory;
+    match category {
+        MediaCategory::Image => &["auto", "native"],
+        MediaCategory::Audio => &["auto", "native", "transcription"],
+        MediaCategory::Video => &["auto", "native", "frames"],
+        MediaCategory::Auto => &["auto"],
+    }
+}
+
+/// Cycle a route's strategy to the next allowed canonical (wrapping).
+pub(super) fn cycle_media_strategy(
+    category: xai_grok_tools::media::domain::MediaCategory,
+    current: &str,
+) -> &'static str {
+    let choices = media_strategy_choices(category);
+    let idx = choices.iter().position(|c| *c == current).unwrap_or(0);
+    choices[(idx + 1) % choices.len()]
 }
 
 /// Whether `(key, canonical)` is gated off and must not be offered as a choice:

@@ -468,7 +468,40 @@ impl ModelsManager {
             .filter(|(_, e)| e.info.user_selectable)
             .collect();
 
-        available_models(&selectable, self.is_session_auth())
+        available_models(
+            &selectable,
+            self.is_session_auth(),
+            Some(&self.media_projection()),
+        )
+    }
+
+    /// Catalog-level media source/staleness/auth metadata for the ACP `_meta`
+    /// projection. Derived from process state: a real fetch makes the source
+    /// `remote`, a disk-cache/prefetched catalog `live_cache`, otherwise
+    /// `bundled`. Stale caches are rejected by `load_fresh`, so `catalog_stale`
+    /// is always `false` here until a stale-catalog path exists.
+    pub fn media_projection(&self) -> config::AcpMediaProjection {
+        let fetched_real = *self.inner.has_fetched_real_catalog.read();
+        let prefetched = self.inner.prefetched.read().is_some();
+        let source = if fetched_real {
+            "remote"
+        } else if prefetched {
+            "live_cache"
+        } else {
+            "bundled"
+        };
+        let auth_status =
+            if self.is_session_auth() || crate::agent::auth_method::has_xai_api_key_env() {
+                "credentialed"
+            } else {
+                "missing"
+            };
+        config::AcpMediaProjection {
+            source: Some(source.to_string()),
+            fetched_at: None,
+            catalog_stale: false,
+            auth_status: Some(auth_status.to_string()),
+        }
     }
 
     pub(crate) fn task_model_error(&self, requested: &str) -> Option<String> {
@@ -1392,8 +1425,21 @@ pub enum RefreshStrategy {
 // ── Disk cache ──────────────────────────────────────────────────────────────
 
 const MODELS_CACHE_FILE: &str = "models_cache.json";
-const MODELS_CAPABILITY_SCHEMA_VERSION: u8 = 2;
+const MODELS_CAPABILITY_SCHEMA_VERSION: u8 = 3;
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether a cached `capability_schema_version` may be loaded under the
+/// current schema (v3).
+///
+/// v2 -> v3 migration is **tolerant** (not a refetch): a v2 cache is accepted
+/// and its entries deserialize with every modality `Unknown` via the serde
+/// defaults on `ModelInfo::media_capabilities` / `media_transport`. Older
+/// (v1 and below) and newer (v4+, a future schema) caches stay cache misses,
+/// so the origin/auth/TTL guards at the call sites are never bypassed.
+fn capability_schema_loadable(version: u8) -> bool {
+    version == MODELS_CAPABILITY_SCHEMA_VERSION
+        || version == MODELS_CAPABILITY_SCHEMA_VERSION.saturating_sub(1)
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ModelsCache {
@@ -1460,11 +1506,11 @@ impl ModelsCacheManager {
             tracing::debug!("models cache version mismatch");
             return None;
         }
-        if cache.capability_schema_version != MODELS_CAPABILITY_SCHEMA_VERSION {
+        if !capability_schema_loadable(cache.capability_schema_version) {
             tracing::debug!(
                 cached = cache.capability_schema_version,
                 expected = MODELS_CAPABILITY_SCHEMA_VERSION,
-                "models cache capability schema mismatch"
+                "models cache capability schema not loadable"
             );
             return None;
         }
@@ -1484,6 +1530,9 @@ impl ModelsCacheManager {
             tracing::debug!("models cache is stale");
             return None;
         }
+        // v2 caches deserialize with modality `Unknown` (serde defaults), so a
+        // loaded v2 cache is indistinguishable from a v3 cache here; no
+        // per-entry rewrite is required.
         tracing::debug!(count = cache.models.len(), "loaded models from disk cache");
         Some(CacheResult {
             models: cache.models,
@@ -1523,8 +1572,8 @@ impl ModelsCacheManager {
         let Ok(mut cache) = serde_json::from_slice::<ModelsCache>(&data) else {
             return;
         };
-        if cache.capability_schema_version != MODELS_CAPABILITY_SCHEMA_VERSION {
-            tracing::debug!("models cache TTL renewal skipped: capability schema mismatch");
+        if !capability_schema_loadable(cache.capability_schema_version) {
+            tracing::debug!("models cache TTL renewal skipped: capability schema not loadable");
             return;
         }
         if cache.auth_method.as_ref() != Some(expected_auth) {
@@ -1535,6 +1584,9 @@ impl ModelsCacheManager {
             tracing::debug!("models cache TTL renewal skipped: origin mismatch");
             return;
         }
+        // Normalize a tolerated v2 cache to the current schema on renewal so
+        // subsequent loads are unambiguous.
+        cache.capability_schema_version = MODELS_CAPABILITY_SCHEMA_VERSION;
         cache.fetched_at = Utc::now();
         self.atomic_write_async(&cache).await;
         tracing::debug!("models cache TTL renewed");
@@ -1988,9 +2040,14 @@ pub(crate) fn resolve_default_model(
 }
 
 /// Filter hidden and auth-gated entries out of `catalog` and convert to ACP wire format.
+///
+/// `media_projection` carries catalog-level media source/staleness/auth
+/// metadata projected onto every row's `_meta`; `None` defaults to the
+/// bundled-catalog story.
 pub fn available_models(
     catalog: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
+    media_projection: Option<&config::AcpMediaProjection>,
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
@@ -1999,7 +2056,7 @@ pub fn available_models(
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    config::to_acp_model_info(&visible)
+    config::to_acp_model_info(&visible, media_projection)
 }
 
 /// Compiled glob matcher shared by `allowed_models`, `disabled_models`, and
@@ -3187,29 +3244,120 @@ mod tests {
         assert!(mgr.inner.etag.read().is_none());
     }
 
-    /// A cache written by the previous capability schema must be treated as a
-    /// miss even when every other cache guard matches.
+    /// A cache written by a capability schema older than the previous one
+    /// (v1 and below) must be treated as a miss even when every other cache
+    /// guard matches. v2 is tolerated (tolerant v2 -> v3 migration), but
+    /// anything older is rejected fail-closed.
     #[test]
-    fn reasoning_effort_cache_ignores_capability_schema_mismatch() {
+    fn cache_ignores_capability_schema_older_than_previous() {
         let mgr = test_manager();
         let tmp = tempfile::TempDir::new().unwrap();
         let cache = test_cache_manager(tmp.path());
         let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
-        let old_schema = ModelsCache {
+        let too_old_schema = ModelsCache {
             fetched_at: Utc::now(),
-            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION - 1,
+            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION.saturating_sub(2),
             grok_version: Some(xai_grok_version::VERSION.to_string()),
             auth_method: Some(auth_method),
             origin: Some(mgr.cache_origin()),
             etag: Some("etag-old-capabilities".into()),
             models: make_prefetched(&["grok-old-capabilities"]),
         };
-        cache.atomic_write(&old_schema);
+        cache.atomic_write(&too_old_schema);
 
         mgr.reload_from_cache_manager(&cache);
 
         assert!(!mgr.models().contains_key("grok-old-capabilities"));
         assert!(mgr.inner.etag.read().is_none());
+    }
+
+    /// The v2 -> v3 migration is tolerant: a v2 cache is accepted and its
+    /// entries deserialize with every media modality `Unknown` (serde
+    /// defaults). Origin/auth/TTL guards still apply; only the schema gate
+    /// relaxes one version.
+    #[test]
+    fn reload_from_disk_cache_accepts_v2_schema_with_unknown_modality() {
+        let mgr = test_manager();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache = test_cache_manager(tmp.path());
+        let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
+        let v2_schema = ModelsCache {
+            fetched_at: Utc::now(),
+            capability_schema_version: MODELS_CAPABILITY_SCHEMA_VERSION - 1,
+            grok_version: Some(xai_grok_version::VERSION.to_string()),
+            auth_method: Some(auth_method),
+            origin: Some(mgr.cache_origin()),
+            etag: Some("etag-v2".into()),
+            models: make_prefetched(&["grok-v2-migrated"]),
+        };
+        cache.atomic_write(&v2_schema);
+
+        mgr.reload_from_cache_manager(&cache);
+
+        assert!(
+            mgr.models().contains_key("grok-v2-migrated"),
+            "a v2 cache must load under the tolerant v2 -> v3 migration"
+        );
+        assert_eq!(
+            mgr.inner.etag.read().as_deref(),
+            Some("etag-v2"),
+            "the adopted etag keeps refresh_if_new_etag accurate"
+        );
+        let entry = &mgr.models()["grok-v2-migrated"];
+        use xai_grok_tools::media::MediaModalitySupport;
+        assert_eq!(
+            entry.info.media_capabilities.image,
+            MediaModalitySupport::Unknown,
+            "v2 entries predate modality metadata and must load with Unknown"
+        );
+        assert_eq!(
+            entry.info.media_capabilities.audio,
+            MediaModalitySupport::Unknown,
+            "v2 entries predate modality metadata and must load with Unknown"
+        );
+        assert_eq!(
+            entry.info.media_transport,
+            config::MediaTransportCapabilities::default(),
+            "v2 entries predate transport metadata and must load with the all-false default"
+        );
+    }
+
+    /// A v3 cache round-trips media metadata through persist + load.
+    #[test]
+    fn cache_persist_round_trips_media_metadata_v3() {
+        use xai_grok_tools::media::MediaModalitySupport as M;
+        let mgr = test_manager();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache = test_cache_manager(tmp.path());
+        let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
+
+        let mut prefetched = make_prefetched(&["grok-media"]);
+        let entry = prefetched.get_mut("grok-media").unwrap();
+        entry.info.media_capabilities = config::MediaCapabilities {
+            image: M::Supported,
+            audio: M::Unknown,
+            video: M::Unsupported,
+        };
+        entry.info.media_transport = config::MediaTransportCapabilities {
+            image_inline: true,
+            transcription_endpoint: true,
+            ..Default::default()
+        };
+        cache.persist(
+            &prefetched,
+            Some("etag-media"),
+            auth_method,
+            &mgr.cache_origin(),
+        );
+
+        mgr.reload_from_cache_manager(&cache);
+
+        let entry = &mgr.models()["grok-media"];
+        assert_eq!(entry.info.media_capabilities.image, M::Supported);
+        assert_eq!(entry.info.media_capabilities.video, M::Unsupported);
+        assert!(entry.info.media_transport.image_inline);
+        assert!(entry.info.media_transport.transcription_endpoint);
+        assert!(!entry.info.media_transport.native_video);
     }
 
     /// A cache persisted by a process running with different credentials
@@ -3708,14 +3856,16 @@ mod tests {
         catalog.insert("openai-test".to_owned(), entry.clone());
 
         assert!(
-            available_models(&catalog, false).is_empty(),
+            available_models(&catalog, false, None).is_empty(),
             "an OpenAI model without its own key must not enter /model"
         );
         assert!(task_model_error_for_catalog("openai-test", &catalog, false).is_some());
 
         entry.api_key = Some("configured-for-test".to_owned());
         catalog.insert("openai-test".to_owned(), entry);
-        assert!(available_models(&catalog, false).contains_key(&acp::ModelId::new("openai-test")));
+        assert!(
+            available_models(&catalog, false, None).contains_key(&acp::ModelId::new("openai-test"))
+        );
         assert!(task_model_error_for_catalog("openai-test", &catalog, false).is_none());
         assert!(
             task_model_error_for_catalog("openai:gpt-unverified-preview", &catalog, false)
@@ -3773,6 +3923,8 @@ mod tests {
             stream_tool_calls: None,
             laziness_detector: config::LazinessDetectorPerModelConfig::default(),
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
+            media_capabilities: config::MediaCapabilities::default(),
+            media_transport: config::MediaTransportCapabilities::default(),
         }
     }
 

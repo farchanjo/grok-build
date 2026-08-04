@@ -1477,6 +1477,73 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             // Status is read-only, no action to dispatch
             panic!("compaction_status is read-only, no action to dispatch");
         }
+        // Media-understanding settings: drive each setter away from its default.
+        "media_understanding_enabled" => {
+            let _ = dispatch(Action::SetMediaUnderstandingEnabled(true), app);
+        }
+        "media_auto_enrich" => {
+            let _ = dispatch(Action::SetMediaAutoEnrich(true), app);
+        }
+        "media_compaction_enrichment" => {
+            let _ = dispatch(Action::SetMediaCompactionEnrichment(true), app);
+        }
+        "media_unknown_policy" => {
+            let _ = dispatch(Action::SetMediaUnknownPolicy("delegate".to_string()), app);
+        }
+        "media_preflight_policy" => {
+            let _ = dispatch(Action::SetMediaPreflightPolicy("strict".to_string()), app);
+        }
+        "media_max_output_chars" => {
+            let _ = dispatch(Action::SetMediaMaxOutputChars(25_000), app);
+        }
+        "media_max_aux_tokens_per_call" => {
+            let _ = dispatch(Action::SetMediaMaxAuxTokensPerCall(9_000), app);
+        }
+        "media_max_media_bytes" => {
+            let _ = dispatch(Action::SetMediaMaxMediaBytes(300 * 1024 * 1024), app);
+        }
+        "media_image_routes" => {
+            let _ = dispatch(
+                Action::SetMediaRoutes {
+                    category: xai_grok_tools::media::domain::MediaCategory::Image,
+                    routes: vec![crate::settings::MediaRouteEdit {
+                        model: "grok-4.5".to_string(),
+                        strategy: None,
+                        allow_unknown_capability: false,
+                        force_unsupported_capability: false,
+                    }],
+                },
+                app,
+            );
+        }
+        "media_audio_routes" => {
+            let _ = dispatch(
+                Action::SetMediaRoutes {
+                    category: xai_grok_tools::media::domain::MediaCategory::Audio,
+                    routes: vec![crate::settings::MediaRouteEdit {
+                        model: "grok-audio".to_string(),
+                        strategy: Some("transcription".to_string()),
+                        allow_unknown_capability: false,
+                        force_unsupported_capability: false,
+                    }],
+                },
+                app,
+            );
+        }
+        "media_video_routes" => {
+            let _ = dispatch(
+                Action::SetMediaRoutes {
+                    category: xai_grok_tools::media::domain::MediaCategory::Video,
+                    routes: vec![crate::settings::MediaRouteEdit {
+                        model: "grok-video".to_string(),
+                        strategy: Some("frames".to_string()),
+                        allow_unknown_capability: false,
+                        force_unsupported_capability: false,
+                    }],
+                },
+                app,
+            );
+        }
         other => {
             panic!(
                 "move_setting_away_from_default: no arm for `{other}`. \
@@ -3729,4 +3796,224 @@ fn compaction_session_default_resolves_correctly() {
 
     assert_eq!(resolved.models.len(), 1);
     assert!(resolved.models[0].is_session());
+}
+
+// ---------------------------------------------------------------------------
+// Media-understanding dispatch tests
+// ---------------------------------------------------------------------------
+
+/// `Action::SetMediaUnderstandingEnabled` optimistically mutates the
+/// in-memory `[media_understanding]` config and emits a `PersistSetting`
+/// effect with the prior value as the rollback.
+#[test]
+fn media_enabled_dispatch_mutates_and_persists() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetMediaUnderstandingEnabled(true), &mut app);
+    assert_eq!(
+        app.media_understanding_config.enabled,
+        Some(true),
+        "optimistic in-memory mutation must apply"
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::PersistSetting {
+                key: "media_understanding_enabled",
+                value: crate::settings::SettingValue::Bool(true),
+                rollback_value: crate::settings::SettingValue::Bool(false),
+            }]
+        ),
+        "unexpected effects: {effects:?}",
+    );
+}
+
+/// A `SettingPersistFailed` for a media route-list key rolls the in-memory
+/// route list back to the previous value (atomic optimistic-preview rollback).
+#[test]
+fn media_route_persist_failure_rolls_back_in_memory() {
+    use crate::settings::{MediaRouteEdit, SettingValue};
+    let mut app = test_app_with_agent();
+    let route = MediaRouteEdit {
+        model: "grok-4.5".to_string(),
+        strategy: Some("native".to_string()),
+        allow_unknown_capability: false,
+        force_unsupported_capability: false,
+    };
+    let encoded = serde_json::to_string(&vec![route.clone()]).unwrap();
+    // Optimistic set.
+    let _ = dispatch(
+        Action::SetMediaRoutes {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            routes: vec![route],
+        },
+        &mut app,
+    );
+    assert!(
+        app.media_understanding_config
+            .image
+            .as_ref()
+            .is_some_and(|c| c.routes.len() == 1),
+        "optimistic image route must be applied"
+    );
+    // Persist failure → rollback to the empty list.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SettingPersistFailed {
+            key: "media_image_routes",
+            rollback_value: SettingValue::String(encoded.clone()),
+            error: "disk full".into(),
+        }),
+        &mut app,
+    );
+    // Rollback restores the in-memory state encoded in rollback_value.
+    let restored = serde_json::from_str::<Vec<MediaRouteEdit>>(&encoded).unwrap();
+    let _ = apply_setting_rollback(
+        &mut app,
+        "media_image_routes",
+        &SettingValue::String(encoded),
+    );
+    assert!(
+        app.media_understanding_config
+            .image
+            .as_ref()
+            .is_some_and(|c| c.routes.len() == restored.len()),
+        "rollback must restore the encoded route list"
+    );
+    assert!(
+        effects.is_empty()
+            || effects
+                .iter()
+                .all(|e| matches!(e, Effect::PersistSetting { .. })),
+        "rollback must not loop: {effects:?}"
+    );
+}
+
+/// `Action::SetMediaRoutes` round-trips: dispatching the reset action restores
+/// the route list to the unconfigured default.
+#[test]
+fn media_route_reset_round_trip_restores_default() {
+    use crate::settings::MediaRouteEdit;
+    let mut app = test_app_with_agent();
+    let _ = dispatch(
+        Action::SetMediaRoutes {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            routes: vec![MediaRouteEdit {
+                model: "grok-4.5".to_string(),
+                strategy: None,
+                allow_unknown_capability: false,
+                force_unsupported_capability: false,
+            }],
+        },
+        &mut app,
+    );
+    let pager = build_pager_snapshot(&app);
+    assert_eq!(
+        pager.media_image_routes.len(),
+        1,
+        "configured image route must appear in the snapshot"
+    );
+    let _ = dispatch(
+        Action::SetMediaRoutes {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            routes: vec![],
+        },
+        &mut app,
+    );
+    let pager = build_pager_snapshot(&app);
+    assert!(
+        pager.media_image_routes.is_empty(),
+        "empty route list must be reflected in the snapshot"
+    );
+}
+
+/// `Action::TestMediaRoute` rejects an empty path defensively — no effect is
+/// emitted and the toast explains the requirement.
+#[test]
+fn test_media_route_rejects_empty_path() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::TestMediaRoute {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            index: 0,
+            path: "   ".to_string(),
+        },
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "empty path must not forward a route test, got {effects:?}"
+    );
+}
+
+/// `Action::TestMediaRoute` rejects URL forms defensively (the content-only
+/// contract permits workspace-relative paths only).
+#[test]
+fn test_media_route_rejects_url_path() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::TestMediaRoute {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            index: 0,
+            path: "https://example.com/pic.png".to_string(),
+        },
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "URL path must not forward a route test, got {effects:?}"
+    );
+}
+
+/// `Action::TestMediaRoute` rejects absolute paths defensively (only
+/// workspace-relative paths are permitted).
+#[test]
+fn test_media_route_rejects_absolute_path() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::TestMediaRoute {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            index: 0,
+            path: "/tmp/pic.png".to_string(),
+        },
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "absolute path must not forward a route test, got {effects:?}"
+    );
+}
+
+/// A valid workspace-relative path forwards the consented route test (with
+/// the active session targeted so the shell backend can run it).
+#[test]
+fn test_media_route_forwards_workspace_relative_path() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::TestMediaRoute {
+            category: xai_grok_tools::media::domain::MediaCategory::Image,
+            index: 0,
+            path: "assets/sample.png".to_string(),
+        },
+        &mut app,
+    );
+    assert_eq!(effects.len(), 1, "expected one TestMediaRoute effect");
+    match &effects[0] {
+        Effect::TestMediaRoute {
+            category,
+            index,
+            path,
+            session_id,
+        } => {
+            assert_eq!(
+                *category,
+                xai_grok_tools::media::domain::MediaCategory::Image
+            );
+            assert_eq!(*index, 0);
+            assert_eq!(path, "assets/sample.png");
+            assert!(
+                session_id.is_some(),
+                "route test must target the active session"
+            );
+        }
+        other => panic!("expected Effect::TestMediaRoute, got {other:?}"),
+    }
 }

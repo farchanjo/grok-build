@@ -134,6 +134,10 @@ pub(crate) struct AgentRebuildSpec {
     pub owner_session_id: Option<String>,
     pub parent_scheduler_handle:
         Option<xai_grok_tools::implementations::grok_build::scheduler::types::SchedulerHandle>,
+    /// Optional session-scoped media-understanding backend, injected into the
+    /// toolset's resources so the deferred `analyze_media` tool can delegate.
+    pub media_understanding_backend:
+        Option<Arc<dyn xai_grok_tools::media::backend::MediaUnderstandingBackend>>,
 }
 impl AgentRebuildSpec {
     /// Build a fresh [`Agent`] from this spec and an [`AgentDefinition`].
@@ -231,6 +235,7 @@ impl AgentRebuildSpec {
             system_prompt_label,
             owner_session_id,
             parent_scheduler_handle,
+            media_understanding_backend,
         } = self.as_ref();
         let _ = mcp_state;
         #[allow(unused_variables)]
@@ -295,6 +300,9 @@ impl AgentRebuildSpec {
         }
         if let Some(attribution_callback) = attribution_callback.clone() {
             builder = builder.with_attribution_callback(attribution_callback);
+        }
+        if let Some(media_backend) = media_understanding_backend.clone() {
+            builder = builder.with_media_understanding_backend(media_backend);
         }
         if let Some(bash_params_json) = tool_params_json.bash.clone() {
             builder = builder.with_bash_params(bash_params_json);
@@ -447,6 +455,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         owner_session_id: Some("test-session".to_string()),
         parent_scheduler_handle: None,
+        media_understanding_backend: None,
     })
 }
 #[cfg(test)]
@@ -467,6 +476,23 @@ mod tests {
             .find(|definition| definition.function.name == task_name)
             .and_then(|definition| definition.function.description)
             .expect("GrokBuild Task description should be present")
+    }
+    /// Build an agent from `spec` and return the names of its listed tools.
+    ///
+    /// A free `async fn` (rather than an async closure borrowing the spec)
+    /// so the returned future has a concrete lifetime and `spec` may be any
+    /// short-lived `&Arc<AgentRebuildSpec>`.
+    async fn built_tool_names(spec: &Arc<AgentRebuildSpec>) -> Vec<String> {
+        let agent = spec
+            .build_agent(AgentDefinition::default_grok_build())
+            .await
+            .expect("agent should build");
+        agent
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect()
     }
     #[tokio::test(flavor = "current_thread")]
     async fn rebuild_projects_fresh_public_model_keys_into_task_description() {
@@ -529,5 +555,173 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    /// The injected media-understanding backend conditionally lists the
+    /// `analyze_media` tool: omitted without a backend, listed when the
+    /// availability snapshot has an eligible route, omitted when the backend
+    /// reports disabled (PR 7, plan §4.2).
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_backend_gates_analyze_media_tool_listing() {
+        use xai_grok_tools::media::backend::{
+            MediaBackendAvailability, MediaUnderstandingBackend, MediaUnderstandingError,
+            MediaUnderstandingRequest, MediaUnderstandingResult,
+        };
+        use xai_grok_tools::media::domain::MediaCategory;
+
+        struct ReadyBackend;
+        #[async_trait::async_trait]
+        impl MediaUnderstandingBackend for ReadyBackend {
+            async fn analyze(
+                &self,
+                _request: MediaUnderstandingRequest,
+            ) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
+                Ok(MediaUnderstandingResult {
+                    results: vec![],
+                    attempts: vec![],
+                })
+            }
+            fn availability(&self) -> MediaBackendAvailability {
+                MediaBackendAvailability {
+                    enabled: true,
+                    supported_categories: vec![MediaCategory::Image],
+                    routes: vec![],
+                }
+            }
+        }
+        struct UnavailableBackend;
+        #[async_trait::async_trait]
+        impl MediaUnderstandingBackend for UnavailableBackend {
+            async fn analyze(
+                &self,
+                _request: MediaUnderstandingRequest,
+            ) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
+                Ok(MediaUnderstandingResult {
+                    results: vec![],
+                    attempts: vec![],
+                })
+            }
+            fn availability(&self) -> MediaBackendAvailability {
+                MediaBackendAvailability {
+                    enabled: false,
+                    supported_categories: vec![],
+                    routes: vec![],
+                }
+            }
+        }
+
+        let previous = std::env::var_os("GROK_DISABLE_MEDIA_ANALYZE");
+        unsafe {
+            std::env::remove_var("GROK_DISABLE_MEDIA_ANALYZE");
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                // No backend: omitted.
+                let plain = test_rebuild_spec_default();
+                let names = built_tool_names(&plain).await;
+                assert!(
+                    !names.iter().any(|n| n == "analyze_media"),
+                    "no backend must not list analyze_media, got {names:?}"
+                );
+
+                // Ready backend: listed.
+                let mut ready = test_rebuild_spec_default();
+                Arc::get_mut(&mut ready)
+                    .expect("uniquely owned test spec")
+                    .media_understanding_backend = Some(Arc::new(ReadyBackend));
+                let names = built_tool_names(&ready).await;
+                assert!(
+                    names.iter().any(|n| n == "analyze_media"),
+                    "ready backend must list analyze_media, got {names:?}"
+                );
+
+                // Unavailable backend: omitted.
+                let mut disabled = test_rebuild_spec_default();
+                Arc::get_mut(&mut disabled)
+                    .expect("uniquely owned test spec")
+                    .media_understanding_backend = Some(Arc::new(UnavailableBackend));
+                let names = built_tool_names(&disabled).await;
+                assert!(
+                    !names.iter().any(|n| n == "analyze_media"),
+                    "disabled backend must not list analyze_media, got {names:?}"
+                );
+            })
+            .await;
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("GROK_DISABLE_MEDIA_ANALYZE", value);
+            },
+            None => {}
+        }
+    }
+
+    /// The `GROK_DISABLE_MEDIA_ANALYZE` kill switch omits the tool even when
+    /// the injected backend reports an eligible route (plan §5.5).
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_analyze_kill_switch_omits_tool() {
+        use xai_grok_tools::media::backend::{
+            MediaBackendAvailability, MediaUnderstandingBackend, MediaUnderstandingError,
+            MediaUnderstandingRequest, MediaUnderstandingResult,
+        };
+        use xai_grok_tools::media::domain::MediaCategory;
+
+        struct ReadyBackend;
+        #[async_trait::async_trait]
+        impl MediaUnderstandingBackend for ReadyBackend {
+            async fn analyze(
+                &self,
+                _request: MediaUnderstandingRequest,
+            ) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
+                Ok(MediaUnderstandingResult {
+                    results: vec![],
+                    attempts: vec![],
+                })
+            }
+            fn availability(&self) -> MediaBackendAvailability {
+                MediaBackendAvailability {
+                    enabled: true,
+                    supported_categories: vec![MediaCategory::Image],
+                    routes: vec![],
+                }
+            }
+        }
+
+        let previous = std::env::var_os("GROK_DISABLE_MEDIA_ANALYZE");
+        unsafe {
+            std::env::set_var("GROK_DISABLE_MEDIA_ANALYZE", "1");
+        }
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                // Constructed inside the LocalSet: `test_rebuild_spec_default`
+                // creates a `LocalTerminalBackend::new_local` that calls
+                // `spawn_local`, which requires a LocalSet context.
+                let mut ready = test_rebuild_spec_default();
+                Arc::get_mut(&mut ready)
+                    .expect("uniquely owned test spec")
+                    .media_understanding_backend = Some(Arc::new(ReadyBackend));
+                let agent = ready
+                    .build_agent(AgentDefinition::default_grok_build())
+                    .await
+                    .expect("agent should build");
+                let names: Vec<String> = agent
+                    .tool_definitions()
+                    .await
+                    .into_iter()
+                    .map(|d| d.function.name)
+                    .collect();
+                assert!(
+                    !names.iter().any(|n| n == "analyze_media"),
+                    "kill switch must omit analyze_media even with a ready backend, got {names:?}"
+                );
+            })
+            .await;
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("GROK_DISABLE_MEDIA_ANALYZE", value);
+            },
+            None => {}
+        }
     }
 }

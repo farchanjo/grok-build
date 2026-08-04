@@ -3615,3 +3615,287 @@ fn kill_switched_cold_cwd_stays_allowed_through_plugins_config_read() {
             "gate must still allow the kill-switched folder after the config read"
         );
 }
+
+// ---------------------------------------------------------------------------
+// Media-understanding env-var precedence and legacy-chain tests.
+// ---------------------------------------------------------------------------
+
+/// Mutex to serialize tests that touch the GROK_MEDIA_* / GROK_IMAGE_DESCRIPTION_MODEL
+/// env vars. Env vars are process-global, so parallel tests race on them.
+static MEDIA_ROUTES_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` with the given env vars set (`Some`) or removed (`None`),
+/// restoring the previous values on exit (even on panic).
+fn with_media_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+    let _guard = MEDIA_ROUTES_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut previous = Vec::new();
+    for (name, value) in vars {
+        previous.push((*name, std::env::var(name).ok()));
+        match value {
+            Some(v) => unsafe { std::env::set_var(name, v) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    for (name, value) in previous {
+        match value {
+            Some(prev) => unsafe { std::env::set_var(name, prev) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+    result.unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
+/// The env vars that could leak into the legacy image chain or plural routes.
+const MEDIA_ENV_VARS: &[&str] = &[
+    "GROK_MEDIA_IMAGE_ROUTES",
+    "GROK_MEDIA_AUDIO_ROUTES",
+    "GROK_MEDIA_VIDEO_ROUTES",
+    "GROK_IMAGE_DESCRIPTION_MODEL",
+];
+
+fn media_config_from_toml(src: &str) -> crate::agent::config::MediaUnderstandingConfig {
+    let root: toml::Value = toml::from_str(src).unwrap();
+    let parsed: crate::agent::config::MediaUnderstandingConfig = root
+        .get("media_understanding")
+        .cloned()
+        .map(|v| v.try_into().expect("valid [media_understanding] section"))
+        .unwrap_or_default();
+    parsed.resolve_with_env(&root, None)
+}
+
+#[test]
+fn parse_media_route_list_env_accepts_toml_inline_array() {
+    let routes =
+        super::parse_media_route_list_env(r#"[{ model = "grok-4.5", strategy = "auto" }]"#)
+            .expect("TOML inline array must parse");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].model, "grok-4.5");
+    assert_eq!(
+        routes[0].strategy,
+        Some(crate::agent::config::MediaCategoryStrategy::Auto)
+    );
+}
+
+#[test]
+fn parse_media_route_list_env_accepts_json_array() {
+    let routes = super::parse_media_route_list_env(
+        r#"[{"model":"grok-4.5","strategy":"transcription"}]"#,
+    )
+    .expect("JSON array must parse");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].model, "grok-4.5");
+    assert_eq!(
+        routes[0].strategy,
+        Some(crate::agent::config::MediaCategoryStrategy::Transcription)
+    );
+}
+
+#[test]
+fn parse_media_route_list_env_rejects_malformed_input() {
+    for bad in ["not-a-list@@", "", "42", "{ model = }", "grok-4.5"] {
+        assert!(
+            super::parse_media_route_list_env(bad).is_none(),
+            "malformed env value `{bad}` must degrade to None, never panic"
+        );
+    }
+}
+
+#[test]
+fn media_routes_env_overrides_config_toml() {
+    with_media_env(
+        &[
+            ("GROK_MEDIA_IMAGE_ROUTES", Some(r#"[{ model = "env-route" }]"#)),
+            ("GROK_MEDIA_AUDIO_ROUTES", None),
+            ("GROK_MEDIA_VIDEO_ROUTES", None),
+            ("GROK_IMAGE_DESCRIPTION_MODEL", None),
+        ],
+        || {
+            let src = r#"
+[media_understanding.image]
+routes = [{ model = "config-route" }]
+"#;
+            let cfg = media_config_from_toml(src);
+            assert_eq!(
+                cfg.image.as_ref().unwrap().routes[0].model,
+                "env-route",
+                "plural env var must beat config.toml"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_env_overrides_legacy_chain() {
+    with_media_env(
+        &[
+            ("GROK_MEDIA_IMAGE_ROUTES", Some(r#"[{ model = "env-route" }]"#)),
+            ("GROK_MEDIA_AUDIO_ROUTES", None),
+            ("GROK_MEDIA_VIDEO_ROUTES", None),
+            ("GROK_IMAGE_DESCRIPTION_MODEL", Some("legacy-env")),
+        ],
+        || {
+            let cfg = media_config_from_toml("");
+            assert_eq!(
+                cfg.image.as_ref().unwrap().routes[0].model,
+                "env-route",
+                "plural env var must override the legacy GROK_IMAGE_DESCRIPTION_MODEL"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_legacy_chain_uses_image_description_model() {
+    with_media_env(
+        &[("GROK_MEDIA_IMAGE_ROUTES", None), ("GROK_IMAGE_DESCRIPTION_MODEL", None)],
+        || {
+            let src = r#"
+[models]
+image_description = "legacy-config-model"
+"#;
+            let cfg = media_config_from_toml(src);
+            assert_eq!(
+                cfg.image.as_ref().unwrap().routes[0].model,
+                "legacy-config-model",
+                "legacy chain: [models].image_description must become the image route"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_legacy_chain_env_beats_config() {
+    with_media_env(
+        &[
+            ("GROK_MEDIA_IMAGE_ROUTES", None),
+            ("GROK_IMAGE_DESCRIPTION_MODEL", Some("env-legacy-model")),
+        ],
+        || {
+            let src = r#"
+[models]
+image_description = "config-legacy-model"
+"#;
+            let cfg = media_config_from_toml(src);
+            assert_eq!(
+                cfg.image.as_ref().unwrap().routes[0].model,
+                "env-legacy-model",
+                "legacy chain: GROK_IMAGE_DESCRIPTION_MODEL beats config.toml"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_legacy_chain_remote_beats_default() {
+    with_media_env(
+        &[
+            ("GROK_MEDIA_IMAGE_ROUTES", None),
+            ("GROK_MEDIA_AUDIO_ROUTES", None),
+            ("GROK_MEDIA_VIDEO_ROUTES", None),
+            ("GROK_IMAGE_DESCRIPTION_MODEL", None),
+        ],
+        || {
+            let root: toml::Value = toml::from_str("").unwrap();
+            let remote = crate::util::config::RemoteSettings {
+                image_description_model: Some("remote-legacy-model".to_owned()),
+                ..Default::default()
+            };
+            let cfg = crate::agent::config::MediaUnderstandingConfig::default()
+                .resolve_with_env(&root, Some(&remote));
+            assert_eq!(
+                cfg.image.as_ref().unwrap().routes[0].model,
+                "remote-legacy-model",
+                "legacy chain: remote image_description_model must apply"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_legacy_chain_default_fallback() {
+    with_media_env(
+        &[("GROK_MEDIA_IMAGE_ROUTES", None), ("GROK_IMAGE_DESCRIPTION_MODEL", None)],
+        || {
+            let cfg = media_config_from_toml("");
+            assert_eq!(
+                cfg.image.as_ref().unwrap().routes[0].model,
+                crate::models::default_image_description_model(),
+                "legacy chain must end at the compiled default"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_absent_audio_video_mean_disabled() {
+    with_media_env(
+        &[
+            ("GROK_MEDIA_IMAGE_ROUTES", None),
+            ("GROK_MEDIA_AUDIO_ROUTES", None),
+            ("GROK_MEDIA_VIDEO_ROUTES", None),
+            ("GROK_IMAGE_DESCRIPTION_MODEL", None),
+        ],
+        || {
+            let cfg = media_config_from_toml("");
+            assert!(
+                cfg.audio.as_ref().is_none_or(|c| c.routes.is_empty()),
+                "absent audio routes must mean disabled"
+            );
+            assert!(
+                cfg.video.as_ref().is_none_or(|c| c.routes.is_empty()),
+                "absent video routes must mean disabled"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_malformed_env_degrades_gracefully() {
+    with_media_env(
+        &[
+            ("GROK_MEDIA_IMAGE_ROUTES", Some("@@not-a-route-list@@")),
+            ("GROK_MEDIA_AUDIO_ROUTES", Some("[{ model = }")),
+            ("GROK_MEDIA_VIDEO_ROUTES", None),
+            ("GROK_IMAGE_DESCRIPTION_MODEL", None),
+        ],
+        || {
+            let src = r#"
+[media_understanding.image]
+routes = [{ model = "config-route" }]
+"#;
+            let cfg = media_config_from_toml(src);
+            assert_eq!(
+                cfg.image.as_ref().unwrap().routes[0].model,
+                "config-route",
+                "malformed plural env must keep the config.toml value and never panic"
+            );
+            assert!(
+                cfg.audio.as_ref().is_none_or(|c| c.routes.is_empty()),
+                "malformed audio env must leave the category disabled"
+            );
+        },
+    );
+}
+
+#[test]
+fn media_routes_env_vars_do_not_leak_between_categories() {
+    with_media_env(
+        &[
+            ("GROK_MEDIA_IMAGE_ROUTES", Some(r#"[{ model = "img-route" }]"#)),
+            ("GROK_MEDIA_AUDIO_ROUTES", None),
+            ("GROK_MEDIA_VIDEO_ROUTES", Some(r#"[{ model = "vid-route", strategy = "frames" }]"#)),
+            ("GROK_IMAGE_DESCRIPTION_MODEL", None),
+        ],
+        || {
+            let cfg = media_config_from_toml("");
+            assert_eq!(cfg.image.as_ref().unwrap().routes[0].model, "img-route");
+            assert_eq!(cfg.video.as_ref().unwrap().routes[0].model, "vid-route");
+            assert!(
+                cfg.audio.as_ref().is_none_or(|c| c.routes.is_empty()),
+                "audio must stay disabled when only image/video env vars are set"
+            );
+        },
+    );
+}
+

@@ -1281,6 +1281,7 @@ pub(crate) async fn run(
     // stays sans-IO.
     app.current_ui = load_initial_ui_config();
     app.compaction_config = load_initial_compaction_config();
+    app.media_understanding_config = load_initial_media_understanding_config();
     // Field-tolerant: a whole-`UiConfig` default (malformed unrelated `[ui]`
     // field) must not wipe a valid `show_timeline` or leave appearance /
     // cache / `current_ui` disagreeing — `/timeline` and the rail all read
@@ -2790,6 +2791,26 @@ pub(crate) fn load_initial_compaction_config() -> xai_grok_shell::agent::config:
     };
     value
         .try_into::<CompactionConfig>()
+        .ok()
+        .filter(|config| config.normalize_validate().is_ok())
+        .unwrap_or_default()
+}
+
+/// Load the shell-owned `[media_understanding]` section into an in-memory
+/// snapshot for the pager (mirrors `load_initial_compaction_config`).
+/// `normalize_validate` re-checks the section, so a corrupt external edit
+/// degrades to defaults rather than poisoning the modal.
+pub(crate) fn load_initial_media_understanding_config()
+-> xai_grok_shell::agent::config::MediaUnderstandingConfig {
+    use xai_grok_shell::agent::config::MediaUnderstandingConfig;
+    let Ok(root) = xai_grok_shell::config::load_effective_config() else {
+        return MediaUnderstandingConfig::default();
+    };
+    let Some(value) = root.get("media_understanding").cloned() else {
+        return MediaUnderstandingConfig::default();
+    };
+    value
+        .try_into::<MediaUnderstandingConfig>()
         .ok()
         .filter(|config| config.normalize_validate().is_ok())
         .unwrap_or_default()

@@ -106,6 +106,10 @@ pub enum ToolKind {
     Monitor,
     GoalUpdate,
     Workflow,
+    /// Native media-understanding analysis (`analyze_media`). Read-only;
+    /// delegates to a separately configured capable model. The tool is not
+    /// registered model-visibly until the shell backend lands (PR 7).
+    AnalyzeMedia,
     #[serde(other)]
     Other,
 }

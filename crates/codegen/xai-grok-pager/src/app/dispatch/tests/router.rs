@@ -1945,6 +1945,10 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                          truth.",
                 );
             }
+            // Read-only runtime row: no scalar PagerLocalSnapshot default to
+            // pin against a runtime initializer (same treatment as the
+            // defaults_match_pager_state test).
+            ("compaction_status", SettingKind::Status) => {}
             _ => {
                 panic!(
                     "PAGER setting `{}` has no arm in \

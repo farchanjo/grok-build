@@ -56,7 +56,19 @@ pub async fn load_config() -> Config {
         Ok(v) => v,
         Err(_) => return Config::default(),
     };
-    load_config_from_toml(&root)
+    let mut cfg = load_config_from_toml(&root);
+    // Runtime view: apply plural route env vars and the legacy image-route
+    // chain (env > config.toml > remote > legacy default). The persistence
+    // path (`load_config_from_toml` directly) stays env-free so an env-derived
+    // route can never leak into the user's config.toml on a settings write.
+    // The settings surface has no `RemoteSettings` handle, so the remote tier
+    // of the legacy chain stays a no-op here; `resolve_with_env` is also
+    // available to callers that do hold remote settings.
+    cfg.media_understanding = cfg
+        .media_understanding
+        .clone()
+        .resolve_with_env(&root, None);
+    cfg
 }
 /// Parse `Config` from a pre-loaded TOML value. Used by both async and sync paths.
 pub fn load_config_from_toml(root: &TomlValue) -> Config {
@@ -111,6 +123,10 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .unwrap_or_default(),
         privacy: section(table, "privacy"),
         compaction: section(table, "compaction"),
+        // Parsed purely from disk so the persistence path (`update_config_*`)
+        // never leaks env-derived routes into config.toml. The runtime view
+        // applies `resolve_with_env` in `load_config`.
+        media_understanding: section(table, "media_understanding"),
     }
 }
 /// Resolve permission config with project override semantics.

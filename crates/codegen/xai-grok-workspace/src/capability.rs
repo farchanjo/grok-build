@@ -105,6 +105,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
     ToolKind::Workflow,
+    ToolKind::AnalyzeMedia,
     ToolKind::Other,
 ];
 
@@ -134,7 +135,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         }
 
         // Read class.
-        Read | MemoryGet | MemorySearch => {
+        Read | MemoryGet | MemorySearch | AnalyzeMedia => {
             matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute)
         }
 
