@@ -398,7 +398,15 @@ pub fn persist_user_images(
         let ext = mime_to_extension(&img.mime_type);
         let filename = format!("image-{}.{ext}", uuid::Uuid::new_v4());
         let path = assets_dir.join(&filename);
-        std::fs::write(&path, &bytes)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
         let mime_type = img.mime_type.clone();
         out.push(PersistedImage {
             path,
@@ -793,6 +801,14 @@ mod tests {
         assert!(p.path.exists(), "image file should be written to disk");
         let on_disk = std::fs::read(&p.path).unwrap();
         assert_eq!(on_disk, png_bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p.path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
     #[test]
     fn persist_user_images_uses_uri_passthrough_when_present() {

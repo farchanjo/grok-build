@@ -51,6 +51,13 @@ pub struct ForkSessionResponse {
     /// The model ID of the forked session (may differ from source if overridden)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_model_id: Option<String>,
+    /// Number of durable media descriptor sidecars copied into the fork.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub media_descriptor_files_copied: usize,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 /// Generate a forked session ID.
@@ -103,6 +110,9 @@ pub async fn fork_session(
         // child retains pre-compaction history (the live summary is already
         // copied via chat_history.jsonl).
         copy_compaction_segments: true,
+        // Carry normalized media text into the fork without copying raw media
+        // bytes or repeating auxiliary inference.
+        copy_media_descriptors: true,
         ..Default::default()
     };
 
@@ -160,6 +170,7 @@ pub async fn fork_session(
         new_cwd: request.new_cwd,
         parent_session_id: request.source_session_id,
         new_model_id: request.new_model_id,
+        media_descriptor_files_copied: result.media_descriptor_files_copied,
     })
 }
 
@@ -293,6 +304,7 @@ mod tests {
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: Some("grok-3".to_string()),
+            media_descriptor_files_copied: 1,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -305,6 +317,7 @@ mod tests {
         assert_eq!(deserialized.new_cwd, "/new/project");
         assert_eq!(deserialized.parent_session_id, "abc123");
         assert_eq!(deserialized.new_model_id, Some("grok-3".to_string()));
+        assert_eq!(deserialized.media_descriptor_files_copied, 1);
     }
 
     #[test]
@@ -317,10 +330,12 @@ mod tests {
             new_cwd: "/new/project".to_string(),
             parent_session_id: "abc123".to_string(),
             new_model_id: None,
+            media_descriptor_files_copied: 0,
         };
 
         let json = serde_json::to_string(&response).unwrap();
-        // new_model_id should not be present in JSON when None
+        // Optional/zero fields should not be present for wire compatibility.
         assert!(!json.contains("new_model_id"));
+        assert!(!json.contains("mediaDescriptorFilesCopied"));
     }
 }

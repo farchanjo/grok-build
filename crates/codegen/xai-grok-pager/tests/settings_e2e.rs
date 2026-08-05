@@ -8524,4 +8524,6 @@ fn media_catalog_external_choice_has_privacy_warning() {
         .find(|c| c.canonical == external_id)
         .expect("external model");
     assert!(external.description.contains("External provider"));
+    assert!(external.description.contains("media content"));
+    assert!(external.description.contains("prompt context"));
 }

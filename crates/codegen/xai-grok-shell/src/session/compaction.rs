@@ -190,11 +190,17 @@ impl SessionActor {
                     self.client_identifier.clone(),
                     Some(self.max_retries),
                 );
-            let client = xai_grok_inference::InferenceClient::new(sampler_config).ok();
+            let provider = sampler_config.provider_identity;
+            let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
+                provider,
+                self.auth_manager.as_ref(),
+            )
+            .ok()
+            .and_then(|()| xai_grok_inference::InferenceClient::new(sampler_config).ok());
             (
                 client,
                 Some(describe_model),
-                Some(active_session_config.provider_identity.label().to_owned()),
+                Some(provider.label().to_owned()),
             )
         } else {
             (None, None, None)

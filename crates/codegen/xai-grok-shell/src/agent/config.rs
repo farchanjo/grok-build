@@ -6519,8 +6519,8 @@ reasoning_effort = "low"
         );
         assert_eq!(
             cfg.image_description_model,
-            Some(crate::models::default_image_description_model().to_owned()),
-            "empty config should produce compiled default image_description model"
+            Some("@session".to_owned()),
+            "empty config should route image understanding through the session model"
         );
         let with_overrides: toml::Value = toml::from_str(
             r#"
@@ -8923,6 +8923,7 @@ reasoning_effort = "low"
     fn acp_model_meta_derives_first_option_when_no_default() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        entry.info.reasoning_effort_selection = ReasoningEffortSelection::Exact;
         entry.info.reasoning_efforts = vec![
             ReasoningEffortOption {
                 id: "balanced".to_string(),
@@ -8952,21 +8953,22 @@ reasoning_effort = "low"
         assert_eq!(meta["reasoningEffort"], "medium");
     }
     #[test]
-    fn acp_model_meta_omits_reasoning_when_unsupported() {
+    fn acp_model_meta_marks_reasoning_unsupported_and_omits_effort() {
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        entry.info.reasoning_effort_selection = ReasoningEffortSelection::Unsupported;
         entry.info.reasoning_effort = Some(ReasoningEffort::High);
+        entry.info.derive_reasoning_effort_fields();
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
             .values()
             .next()
             .unwrap()
             .meta
-            .clone();
-        if let Some(meta) = meta {
-            assert!(meta.get("supportsReasoningEffort").is_none());
-            assert!(meta.get("reasoningEffort").is_none());
-        }
+            .clone()
+            .expect("base metadata should exist");
+        assert_eq!(meta["supportsReasoningEffort"], false);
+        assert!(meta.get("reasoningEffort").is_none());
     }
     #[test]
     fn acp_model_meta_always_has_context_window() {

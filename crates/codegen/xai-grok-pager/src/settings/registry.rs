@@ -126,26 +126,25 @@ pub fn dynamic_enum_choices(
     source: DynamicEnumSource,
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<OwnedEnumChoice> {
-    let append_catalog = |out: &mut Vec<OwnedEnumChoice>, excluded: Option<&str>| {
-        for (name, id) in &snapshot.available_models {
-            if excluded.is_some_and(|excluded| id.0.as_ref() == excluded) {
-                continue;
+    let append_catalog =
+        |out: &mut Vec<OwnedEnumChoice>, excluded: Option<&str>, external_disclosure: &str| {
+            for (name, id) in &snapshot.available_models {
+                if excluded.is_some_and(|excluded| id.0.as_ref() == excluded) {
+                    continue;
+                }
+                let id_string = id.0.to_string();
+                let description = if snapshot.external_model_ids.contains(&id_string) {
+                    format!("{id_string} · External provider: {external_disclosure}")
+                } else {
+                    id_string.clone()
+                };
+                out.push(OwnedEnumChoice {
+                    canonical: id_string,
+                    display: name.clone(),
+                    description,
+                });
             }
-            let id_string = id.0.to_string();
-            let description = if snapshot.external_model_ids.contains(&id_string) {
-                format!(
-                    "{id_string} · External provider: selected conversation history is sent to this provider."
-                )
-            } else {
-                id_string.clone()
-            };
-            out.push(OwnedEnumChoice {
-                canonical: id_string,
-                display: name.clone(),
-                description,
-            });
-        }
-    };
+        };
     match source {
         DynamicEnumSource::ActiveModelCatalog => {
             let mut out = Vec::with_capacity(snapshot.available_models.len() + 1);
@@ -154,7 +153,11 @@ pub fn dynamic_enum_choices(
                 display: "(no override)".to_string(),
                 description: "Inherit the default model (no per-user override).".to_string(),
             });
-            append_catalog(&mut out, None);
+            append_catalog(
+                &mut out,
+                None,
+                "selected conversation history is sent to this provider.",
+            );
             out
         }
         DynamicEnumSource::CompactionPrimaryModelCatalog => {
@@ -170,6 +173,7 @@ pub fn dynamic_enum_choices(
                 &mut out,
                 (!snapshot.compaction_fallback_model.is_empty())
                     .then_some(snapshot.compaction_fallback_model.as_str()),
+                "selected conversation history is sent to this provider.",
             );
             out
         }
@@ -188,7 +192,11 @@ pub fn dynamic_enum_choices(
                         .to_string(),
                 });
             }
-            append_catalog(&mut out, Some(snapshot.compaction_primary_model.as_str()));
+            append_catalog(
+                &mut out,
+                Some(snapshot.compaction_primary_model.as_str()),
+                "selected conversation history is sent to this provider.",
+            );
             out
         }
         DynamicEnumSource::MediaImageModelCatalog => {
@@ -198,7 +206,11 @@ pub fn dynamic_enum_choices(
                 display: "Session model".to_string(),
                 description: "Use the active session's model for image understanding.".to_string(),
             });
-            append_catalog(&mut out, None);
+            append_catalog(
+                &mut out,
+                None,
+                "media content and the minimum relevant prompt context are sent to this provider.",
+            );
             out
         }
         DynamicEnumSource::MediaAudioModelCatalog => {
@@ -228,7 +240,11 @@ pub fn dynamic_enum_choices(
                 display: "Session model".to_string(),
                 description: "Use the active session's model for video understanding.".to_string(),
             });
-            append_catalog(&mut out, None);
+            append_catalog(
+                &mut out,
+                None,
+                "media content and the minimum relevant prompt context are sent to this provider.",
+            );
             out
         }
     }
@@ -363,7 +379,8 @@ mod compaction_choice_tests {
             .find(|choice| choice.canonical == external_id)
             .expect("external model choice");
         assert!(external.description.contains("External provider"));
-        assert!(external.description.contains("conversation history"));
+        assert!(external.description.contains("media content"));
+        assert!(external.description.contains("prompt context"));
     }
 
     #[test]

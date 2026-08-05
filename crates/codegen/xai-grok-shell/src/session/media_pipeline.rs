@@ -37,6 +37,8 @@ pub enum MediaPolicyError {
         "user media is not automatically understood when [media].mode = tools_only (use read_file on the saved asset)"
     )]
     UserMediaSkippedByMode,
+    #[error("ZDR policy blocks auxiliary media disclosure to {provider}")]
+    ExternalProviderBlockedByZdr { provider: &'static str },
 }
 
 /// Whether auxiliary media inference may run for this source. Native model
@@ -55,6 +57,34 @@ pub fn auxiliary_media_allowed(
         },
         crate::config::MediaMode::Off => Err(MediaPolicyError::Disabled),
     }
+}
+
+/// Fail closed when a ZDR team's media route targets a provider outside xAI.
+///
+/// Provider identity comes from the resolved inference configuration, while
+/// the ZDR verdict comes only from server-issued account metadata. Local TOML,
+/// permission mode, and tool arguments cannot override this gate.
+pub fn auxiliary_media_provider_allowed(
+    provider: xai_grok_inference::config::ProviderIdentity,
+    auth: Option<&crate::auth::GrokAuth>,
+) -> Result<(), MediaPolicyError> {
+    let blocked =
+        !provider.is_first_party() && auth.is_some_and(crate::auth::GrokAuth::is_zdr_team);
+    if blocked {
+        Err(MediaPolicyError::ExternalProviderBlockedByZdr {
+            provider: provider.label(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub fn auxiliary_media_route_allowed(
+    provider: xai_grok_inference::config::ProviderIdentity,
+    auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
+) -> Result<(), MediaPolicyError> {
+    let auth = auth_manager.and_then(|manager| manager.current_or_expired());
+    auxiliary_media_provider_allowed(provider, auth.as_ref())
 }
 
 fn descriptor_source(source: ImageDescribeSource) -> MediaDescriptorSource {
@@ -344,6 +374,7 @@ pub async fn understand_video(
     client: Option<xai_grok_inference::InferenceClient>,
     describe_model: Option<&str>,
     provider: Option<&str>,
+    frame_route_policy: Result<(), MediaPolicyError>,
     source: ImageDescribeSource,
     runner: &dyn ProcessRunner,
     transcriber: Option<&dyn AsyncAudioTranscriber>,
@@ -388,6 +419,8 @@ pub async fn understand_video(
     let sample_duration = duration.min(media.video_max_seconds as f64);
 
     if let Err(error) = policy {
+        sections.push(format!("Frame understanding skipped: {error}"));
+    } else if let Err(error) = frame_route_policy {
         sections.push(format!("Frame understanding skipped: {error}"));
     } else if let Some(error) = fingerprint_error.as_ref() {
         sections.push(format!("Frame understanding skipped: {error}"));
@@ -593,7 +626,15 @@ pub fn persist_user_audio(
             "audio asset path escaped session assets directory",
         ));
     }
-    std::fs::write(&path, &bytes)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
     Ok(PersistedAudio {
         path,
         mime_type: mime_type.to_owned(),
@@ -845,6 +886,79 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn auxiliary_provider_policy_blocks_external_routes_for_zdr_teams() {
+        use xai_grok_inference::config::ProviderIdentity;
+
+        let zdr_auth = crate::auth::GrokAuth {
+            team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".to_owned()],
+            ..crate::auth::GrokAuth::test_default()
+        };
+        assert!(auxiliary_media_provider_allowed(ProviderIdentity::Xai, Some(&zdr_auth)).is_ok());
+        assert!(matches!(
+            auxiliary_media_provider_allowed(ProviderIdentity::OpenRouter, Some(&zdr_auth)),
+            Err(MediaPolicyError::ExternalProviderBlockedByZdr { .. })
+        ));
+        assert!(
+            auxiliary_media_provider_allowed(ProviderIdentity::Anthropic, None).is_ok(),
+            "without trusted ZDR metadata, normal route/privacy controls still apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn understand_video_surfaces_denied_frame_route_without_false_provenance() {
+        use xai_grok_inference::config::ProviderIdentity;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp4");
+        std::fs::write(&path, b"video").unwrap();
+        let store = MediaDescriptorStore::empty(dir.path());
+        let video = VideoContent {
+            absolute_path: path,
+            mime_type: "video/mp4".to_owned(),
+            size_bytes: 5,
+            duration_secs: Some(1.0),
+            width: Some(640),
+            height: Some(360),
+            has_audio: false,
+        };
+        let runner = MockRunner::new(vec![
+            Err(FfmpegError::ToolMissing { tool: "ffprobe" }),
+            Ok(ProcessOutput {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                status_code: 0,
+            }),
+        ]);
+        let denied = Err(MediaPolicyError::ExternalProviderBlockedByZdr {
+            provider: ProviderIdentity::OpenRouter.label(),
+        });
+        let text = understand_video(
+            &video,
+            &MediaConfig::default(),
+            &ImageDescribeCache::new(),
+            &store,
+            None,
+            None,
+            None,
+            denied,
+            ImageDescribeSource::ToolRead,
+            &runner,
+            None,
+        )
+        .await;
+
+        assert!(text.contains("ZDR policy blocks auxiliary media disclosure to OpenRouter"));
+        let descriptor = store
+            .snapshot()
+            .values()
+            .next()
+            .cloned()
+            .expect("video descriptor should be persisted");
+        assert!(descriptor.model_id.is_none());
+        assert!(descriptor.provider.is_none());
+    }
+
     #[tokio::test]
     async fn understand_audio_uses_transcript_when_stt_available() {
         use crate::session::media_stt::MockAudioTranscriber;
@@ -958,8 +1072,17 @@ mod tests {
         assert!(text.contains("from acp"));
         assert!(text.contains("<audio_asset>assets/audio-"));
         assert!(!text.contains("bytes_b64="));
-        let assets = std::fs::read_dir(dir.path().join("assets")).unwrap();
-        assert_eq!(assets.count(), 1);
+        let mut assets = std::fs::read_dir(dir.path().join("assets")).unwrap();
+        let asset = assets.next().unwrap().unwrap().path();
+        assert!(assets.next().is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(asset).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

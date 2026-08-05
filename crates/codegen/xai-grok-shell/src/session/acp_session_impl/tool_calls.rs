@@ -2339,7 +2339,15 @@ impl SessionActor {
                     prompt_text = format!(
                         "[Image from {path} could not be understood: configure an image-capable media route]"
                     );
+                } else if let Err(error) =
+                    crate::session::media_pipeline::auxiliary_media_route_allowed(
+                        sampler_config.provider_identity,
+                        self.auth_manager.as_ref(),
+                    )
+                {
+                    prompt_text = format!("[Image from {path} was not understood: {error}]");
                 } else {
+                    let provider_label = sampler_config.provider_identity.label();
                     let client = xai_grok_inference::InferenceClient::new(sampler_config).map_err(
                         |error| {
                             acp::Error::internal_error().data(format!(
@@ -2352,7 +2360,7 @@ impl SessionActor {
                         &self.media_descriptor_store,
                         client,
                         &describe_model,
-                        Some(active_session_config.provider_identity.label()),
+                        Some(provider_label),
                         &raw_bytes,
                         &image_content.mime_type,
                         None,
@@ -2407,59 +2415,70 @@ impl SessionActor {
                         self.client_identifier.clone(),
                         Some(self.max_retries),
                     );
-                let client =
-                    xai_grok_inference::InferenceClient::new(sampler_config).map_err(|error| {
-                        acp::Error::internal_error().data(format!(
-                            "failed to build PDF describe sampling client: {error}"
-                        ))
-                    })?;
-                let mut descriptions = Vec::new();
-                for page in pdf.pages.iter().take(media.image_limit) {
-                    let raw_bytes = match base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &page.data,
-                    ) {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            descriptions.push(format!(
-                                "Page {}: [unreadable rendered page: {error}]",
+                if let Err(error) = crate::session::media_pipeline::auxiliary_media_route_allowed(
+                    sampler_config.provider_identity,
+                    self.auth_manager.as_ref(),
+                ) {
+                    prompt_text = format!(
+                        "[PDF {path} was rendered as images but was not understood: {error}]"
+                    );
+                } else {
+                    let provider_label = sampler_config.provider_identity.label();
+                    let client = xai_grok_inference::InferenceClient::new(sampler_config).map_err(
+                        |error| {
+                            acp::Error::internal_error().data(format!(
+                                "failed to build PDF describe sampling client: {error}"
+                            ))
+                        },
+                    )?;
+                    let mut descriptions = Vec::new();
+                    for page in pdf.pages.iter().take(media.image_limit) {
+                        let raw_bytes = match base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &page.data,
+                        ) {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                descriptions.push(format!(
+                                    "Page {}: [unreadable rendered page: {error}]",
+                                    page.page_number
+                                ));
+                                continue;
+                            }
+                        };
+                        match crate::session::media_pipeline::describe_image(
+                            &self.image_describe_cache,
+                            &self.media_descriptor_store,
+                            client.clone(),
+                            &describe_model,
+                            Some(provider_label),
+                            &raw_bytes,
+                            &page.mime_type,
+                            None,
+                            "Describe this PDF page for the current coding task.",
+                            crate::session::image_describe::ImageDescribeSource::ToolRead,
+                            Some(std::path::Path::new(path)),
+                        )
+                        .await
+                        {
+                            Ok(description) => descriptions.push(format!(
+                                "Page {}:\n{}",
+                                page.page_number,
+                                crate::session::image_describe::scrub_envelope_body(&description)
+                            )),
+                            Err(error) => descriptions.push(format!(
+                                "Page {}: [transcription unavailable: {error}]",
                                 page.page_number
-                            ));
-                            continue;
+                            )),
                         }
-                    };
-                    match crate::session::media_pipeline::describe_image(
-                        &self.image_describe_cache,
-                        &self.media_descriptor_store,
-                        client.clone(),
-                        &describe_model,
-                        Some(active_session_config.provider_identity.label()),
-                        &raw_bytes,
-                        &page.mime_type,
-                        None,
-                        "Describe this PDF page for the current coding task.",
-                        crate::session::image_describe::ImageDescribeSource::ToolRead,
-                        Some(std::path::Path::new(path)),
-                    )
-                    .await
-                    {
-                        Ok(description) => descriptions.push(format!(
-                            "Page {}:\n{}",
-                            page.page_number,
-                            crate::session::image_describe::scrub_envelope_body(&description)
-                        )),
-                        Err(error) => descriptions.push(format!(
-                            "Page {}: [transcription unavailable: {error}]",
-                            page.page_number
-                        )),
                     }
+                    prompt_text = format!(
+                        "Read PDF file: {path} ({} pages rendered, {} total)\n\n<pdf_description>\n{}\n</pdf_description>",
+                        pdf.pages.len(),
+                        pdf.total_pages,
+                        descriptions.join("\n\n")
+                    );
                 }
-                prompt_text = format!(
-                    "Read PDF file: {path} ({} pages rendered, {} total)\n\n<pdf_description>\n{}\n</pdf_description>",
-                    pdf.pages.len(),
-                    pdf.total_pages,
-                    descriptions.join("\n\n")
-                );
             }
         }
         // Typed audio/video from read_file: convert to text descriptors only.
@@ -2507,10 +2526,21 @@ impl SessionActor {
                     self.client_identifier.clone(),
                     Some(self.max_retries),
                 );
-            let client = if route == "@session" && active_supports_images != Some(true) {
-                None
-            } else {
+            let provider = sampler_config.provider_identity;
+            let frame_route_policy = crate::session::media_pipeline::auxiliary_media_route_allowed(
+                provider,
+                self.auth_manager.as_ref(),
+            );
+            let frame_route_usable = !(route == "@session" && active_supports_images != Some(true));
+            let client = if frame_route_policy.is_ok() && frame_route_usable {
                 xai_grok_inference::InferenceClient::new(sampler_config).ok()
+            } else {
+                None
+            };
+            let (describe_model, provider_label) = if frame_route_policy.is_ok() {
+                (Some(describe_model.as_str()), Some(provider.label()))
+            } else {
+                (None, None)
             };
             prompt_text = crate::session::media_pipeline::understand_video(
                 video,
@@ -2518,8 +2548,9 @@ impl SessionActor {
                 &self.image_describe_cache,
                 &self.media_descriptor_store,
                 client,
-                Some(describe_model.as_str()),
-                Some(active_session_config.provider_identity.label()),
+                describe_model,
+                provider_label,
+                frame_route_policy,
                 crate::session::image_describe::ImageDescribeSource::ToolRead,
                 &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
                 stt.as_deref(),

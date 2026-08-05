@@ -853,6 +853,12 @@ impl SessionActor {
                 self.client_identifier.clone(),
                 Some(self.max_retries),
             );
+        crate::session::media_pipeline::auxiliary_media_route_allowed(
+            sampler_config.provider_identity,
+            self.auth_manager.as_ref(),
+        )
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+        let provider_label = sampler_config.provider_identity.label();
         let client = xai_grok_inference::InferenceClient::new(sampler_config).map_err(|e| {
             acp::Error::internal_error().data(format!(
                 "failed to build image-describe sampling client: {e}"
@@ -880,7 +886,7 @@ impl SessionActor {
                     &self.media_descriptor_store,
                     client.clone(),
                     model,
-                    Some(active_session_config.provider_identity.label()),
+                    Some(provider_label),
                     &p.raw_bytes,
                     &p.mime_type,
                     outline.as_deref(),

@@ -758,6 +758,71 @@ async fn copy_session_data_copies_compaction_segments_when_enabled() {
                 .exists()
         );
 }
+
+#[tokio::test]
+async fn copy_session_data_copies_bounded_private_media_descriptors_when_enabled() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("media-descriptor-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    let source_path = adapter
+        .session_dir(&source_info)
+        .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
+    std::fs::write(&source_path, b"{\"descriptor\":true}\n").unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("media-descriptor-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    let result = adapter
+        .copy_session_data(
+            &source_info,
+            &target_info,
+            CopySessionOptions {
+                copy_media_descriptors: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.media_descriptor_files_copied, 1);
+    let copied_path = adapter
+        .session_dir(&target_info)
+        .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
+    assert_eq!(std::fs::read(&copied_path).unwrap(), b"{\"descriptor\":true}\n");
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(copied_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let target_without_copy = Info {
+        id: acp::SessionId::new("media-descriptor-default-dst"),
+        cwd: "/target/default".to_string(),
+    };
+    let result = adapter
+        .copy_session_data(
+            &source_info,
+            &target_without_copy,
+            CopySessionOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.media_descriptor_files_copied, 0);
+    assert!(
+        !adapter
+            .session_dir(&target_without_copy)
+            .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE)
+            .exists()
+    );
+}
 /// A `compaction_checkpoint` record pointing at `compaction_checkpoints/{id}.json`.
 fn checkpoint_record(id: &str) -> SessionUpdate {
     checkpoint_record_with_path(id, &format!("compaction_checkpoints/{id}.json"))

@@ -1504,6 +1504,61 @@ impl JsonlStorageAdapter {
                 compaction_checkpoints_copied += 1;
             }
         }
+        let media_descriptor_files_copied = if options.copy_media_descriptors {
+            let source =
+                source_session_dir.join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
+            match std::fs::symlink_metadata(&source) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    if metadata.len()
+                        > crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES
+                    {
+                        tracing::warn!(
+                            path = %source.display(),
+                            size_bytes = metadata.len(),
+                            session_id = %source_info.id,
+                            "media descriptor sidecar exceeds its copy limit; skipping",
+                        );
+                        0
+                    } else {
+                        let destination = target_dir
+                            .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
+                        let source_file = std::fs::File::open(&source)?;
+                        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+                        std::io::Read::take(
+                            source_file,
+                            crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES + 1,
+                        )
+                        .read_to_end(&mut bytes)?;
+                        if bytes.len() as u64
+                            > crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES
+                        {
+                            tracing::warn!(
+                                path = %source.display(),
+                                session_id = %source_info.id,
+                                "media descriptor sidecar grew beyond its copy limit; skipping",
+                            );
+                            0
+                        } else {
+                            super::write_bytes_atomic(&destination, &bytes)?;
+                            1
+                        }
+                    }
+                }
+                Ok(metadata) => {
+                    tracing::warn!(
+                        path = %source.display(),
+                        file_type = ?metadata.file_type(),
+                        session_id = %source_info.id,
+                        "media descriptor sidecar is not a regular file; skipping copy",
+                    );
+                    0
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+                Err(error) => return Err(error),
+            }
+        } else {
+            0
+        };
         Ok(super::CopySessionResult {
             chat_messages_copied: num_chat_messages,
             updates_copied: num_messages,
@@ -1514,6 +1569,7 @@ impl JsonlStorageAdapter {
             announcement_state_copied,
             compaction_segments_copied,
             compaction_checkpoints_copied,
+            media_descriptor_files_copied,
         })
     }
 }

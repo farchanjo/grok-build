@@ -894,6 +894,9 @@ pub struct CopySessionResult {
     /// checkpoint records retained in the copied updates. `0` when no records
     /// survive the copy or their files are missing from the source.
     pub compaction_checkpoints_copied: usize,
+    /// Number of durable media descriptor sidecars copied. Currently `0` or
+    /// `1`; kept as a count for forward-compatible copy reporting.
+    pub media_descriptor_files_copied: usize,
 }
 
 /// Options for copying session data during fork
@@ -939,6 +942,10 @@ pub struct CopySessionOptions {
     /// `false` — these can be large and most copy paths don't need them. Forks
     /// enable it so the child retains the parent's pre-compaction history.
     pub copy_compaction_segments: bool,
+    /// Whether to copy the bounded `media_descriptors.jsonl` sidecar. Session
+    /// forks enable this so inherited media text remains available to later
+    /// compaction without repeating auxiliary inference.
+    pub copy_media_descriptors: bool,
     /// When true, apply fork-safety filtering to copied chat history:
     /// - Strip synthetic user messages (doom loop warnings, compaction metadata)
     /// - Truncate at the last complete turn boundary
@@ -976,6 +983,7 @@ impl Default for CopySessionOptions {
             copy_tool_state: true,
             copy_announcement_state: true,
             copy_compaction_segments: false,
+            copy_media_descriptors: false,
             fork_filter: false,
             inherited_prefix_len: None,
             strip_reasoning: false,
