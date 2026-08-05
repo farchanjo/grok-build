@@ -1556,6 +1556,10 @@ pub struct Config {
     pub toolset: ShellToolsetConfig,
     #[serde(default)]
     pub endpoints: EndpointsConfig,
+    /// `[voice]` streaming STT transport settings. File media and microphone
+    /// dictation share this endpoint/language configuration.
+    #[serde(default)]
+    pub voice: xai_grok_voice::VoiceConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
@@ -1801,9 +1805,12 @@ pub struct Config {
     /// (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
     #[serde(skip)]
     pub session_summary_model: Option<String>,
-    /// Image describe model (`grok-build` default via `ModelOverrideConfig::resolve`).
+    /// Legacy image describe model mirror retained during `[media]` migration.
     #[serde(skip)]
     pub image_description_model: Option<String>,
+    /// Canonical resolved media-understanding policy.
+    #[serde(skip)]
+    pub media_config: crate::config::MediaConfig,
     /// Next-prompt suggestion model pin (`env > [models] prompt_suggestion >
     /// remote`), consumed catalog-guarded by `handle_suggest_prompt`; see
     /// `ModelOverrideConfig::resolve`.
@@ -1978,6 +1985,10 @@ impl Default for Config {
             hints: None,
             ui: UiConfig::default(),
             toolset: ShellToolsetConfig::default(),
+            voice: xai_grok_voice::VoiceConfig::from_config_table(
+                &toml::Table::new(),
+                Some(&endpoints.xai_api_base_url),
+            ),
             endpoints,
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
@@ -2050,6 +2061,7 @@ impl Default for Config {
             web_search_model: crate::models::default_web_search_model().to_owned(),
             session_summary_model: None,
             image_description_model: None,
+            media_config: crate::config::MediaConfig::default(),
             prompt_suggest_model_pin: crate::config::PromptSuggestModelPin::Unpinned,
         };
         cfg.apply_env_overrides();
@@ -2304,7 +2316,22 @@ impl Config {
             crate::config::ModelOverrideConfig::resolve(None, None, raw_config, None);
         config.web_search_model = model_overrides.web_search;
         config.session_summary_model = model_overrides.session_summary;
-        config.image_description_model = model_overrides.image_description;
+        config.media_config = crate::config::MediaConfig::resolve(raw_config, None);
+        config.image_description_model = config.media_config.image_model.clone();
+        config.voice = raw_config
+            .as_table()
+            .map(|table| {
+                xai_grok_voice::VoiceConfig::from_config_table(
+                    table,
+                    Some(&config.endpoints.xai_api_base_url),
+                )
+            })
+            .unwrap_or_else(|| {
+                xai_grok_voice::VoiceConfig::from_config_table(
+                    &toml::Table::new(),
+                    Some(&config.endpoints.xai_api_base_url),
+                )
+            });
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
         Ok(config)
@@ -2366,7 +2393,24 @@ impl Config {
         );
         self.web_search_model = models.web_search;
         self.session_summary_model = models.session_summary;
-        self.image_description_model = models.image_description;
+        self.media_config =
+            crate::config::MediaConfig::resolve(ctx.raw_config, ctx.remote_settings);
+        self.image_description_model = self.media_config.image_model.clone();
+        self.voice = ctx
+            .raw_config
+            .as_table()
+            .map(|table| {
+                xai_grok_voice::VoiceConfig::from_config_table(
+                    table,
+                    Some(&self.endpoints.xai_api_base_url),
+                )
+            })
+            .unwrap_or_else(|| {
+                xai_grok_voice::VoiceConfig::from_config_table(
+                    &toml::Table::new(),
+                    Some(&self.endpoints.xai_api_base_url),
+                )
+            });
         self.prompt_suggest_model_pin = models.prompt_suggestion;
         self.cli_experimental_memory = ctx.cli_experimental_memory;
         self.cli_no_memory = ctx.cli_no_memory;
@@ -3679,6 +3723,15 @@ pub fn resolve_model_list(
                 if entry.info.api_backend == ApiBackend::default() {
                     entry.info.api_backend.clone_from(&donor.info.api_backend);
                 }
+                if entry.info.supports_image_input.is_none() {
+                    entry.info.supports_image_input = donor.info.supports_image_input;
+                }
+                if entry.info.supports_audio_input.is_none() {
+                    entry.info.supports_audio_input = donor.info.supports_audio_input;
+                }
+                if entry.info.supports_video_input.is_none() {
+                    entry.info.supports_video_input = donor.info.supports_video_input;
+                }
             }
             if resolved.contains_key(key) {
                 tracing::debug!(model_key = %key, "prefetched model overriding default");
@@ -3753,19 +3806,40 @@ pub fn resolve_model_list(
     }
     {
         let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let donors: std::collections::HashMap<String, (std::num::NonZeroU64, ApiBackend)> =
-            resolved
-                .values()
-                .filter(|e| e.info.context_window.get() != default_cw)
-                .map(|e| {
+        let donors: std::collections::HashMap<
+            String,
+            (
+                std::num::NonZeroU64,
+                ApiBackend,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+            ),
+        > = resolved
+            .values()
+            .filter(|e| {
+                e.info.context_window.get() != default_cw
+                    || e.info.supports_image_input.is_some()
+                    || e.info.supports_audio_input.is_some()
+                    || e.info.supports_video_input.is_some()
+            })
+            .map(|e| {
+                (
+                    e.info.model.clone(),
                     (
-                        e.info.model.clone(),
-                        (e.info.context_window, e.info.api_backend.clone()),
-                    )
-                })
-                .collect();
+                        e.info.context_window,
+                        e.info.api_backend.clone(),
+                        e.info.supports_image_input,
+                        e.info.supports_audio_input,
+                        e.info.supports_video_input,
+                    ),
+                )
+            })
+            .collect();
         for entry in resolved.values_mut() {
-            if let Some((donor_cw, donor_backend)) = donors.get(&entry.info.model) {
+            if let Some((donor_cw, donor_backend, donor_image, donor_audio, donor_video)) =
+                donors.get(&entry.info.model)
+            {
                 if entry.info.context_window.get() == default_cw {
                     tracing::debug!(
                         model = %entry.info.model,
@@ -3779,6 +3853,15 @@ pub fn resolve_model_list(
                     && *donor_backend != ApiBackend::default()
                 {
                     entry.info.api_backend.clone_from(donor_backend);
+                }
+                if entry.info.supports_image_input.is_none() {
+                    entry.info.supports_image_input = *donor_image;
+                }
+                if entry.info.supports_audio_input.is_none() {
+                    entry.info.supports_audio_input = *donor_audio;
+                }
+                if entry.info.supports_video_input.is_none() {
+                    entry.info.supports_video_input = *donor_video;
                 }
             }
         }
@@ -3938,6 +4021,12 @@ struct DefaultModelJson {
     #[serde(default)]
     supports_backend_search: bool,
     #[serde(default)]
+    supports_image_input: Option<bool>,
+    #[serde(default)]
+    supports_audio_input: Option<bool>,
+    #[serde(default)]
+    supports_video_input: Option<bool>,
+    #[serde(default)]
     compactions_remaining: Option<CompactionsRemaining>,
     #[serde(default)]
     compaction_at_tokens: Option<CompactionAtTokens>,
@@ -4010,6 +4099,9 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 supports_backend_search: m.supports_backend_search,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: m.supports_image_input,
+                supports_audio_input: m.supports_audio_input,
+                supports_video_input: m.supports_video_input,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -4151,6 +4243,14 @@ pub struct ModelEntryConfig {
     /// [`ModelInfo::supports_strict_tools`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    /// Explicit media-input capabilities. `None` means the catalog did not
+    /// establish support and must not be treated as a guaranteed native route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_video_input: Option<bool>,
     /// How turns execute for this model. Defaults to native HTTP inference.
     /// Distinct from [`ApiBackend`] (wire protocol) and from provider kind.
     #[serde(
@@ -4262,6 +4362,12 @@ pub struct ConfigModelOverride {
     /// Opt-in Anthropic strict tool definitions. See
     /// [`ModelInfo::supports_strict_tools`].
     pub supports_strict_tools: Option<bool>,
+    /// Per-model modality capability overrides. These are tri-state so a hand-
+    /// written model without metadata remains distinguishable from an explicit
+    /// `false` declaration.
+    pub supports_image_input: Option<bool>,
+    pub supports_audio_input: Option<bool>,
+    pub supports_video_input: Option<bool>,
     /// Normalized reasoning effort selection state (additive to legacy bool/list/default fields).
     /// - Unknown: no information available
     /// - Unsupported: model does not support reasoning effort
@@ -4399,6 +4505,15 @@ impl ConfigModelOverride {
         if let Some(v) = self.supports_strict_tools {
             entry.info.supports_strict_tools = Some(v);
         }
+        if let Some(v) = self.supports_image_input {
+            entry.info.supports_image_input = Some(v);
+        }
+        if let Some(v) = self.supports_audio_input {
+            entry.info.supports_audio_input = Some(v);
+        }
+        if let Some(v) = self.supports_video_input {
+            entry.info.supports_video_input = Some(v);
+        }
         if let Some(backend) = self.execution_backend {
             entry.info.execution_backend = backend;
         }
@@ -4533,6 +4648,15 @@ pub struct ModelInfo {
     /// (capped at 20). Default/`None`/`false` never mark Grok tools strict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    /// Explicitly advertised media-input capabilities. `None` means unknown.
+    /// Native media routing requires `Some(true)`; unknown is routed through
+    /// the configured media-understanding path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_video_input: Option<bool>,
     /// How turns execute for this model. Defaults to native HTTP inference.
     /// Distinct from [`ApiBackend`] and provider identity.
     #[serde(
@@ -4580,6 +4704,9 @@ impl ModelInfo {
             supports_tools: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         }
     }
@@ -4623,6 +4750,9 @@ impl ModelInfo {
             supports_tools: None,
             supports_native_schema: entry.supports_native_schema,
             supports_strict_tools: entry.supports_strict_tools,
+            supports_image_input: entry.supports_image_input,
+            supports_audio_input: entry.supports_audio_input,
+            supports_video_input: entry.supports_video_input,
             execution_backend: entry.execution_backend,
         }
     }
@@ -5467,6 +5597,9 @@ pub fn resolve_aux_model_inference_config(
                 supports_tools: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
@@ -5714,6 +5847,9 @@ pub fn inference_config_for_model(
         supports_backend_search: info.supports_backend_search,
         supports_native_schema: info.supports_native_schema,
         supports_strict_tools: info.supports_strict_tools,
+        supports_image_input: info.supports_image_input,
+        supports_audio_input: info.supports_audio_input,
+        supports_video_input: info.supports_video_input,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
@@ -5817,6 +5953,9 @@ fn resolve_hidden_default_web_search_inference_config(
             supports_tools: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
@@ -5935,6 +6074,47 @@ pub fn to_acp_model_info(
                     map.insert(
                         "supportsReasoningEffort".to_string(),
                         serde_json::Value::Bool(supports),
+                    );
+                }
+                if let Some(supports) = info.supports_image_input {
+                    map.insert(
+                        "supportsImageInput".to_string(),
+                        serde_json::Value::Bool(supports),
+                    );
+                    map.insert(
+                        "acceptsImages".to_string(),
+                        serde_json::Value::Bool(supports),
+                    );
+                }
+                if let Some(supports) = info.supports_audio_input {
+                    map.insert(
+                        "supportsAudioInput".to_string(),
+                        serde_json::Value::Bool(supports),
+                    );
+                }
+                if let Some(supports) = info.supports_video_input {
+                    map.insert(
+                        "supportsVideoInput".to_string(),
+                        serde_json::Value::Bool(supports),
+                    );
+                }
+                if info.supports_image_input.is_some()
+                    || info.supports_audio_input.is_some()
+                    || info.supports_video_input.is_some()
+                {
+                    let mut input_modalities = vec![serde_json::Value::String("text".to_owned())];
+                    for (modality, supported) in [
+                        ("image", info.supports_image_input),
+                        ("audio", info.supports_audio_input),
+                        ("video", info.supports_video_input),
+                    ] {
+                        if supported == Some(true) {
+                            input_modalities.push(serde_json::Value::String(modality.to_owned()));
+                        }
+                    }
+                    map.insert(
+                        "inputModalities".to_string(),
+                        serde_json::Value::Array(input_modalities),
                     );
                 }
                 if let Some(effort) = info.reasoning_effort
@@ -7004,6 +7184,9 @@ reasoning_effort = "low"
                 supports_tools: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },
@@ -8225,6 +8408,9 @@ reasoning_effort = "low"
         let mut override_entry = ConfigModelOverride {
             supports_native_schema: sonnet.supports_native_schema,
             supports_strict_tools: sonnet.supports_strict_tools,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             api_backend: Some(ApiBackend::Messages),
             model_provider: Some("grok_build_anthropic".into()),
             ..Default::default()
@@ -8371,6 +8557,9 @@ reasoning_effort = "low"
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -8534,6 +8723,9 @@ reasoning_effort = "low"
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -8544,6 +8736,42 @@ reasoning_effort = "low"
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
     }
+    #[test]
+    fn acp_model_meta_preserves_media_capability_tristate() {
+        let mut models = IndexMap::new();
+        let mut known = test_model_entry("known-media", "https://test.api/v1", None, None, None);
+        known.info.supports_image_input = Some(true);
+        known.info.supports_audio_input = Some(false);
+        known.info.supports_video_input = Some(true);
+        models.insert("known-media".to_string(), known);
+
+        let unknown = test_model_entry("unknown-media", "https://test.api/v1", None, None, None);
+        models.insert("unknown-media".to_string(), unknown);
+
+        let acp_models = to_acp_model_info(&models);
+        let known_meta = acp_models
+            .get(&acp::ModelId::new("known-media"))
+            .and_then(|model| model.meta.as_ref())
+            .expect("known media metadata");
+        assert_eq!(known_meta["supportsImageInput"], true);
+        assert_eq!(known_meta["acceptsImages"], true);
+        assert_eq!(known_meta["supportsAudioInput"], false);
+        assert_eq!(known_meta["supportsVideoInput"], true);
+        assert_eq!(
+            known_meta["inputModalities"],
+            serde_json::json!(["text", "image", "video"])
+        );
+
+        let unknown_meta = acp_models
+            .get(&acp::ModelId::new("unknown-media"))
+            .and_then(|model| model.meta.as_ref())
+            .expect("base metadata still exists");
+        assert!(unknown_meta.get("supportsImageInput").is_none());
+        assert!(unknown_meta.get("supportsAudioInput").is_none());
+        assert!(unknown_meta.get("supportsVideoInput").is_none());
+        assert!(unknown_meta.get("inputModalities").is_none());
+    }
+
     #[test]
     fn acp_model_meta_includes_agent_type_when_present() {
         let mut models = IndexMap::new();
@@ -8997,6 +9225,9 @@ reasoning_effort = "low"
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -12738,6 +12969,9 @@ default = "grok-4.5"
                 system_prompt_label: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
                 execution_backend:
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
             },

@@ -54,6 +54,10 @@ pub struct Config {
     /// `[compaction]` section — round-tripped so the pager's live compaction
     /// config updates persist and future sessions adopt them.
     pub compaction: crate::agent::config::CompactionConfig,
+    /// `[media]` section — media-understanding policy and auxiliary model
+    /// routes. Round-tripped so settings-modal edits land in config.toml
+    /// without disturbing unrelated tables.
+    pub media: crate::config::MediaConfig,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

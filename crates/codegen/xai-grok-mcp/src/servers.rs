@@ -1455,6 +1455,12 @@ impl xai_tool_runtime::Tool for McpErasedTool {
                     rmcp::model::ContentBlock::Image(img) => {
                         Some(format_mcp_image(&img.mime_type, &img.data, expose_base64))
                     }
+                    rmcp::model::ContentBlock::Audio(audio) => {
+                        // Do not silently drop MCP audio. Emit a durable text
+                        // marker (+ data URI) so the session layer can surface
+                        // or understand it without a new ToolKind.
+                        Some(format_mcp_audio(&audio.mime_type, &audio.data))
+                    }
                     rmcp::model::ContentBlock::Resource(r) => match &r.resource {
                         rmcp::model::ResourceContents::BlobResourceContents {
                             mime_type,
@@ -1467,9 +1473,33 @@ impl xai_tool_runtime::Tool for McpErasedTool {
                             let mime = mime_type.as_deref().unwrap();
                             Some(format_mcp_image(mime, blob, expose_base64))
                         }
+                        rmcp::model::ResourceContents::BlobResourceContents {
+                            mime_type,
+                            blob,
+                            ..
+                        } if mime_type
+                            .as_deref()
+                            .is_some_and(|m| m.starts_with("audio/")) =>
+                        {
+                            let mime = mime_type.as_deref().unwrap();
+                            Some(format_mcp_audio(mime, blob))
+                        }
+                        rmcp::model::ResourceContents::BlobResourceContents {
+                            mime_type,
+                            blob,
+                            ..
+                        } if mime_type
+                            .as_deref()
+                            .is_some_and(|m| m.starts_with("video/")) =>
+                        {
+                            let mime = mime_type.as_deref().unwrap();
+                            Some(format_mcp_video(mime, blob))
+                        }
                         _ => serde_json::to_string(&r).ok(),
                     },
-                    _ => None,
+                    other => serde_json::to_string(&other)
+                        .ok()
+                        .map(|json| format!("[MCP content retained as JSON]\n{json}")),
                 })
                 .collect();
             let text = parts.join("\n");
@@ -1533,6 +1563,22 @@ fn format_mcp_image(mime: &str, base64_data: &str, expose_base64: bool) -> Strin
     } else {
         format!("data:{mime};base64,{base64_data}")
     }
+}
+
+/// Surface MCP audio as explicit text + data URI (never silent drop).
+fn format_mcp_audio(mime: &str, base64_data: &str) -> String {
+    format!(
+        "[MCP audio content mime={mime} bytes_b64={}]\ndata:{mime};base64,{base64_data}",
+        base64_data.len()
+    )
+}
+
+/// Surface MCP video blobs as explicit text + data URI (never silent drop).
+fn format_mcp_video(mime: &str, base64_data: &str) -> String {
+    format!(
+        "[MCP video content mime={mime} bytes_b64={}]\ndata:{mime};base64,{base64_data}",
+        base64_data.len()
+    )
 }
 
 /// Check whether a `ServiceError` indicates the underlying transport has died
@@ -6952,6 +6998,20 @@ mod tests {
     fn format_mcp_image_expose_raw_block_has_no_data_prefix() {
         let out = format_mcp_image("image/jpeg", "ZZZZ", true);
         assert_eq!(out.matches("data:image/").count(), 1);
+    }
+
+    #[test]
+    fn format_mcp_audio_is_never_empty() {
+        let out = format_mcp_audio("audio/wav", "AQID");
+        assert!(out.contains("[MCP audio content mime=audio/wav"));
+        assert!(out.contains("data:audio/wav;base64,AQID"));
+    }
+
+    #[test]
+    fn format_mcp_video_is_never_empty() {
+        let out = format_mcp_video("video/mp4", "ZZZZ");
+        assert!(out.contains("[MCP video content mime=video/mp4"));
+        assert!(out.contains("data:video/mp4;base64,ZZZZ"));
     }
 
     #[test]

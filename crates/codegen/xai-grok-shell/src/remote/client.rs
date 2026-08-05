@@ -970,9 +970,55 @@ pub fn parse_remote_model_value(
             .or_else(|| obj.get("supports_strict_tools"))
             .or_else(|| meta.and_then(|m| m.get("supportsStrictTools")))
             .and_then(|v| v.as_bool()),
+        supports_image_input: parse_input_modality_capability(
+            obj,
+            meta,
+            "image",
+            &["supportsImageInput", "supports_image_input", "acceptsImages"],
+        ),
+        supports_audio_input: parse_input_modality_capability(
+            obj,
+            meta,
+            "audio",
+            &["supportsAudioInput", "supports_audio_input"],
+        ),
+        supports_video_input: parse_input_modality_capability(
+            obj,
+            meta,
+            "video",
+            &["supportsVideoInput", "supports_video_input"],
+        ),
         execution_backend: parse_remote_execution_backend(obj, meta),
         reasoning_effort_selection,
     })
+}
+
+fn parse_input_modality_capability(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    modality: &str,
+    scalar_keys: &[&str],
+) -> Option<bool> {
+    for key in scalar_keys {
+        if let Some(value) = obj
+            .get(*key)
+            .or_else(|| meta.and_then(|metadata| metadata.get(*key)))
+            .and_then(serde_json::Value::as_bool)
+        {
+            return Some(value);
+        }
+    }
+    let modalities = obj
+        .get("inputModalities")
+        .or_else(|| obj.get("input_modalities"))
+        .or_else(|| meta.and_then(|metadata| metadata.get("inputModalities")))
+        .or_else(|| meta.and_then(|metadata| metadata.get("input_modalities")))
+        .and_then(serde_json::Value::as_array)?;
+    Some(modalities.iter().any(|value| {
+        value
+            .as_str()
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(modality))
+    }))
 }
 
 /// Parse optional `executionBackend` / `execution_backend` from remote model JSON.
@@ -1469,6 +1515,43 @@ mod tests {
         assert!(matches!(error, BackendError::Serialization(_)));
         server.abort();
     }
+    #[test]
+    fn parse_input_modalities_preserves_unknown_and_explicit_false() {
+        let unknown = serde_json::json!({
+            "model": "unknown-media",
+            "context_window": 131072
+        });
+        let unknown = parse_remote_model_value(&unknown, "https://default.url").unwrap();
+        assert_eq!(unknown.supports_image_input, None);
+        assert_eq!(unknown.supports_audio_input, None);
+        assert_eq!(unknown.supports_video_input, None);
+
+        let listed = serde_json::json!({
+            "model": "listed-media",
+            "context_window": 131072,
+            "inputModalities": ["TEXT", "Image", "audio"]
+        });
+        let listed = parse_remote_model_value(&listed, "https://default.url").unwrap();
+        assert_eq!(listed.supports_image_input, Some(true));
+        assert_eq!(listed.supports_audio_input, Some(true));
+        assert_eq!(listed.supports_video_input, Some(false));
+    }
+
+    #[test]
+    fn parse_scalar_media_capability_overrides_modalities_array() {
+        let value = serde_json::json!({
+            "model": "scalar-wins",
+            "context_window": 131072,
+            "supportsImageInput": false,
+            "inputModalities": ["text", "image", "video"],
+            "_meta": { "supportsAudioInput": true }
+        });
+        let parsed = parse_remote_model_value(&value, "https://default.url").unwrap();
+        assert_eq!(parsed.supports_image_input, Some(false));
+        assert_eq!(parsed.supports_audio_input, Some(true));
+        assert_eq!(parsed.supports_video_input, Some(true));
+    }
+
     #[test]
     fn parse_openai_format_uses_id_field() {
         let value = serde_json::json!({

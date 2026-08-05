@@ -389,3 +389,67 @@ pub async fn set_compaction_primary_model(value: String) -> Result<()> {
 pub async fn set_compaction_fallback_model(value: String) -> Result<()> {
     set_compaction_model_at(1, value).await
 }
+
+/// Persist `[media].mode` after validating its canonical value.
+pub async fn set_media_routing(value: String) -> Result<()> {
+    let mode = match value.as_str() {
+        "auto" => crate::config::MediaMode::Auto,
+        "tools_only" => crate::config::MediaMode::ToolsOnly,
+        "off" => crate::config::MediaMode::Off,
+        _ => anyhow::bail!("invalid media routing `{value}`"),
+    };
+    update_config(|cfg| cfg.media.mode = mode).await
+}
+
+fn set_media_model_field(field: &str, value: String) -> impl FnOnce(&mut super::mcp::Config) + '_ {
+    move |cfg| {
+        let resolved = if value.is_empty() { None } else { Some(value) };
+        match field {
+            "image_model" => cfg.media.image_model = resolved,
+            "audio_model" => cfg.media.audio_model = resolved,
+            "video_model" => cfg.media.video_model = resolved,
+            _ => unreachable!("unknown media model field `{field}`"),
+        }
+    }
+}
+
+/// Persist `[media].image_model`. Empty restores the `@session` default.
+pub async fn set_media_image_model(value: String) -> Result<()> {
+    if value.len() > MAX_DEFAULT_MODEL_LEN {
+        anyhow::bail!(
+            "media image model name too long ({} > {} bytes)",
+            value.len(),
+            MAX_DEFAULT_MODEL_LEN
+        );
+    }
+    let value = if value.is_empty() {
+        "@session".to_owned()
+    } else {
+        value
+    };
+    update_config(set_media_model_field("image_model", value)).await
+}
+
+/// Persist or clear `[media].audio_model`. Empty clears the route.
+pub async fn set_media_audio_model(value: String) -> Result<()> {
+    if value.len() > MAX_DEFAULT_MODEL_LEN {
+        anyhow::bail!(
+            "media audio model name too long ({} > {} bytes)",
+            value.len(),
+            MAX_DEFAULT_MODEL_LEN
+        );
+    }
+    update_config(set_media_model_field("audio_model", value)).await
+}
+
+/// Persist or clear `[media].video_model`. Empty clears the route.
+pub async fn set_media_video_model(value: String) -> Result<()> {
+    if value.len() > MAX_DEFAULT_MODEL_LEN {
+        anyhow::bail!(
+            "media video model name too long ({} > {} bytes)",
+            value.len(),
+            MAX_DEFAULT_MODEL_LEN
+        );
+    }
+    update_config(set_media_model_field("video_model", value)).await
+}

@@ -438,6 +438,12 @@ impl ModelsManager {
         self.inner.cfg.read().endpoints.clone()
     }
 
+    /// Clone the current authoritative runtime configuration. Keep the lock
+    /// short-lived; media/voice callers use this to follow hot reloads.
+    pub fn config_snapshot(&self) -> config::Config {
+        self.inner.cfg.read().clone()
+    }
+
     /// Return the normalized compaction settings from the current authoritative
     /// configuration snapshot.
     pub fn compaction_config(
@@ -3767,6 +3773,9 @@ mod tests {
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,

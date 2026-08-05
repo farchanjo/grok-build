@@ -131,6 +131,9 @@ impl SessionActor {
             .get(1)
             .map(ConversationItem::text_content)
             .filter(|text| !text.is_empty());
+        let media_descriptors = self
+            .freeze_compaction_media_descriptors(&source_items)
+            .await;
 
         Ok(Some(RollingCompactionJob {
             identity,
@@ -138,6 +141,7 @@ impl SessionActor {
             compactor_input_capacity: budget.compactor_input_capacity,
             prompt_index: snapshot.prompt_index,
             original_user_info,
+            media_descriptors,
         }))
     }
 
@@ -195,8 +199,9 @@ impl SessionActor {
             std::collections::VecDeque::from_iter(chunks.into_iter().map(|chunk| chunk.range));
         let mut partial_summaries = Vec::new();
         while let Some(range) = pending.pop_front() {
-            let prepared = xai_chat_state::compaction_utils::prepare_conversation_for_summarization(
+            let prepared = xai_chat_state::compaction_utils::prepare_conversation_for_summarization_with_descriptors(
                 job.source_items[range.clone()].to_vec(),
+                &job.media_descriptors,
             );
             match sampler
                 .sample_compaction(&prepared, &chunk_prompt, self.inference_idle_timeout)

@@ -476,6 +476,27 @@ fn every_dynamic_enum_setting_has_action_for_string_arm() {
                     Some(Action::SetCompactionFallbackModel(_))
                 ));
             }
+            "media_image_model" => {
+                assert!(matches!(empty_action, Some(Action::ClearMediaImageModel)));
+                assert!(matches!(
+                    nonempty_action,
+                    Some(Action::SetMediaImageModel(_))
+                ));
+            }
+            "media_audio_model" => {
+                assert!(matches!(empty_action, Some(Action::ClearMediaAudioModel)));
+                assert!(matches!(
+                    nonempty_action,
+                    Some(Action::SetMediaAudioModel(_))
+                ));
+            }
+            "media_video_model" => {
+                assert!(matches!(empty_action, Some(Action::ClearMediaVideoModel)));
+                assert!(matches!(
+                    nonempty_action,
+                    Some(Action::SetMediaVideoModel(_))
+                ));
+            }
             other => panic!(
                 "Unknown DynamicEnum key `{other}` — add a discriminating arm in \
                  every_dynamic_enum_setting_has_action_for_string_arm so future \
@@ -721,6 +742,12 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
+            // Media understanding rows under Models.
+            "media_routing",
+            "media_image_model",
+            "media_audio_model",
+            "media_video_model",
+            "media_status",
             // Dedicated Compaction category.
             "compaction_strategy",
             "compaction_trigger_policy",

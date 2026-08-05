@@ -1423,6 +1423,104 @@ fn with_model_overrides_env<T>(
     with_model_overrides_env_full(ws, ss, id, None, f)
 }
 #[test]
+fn media_config_uses_defaults_and_clamps_explicit_limits() {
+    with_model_overrides_env(
+        None,
+        None,
+        None,
+        || {
+            let empty = toml::Value::Table(toml::map::Map::new());
+            assert_eq!(MediaConfig::resolve(&empty, None), MediaConfig::default());
+
+            let config: toml::Value = toml::from_str(
+                r#"
+                [media]
+                mode = "tools_only"
+                image_model = "  vision-route  "
+                audio_model = "speech-route"
+                video_model = "video-route"
+                image_limit = 0
+                audio_max_seconds = 99999
+                video_max_seconds = 0
+                video_max_frames = 999
+                "#,
+            )
+            .unwrap();
+            let resolved = MediaConfig::resolve(&config, None);
+            assert_eq!(resolved.mode, MediaMode::ToolsOnly);
+            assert_eq!(resolved.image_model.as_deref(), Some("vision-route"));
+            assert_eq!(resolved.audio_model.as_deref(), Some("speech-route"));
+            assert_eq!(resolved.video_model.as_deref(), Some("video-route"));
+            assert_eq!(resolved.image_limit, 1);
+            assert_eq!(
+                resolved.audio_max_seconds,
+                xai_grok_tools::util::ffmpeg::MAX_AUDIO_EXTRACT_SECONDS
+            );
+            assert_eq!(resolved.video_max_seconds, 1);
+            assert_eq!(resolved.video_max_frames, 32);
+        },
+    );
+}
+
+#[test]
+fn media_config_migrates_legacy_image_route_but_explicit_media_wins() {
+    with_model_overrides_env(
+        None,
+        None,
+        None,
+        || {
+            let legacy: toml::Value = toml::from_str(
+                r#"
+                [models]
+                image_description = "legacy-vision"
+                "#,
+            )
+            .unwrap();
+            assert_eq!(
+                MediaConfig::resolve(&legacy, None).image_model.as_deref(),
+                Some("legacy-vision")
+            );
+
+            let explicit: toml::Value = toml::from_str(
+                r#"
+                [models]
+                image_description = "legacy-vision"
+                [media]
+                image_model = "media-vision"
+                "#,
+            )
+            .unwrap();
+            assert_eq!(
+                MediaConfig::resolve(&explicit, None).image_model.as_deref(),
+                Some("media-vision")
+            );
+        },
+    );
+}
+
+#[test]
+fn media_config_legacy_env_wins_when_media_image_route_is_absent() {
+    with_model_overrides_env(
+        None,
+        None,
+        Some("env-vision"),
+        || {
+            let config: toml::Value = toml::from_str(
+                r#"
+                [models]
+                image_description = "legacy-vision"
+                "#,
+            )
+            .unwrap();
+            assert_eq!(
+                MediaConfig::resolve(&config, None).image_model.as_deref(),
+                Some("env-vision")
+            );
+        },
+    );
+}
+
+#[test]
 fn model_overrides_remote_settings_blocked_by_local_config() {
     with_model_overrides_env(
         None,

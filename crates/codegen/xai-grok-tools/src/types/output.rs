@@ -272,6 +272,41 @@ pub struct PdfPageImages {
     /// File size in bytes
     pub file_size: usize,
 }
+/// Path-centric audio payload from `read_file`.
+///
+/// Raw media bytes are intentionally not embedded: the shell layer understands
+/// the file via bounded ffmpeg helpers and converts it to text. Conversation
+/// history never persists a dedicated audio content variant.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AudioContent {
+    pub absolute_path: PathBuf,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<u32>,
+}
+/// Path-centric video payload from `read_file`.
+///
+/// Same persistence rule as [`AudioContent`]: no raw video variant is stored
+/// in conversation history; the shell converts sampled frames to text.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VideoContent {
+    pub absolute_path: PathBuf,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub has_audio: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ReadFileOutput {
     FileContent(FileContent),
@@ -288,6 +323,10 @@ pub enum ReadFileOutput {
     ImageContent(ImageContent),
     ImageSizeError(String),
     PdfPageImages(PdfPageImages),
+    /// Audio file classified before binary rejection.
+    AudioContent(AudioContent),
+    /// Video file classified before binary rejection.
+    VideoContent(VideoContent),
 }
 /// Represents successful edits applied by SearchReplace
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -680,7 +719,9 @@ impl ToolOutput {
             ToolOutput::ReadFile(
                 ReadFileOutput::FileContent(_)
                 | ReadFileOutput::ImageContent(_)
-                | ReadFileOutput::PdfPageImages(_),
+                | ReadFileOutput::PdfPageImages(_)
+                | ReadFileOutput::AudioContent(_)
+                | ReadFileOutput::VideoContent(_),
             ) => false,
             ToolOutput::ReadFile(_) => true,
             ToolOutput::TaskOutput(TaskOutputOutput::TaskNotFound(_)) => true,
@@ -728,6 +769,12 @@ impl ToolOutput {
                         pdf.total_pages,
                         pdf.file_size as f64 / 1024.0,
                     )
+                }
+                ReadFileOutput::AudioContent(audio) => {
+                    crate::implementations::read_file::audio_prompt_summary(audio)
+                }
+                ReadFileOutput::VideoContent(video) => {
+                    crate::implementations::read_file::video_prompt_summary(video)
                 }
             },
             ToolOutput::ListDir(list_dir_output) => match list_dir_output {

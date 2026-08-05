@@ -820,4 +820,10 @@ pub enum SessionCommand {
     UpdateCompactionConfig {
         compaction: Box<crate::agent::config::CompactionConfig>,
     },
+    /// Update the complete media-understanding policy for a live session.
+    /// Applied at an actor mailbox boundary so a turn sees one coherent
+    /// routes-and-bounds snapshot.
+    UpdateMediaConfig {
+        media: Box<crate::config::MediaConfig>,
+    },
 }

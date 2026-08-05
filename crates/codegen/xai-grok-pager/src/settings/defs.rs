@@ -534,6 +534,24 @@ const COMPACTION_STRATEGY_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+const MEDIA_ROUTING_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "auto",
+        display: "Auto",
+        description: "Proactively understand unsupported media and lazily backfill descriptors.",
+    },
+    EnumChoice {
+        canonical: "tools_only",
+        display: "Tools only",
+        description: "Only explicit tool reads may invoke media understanding.",
+    },
+    EnumChoice {
+        canonical: "off",
+        display: "Off",
+        description: "Never invoke auxiliary media inference.",
+    },
+];
+
 const COMPACTION_TRIGGER_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "fixed",
@@ -1591,6 +1609,95 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 source: DynamicEnumSource::ActiveModelCatalog,
                 supports_preview: false,
             },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // ── Media understanding (Models category) ─────────────────────
+        //
+        // SHELL-owned: persisted under `[media]` in config.toml.
+        // Routing selects when auxiliary media inference may run.
+        // Image/audio/video model pickers choose the auxiliary routes;
+        // `@session` reuses the active session model. External catalog
+        // models disclose that media content may leave the local host.
+        SettingMeta {
+            key: "media_routing",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Media routing",
+            description: "When Grok may run auxiliary media understanding for images, audio, and video that the active model cannot consume natively.",
+            keywords: &[
+                "media",
+                "routing",
+                "image",
+                "audio",
+                "video",
+                "vision",
+                "multimodal",
+                "tools_only",
+                "auto",
+                "off",
+            ],
+            kind: SettingKind::Enum {
+                default: "auto",
+                choices: MEDIA_ROUTING_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_image_model",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Image model",
+            description: "Model used for image understanding when media routing is active. Session model reuses the active route. External providers receive media content.",
+            keywords: &["media", "image", "vision", "describe", "model", "session"],
+            kind: SettingKind::DynamicEnum {
+                default: "@session",
+                source: DynamicEnumSource::MediaImageModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_audio_model",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Audio transcription route",
+            description: "Optional audio transcription route. File audio currently uses xAI streaming STT only; arbitrary catalog routes fail closed.",
+            keywords: &["media", "audio", "speech", "transcribe", "model", "session"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::MediaAudioModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_video_model",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Video model",
+            description: "Optional model for video understanding. Leave Unset when video routing is not needed. External providers receive media content.",
+            keywords: &["media", "video", "frames", "model", "session"],
+            kind: SettingKind::DynamicEnum {
+                default: "",
+                source: DynamicEnumSource::MediaVideoModelCatalog,
+                supports_preview: false,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "media_status",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Pager,
+            label: "Media status",
+            description: "Effective media routing and model routes. External provider selections are disclosed here.",
+            keywords: &["media", "status", "effective", "external", "provider"],
+            kind: SettingKind::Status,
             restart_required: false,
             hidden_in_minimal: false,
         },

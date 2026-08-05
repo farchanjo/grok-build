@@ -507,7 +507,12 @@ impl acp::Agent for MvpAgent {
                                 .cloned(),
                         )
                         .prompt_capabilities(
-                            acp::PromptCapabilities::new().embedded_context(true),
+                            // Advertise image + audio so clients stop treating
+                            // those prompt blocks as unsupported / droppable.
+                            acp::PromptCapabilities::new()
+                                .image(true)
+                                .audio(true)
+                                .embedded_context(true),
                         )
                         .mcp_capabilities(
                             acp::McpCapabilities::new().http(true).sse(true),

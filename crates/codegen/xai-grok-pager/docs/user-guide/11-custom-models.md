@@ -92,6 +92,10 @@ temperature = 0.7                         # Sampling temperature
 top_p = 0.95                              # Nucleus sampling parameter
 max_completion_tokens = 8192              # Maximum tokens per response
 context_window = 128000                   # Total context window in tokens
+# Declare only capabilities verified for this endpoint. Omitted means unknown.
+supports_image_input = true
+supports_audio_input = false
+supports_video_input = false
 # Non-secret headers only — never put credentials here:
 extra_headers = { "X-Request-Tags" = "team=example" }
 ```
@@ -130,6 +134,18 @@ not URL-based, so a mistyped `base_url` cannot leak the headers.
 ### Context Window
 
 The `context_window` value tells Grok when to trigger auto-compaction. When you override a known model, Grok inherits that model's context window. When you define a new model and omit `context_window`, Grok defaults to 200,000 tokens, so set it explicitly to match your provider.
+
+### Media Input Capabilities
+
+`supports_image_input`, `supports_audio_input`, and `supports_video_input` are
+tri-state fields. `true` means the endpoint is known to accept that native input
+shape, `false` means it is known not to, and an omitted field remains unknown.
+Grok does not treat unknown as supported; unsupported or unknown media can use
+the configured auxiliary route instead. Local model overrides take precedence
+over discovered or inherited capability metadata.
+
+For auxiliary route configuration and privacy implications, see
+[Media Understanding](28-media-understanding.md).
 
 ### Global Default Headers
 

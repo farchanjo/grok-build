@@ -225,8 +225,16 @@ impl SessionActor {
             .as_ref()
             .map(|c| c.context_window.get())
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        let items =
-            session_recap::budget_recap_items(conversation, tag, strip_reasoning, context_window);
+        let media_descriptors = self
+            .freeze_compaction_media_descriptors(&conversation)
+            .await;
+        let items = session_recap::budget_recap_items_with_descriptors(
+            conversation,
+            tag,
+            strip_reasoning,
+            context_window,
+            &media_descriptors,
+        );
 
         let model = inference_config.map(|c| c.model).unwrap_or_default();
 

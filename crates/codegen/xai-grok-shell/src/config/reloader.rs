@@ -399,9 +399,12 @@ impl ConfigReloader {
         let new_models_table = new_global.get("models");
         let old_providers_table = self.last_global_config.get("model_providers");
         let new_providers_table = new_global.get("model_providers");
+        let old_media_table = self.last_global_config.get("media");
+        let new_media_table = new_global.get("media");
         if old_model_table != new_model_table
             || old_models_table != new_models_table
             || old_providers_table != new_providers_table
+            || old_media_table != new_media_table
         {
             info!("model or model_providers config change detected");
             let _ = self.config_update_tx.send(ConfigUpdate::ModelsChanged);

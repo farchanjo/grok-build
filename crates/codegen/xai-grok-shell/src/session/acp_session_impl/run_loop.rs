@@ -2458,6 +2458,9 @@ pub(super) async fn run_session(
                             // Preserves threshold/memory/timing/two-pass state.
                             session.update_compaction_config(*compaction);
                         }
+                        SessionCommand::UpdateMediaConfig { media } => {
+                            *session.media_config.borrow_mut() = *media;
+                        }
                     }
             }
         }

@@ -184,6 +184,13 @@ pub struct ProviderModelPreset {
     /// Opt-in Anthropic strict tool definitions (never default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    /// Explicit input-modality capabilities advertised by the provider catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_video_input: Option<bool>,
     /// Normalized reasoning effort selection (additive to legacy bool/list/default fields).
     /// - Unknown: no information available
     /// - Unsupported: model does not support reasoning effort
@@ -385,6 +392,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             ProviderModelPreset {
                 id: "openai-gpt-5.6-terra".to_owned(),
@@ -411,6 +421,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             ProviderModelPreset {
                 id: "openai-gpt-5.6-luna".to_owned(),
@@ -437,6 +450,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             ProviderModelPreset {
                 id: "openrouter-openai-gpt-5.6-sol".to_owned(),
@@ -463,6 +479,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             ProviderModelPreset {
                 id: "openrouter-openai-gpt-5.6-terra".to_owned(),
@@ -489,6 +508,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             // Curated direct Anthropic agent-capable presets (API aliases as of
             // 2026-07). Visible only when an Anthropic key is configured.
@@ -518,6 +540,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             ProviderModelPreset {
                 id: "anthropic-claude-opus-5".to_owned(),
@@ -543,6 +568,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             ProviderModelPreset {
                 id: "anthropic-claude-haiku-4-5".to_owned(),
@@ -563,6 +591,9 @@ impl ProviderManager {
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Unknown),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
         ]
     }
@@ -758,6 +789,9 @@ impl ProviderManager {
                     supports_tools: Some(preset.supports_tools),
                     supports_native_schema: preset.supports_native_schema,
                     supports_strict_tools: preset.supports_strict_tools,
+                    supports_image_input: preset.supports_image_input,
+                    supports_audio_input: preset.supports_audio_input,
+                    supports_video_input: preset.supports_video_input,
                     ..Default::default()
                 });
         }
@@ -1634,6 +1668,9 @@ fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
                 default_reasoning_effort: default_effort,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
                 reasoning_effort_selection: Some(ReasoningEffortSelection::Exact),
             }
         })
@@ -1901,6 +1938,9 @@ fn parse_openai_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()> {
                 ),
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             })
         })
         .collect::<Vec<_>>();
@@ -1969,6 +2009,8 @@ struct OpenRouterModel {
     #[serde(default)]
     top_provider: Option<OpenRouterTopProvider>,
     #[serde(default)]
+    architecture: Option<OpenRouterArchitecture>,
+    #[serde(default)]
     supported_parameters: Vec<String>,
     /// Optional provider-advertised defaults (effort, temperature, …).
     #[serde(default)]
@@ -2018,6 +2060,12 @@ struct OpenRouterTopProvider {
     max_completion_tokens: Option<u64>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct OpenRouterArchitecture {
+    #[serde(default)]
+    input_modalities: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OpenRouterCatalogCache {
     version: u8,
@@ -2057,6 +2105,18 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
                     "reasoning" | "reasoning_effort" | "include_reasoning"
                 )
             });
+            let input_modalities = model
+                .architecture
+                .as_ref()
+                .map(|architecture| architecture.input_modalities.as_slice())
+                .unwrap_or_default();
+            let modality_capability = |modality: &str| {
+                (!input_modalities.is_empty()).then(|| {
+                    input_modalities
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(modality))
+                })
+            };
             let (reasoning_effort_selection, reasoning_efforts, default_reasoning_effort) =
                 openrouter_effort_metadata(&model, supports_reasoning_effort);
 
@@ -2082,6 +2142,9 @@ fn parse_openrouter_catalog(body: &[u8]) -> Result<Vec<ProviderModelPreset>, ()>
                 reasoning_effort_selection,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: modality_capability("image"),
+                supports_audio_input: modality_capability("audio"),
+                supports_video_input: modality_capability("video"),
             })
         })
         .collect::<Vec<_>>();
@@ -2680,6 +2743,11 @@ fn merge_anthropic_catalog(
                 .as_ref()
                 .and_then(|c| c.structured_outputs.as_ref())
                 .is_some_and(|s| s.supported);
+            let supports_image_input = info
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.image_input.as_ref())
+                .map(|capability| capability.supported);
             let advertised_efforts = anthropic_effort_metadata(info.capabilities.as_ref());
             let effort_options = advertised_efforts.clone().unwrap_or_default();
             let supports_effort = !effort_options.is_empty();
@@ -2708,6 +2776,9 @@ fn merge_anthropic_catalog(
                 }),
                 supports_native_schema: structured.then_some(true),
                 supports_strict_tools: None,
+                supports_image_input,
+                supports_audio_input: None,
+                supports_video_input: None,
             }
         })
         .collect();
@@ -3302,6 +3373,9 @@ mod tests {
                 ),
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             }],
             fetched_at: current_epoch_secs(),
         };
@@ -3327,6 +3401,9 @@ mod tests {
                 ),
                 supports_native_schema: Some(true),
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             }],
             fetched_at: current_epoch_secs(),
         };

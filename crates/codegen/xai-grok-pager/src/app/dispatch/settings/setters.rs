@@ -2399,3 +2399,327 @@ pub(in crate::app::dispatch) fn clear_compaction_fallback_model(app: &mut AppVie
         rollback_value: crate::settings::SettingValue::String(prev),
     }]
 }
+
+// ---------------------------------------------------------------------------
+// Media settings setters.
+// SHELL-OWNED: persisted to `[media]` in config.toml.
+// ---------------------------------------------------------------------------
+
+fn media_routing_canonical(mode: xai_grok_shell::config::MediaMode) -> &'static str {
+    match mode {
+        xai_grok_shell::config::MediaMode::Auto => "auto",
+        xai_grok_shell::config::MediaMode::ToolsOnly => "tools_only",
+        xai_grok_shell::config::MediaMode::Off => "off",
+    }
+}
+
+/// State-only mutation for `media_routing`.
+pub(super) fn set_media_routing_inner(app: &mut AppView, value: &str) {
+    app.media_config.mode = match value {
+        "tools_only" => xai_grok_shell::config::MediaMode::ToolsOnly,
+        "off" => xai_grok_shell::config::MediaMode::Off,
+        _ => xai_grok_shell::config::MediaMode::Auto,
+    };
+}
+
+/// Outer dispatcher for `Action::SetMediaRouting`.
+pub(in crate::app::dispatch) fn set_media_routing(app: &mut AppView, new: String) -> Vec<Effect> {
+    let prev = media_routing_canonical(app.media_config.mode);
+    let new_canonical = match new.as_str() {
+        "tools_only" => "tools_only",
+        "off" => "off",
+        _ => "auto",
+    };
+    if prev == new_canonical {
+        return vec![];
+    }
+    set_media_routing_inner(app, new_canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target: "settings",
+        key = "media_routing",
+        value = new_canonical,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Media routing: {new_canonical}"));
+    vec![Effect::PersistSetting {
+        key: "media_routing",
+        value: crate::settings::SettingValue::Enum(new_canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
+/// State-only mutation for `media_image_model`.
+pub(super) fn set_media_image_model_inner(app: &mut AppView, value: String) {
+    let value = if value.is_empty() {
+        "@session".to_owned()
+    } else {
+        value
+    };
+    app.media_config.image_model = Some(value);
+}
+
+/// Outer dispatcher for `Action::SetMediaImageModel`.
+pub(in crate::app::dispatch) fn set_media_image_model(
+    app: &mut AppView,
+    new_id: acp::ModelId,
+) -> Vec<Effect> {
+    let ActiveView::Agent(aid) = app.active_view else {
+        tracing::error!(
+            target: "settings",
+            key = "media_image_model",
+            "Action::SetMediaImageModel dispatched with no active agent — no-op",
+        );
+        return vec![];
+    };
+    let (new_display, available_has_new) = {
+        let Some(agent) = app.agents.get(&aid) else {
+            tracing::error!(
+                target: "settings",
+                key = "media_image_model",
+                "Action::SetMediaImageModel: active_view::Agent points to missing agent",
+            );
+            return vec![];
+        };
+        let display = agent.session.models.display_name_for(&new_id);
+        let has = agent.session.models.available.contains_key(&new_id);
+        (display, has)
+    };
+    let new_id_str = new_id.0.to_string();
+    if new_id_str != "@session" && !available_has_new {
+        tracing::error!(
+            target: "settings",
+            key = "media_image_model",
+            id = ?new_id,
+            "Action::SetMediaImageModel dispatched with id not in catalog — \
+             validator skew; no-op",
+        );
+        return vec![];
+    }
+    let prev = app
+        .media_config
+        .image_model
+        .clone()
+        .unwrap_or_else(|| "@session".to_owned());
+    if prev == new_id_str {
+        return vec![];
+    }
+    set_media_image_model_inner(app, new_id_str.clone());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target = "settings",
+        key = "media_image_model",
+        new = ?new_display,
+        new_id = %new_id_str,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Image model: {new_display}"));
+    vec![Effect::PersistSetting {
+        key: "media_image_model",
+        value: crate::settings::SettingValue::String(new_id_str),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// Restore the image understanding route to `@session`.
+pub(in crate::app::dispatch) fn clear_media_image_model(app: &mut AppView) -> Vec<Effect> {
+    let prev = app
+        .media_config
+        .image_model
+        .clone()
+        .unwrap_or_else(|| "@session".to_owned());
+    if prev == "@session" {
+        app.show_toast("\u{2713} Image model: already using session model");
+        return vec![];
+    }
+    set_media_image_model_inner(app, "@session".to_owned());
+    refresh_open_settings_modals(app);
+    app.show_toast("\u{2713} Image model: Session model");
+    vec![Effect::PersistSetting {
+        key: "media_image_model",
+        value: crate::settings::SettingValue::String("@session".to_owned()),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// State-only mutation for `media_audio_model`. Empty clears the route.
+pub(super) fn set_media_audio_model_inner(app: &mut AppView, value: String) {
+    app.media_config.audio_model = if value.is_empty() { None } else { Some(value) };
+}
+
+/// Outer dispatcher for `Action::SetMediaAudioModel`.
+pub(in crate::app::dispatch) fn set_media_audio_model(
+    app: &mut AppView,
+    new_id: acp::ModelId,
+) -> Vec<Effect> {
+    let ActiveView::Agent(aid) = app.active_view else {
+        tracing::error!(
+            target: "settings",
+            key = "media_audio_model",
+            "Action::SetMediaAudioModel dispatched with no active agent — no-op",
+        );
+        return vec![];
+    };
+    let (new_display, available_has_new) = {
+        let Some(agent) = app.agents.get(&aid) else {
+            tracing::error!(
+                target: "settings",
+                key = "media_audio_model",
+                "Action::SetMediaAudioModel: active_view::Agent points to missing agent",
+            );
+            return vec![];
+        };
+        let display = agent.session.models.display_name_for(&new_id);
+        let has = agent.session.models.available.contains_key(&new_id);
+        (display, has)
+    };
+    let new_id_str = new_id.0.to_string();
+    if new_id_str != "xai-streaming-stt" {
+        tracing::error!(
+            target: "settings",
+            key = "media_audio_model",
+            id = ?new_id,
+            "Action::SetMediaAudioModel dispatched with an unsupported route — no-op",
+        );
+        return vec![];
+    }
+    let _ = available_has_new;
+    let prev = app.media_config.audio_model.clone().unwrap_or_default();
+    if prev == new_id_str {
+        return vec![];
+    }
+    set_media_audio_model_inner(app, new_id_str.clone());
+    refresh_open_settings_modals(app);
+    let toast_label = if new_id_str == "xai-streaming-stt" {
+        "xAI streaming STT".to_owned()
+    } else {
+        new_display
+    };
+    tracing::info!(
+        target = "settings",
+        key = "media_audio_model",
+        new = %toast_label,
+        new_id = %new_id_str,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Audio model: {toast_label}"));
+    vec![Effect::PersistSetting {
+        key: "media_audio_model",
+        value: crate::settings::SettingValue::String(new_id_str),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// Clear the persisted audio understanding model.
+pub(in crate::app::dispatch) fn clear_media_audio_model(app: &mut AppView) -> Vec<Effect> {
+    let prev = app.media_config.audio_model.clone().unwrap_or_default();
+    if prev.is_empty() {
+        app.show_toast("\u{2713} Audio model: already unset");
+        return vec![];
+    }
+    set_media_audio_model_inner(app, String::new());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target = "settings",
+        key = "media_audio_model",
+        value = "<cleared>",
+        "setting changed",
+    );
+    app.show_toast("\u{2713} Audio model: Unset");
+    vec![Effect::PersistSetting {
+        key: "media_audio_model",
+        value: crate::settings::SettingValue::String(String::new()),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// State-only mutation for `media_video_model`. Empty clears the route.
+pub(super) fn set_media_video_model_inner(app: &mut AppView, value: String) {
+    app.media_config.video_model = if value.is_empty() { None } else { Some(value) };
+}
+
+/// Outer dispatcher for `Action::SetMediaVideoModel`.
+pub(in crate::app::dispatch) fn set_media_video_model(
+    app: &mut AppView,
+    new_id: acp::ModelId,
+) -> Vec<Effect> {
+    let ActiveView::Agent(aid) = app.active_view else {
+        tracing::error!(
+            target: "settings",
+            key = "media_video_model",
+            "Action::SetMediaVideoModel dispatched with no active agent — no-op",
+        );
+        return vec![];
+    };
+    let (new_display, available_has_new) = {
+        let Some(agent) = app.agents.get(&aid) else {
+            tracing::error!(
+                target: "settings",
+                key = "media_video_model",
+                "Action::SetMediaVideoModel: active_view::Agent points to missing agent",
+            );
+            return vec![];
+        };
+        let display = agent.session.models.display_name_for(&new_id);
+        let has = agent.session.models.available.contains_key(&new_id);
+        (display, has)
+    };
+    let new_id_str = new_id.0.to_string();
+    if new_id_str != "@session" && !available_has_new {
+        tracing::error!(
+            target: "settings",
+            key = "media_video_model",
+            id = ?new_id,
+            "Action::SetMediaVideoModel dispatched with id not in catalog — \
+             validator skew; no-op",
+        );
+        return vec![];
+    }
+    let prev = app.media_config.video_model.clone().unwrap_or_default();
+    if prev == new_id_str {
+        return vec![];
+    }
+    set_media_video_model_inner(app, new_id_str.clone());
+    refresh_open_settings_modals(app);
+    let toast_label = if new_id_str == "@session" {
+        "Session model".to_owned()
+    } else {
+        new_display
+    };
+    tracing::info!(
+        target = "settings",
+        key = "media_video_model",
+        new = %toast_label,
+        new_id = %new_id_str,
+        "setting changed",
+    );
+    app.show_toast(&format!("\u{2713} Video model: {toast_label}"));
+    vec![Effect::PersistSetting {
+        key: "media_video_model",
+        value: crate::settings::SettingValue::String(new_id_str),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}
+
+/// Clear the persisted video understanding model.
+pub(in crate::app::dispatch) fn clear_media_video_model(app: &mut AppView) -> Vec<Effect> {
+    let prev = app.media_config.video_model.clone().unwrap_or_default();
+    if prev.is_empty() {
+        app.show_toast("\u{2713} Video model: already unset");
+        return vec![];
+    }
+    set_media_video_model_inner(app, String::new());
+    refresh_open_settings_modals(app);
+    tracing::info!(
+        target = "settings",
+        key = "media_video_model",
+        value = "<cleared>",
+        "setting changed",
+    );
+    app.show_toast("\u{2713} Video model: Unset");
+    vec![Effect::PersistSetting {
+        key: "media_video_model",
+        value: crate::settings::SettingValue::String(String::new()),
+        rollback_value: crate::settings::SettingValue::String(prev),
+    }]
+}

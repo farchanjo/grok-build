@@ -14,6 +14,15 @@
 #
 # `cargo test` compatibility is preserved; `cargo test` simply ignores this file.
 
+# Static nextest store path. These paths are resolved relative to the workspace
+# root and are not dynamically altered by a caller-provided CARGO_TARGET_DIR
+# override. In verified cargo-nextest 0.9.137, environment-variable syntax here
+# is not interpolated (it was literally used as a directory name), so keep the
+# path static. If you deliberately want nextest output elsewhere, pass a custom
+# --config-file or edit this value directly.
+[store]
+dir = "target-dev/nextest"
+
 [profile.default]
 # Zero retries: if a test is flaky, re-running it silently hides the defect.
 retries = 0
@@ -29,4 +38,8 @@ status-level = "skip"
 final-status-level = "fail"
 
 [profile.default.junit]
-path = "target/nextest-results.xml"
+# Path is interpreted relative to ${store.dir}/${profile}. With the store above,
+# reports are written to target-dev/nextest/default/nextest-results.xml.
+# cargo-nextest 0.9.137 does not interpolate environment variables here, so do
+# not rely on ${CARGO_TARGET_DIR} or similar syntax.
+path = "nextest-results.xml"

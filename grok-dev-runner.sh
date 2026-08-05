@@ -1,30 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Portable symlink resolution: follow symlinks without requiring GNU realpath or
+# readlink -f, which are unavailable on a default macOS install.
+_grok_resolve_symlinks() {
+    local target="$1"
+    local depth=0
 
-# Keep development state separate from the default ~/.grok production state.
-if [[ -z "${GROK_HOME:-}" ]]; then
-    if [[ -z "${HOME:-}" ]]; then
-        printf 'error: HOME or GROK_HOME must be set\n' >&2
-        exit 1
-    fi
-    GROK_HOME="${HOME}/.grokdev"
+    while [[ -L "${target}" ]]; do
+        if (( ++depth > 40 )); then
+            printf 'error: too many symlink levels for: %s\n' "$1" >&2
+            return 1
+        fi
+
+        local link
+        link="$(readlink "${target}")" || {
+            printf 'error: cannot read symlink: %s\n' "${target}" >&2
+            return 1
+        }
+
+        if [[ "${link}" == /* ]]; then
+            target="${link}"
+        else
+            local dir
+            dir="${target%/*}"
+            dir="${dir:-.}"
+            target="${dir}/${link}"
+        fi
+    done
+
+    printf '%s\n' "${target}"
+}
+
+SCRIPT_SRC="${BASH_SOURCE[0]}"
+if [[ -L "${SCRIPT_SRC}" ]]; then
+    SCRIPT_SRC="$(_grok_resolve_symlinks "${SCRIPT_SRC}")" || exit 1
 fi
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${SCRIPT_SRC}")" && pwd -P)"
 
-export GROK_HOME
-export GROK_LEADER_SOCKET="${GROK_LEADER_SOCKET:-${GROK_HOME}/leader.sock}"
-export GROK_DISABLE_AUTOUPDATER="${GROK_DISABLE_AUTOUPDATER:-1}"
+source "${SCRIPT_DIR}/grok-dev-env.sh"
 
-# Isolate artifacts from concurrent cargo test/check/build on ./target so this
-# runner never blocks on "file lock on artifact directory". sccache (configured
-# in .cargo/config.toml) still shares the compile cache across target dirs.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${SCRIPT_DIR}/target-dev}"
+cd "${SCRIPT_DIR}"
 
-# Prefer sccache when available even if .cargo/config is overridden.
-if [[ -z "${RUSTC_WRAPPER:-}" ]] && command -v sccache >/dev/null 2>&1; then
-    export RUSTC_WRAPPER=sccache
-fi
+# Run the interactive console with the experimental claude-cli-runtime feature.
+# This wrapper shares the same isolated ~/.grokdev profile and target-dev
+# directory as ./grok-check.sh and ./grok-test.sh, so dependency artifacts are
+# reused across the normal development loop. Targets that depend on
+# claude-cli-runtime are rebuilt because of the feature flag, but the shared
+# directory avoids duplicating everything. Use it only when you need
+# claude-cli-runtime; otherwise prefer direct `cargo run` with the same
+# environment.
+#
+# Examples:
+#   ./grok-dev-runner.sh --no-leader --no-auto-update
+#   ./grok-dev-runner.sh --no-leader --no-auto-update --no-alt-screen
 
 # Export content-redacted development usage telemetry to the dedicated Alloy
 # receiver. Pin the routing before Grok starts so ambient OTEL settings cannot
@@ -36,45 +65,20 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://vm.services:14318
 export OTEL_LOG_USER_PROMPTS=0
 export OTEL_LOG_TOOL_DETAILS=0
-# Opt in to the experimental Claude Agent CLI runtime. The matching Cargo
-# feature is enabled in the cargo invocation below; default/release-dist builds
-# remain feature-off.
+
+# Opt in to the experimental Claude Agent CLI runtime.
 export GROK_CLAUDE_CLI_RUNTIME="${GROK_CLAUDE_CLI_RUNTIME:-1}"
+
 unset OTEL_EXPORTER_OTLP_LOGS_ENDPOINT OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
 unset OTEL_EXPORTER_OTLP_HEADERS OTEL_EXPORTER_OTLP_LOGS_HEADERS
 unset OTEL_EXPORTER_OTLP_METRICS_HEADERS
-
-# Do not discover state owned by other coding agents. This does not disable
-# native Grok hooks or the explicitly selected Claude CLI external runtime.
-export GROK_CURSOR_SKILLS_ENABLED=0
-export GROK_CURSOR_RULES_ENABLED=0
-export GROK_CURSOR_AGENTS_ENABLED=0
-export GROK_CURSOR_MCPS_ENABLED=0
-export GROK_CURSOR_HOOKS_ENABLED=0
-export GROK_CURSOR_SESSIONS_ENABLED=0
-
-export GROK_CLAUDE_SKILLS_ENABLED=0
-export GROK_CLAUDE_RULES_ENABLED=0
-export GROK_CLAUDE_AGENTS_ENABLED=0
-export GROK_CLAUDE_MCPS_ENABLED=0
-export GROK_CLAUDE_HOOKS_ENABLED=0
-export GROK_CLAUDE_SESSIONS_ENABLED=0
-
-export GROK_CODEX_SKILLS_ENABLED=0
-export GROK_CODEX_RULES_ENABLED=0
-export GROK_CODEX_AGENTS_ENABLED=0
-export GROK_CODEX_MCPS_ENABLED=0
-export GROK_CODEX_HOOKS_ENABLED=0
-export GROK_CODEX_SESSIONS_ENABLED=0
 
 # Space large OpenRouter tool-loop requests and keep a conservative pace for
 # a few successful calls after a 429. Both defaults remain overridable.
 export GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS="${GROK_OPENROUTER_MIN_REQUEST_INTERVAL_MS:-2000}"
 export GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS="${GROK_OPENROUTER_RATE_LIMIT_RECOVERY_REQUESTS:-8}"
 
-mkdir -p "${GROK_HOME}"
-chmod 700 "${GROK_HOME}"
-mkdir -p "${CARGO_TARGET_DIR}"
-
-cd "${SCRIPT_DIR}"
-exec cargo run -p xai-grok-pager-bin --features claude-cli-runtime -- "$@"
+# Cargo serializes access to the shared target-dev directory with its own file
+# lock, which is released once the build finishes and the long-running binary
+# starts. Do not add a wrapper-level lock; keep the invocation simple.
+exec cargo run --locked -p xai-grok-pager-bin --features claude-cli-runtime -- "$@"

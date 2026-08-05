@@ -675,8 +675,16 @@ impl SessionActor {
             self.chat_state_handle.get_conversation_counts(),
             self.chat_state_handle.get_conversation(),
         );
+        // External agents refuse the flush itself earlier; still fail-closed
+        // on lazy media backfill when this path is reached.
+        let media_descriptors = self
+            .freeze_compaction_media_descriptors(&conversation)
+            .await;
         let chat_history = crate::inference::conversation_to_chat_messages(
-            xai_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation),
+            xai_chat_state::compaction_utils::prepare_conversation_for_summarization_with_descriptors(
+                conversation,
+                &media_descriptors,
+            ),
         );
         MemoryFlushSnapshot {
             counts,

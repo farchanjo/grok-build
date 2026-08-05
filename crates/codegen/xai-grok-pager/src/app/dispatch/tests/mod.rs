@@ -53,7 +53,7 @@ use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
 use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
-use super::settings::ui::{action_for_reset, apply_setting_rollback};
+use super::settings::ui::{action_for_reset, apply_setting_rollback, build_pager_snapshot};
 use super::status::scrub_error_for_toast;
 use super::task_result::dispatch_task_result;
 use super::*;
@@ -87,6 +87,7 @@ fn test_app() -> AppView {
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         compaction_config: xai_grok_shell::agent::config::CompactionConfig::default(),
+        media_config: xai_grok_shell::config::MediaConfig::default(),
         cwd: PathBuf::from("/tmp"),
         project_picker_shown: true,
         project_picker_disabled: false,

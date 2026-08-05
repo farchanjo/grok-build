@@ -72,6 +72,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     supports_backend_search: false,
                     supports_native_schema: None,
                     supports_strict_tools: None,
+                    supports_image_input: None,
+                    supports_audio_input: None,
+                    supports_video_input: None,
                     compactions_remaining: None,
                     compaction_at_tokens: None,
                     doom_loop_recovery: None,
@@ -110,6 +113,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     stream_tool_calls: None,
                     supports_native_schema: None,
                     supports_strict_tools: None,
+                    supports_image_input: None,
+                    supports_audio_input: None,
+                    supports_video_input: None,
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -310,9 +316,17 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 external_runtime: std::cell::RefCell::new(None),
                 external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+                    image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+                    ..Default::default()
+                }),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
+                ),
+                media_descriptor_store: Arc::new(
+                    crate::session::media_descriptors::MediaDescriptorStore::empty(
+                        std::path::Path::new("/tmp"),
+                    ),
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
@@ -402,6 +416,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     supports_backend_search: false,
                     supports_native_schema: None,
                     supports_strict_tools: None,
+                    supports_image_input: None,
+                    supports_audio_input: None,
+                    supports_video_input: None,
                     compactions_remaining: None,
                     compaction_at_tokens: None,
                     doom_loop_recovery: None,
@@ -443,6 +460,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     stream_tool_calls: None,
                 supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -545,6 +565,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     supports_backend_search: false,
                     supports_native_schema: None,
                     supports_strict_tools: None,
+                    supports_image_input: None,
+                    supports_audio_input: None,
+                    supports_video_input: None,
                     compactions_remaining: None,
                     compaction_at_tokens: None,
                     doom_loop_recovery: None,
@@ -588,6 +611,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     stream_tool_calls: None,
                     supports_native_schema: None,
                     supports_strict_tools: None,
+                    supports_image_input: None,
+                    supports_audio_input: None,
+                    supports_video_input: None,
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -807,9 +833,17 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 external_runtime: std::cell::RefCell::new(None),
                 external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+                    image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+                    ..Default::default()
+                }),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
+                ),
+                media_descriptor_store: Arc::new(
+                    crate::session::media_descriptors::MediaDescriptorStore::empty(
+                        std::path::Path::new("/tmp"),
+                    ),
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
@@ -1118,9 +1152,17 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 external_runtime: std::cell::RefCell::new(None),
                 external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+                    image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+                    ..Default::default()
+                }),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
+                ),
+                media_descriptor_store: Arc::new(
+                    crate::session::media_descriptors::MediaDescriptorStore::empty(
+                        std::path::Path::new("/tmp"),
+                    ),
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
@@ -2116,6 +2158,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 supports_backend_search: false,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
@@ -2392,9 +2437,17 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 external_runtime: std::cell::RefCell::new(None),
                 external_agent_runtime: std::cell::RefCell::new(None),
                 rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+                    image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+                    ..Default::default()
+                }),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
+                ),
+                media_descriptor_store: Arc::new(
+                    crate::session::media_descriptors::MediaDescriptorStore::empty(
+                        std::path::Path::new("/tmp"),
+                    ),
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),

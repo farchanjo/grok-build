@@ -9,6 +9,8 @@ description = "Actor-based chat state management for xAI agents"
 default-bazel = []
 
 [dependencies]
+base64 = { workspace = true }
+blake3 = { workspace = true }
 hex = "0.4"
 indexmap = { workspace = true }
 regex = { workspace = true }

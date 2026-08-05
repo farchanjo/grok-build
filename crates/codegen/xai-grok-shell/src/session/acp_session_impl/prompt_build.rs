@@ -841,8 +841,10 @@ impl SessionActor {
             &xai_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
         let active_session_config = self.reconstruct_full_config().await;
+        let media = self.media_config.borrow().clone();
+        let image_description_model = media.image_model.as_deref().unwrap_or("@session");
         let resolved_describe = self
-            .resolve_aux_inference_config(&self.image_description_model)
+            .resolve_aux_inference_config(image_description_model)
             .await;
         let (describe_model, sampler_config) =
             crate::agent::config::finalize_image_describe_inference_config(
@@ -857,7 +859,7 @@ impl SessionActor {
             ))
         })?;
         let model = &describe_model;
-        let limit = crate::session::image_describe::IMAGE_DESCRIPTION_PROCESSING_LIMIT;
+        let limit = media.image_limit;
         let skip_count = persisted.len().saturating_sub(limit);
         if skip_count > 0 {
             tracing::info!(
@@ -873,22 +875,23 @@ impl SessionActor {
             let part = if i < skip_count {
                 crate::session::image_describe::SKIPPED_IMAGE_MARKER.to_owned()
             } else {
-                self.image_describe_cache
-                    .get_or_describe(
-                        client.clone(),
-                        model,
-                        &p.raw_bytes,
-                        &p.mime_type,
-                        outline.as_deref(),
-                        &current_query,
-                        crate::session::image_describe::ImageDescribeSource::UserAttachment,
-                        "",
-                    )
-                    .await
-                    .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("image transcription failed: {e}"))
-                    })?
+                crate::session::media_pipeline::describe_image(
+                    &self.image_describe_cache,
+                    &self.media_descriptor_store,
+                    client.clone(),
+                    model,
+                    Some(active_session_config.provider_identity.label()),
+                    &p.raw_bytes,
+                    &p.mime_type,
+                    outline.as_deref(),
+                    &current_query,
+                    crate::session::image_describe::ImageDescribeSource::UserAttachment,
+                    Some(&p.path),
+                )
+                .await
+                .map_err(|e| {
+                    acp::Error::internal_error().data(format!("image transcription failed: {e}"))
+                })?
             };
             if persisted.len() > 1 {
                 description_parts.push(format!("Image {}: {}", i + 1, part));

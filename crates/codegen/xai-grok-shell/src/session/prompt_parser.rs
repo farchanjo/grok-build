@@ -1,5 +1,5 @@
 use crate::session::user_message::user_query;
-use agent_client_protocol::{self as acp, ImageContent};
+use agent_client_protocol::{self as acp, AudioContent, ImageContent};
 use serde::Deserialize;
 use std::path::PathBuf;
 use xai_grok_workspace::file_system::{
@@ -24,6 +24,9 @@ pub struct ParsedPrompt {
     pub skill_information: String,
     /// Extracted images from the prompt.
     pub images: Vec<ImageContent>,
+    /// Extracted ACP audio blocks. Converted to session assets + text
+    /// envelopes before conversation persistence (never stored as Audio).
+    pub audios: Vec<AudioContent>,
     /// Whether the prompt was parsed in query-last mode.
     pub is_cursor: bool,
 }
@@ -113,10 +116,15 @@ pub async fn parse_prompt_with_skills(
     let mut image_parts = Vec::new();
     let mut resource_links = Vec::new();
     let mut embedded_resources = Vec::new();
+    let mut audio_parts = Vec::new();
     for block in prompt {
         match block {
             acp::ContentBlock::Text(text) => message_parts.push(text.text.clone()),
             acp::ContentBlock::Image(image_content) => image_parts.push(image_content.clone()),
+            // Accept ACP audio without failing the prompt. Normalization to a
+            // confined session asset + transcript envelope happens in the
+            // session layer before conversation persistence.
+            acp::ContentBlock::Audio(audio_content) => audio_parts.push(audio_content.clone()),
             acp::ContentBlock::ResourceLink(link) => {
                 resource_links.push(link.clone());
                 if link.meta.is_none() {
@@ -165,6 +173,7 @@ pub async fn parse_prompt_with_skills(
         query: parsed.1,
         skill_information,
         images: image_parts,
+        audios: audio_parts,
         is_cursor,
     })
 }

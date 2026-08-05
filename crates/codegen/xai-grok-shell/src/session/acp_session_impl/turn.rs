@@ -1034,6 +1034,7 @@ impl SessionActor {
             query,
             skill_information: skill_info,
             images: mut raw_images,
+            audios: raw_audios,
             is_cursor,
         } = match parse_prompt_with_skills(
             &prompt_blocks,
@@ -1170,9 +1171,68 @@ impl SessionActor {
         }
         self.drain_between_turn_completions().await;
         self.inject_workflow_status_reminder().await;
+        let active_supports_images = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .and_then(|settings| settings.supports_image_input);
+        let describe_user_images = self.is_cursor_harness() || active_supports_images != Some(true);
+        let media = self.media_config.borrow().clone();
+        let image_description_model = media.image_model.as_deref().unwrap_or("@session");
+        if describe_user_images && !user_images.is_empty() {
+            crate::session::media_pipeline::auxiliary_media_allowed(
+                media.mode,
+                crate::session::image_describe::ImageDescribeSource::UserAttachment,
+            )
+            .map_err(|error| acp::Error::invalid_request().data(error.to_string()))?;
+            if image_description_model == "@session" && active_supports_images != Some(true) {
+                return Err(acp::Error::invalid_request().data(
+                    "The active model does not explicitly support image input, and the media image route is @session. Select an image-capable auxiliary model in Settings → Models or set [media].image_model.",
+                ));
+            }
+        }
+        // Normalize ACP audio immediately: confined session asset + text
+        // envelope. Never persist an Audio conversation variant.
+        let user_message = if raw_audios.is_empty() {
+            user_message
+        } else {
+            let session_dir =
+                crate::session::persistence::session_dir(&crate::session::info::Info {
+                    id: self.session_info.id.clone(),
+                    cwd: self.session_info.cwd.clone(),
+                });
+            let media = media.clone();
+            let stt_config = self.models_manager.config_snapshot().voice;
+            let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
+                self.auth_manager.as_ref(),
+                self.rebuild_spec.api_key_provider.as_ref(),
+                stt_config,
+            );
+            let mut envelopes = Vec::with_capacity(raw_audios.len());
+            for audio in &raw_audios {
+                envelopes.push(
+                    crate::session::media_pipeline::normalize_acp_audio_to_envelope(
+                        &session_dir,
+                        &audio.data,
+                        &audio.mime_type,
+                        &media,
+                        &self.media_descriptor_store,
+                        crate::session::image_describe::ImageDescribeSource::UserAttachment,
+                        &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
+                        stt.as_deref(),
+                    )
+                    .await,
+                );
+            }
+            if envelopes.is_empty() {
+                user_message
+            } else {
+                format!("{user_message}\n\n{}", envelopes.join("\n\n"))
+            }
+        };
         let user_message = if user_images.is_empty() {
             user_message
-        } else if self.is_cursor_harness() {
+        } else if describe_user_images {
             self.transcribe_user_images(user_message, &user_images)
                 .await?
         } else {
@@ -1191,7 +1251,7 @@ impl SessionActor {
                     .data(format!("failed to save user images to assets dir: {e}"))
             })?
         };
-        let attached_image_refs = if self.is_cursor_harness() {
+        let attached_image_refs = if describe_user_images {
             Vec::new()
         } else {
             crate::session::placeholder_images::attached_image_references(&user_images)
@@ -1246,7 +1306,7 @@ impl SessionActor {
                 }
             };
             user_chat.set_prompt_index(current_prompt_index);
-            if !self.is_cursor_harness() {
+            if !describe_user_images {
                 for image in &user_images {
                     user_chat.add_image(pick_user_image_url(image));
                 }

@@ -3664,6 +3664,9 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             supports_tools: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             execution_backend: crate::agent::execution_backend::ExecutionBackend::NativeInference,
         },
         model_provider: None,
@@ -4016,6 +4019,9 @@ fn test_inference_settings(model_slug: &str) -> xai_grok_inference_types::Infere
         stream_tool_calls: None,
         supports_native_schema: None,
         supports_strict_tools: None,
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
     }
 }
 fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHandle {

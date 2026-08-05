@@ -511,6 +511,9 @@ impl SessionActor {
                 stream_tool_calls: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
@@ -670,6 +673,18 @@ impl SessionActor {
             supports_strict_tools: match resolved_entry {
                 Some(e) => e.info().supports_strict_tools,
                 None => cfg.supports_strict_tools,
+            },
+            supports_image_input: match resolved_entry {
+                Some(e) => e.info().supports_image_input,
+                None => cfg.supports_image_input,
+            },
+            supports_audio_input: match resolved_entry {
+                Some(e) => e.info().supports_audio_input,
+                None => cfg.supports_audio_input,
+            },
+            supports_video_input: match resolved_entry {
+                Some(e) => e.info().supports_video_input,
+                None => cfg.supports_video_input,
             },
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),

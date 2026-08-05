@@ -42,27 +42,8 @@ source "${SCRIPT_DIR}/grok-dev-env.sh"
 
 cd "${SCRIPT_DIR}"
 
-# Run cargo-nextest with the isolated ~/.grokdev profile. All helper scripts
-# source grok-dev-env.sh, so test/check/run share one worktree-local target-dev
-# directory and reuse the same Cargo artifacts.
-#
-# Examples:
-#   ./grok-test.sh -p xai-grok-shell
-#   ./grok-test.sh -p xai-grok-shell --run-ignored all
-#   ./grok-test.sh -p xai-grok-shell -- session_runtime_family::test_fork_session
-#   ./grok-test.sh -p xai-grok-shell --no-run
-
-# Prefer the rustup-managed active toolchain when available so that the
-# correct sysroot and linker setup are used. Fallback to the ambient `cargo`
-# if rustup is not present.
-CARGO_CMD=(cargo)
-if command -v rustup >/dev/null 2>&1; then
-    ACTIVE_TOOLCHAIN=$(rustup show active-toolchain | awk 'NR==1 { print $1 }')
-    if [[ -n "${ACTIVE_TOOLCHAIN:-}" ]]; then
-        CARGO_CMD=(rustup run "${ACTIVE_TOOLCHAIN}" cargo)
-    fi
+if [[ $# -eq 0 ]]; then
+    printf 'tip: pass -p <crate> for a focused check (for example, ./grok-check.sh -p xai-grok-shell)\n' >&2
 fi
 
-# --locked is a global cargo flag and must appear before the `nextest`
-# subcommand; `cargo nextest run --locked` is not accepted by cargo-nextest.
-exec "${CARGO_CMD[@]}" --locked nextest run "$@"
+exec cargo check --locked "$@"

@@ -3,9 +3,12 @@
 These instructions apply to the entire repository. They are mandatory for every
 agent, automation, and development session that reads this file.
 
-This file contains the mandatory operational rules. The canonical detailed
-architecture and development guide is [`GROK.md`](GROK.md). A concise
-compatibility entry point for Claude-compatible agents is [`CLAUDE.md`](CLAUDE.md).
+This file is the **enforceable operations policy** for the repository. It
+states what agents must and must not do. The canonical detailed architecture
+and local-development explanation is [`GROK.md`](GROK.md). A concise
+compatibility entry point for Claude-compatible agents is [`CLAUDE.md`](CLAUDE.md),
+but that entry point still requires reading both `AGENTS.md` and `GROK.md` in
+full before editing code or running commands.
 
 ## Required Reference
 
@@ -14,6 +17,28 @@ running commands, or editing files. `GROK.md` is the canonical development and
 architecture reference. Claude-compatible agents may start at
 [`CLAUDE.md`](CLAUDE.md), but still must read `AGENTS.md` and `GROK.md` in
 full before editing.
+
+## Mandatory Rapid Development Checklist
+
+Before every normal edit loop, verify:
+
+1. `GROK_HOME` is set to `"${HOME}/.grokdev"` before the process starts.
+2. `GROK_LEADER_SOCKET` is `"${GROK_HOME}/leader.sock"`.
+3. `GROK_DISABLE_AUTOUPDATER=1` and Cursor/Claude/Codex discovery flags are
+   disabled unless the task explicitly exercises a compatibility surface.
+4. The default development commands are `./grok-check.sh`, `./grok-test.sh`,
+   or `./grok-dev-runner.sh`.
+5. Only one Cargo helper runs at a time against the worktree-local
+   `./target-dev` directory.
+6. Direct `cargo` commands are used only when a helper cannot express the
+   needed operation, and `source ./grok-dev-env.sh` (or its exact environment)
+   is applied first so they share `./target-dev` and the isolated profile.
+7. Validation starts with the narrowest affected package or test; workspace-wide
+   or release-dist builds are deliberate, slower steps.
+8. `Cargo.lock` is not modified for source-only changes; `--locked` is used for
+   reproducible builds.
+9. No production profile, installed `grok` binary, deployed wrapper, or
+   production leader socket is used.
 
 ## Language Policy
 
@@ -86,6 +111,7 @@ export GROK_DISABLE_AUTOUPDATER=1
 Before using the profile:
 
 ```sh
+set -euo pipefail
 umask 077
 mkdir -p "${HOME}/.grokdev"
 chmod 0700 "${HOME}/.grokdev"
@@ -146,6 +172,7 @@ verification, pass `--no-leader` so a stale leader cannot substitute older
 code:
 
 ```sh
+source ./grok-dev-env.sh
 cargo run -p xai-grok-pager-bin -- --no-leader --no-auto-update
 ```
 
@@ -162,40 +189,106 @@ again in the same command invocation.
 Install DotSlash first because `bin/protoc` uses it for hermetic protobuf
 tooling.
 
-### Preferred local workflow
+### Mandatory normal workflow
 
-For ordinary development, use direct crate-targeted Cargo commands:
+For ordinary development, agents **must** prefer the crate-targeted helper
+scripts:
+
+- `./grok-check.sh` for fast focused checks.
+- `./grok-test.sh` for fast `cargo-nextest` runs.
+- `./grok-dev-runner.sh` only when the experimental `claude-cli-runtime`
+  feature is required.
+
+These helpers **must** be used by default because they:
+
+- enforce the canonical isolated `~/.grokdev` profile;
+- disable discovery of Cursor / Claude / Codex state;
+- share one worktree-local `./target-dev` directory so check, test, and run
+  reuse the same Cargo artifacts instead of compiling the dependency graph
+  multiple times.
 
 ```sh
-cargo check -p xai-grok-pager-bin
-cargo test -p xai-grok-config
-cargo clippy -p xai-grok-shell
-cargo fmt --all --check
-cargo build -p xai-grok-pager-bin --release
-```
+# Fast focused check first.
+./grok-check.sh -p xai-grok-shell
+./grok-check.sh -p xai-grok-pager-bin
 
-Use `./grok-test.sh` as the fast local `cargo-nextest` wrapper.
-
-```sh
+# Focused test with cargo-nextest after the check passes.
 ./grok-test.sh -p xai-grok-shell
 ./grok-test.sh -p xai-grok-shell -- session_runtime_family
 ./grok-test.sh -p xai-grok-shell --run-ignored all
 ./grok-test.sh -p xai-grok-shell --no-run
+
+# Experimental claude-cli-runtime run (only when needed).
+./grok-dev-runner.sh --no-leader --no-auto-update
 ```
 
-`grok-dev-runner.sh` runs the console with the experimental
-`claude-cli-runtime` feature and stores its artifacts in `./target-dev`. Use it
-only when that feature is needed; otherwise prefer direct `cargo run`.
+### Direct Cargo commands
 
-`grok-test.sh` stores test artifacts in `./target-test`.
+Direct `cargo` commands are allowed **only** when a helper cannot express the
+needed operation. Before running any direct `cargo check`, `cargo test`,
+`cargo clippy`, `cargo fmt`, or similar command from Bash, `source
+./grok-dev-env.sh` (or reproduce its exact environment) so the command:
+
+- uses the isolated `~/.grokdev` profile;
+- shares `./target-dev` with the helpers;
+- applies the same Cursor/Claude/Codex discovery disablement.
+
+```sh
+source ./grok-dev-env.sh
+cargo test -p xai-grok-config
+cargo clippy -p xai-grok-shell
+cargo fmt --all --check
+```
+
+### One helper at a time
+
+Run **one** Cargo helper at a time by default. The helpers share the same
+`./target-dev` directory, and Cargo serializes access with its own file lock.
+Waiting on that lock is expected and preferable to launching duplicate compile
+graphs. Do **not** delete `.cargo` file locks, kill another build, or bypass
+Cargo's locking merely to avoid waiting.
+
+Intentional parallel experiments must set a separate worktree-local or
+temporary `CARGO_TARGET_DIR`:
+
+```sh
+CARGO_TARGET_DIR=/tmp/grok-local-target ./grok-check.sh -p xai-grok-shell
+```
+
+Independent worktrees get their own root-local `target-dev` by default. Never
+point multiple active worktrees at the same target directory.
+
+### Start narrow
+
+Always start validation with the narrowest affected package, target, or test:
+
+1. `./grok-check.sh -p <affected-crate>`
+2. `./grok-test.sh -p <affected-crate>`
+3. `./grok-check.sh -p <direct-consumer>` and `./grok-test.sh -p <direct-consumer>`
+4. Full-workspace or release-dist validation only when the change crosses
+   enough crate boundaries to justify the cost.
+
+`cargo build -p xai-grok-pager-bin --release` and `make build` are the
+deliberate slow/comprehensive paths and remain separate. Do not use them in
+ordinary edit loops.
+
+### Test runners
+
+`cargo-nextest` is the fast local default. `cargo test` remains fully
+supported for shared-process semantics and ignores `.config/nextest.toml`.
+Keep nextest as the default for speed; use `cargo test` only when the
+different process model matters.
+
+Passing `--no-capture` to installed `cargo-nextest` serializes execution. Use
+it only for short diagnostic runs.
 
 ### Makefile
 
 `Makefile` targets are release-dist and deployment-oriented. Default `make build`
 uses `--profile release-dist`, plus `--locked`, `--timings`, sccache/jobs, and
-optional `FEATURES=`. Do not use
-`make deploy`, `make deploy-binary`, `make deploy-wrapper`, or `make verify`
-unless the task explicitly requests deployment.
+optional `FEATURES=`. Do not use `make build`, `make deploy`,
+`make deploy-binary`, `make deploy-wrapper`, or `make verify` in ordinary edit
+loops; deployment and verify targets require an explicit user request.
 
 ### Validation practices
 
@@ -220,12 +313,16 @@ targeted `cargo update -p <name> --precise <version>` instead. If `--locked`
 fails, diagnose the manifest/lock mismatch rather than removing `--locked` or
 deleting the lockfile.
 
-Concurrent Cargo work can contend on package and target directory locks. Do
-not delete `.cargo` file locks or kill other users' builds. Use separate
-`CARGO_TARGET_DIR` for independent worktrees or runners (for example,
-`./grok-test.sh` uses `./target-test` and `grok-dev-runner.sh` uses
-`./target-dev`) and let sccache share compilation artifacts. Distinguish the
-persistent `Cargo.lock` dependency lockfile from transient Cargo file locks.
+Distinguish the persistent `Cargo.lock` dependency lockfile from transient
+Cargo file locks under `.cargo` and `target/`.
+
+### Tooling policy
+
+Do not add custom build serialization, new linker flags, `mold`, or
+alternative caching without measurement and an explicit rationale in the
+change. Cargo's own file locks, the shared worktree-local `./target-dev`, and
+`sccache` are the current policy. sccache and Linux `lld` are already
+configured in `.cargo/config.toml`.
 
 ## Editing Rules
 

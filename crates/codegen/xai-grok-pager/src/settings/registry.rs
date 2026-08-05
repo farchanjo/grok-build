@@ -109,6 +109,14 @@ pub enum DynamicEnumSource {
     /// Optional compaction fallback route. Prepends `No fallback`, followed
     /// by the explicit `@session` route.
     CompactionFallbackModelCatalog,
+    /// Media image understanding route. Prepends the explicit `@session`
+    /// route (reuse the active session model).
+    MediaImageModelCatalog,
+    /// Supported xAI file-transcription routes. Catalog models are excluded
+    /// because arbitrary adapter-native audio inference is not implemented.
+    MediaAudioModelCatalog,
+    /// Media video understanding route. Prepends `Unset`, then `@session`.
+    MediaVideoModelCatalog,
 }
 
 /// Build the owned choice list for a `DynamicEnum` at picker-open time.
@@ -181,6 +189,46 @@ pub fn dynamic_enum_choices(
                 });
             }
             append_catalog(&mut out, Some(snapshot.compaction_primary_model.as_str()));
+            out
+        }
+        DynamicEnumSource::MediaImageModelCatalog => {
+            let mut out = Vec::with_capacity(snapshot.available_models.len() + 1);
+            out.push(OwnedEnumChoice {
+                canonical: "@session".to_string(),
+                display: "Session model".to_string(),
+                description: "Use the active session's model for image understanding.".to_string(),
+            });
+            append_catalog(&mut out, None);
+            out
+        }
+        DynamicEnumSource::MediaAudioModelCatalog => {
+            vec![
+                OwnedEnumChoice {
+                    canonical: String::new(),
+                    display: "Automatic xAI STT".to_string(),
+                    description: "Use xAI streaming STT when authentication is available."
+                        .to_string(),
+                },
+                OwnedEnumChoice {
+                    canonical: "xai-streaming-stt".to_string(),
+                    display: "xAI streaming STT".to_string(),
+                    description: "Explicitly select the xAI file-transcription route.".to_string(),
+                },
+            ]
+        }
+        DynamicEnumSource::MediaVideoModelCatalog => {
+            let mut out = Vec::with_capacity(snapshot.available_models.len() + 2);
+            out.push(OwnedEnumChoice {
+                canonical: String::new(),
+                display: "Unset".to_string(),
+                description: "Do not configure an auxiliary video understanding model.".to_string(),
+            });
+            out.push(OwnedEnumChoice {
+                canonical: "@session".to_string(),
+                display: "Session model".to_string(),
+                description: "Use the active session's model for video understanding.".to_string(),
+            });
+            append_catalog(&mut out, None);
             out
         }
     }
@@ -257,6 +305,83 @@ mod compaction_choice_tests {
                 Some(SettingValue::String(expected.to_owned()))
             );
         }
+    }
+
+    #[test]
+    fn media_image_choices_prepend_session_route() {
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![model("Vision Pro", "vision-pro")],
+            ..PagerLocalSnapshot::default()
+        };
+        let choices = dynamic_enum_choices(DynamicEnumSource::MediaImageModelCatalog, &snapshot);
+        assert_eq!(choices[0].canonical, "@session");
+        assert_eq!(choices[0].display, "Session model");
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.canonical == "vision-pro" && choice.display == "Vision Pro")
+        );
+    }
+
+    #[test]
+    fn media_audio_choices_expose_only_supported_xai_stt_routes() {
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![model("Unsupported catalog audio", "audio-1")],
+            ..PagerLocalSnapshot::default()
+        };
+        let choices = dynamic_enum_choices(DynamicEnumSource::MediaAudioModelCatalog, &snapshot);
+        assert_eq!(choices[0].canonical, "");
+        assert_eq!(choices[0].display, "Automatic xAI STT");
+        assert_eq!(choices[1].canonical, "xai-streaming-stt");
+        assert!(choices.iter().all(|choice| choice.canonical != "audio-1"));
+    }
+
+    #[test]
+    fn media_video_choices_prepend_unset_and_session() {
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![model("Vision Model", "vision-1")],
+            ..PagerLocalSnapshot::default()
+        };
+        let choices = dynamic_enum_choices(DynamicEnumSource::MediaVideoModelCatalog, &snapshot);
+        assert_eq!(choices[0].canonical, "");
+        assert_eq!(choices[0].display, "Unset");
+        assert_eq!(choices[1].canonical, "@session");
+        assert_eq!(choices[1].display, "Session model");
+    }
+
+    #[test]
+    fn external_media_choice_has_visible_privacy_warning() {
+        let external_id = "openrouter:poolside/vision";
+        let snapshot = PagerLocalSnapshot {
+            available_models: vec![model("External Vision", external_id)],
+            external_model_ids: std::collections::HashSet::from([external_id.to_owned()]),
+            ..PagerLocalSnapshot::default()
+        };
+        let choices = dynamic_enum_choices(DynamicEnumSource::MediaImageModelCatalog, &snapshot);
+        let external = choices
+            .iter()
+            .find(|choice| choice.canonical == external_id)
+            .expect("external model choice");
+        assert!(external.description.contains("External provider"));
+        assert!(external.description.contains("conversation history"));
+    }
+
+    #[test]
+    fn media_status_reflects_snapshot_string() {
+        let ui = UiConfig::default();
+        let snapshot = PagerLocalSnapshot {
+            media_status:
+                "Tools only · image: Session model · audio: Automatic xAI STT · video: Unset"
+                    .to_owned(),
+            ..PagerLocalSnapshot::default()
+        };
+        assert_eq!(
+            current_value_for("media_status", &ui, &snapshot),
+            Some(SettingValue::String(
+                "Tools only · image: Session model · audio: Automatic xAI STT · video: Unset"
+                    .to_owned()
+            ))
+        );
     }
 }
 
@@ -428,6 +553,16 @@ pub struct PagerLocalSnapshot {
     pub compaction_fallback_model: String,
     /// Whether compaction is currently in progress for the active session.
     pub compaction_in_progress: bool,
+    /// Media routing mode (`auto` | `tools_only` | `off`).
+    pub media_routing: String,
+    /// Stable image understanding model ID. `@session` reuses the active model.
+    pub media_image_model: String,
+    /// Stable audio understanding model ID. Empty means unset.
+    pub media_audio_model: String,
+    /// Stable video understanding model ID. Empty means unset.
+    pub media_video_model: String,
+    /// Read-only effective media summary, including external-provider disclosure.
+    pub media_status: String,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -459,6 +594,12 @@ impl Default for PagerLocalSnapshot {
             compaction_primary_model: "@session".to_string(),
             compaction_fallback_model: String::new(),
             compaction_in_progress: false,
+            media_routing: "auto".to_string(),
+            media_image_model: "@session".to_string(),
+            media_audio_model: String::new(),
+            media_video_model: String::new(),
+            media_status: "Auto · image: Session model · audio: Automatic xAI STT · video: Unset"
+                .to_string(),
         }
     }
 }
@@ -855,6 +996,16 @@ pub fn current_value_for(
         } else {
             "Idle".to_string()
         })),
+        // Media settings live in the pager's dedicated `[media]` snapshot.
+        "media_routing" => Some(SettingValue::Enum(match pager.media_routing.as_str() {
+            "tools_only" => "tools_only",
+            "off" => "off",
+            _ => "auto",
+        })),
+        "media_image_model" => Some(SettingValue::String(pager.media_image_model.clone())),
+        "media_audio_model" => Some(SettingValue::String(pager.media_audio_model.clone())),
+        "media_video_model" => Some(SettingValue::String(pager.media_video_model.clone())),
+        "media_status" => Some(SettingValue::String(pager.media_status.clone())),
 
         _ => None,
     }
@@ -1339,6 +1490,32 @@ mod tests {
                     );
                 }
                 ("compaction_status", SettingKind::Status) => {}
+                // Media settings: SHELL-owned, no UiConfig mirror.
+                ("media_routing", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default, "auto",
+                        "media_routing registry default must be 'auto'"
+                    );
+                }
+                ("media_image_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "@session",
+                        "media_image_model registry default must be @session"
+                    );
+                }
+                ("media_audio_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "media_audio_model registry default must be empty string"
+                    );
+                }
+                ("media_video_model", SettingKind::DynamicEnum { default, .. }) => {
+                    assert_eq!(
+                        *default, "",
+                        "media_video_model registry default must be empty string"
+                    );
+                }
+                ("media_status", SettingKind::Status) => {}
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1391,6 +1568,13 @@ mod tests {
                 }
                 // Read-only runtime row; it has no scalar PagerLocalSnapshot default.
                 ("compaction_status", SettingKind::Status) => {}
+                ("media_status", SettingKind::Status) => {
+                    assert_eq!(
+                        pager.media_status,
+                        "Auto · image: Session model · audio: Automatic xAI STT · video: Unset",
+                        "media_status default drifts from PagerLocalSnapshot::default()"
+                    );
+                }
                 _ => panic!(
                     "settings::defs::default_settings() contains PAGER entry `{}` with no \
                      matching arm in defaults_match_pager_state. Add an arm.",

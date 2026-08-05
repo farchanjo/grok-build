@@ -1070,11 +1070,15 @@ pub(crate) struct SessionActor {
     /// See [`crate::session::agent_rebuild`] for the canonical-construction
     /// invariant.
     pub(crate) rebuild_spec: Arc<crate::session::agent_rebuild::AgentRebuildSpec>,
-    /// Resolved vision model ID for auxiliary image processing.
-    /// Populated from `Config.image_description_model` at spawn.
-    pub(crate) image_description_model: String,
+    /// Canonical resolved media-understanding policy for this session.
+    ///
+    /// Subagents receive a clone of the parent's resolved snapshot when they
+    /// are spawned. Existing sessions retain their spawn-time policy.
+    pub(crate) media_config: std::cell::RefCell<crate::config::MediaConfig>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
+    /// Durable descriptors/transcripts shared by interactive routing and compaction.
+    pub(crate) media_descriptor_store: Arc<crate::session::media_descriptors::MediaDescriptorStore>,
     /// Per-subagent token state keyed by `subagent_id`; sums into
     /// goal totals via [`Self::goal_tokens`].
     pub(crate) subagent_token_records: parking_lot::Mutex<HashMap<String, SubagentTokenRecord>>,

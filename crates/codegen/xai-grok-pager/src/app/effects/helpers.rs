@@ -1202,6 +1202,38 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "media_routing" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("media_routing", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_media_routing(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_image_model" => {
+            let SettingValue::String(model) = value else {
+                return Err(kind_mismatch("media_image_model", "String", &value));
+            };
+            xai_grok_shell::util::config::set_media_image_model(model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_audio_model" => {
+            let SettingValue::String(model) = value else {
+                return Err(kind_mismatch("media_audio_model", "String", &value));
+            };
+            xai_grok_shell::util::config::set_media_audio_model(model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "media_video_model" => {
+            let SettingValue::String(model) = value else {
+                return Err(kind_mismatch("media_video_model", "String", &value));
+            };
+            xai_grok_shell::util::config::set_media_video_model(model)
+                .await
+                .map_err(|e| e.to_string())
+        }
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }

@@ -2221,6 +2221,8 @@ impl SessionActor {
                 result.output,
                 ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(_))
                     | ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(_))
+                    | ToolsToolOutput::ReadFile(ReadFileOutput::AudioContent(_))
+                    | ToolsToolOutput::ReadFile(ReadFileOutput::VideoContent(_))
             ) {
             xai_grok_tools::util::base64_images::extract_base64_images(prompt_text)
         } else {
@@ -2236,8 +2238,20 @@ impl SessionActor {
         {
             extracted_images.extend(fc.extracted_images.iter().cloned());
         }
+        let active_supports_images = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .and_then(|settings| settings.supports_image_input);
+        let can_inline_images = !self.is_cursor_harness() && active_supports_images == Some(true);
+        let media = self.media_config.borrow().clone();
+        let image_description_model = media.image_model.as_deref().unwrap_or("@session");
+        let auxiliary_tool_media_allowed = crate::session::media_pipeline::auxiliary_media_allowed(
+            media.mode,
+            crate::session::image_describe::ImageDescribeSource::ToolRead,
+        );
         let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), prompt_text);
-        if !self.is_cursor_harness()
+        if can_inline_images
             && let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
                 result.output
         {
@@ -2270,7 +2284,7 @@ impl SessionActor {
                 }
             }
         }
-        if !self.is_cursor_harness()
+        if can_inline_images
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
         {
             for page in &pdf.pages {
@@ -2289,6 +2303,228 @@ impl SessionActor {
                 pdf.pages.len(),
                 pdf.total_pages,
             );
+        }
+        if !can_inline_images
+            && let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =
+                result.output
+        {
+            let path = tool_parsed_args
+                .get("target_file")
+                .or_else(|| tool_parsed_args.get("path"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            if let Err(error) = auxiliary_tool_media_allowed {
+                prompt_text = format!("[Image from {path} was not understood: {error}]");
+            } else {
+                let raw_bytes = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &image_content.data,
+                )
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("failed to decode read_file image result: {error}"))
+                })?;
+                let active_session_config = self.reconstruct_full_config().await;
+                let resolved = self
+                    .resolve_aux_inference_config(image_description_model)
+                    .await;
+                let (describe_model, sampler_config) =
+                    crate::agent::config::finalize_image_describe_inference_config(
+                        resolved,
+                        &active_session_config,
+                        self.client_identifier.clone(),
+                        Some(self.max_retries),
+                    );
+                if image_description_model == "@session" && active_supports_images != Some(true) {
+                    prompt_text = format!(
+                        "[Image from {path} could not be understood: configure an image-capable media route]"
+                    );
+                } else {
+                    let client = xai_grok_inference::InferenceClient::new(sampler_config).map_err(
+                        |error| {
+                            acp::Error::internal_error().data(format!(
+                                "failed to build image-describe sampling client: {error}"
+                            ))
+                        },
+                    )?;
+                    match crate::session::media_pipeline::describe_image(
+                        &self.image_describe_cache,
+                        &self.media_descriptor_store,
+                        client,
+                        &describe_model,
+                        Some(active_session_config.provider_identity.label()),
+                        &raw_bytes,
+                        &image_content.mime_type,
+                        None,
+                        "Describe this file for the current coding task.",
+                        crate::session::image_describe::ImageDescribeSource::ToolRead,
+                        Some(std::path::Path::new(path)),
+                    )
+                    .await
+                    {
+                        Ok(description) => {
+                            prompt_text = format!(
+                                "Read image file: {path}\n\n{}",
+                                crate::session::image_describe::render_image_description_block(
+                                    &description
+                                )
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, %path, "tool-result image description failed");
+                            prompt_text =
+                                format!("[Image from {path} could not be transcribed: {error}]");
+                        }
+                    }
+                }
+            }
+        }
+        if !can_inline_images
+            && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
+        {
+            let path = tool_parsed_args
+                .get("target_file")
+                .or_else(|| tool_parsed_args.get("path"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            if let Err(error) = auxiliary_tool_media_allowed {
+                prompt_text =
+                    format!("[PDF {path} was rendered as images but was not understood: {error}]");
+            } else if image_description_model == "@session" && active_supports_images != Some(true)
+            {
+                prompt_text = format!(
+                    "[PDF {path} was rendered as images but could not be understood: configure an image-capable media route]"
+                );
+            } else {
+                let active_session_config = self.reconstruct_full_config().await;
+                let resolved = self
+                    .resolve_aux_inference_config(image_description_model)
+                    .await;
+                let (describe_model, sampler_config) =
+                    crate::agent::config::finalize_image_describe_inference_config(
+                        resolved,
+                        &active_session_config,
+                        self.client_identifier.clone(),
+                        Some(self.max_retries),
+                    );
+                let client =
+                    xai_grok_inference::InferenceClient::new(sampler_config).map_err(|error| {
+                        acp::Error::internal_error().data(format!(
+                            "failed to build PDF describe sampling client: {error}"
+                        ))
+                    })?;
+                let mut descriptions = Vec::new();
+                for page in pdf.pages.iter().take(media.image_limit) {
+                    let raw_bytes = match base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &page.data,
+                    ) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            descriptions.push(format!(
+                                "Page {}: [unreadable rendered page: {error}]",
+                                page.page_number
+                            ));
+                            continue;
+                        }
+                    };
+                    match crate::session::media_pipeline::describe_image(
+                        &self.image_describe_cache,
+                        &self.media_descriptor_store,
+                        client.clone(),
+                        &describe_model,
+                        Some(active_session_config.provider_identity.label()),
+                        &raw_bytes,
+                        &page.mime_type,
+                        None,
+                        "Describe this PDF page for the current coding task.",
+                        crate::session::image_describe::ImageDescribeSource::ToolRead,
+                        Some(std::path::Path::new(path)),
+                    )
+                    .await
+                    {
+                        Ok(description) => descriptions.push(format!(
+                            "Page {}:\n{}",
+                            page.page_number,
+                            crate::session::image_describe::scrub_envelope_body(&description)
+                        )),
+                        Err(error) => descriptions.push(format!(
+                            "Page {}: [transcription unavailable: {error}]",
+                            page.page_number
+                        )),
+                    }
+                }
+                prompt_text = format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total)\n\n<pdf_description>\n{}\n</pdf_description>",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                    descriptions.join("\n\n")
+                );
+            }
+        }
+        // Typed audio/video from read_file: convert to text descriptors only.
+        // Never persist Audio/Video content variants into conversation history.
+        if let ToolsToolOutput::ReadFile(ReadFileOutput::AudioContent(ref audio)) = result.output {
+            let media = media.clone();
+            let stt_config = self.models_manager.config_snapshot().voice;
+            let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
+                self.auth_manager.as_ref(),
+                self.rebuild_spec.api_key_provider.as_ref(),
+                stt_config,
+            );
+            prompt_text = crate::session::media_pipeline::understand_audio(
+                audio,
+                &media,
+                &self.media_descriptor_store,
+                crate::session::image_describe::ImageDescribeSource::ToolRead,
+                &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
+                stt.as_deref(),
+            )
+            .await;
+        }
+        if let ToolsToolOutput::ReadFile(ReadFileOutput::VideoContent(ref video)) = result.output {
+            let active_session_config = self.reconstruct_full_config().await;
+            let media = media.clone();
+            let stt_config = self.models_manager.config_snapshot().voice;
+            let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
+                self.auth_manager.as_ref(),
+                self.rebuild_spec.api_key_provider.as_ref(),
+                stt_config,
+            );
+            // Frame descriptions reuse the image-describe route (tools hold no
+            // inference client; shell owns the conversion).
+            let route = media
+                .video_model
+                .as_deref()
+                .or(media.image_model.as_deref())
+                .unwrap_or("@session")
+                .to_owned();
+            let resolved = self.resolve_aux_inference_config(&route).await;
+            let (describe_model, sampler_config) =
+                crate::agent::config::finalize_image_describe_inference_config(
+                    resolved,
+                    &active_session_config,
+                    self.client_identifier.clone(),
+                    Some(self.max_retries),
+                );
+            let client = if route == "@session" && active_supports_images != Some(true) {
+                None
+            } else {
+                xai_grok_inference::InferenceClient::new(sampler_config).ok()
+            };
+            prompt_text = crate::session::media_pipeline::understand_video(
+                video,
+                &media,
+                &self.image_describe_cache,
+                &self.media_descriptor_store,
+                client,
+                Some(describe_model.as_str()),
+                Some(active_session_config.provider_identity.label()),
+                crate::session::image_describe::ImageDescribeSource::ToolRead,
+                &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
+                stt.as_deref(),
+            )
+            .await;
         }
         let tool_failed = result.output.is_error();
         let tool_chat = if inline_images.is_empty() {

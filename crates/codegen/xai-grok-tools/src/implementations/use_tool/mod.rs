@@ -118,10 +118,28 @@ fn gateway_result_to_text(result: serde_json::Value) -> String {
                     item.get("data")
                         .and_then(|v| v.as_str())
                         .map(|data| format!("data:{mime};base64,{data}"))
+                } else if item.get("type").and_then(|v| v.as_str()) == Some("audio") {
+                    // Never silently drop MCP audio — surface a typed marker so
+                    // the shell can turn it into a transcript/description.
+                    let mime = item
+                        .get("mimeType")
+                        .or_else(|| item.get("mime_type"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("audio/mpeg");
+                    item.get("data").and_then(|v| v.as_str()).map(|data| {
+                        format!("[MCP audio content mime={mime} bytes_b64={}]\ndata:{mime};base64,{data}", data.len())
+                    })
                 } else if item.get("type").and_then(|v| v.as_str()) == Some("resource") {
                     serde_json::to_string(item).ok()
+                } else if let Some(type_name) = item.get("type").and_then(|v| v.as_str()) {
+                    // Preserve unknown structured blocks as JSON rather than
+                    // dropping them on the floor.
+                    Some(format!(
+                        "[MCP content type={type_name}] {}",
+                        serde_json::to_string(item).unwrap_or_default()
+                    ))
                 } else {
-                    None
+                    serde_json::to_string(item).ok()
                 }
             })
             .collect();

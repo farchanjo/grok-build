@@ -3,8 +3,254 @@
 //! These are stateless functions that operate on conversation data only —
 //! no I/O, no actor state. They live in `xai-chat-state` so that both
 //! this crate and `xai-grok-shell` can share them without duplication.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+use base64::Engine as _;
 use xai_grok_inference_types::{ContentPart, ConversationItem, ToolResultItem};
+
+/// Stable placeholder used when an image has no descriptor available.
+pub const COMPACTION_IMAGE_PLACEHOLDER: &str = "[image]";
+
+/// Immutable map of image content fingerprints → descriptions for compaction.
+///
+/// Keys are 64-char hex digests of the raw image bytes (blake3), matching the
+/// shell `MediaDescriptorStore` content fingerprint. Built once per compact
+/// attempt and shared across routes, retries, and input-ladder steps so media
+/// understanding is never re-invoked on fallback.
+#[derive(Debug, Clone, Default)]
+pub struct CompactionMediaDescriptors {
+    by_fingerprint: HashMap<String, Arc<str>>,
+}
+
+impl CompactionMediaDescriptors {
+    /// Empty map — enrichment becomes a pure placeholder strip.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Build from `(content_fingerprint, description)` pairs. Empty or blank
+    /// descriptions are ignored. First non-empty description for a fingerprint
+    /// wins.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
+        let mut map = Self::empty();
+        for (fingerprint, description) in pairs {
+            map.insert(fingerprint, description);
+        }
+        map
+    }
+
+    /// Insert a description for `content_fingerprint` when not already present
+    /// and the description is non-empty after trim.
+    pub fn insert(
+        &mut self,
+        content_fingerprint: impl Into<String>,
+        description: impl Into<String>,
+    ) {
+        let fingerprint = content_fingerprint.into();
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return;
+        }
+        let description = description.into();
+        let trimmed = description.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.by_fingerprint
+            .entry(fingerprint)
+            .or_insert_with(|| Arc::<str>::from(trimmed));
+    }
+
+    /// Look up a description by content fingerprint.
+    pub fn get(&self, content_fingerprint: &str) -> Option<&str> {
+        self.by_fingerprint
+            .get(content_fingerprint)
+            .map(|s| s.as_ref())
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_fingerprint.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_fingerprint.is_empty()
+    }
+}
+
+/// Blake3 hex digest of raw image bytes — matches shell `content_fingerprint`.
+pub fn compaction_image_content_fingerprint(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+/// Decode a `data:<mime>;base64,<payload>` image URL into raw bytes.
+///
+/// Returns `None` for remote `http(s)` URLs, malformed data URLs, or decode
+/// failures. Fail-soft callers treat that as "no descriptor available".
+pub fn decode_image_data_url(url: &str) -> Option<Vec<u8>> {
+    let url = url.trim();
+    let rest = url.strip_prefix("data:")?;
+    let (_meta, payload) = rest.split_once(',')?;
+    // Accept both standard and URL-safe base64; image data URLs are standard.
+    base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .ok()
+}
+
+/// Content fingerprint for an image URL when the payload is a decodable data URL.
+pub fn image_url_content_fingerprint(url: &str) -> Option<String> {
+    decode_image_data_url(url).map(|bytes| compaction_image_content_fingerprint(&bytes))
+}
+
+/// Format a known image description for the compaction summarizer.
+pub fn format_compaction_image_description(description: &str) -> String {
+    let description = description.trim();
+    if description.is_empty() {
+        return COMPACTION_IMAGE_PLACEHOLDER.to_owned();
+    }
+    // Already-enriched interactive envelopes pass through unchanged.
+    if description.contains("<image_description>") || description.starts_with("[image") {
+        return description.to_owned();
+    }
+    format!("{COMPACTION_IMAGE_PLACEHOLDER} description:\n{description}")
+}
+
+/// Resolve the text that should replace one image part given an optional
+/// descriptor map. Missing descriptors fail soft to the stable placeholder.
+pub fn resolve_compaction_image_text(
+    url: &str,
+    descriptors: &CompactionMediaDescriptors,
+) -> String {
+    if let Some(fp) = image_url_content_fingerprint(url)
+        && let Some(description) = descriptors.get(&fp)
+    {
+        return format_compaction_image_description(description);
+    }
+    COMPACTION_IMAGE_PLACEHOLDER.to_owned()
+}
+
+/// Collect `(content_fingerprint, data_url)` for images that lack a descriptor.
+///
+/// Used by shell lazy backfill to describe only missing assets once before the
+/// immutable map is frozen for the compact attempt.
+pub fn missing_compaction_image_payloads(
+    conversation: &[ConversationItem],
+    descriptors: &CompactionMediaDescriptors,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut visit = |url: &str| {
+        let Some(fp) = image_url_content_fingerprint(url) else {
+            return;
+        };
+        if descriptors.get(&fp).is_some() || !seen.insert(fp.clone()) {
+            return;
+        }
+        out.push((fp, url.to_owned()));
+    };
+    for item in conversation {
+        match item {
+            ConversationItem::User(user) => {
+                for part in &user.content {
+                    if let ContentPart::Image { url } = part {
+                        visit(url.as_ref());
+                    }
+                }
+            }
+            ConversationItem::ToolResult(result) => {
+                for part in &result.images {
+                    if let ContentPart::Image { url } = part {
+                        visit(url.as_ref());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Fold known media descriptors into conversation history for compaction.
+///
+/// - User `ContentPart::Image` becomes description text when known, otherwise
+///   is left as an image for [`sanitize_compaction_images`] to placeholder.
+/// - Tool-result images are cleared. When a descriptor is known and the tool
+///   content does not already carry it, the description is appended so the
+///   summarizer still sees the visual context. Call IDs, error flags, ordering,
+///   and tool-call pairing are preserved.
+///
+/// This function is pure and idempotent with respect to already-text images.
+pub fn apply_compaction_media_descriptors(
+    conversation: Vec<ConversationItem>,
+    descriptors: &CompactionMediaDescriptors,
+) -> Vec<ConversationItem> {
+    if descriptors.is_empty() {
+        return conversation;
+    }
+    conversation
+        .into_iter()
+        .map(|item| match item {
+            ConversationItem::User(mut user) => {
+                for part in &mut user.content {
+                    if let ContentPart::Image { url } = part
+                        && let Some(fp) = image_url_content_fingerprint(url.as_ref())
+                        && let Some(description) = descriptors.get(&fp)
+                    {
+                        *part = ContentPart::Text {
+                            text: Arc::<str>::from(format_compaction_image_description(
+                                description,
+                            )),
+                        };
+                    }
+                }
+                ConversationItem::User(user)
+            }
+            ConversationItem::ToolResult(mut result) => {
+                if result.images.is_empty() {
+                    return ConversationItem::ToolResult(result);
+                }
+                let mut extras = Vec::new();
+                for part in &result.images {
+                    if let ContentPart::Image { url } = part
+                        && let Some(fp) = image_url_content_fingerprint(url.as_ref())
+                        && let Some(description) = descriptors.get(&fp)
+                    {
+                        let text = format_compaction_image_description(description);
+                        if !result.content.contains(description)
+                            && !result.content.contains(text.as_str())
+                        {
+                            extras.push(text);
+                        }
+                    }
+                }
+                result.images.clear();
+                if !extras.is_empty() {
+                    let mut content = result.content.as_ref().to_owned();
+                    for extra in extras {
+                        if !content.is_empty() {
+                            content.push_str("\n\n");
+                        }
+                        content.push_str(&extra);
+                    }
+                    result.content = Arc::<str>::from(content);
+                }
+                ConversationItem::ToolResult(result)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// Sanitize after optional descriptor folding: remaining images become
+/// placeholders; tool-result image payloads are cleared without breaking pairing.
+pub fn sanitize_compaction_images_with_descriptors(
+    conversation: Vec<ConversationItem>,
+    descriptors: &CompactionMediaDescriptors,
+) -> Vec<ConversationItem> {
+    sanitize_compaction_images(apply_compaction_media_descriptors(
+        conversation,
+        descriptors,
+    ))
+}
 /// Drops tool results and flattens assistant `tool_calls` into
 /// `[Called tools: ...]` text annotations.
 ///
@@ -81,9 +327,13 @@ pub fn conversation_contains_images(conversation: &[ConversationItem]) -> bool {
 
 /// Build a text-only compaction view without mutating the live conversation.
 ///
-/// User image parts become the stable `"[image]"` placeholder. Tool-result
-/// image payloads are removed while their textual content, call IDs, error
-/// state, ordering, and all tool-call/result relationships remain unchanged.
+/// User image parts become the stable [`COMPACTION_IMAGE_PLACEHOLDER`].
+/// Tool-result image payloads are removed while their textual content, call
+/// IDs, error state, ordering, and all tool-call/result relationships remain
+/// unchanged.
+///
+/// Prefer [`sanitize_compaction_images_with_descriptors`] when a frozen
+/// descriptor map is available so known images keep their descriptions.
 pub fn sanitize_compaction_images(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
     conversation
         .into_iter()
@@ -92,7 +342,7 @@ pub fn sanitize_compaction_images(conversation: Vec<ConversationItem>) -> Vec<Co
                 for part in &mut user.content {
                     if matches!(part, ContentPart::Image { .. }) {
                         *part = ContentPart::Text {
-                            text: std::sync::Arc::<str>::from("[image]"),
+                            text: Arc::<str>::from(COMPACTION_IMAGE_PLACEHOLDER),
                         };
                     }
                 }
@@ -108,29 +358,59 @@ pub fn sanitize_compaction_images(conversation: Vec<ConversationItem>) -> Vec<Co
 }
 /// Prepare a conversation for a summarization call (compaction or memory flush).
 ///
-/// Combines `strip_tool_messages_for_conversation_item` (drops tool
-/// results, flattens `tool_calls` into text annotations),
+/// Combines descriptor folding (optional), `strip_tool_messages_for_conversation_item`
+/// (drops tool results, flattens `tool_calls` into text annotations),
 /// `strip_reasoning_blocks`, and [`sanitize_compaction_images`].
 ///
 /// The reasoning strip is required because the text mutation in the
 /// tool-message step would invalidate signed `thinking` blocks, which
 /// strict providers reject with a 400.
 ///
-/// The image strip replaces `ContentPart::Image` with `"[image]"` so the
-/// summarizer doesn't receive megabytes of base64 data.
+/// The image strip replaces remaining `ContentPart::Image` with
+/// [`COMPACTION_IMAGE_PLACEHOLDER`] so the summarizer doesn't receive
+/// megabytes of base64 data. Known descriptors are folded first.
 pub fn prepare_conversation_for_summarization(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
+    prepare_conversation_for_summarization_with_descriptors(
+        conversation,
+        &CompactionMediaDescriptors::empty(),
+    )
+}
+
+/// [`prepare_conversation_for_summarization`] with a frozen descriptor map.
+pub fn prepare_conversation_for_summarization_with_descriptors(
+    conversation: Vec<ConversationItem>,
+    descriptors: &CompactionMediaDescriptors,
+) -> Vec<ConversationItem> {
+    // Fold descriptors on the full conversation first so user-image
+    // descriptions survive the subsequent tool-message strip.
     sanitize_compaction_images(strip_reasoning_blocks(
-        strip_tool_messages_for_conversation_item(conversation),
+        strip_tool_messages_for_conversation_item(apply_compaction_media_descriptors(
+            conversation,
+            descriptors,
+        )),
     ))
 }
+
 /// Segment-store prep (`segments` mode): keep tool I/O verbatim, strip only images + reasoning.
 pub fn prepare_conversation_for_segment(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
-    sanitize_compaction_images(strip_reasoning_blocks(conversation))
+    prepare_conversation_for_segment_with_descriptors(
+        conversation,
+        &CompactionMediaDescriptors::empty(),
+    )
 }
+
+/// [`prepare_conversation_for_segment`] with a frozen descriptor map.
+pub fn prepare_conversation_for_segment_with_descriptors(
+    conversation: Vec<ConversationItem>,
+    descriptors: &CompactionMediaDescriptors,
+) -> Vec<ConversationItem> {
+    sanitize_compaction_images_with_descriptors(strip_reasoning_blocks(conversation), descriptors)
+}
+
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(
     mut conversation: Vec<ConversationItem>,
@@ -150,12 +430,28 @@ pub fn prepare_conversation_for_verbatim_summarization(
     conversation: Vec<ConversationItem>,
     strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
+    prepare_conversation_for_verbatim_summarization_with_descriptors(
+        conversation,
+        strip_reasoning,
+        &CompactionMediaDescriptors::empty(),
+    )
+}
+
+/// [`prepare_conversation_for_verbatim_summarization`] with a frozen descriptor map.
+pub fn prepare_conversation_for_verbatim_summarization_with_descriptors(
+    conversation: Vec<ConversationItem>,
+    strip_reasoning: bool,
+    descriptors: &CompactionMediaDescriptors,
+) -> Vec<ConversationItem> {
     let conversation = if strip_reasoning {
         strip_reasoning_blocks(conversation)
     } else {
         conversation
     };
-    sanitize_compaction_images(truncate_trailing_incomplete_tool_call(conversation))
+    sanitize_compaction_images_with_descriptors(
+        truncate_trailing_incomplete_tool_call(conversation),
+        descriptors,
+    )
 }
 /// Per-item token estimate via the trigger-side estimator, so `fit`'s budget matches what fired the compaction (counts images + encrypted reasoning).
 fn estimate_item_tokens(item: &ConversationItem) -> u64 {
@@ -3439,7 +3735,9 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             ConversationItem::User(u) => {
                 assert_eq!(u.content.len(), 2);
                 match &u.content[1] {
-                    ContentPart::Text { text } => assert_eq!(text.as_ref(), "[image]"),
+                    ContentPart::Text { text } => {
+                        assert_eq!(text.as_ref(), COMPACTION_IMAGE_PLACEHOLDER)
+                    }
                     ContentPart::Image { .. } => {
                         panic!("image should have been stripped")
                     }
@@ -3447,6 +3745,130 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             }
             _ => panic!("expected User item"),
         }
+    }
+
+    #[test]
+    fn apply_descriptors_replaces_known_user_image_and_preserves_unknown_for_sanitize() {
+        let raw = b"phase3-user-image-bytes";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        let url = format!("data:image/png;base64,{b64}");
+        let fp = compaction_image_content_fingerprint(raw);
+        let descriptors = CompactionMediaDescriptors::from_pairs([(
+            fp,
+            "A red UI button labeled Save".to_owned(),
+        )]);
+
+        let mut known = ConversationItem::user("see this");
+        known.add_image(url.clone());
+        let mut unknown = ConversationItem::user("and that");
+        unknown.add_image("data:image/png;base64,not-in-map");
+
+        let folded = apply_compaction_media_descriptors(vec![known, unknown], &descriptors);
+        match &folded[0] {
+            ConversationItem::User(u) => match &u.content[1] {
+                ContentPart::Text { text } => {
+                    assert!(text.contains("A red UI button labeled Save"));
+                    assert!(text.contains(COMPACTION_IMAGE_PLACEHOLDER));
+                }
+                ContentPart::Image { .. } => panic!("known image must fold to text"),
+            },
+            _ => panic!("expected user"),
+        }
+        match &folded[1] {
+            ConversationItem::User(u) => {
+                assert!(
+                    matches!(u.content[1], ContentPart::Image { .. }),
+                    "unknown image stays for sanitize placeholder"
+                );
+            }
+            _ => panic!("expected user"),
+        }
+        let sanitized = sanitize_compaction_images(folded);
+        assert!(!conversation_contains_images(&sanitized));
+        assert_eq!(
+            sanitized[1].text_content(),
+            format!("and that\n{COMPACTION_IMAGE_PLACEHOLDER}")
+        );
+    }
+
+    #[test]
+    fn apply_descriptors_appends_tool_result_description_without_breaking_pairing() {
+        use xai_grok_inference_types::ToolCall;
+        let raw = b"tool-result-image-bytes";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        let url = format!("data:image/png;base64,{b64}");
+        let fp = compaction_image_content_fingerprint(raw);
+        let descriptors = CompactionMediaDescriptors::from_pairs([(
+            fp,
+            "stack trace on a dark terminal".to_owned(),
+        )]);
+        let input = vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"target_file":"err.png"}"#.into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "call_1",
+                "Read image file: err.png",
+                vec![ContentPart::Image { url: url.into() }],
+            ),
+        ];
+        let result = prepare_conversation_for_verbatim_summarization_with_descriptors(
+            input.clone(),
+            false,
+            &descriptors,
+        );
+        assert!(!conversation_contains_images(&result));
+        assert!(validate_compacted_history(&result).is_empty());
+        let ConversationItem::ToolResult(tool_result) = &result[1] else {
+            panic!("tool result position preserved");
+        };
+        assert_eq!(tool_result.tool_call_id, "call_1");
+        assert!(tool_result.content.contains("Read image file: err.png"));
+        assert!(
+            tool_result
+                .content
+                .contains("stack trace on a dark terminal")
+        );
+        assert!(tool_result.images.is_empty());
+    }
+
+    #[test]
+    fn prepare_with_descriptors_is_idempotent_and_missing_list_skips_known() {
+        let raw = b"idempotent-image";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        let url = format!("data:image/png;base64,{b64}");
+        let fp = compaction_image_content_fingerprint(raw);
+        let descriptors = CompactionMediaDescriptors::from_pairs([(
+            fp.clone(),
+            "diagram of the request path".to_owned(),
+        )]);
+        let mut user = ConversationItem::user("path?");
+        user.add_image(url);
+        let input = vec![ConversationItem::system("sys"), user];
+        let missing = missing_compaction_image_payloads(&input, &descriptors);
+        assert!(
+            missing.is_empty(),
+            "known fingerprint must not request backfill"
+        );
+        let once =
+            prepare_conversation_for_summarization_with_descriptors(input.clone(), &descriptors);
+        let twice =
+            prepare_conversation_for_summarization_with_descriptors(once.clone(), &descriptors);
+        assert_eq!(
+            serde_json::to_value(&once).unwrap(),
+            serde_json::to_value(&twice).unwrap()
+        );
+        assert!(
+            once[1]
+                .text_content()
+                .contains("diagram of the request path")
+        );
+        let missing_empty =
+            missing_compaction_image_payloads(&input, &CompactionMediaDescriptors::empty());
+        assert_eq!(missing_empty.len(), 1);
+        assert_eq!(missing_empty[0].0, fp);
     }
     #[test]
     fn sanitize_compaction_images_leaves_text_only_messages_unchanged() {

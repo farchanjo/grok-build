@@ -481,6 +481,9 @@ mod tests {
                 stream_tool_calls: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
         };
         let _ = ChatStateCommand::RecordAgentEditedPath {

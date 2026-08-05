@@ -12881,6 +12881,8 @@ dependencies = [
 name = "xai-chat-state"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "blake3",
  "hex",
  "indexmap",
  "regex",
@@ -13896,6 +13898,7 @@ dependencies = [
  "xai-grok-test-support",
  "xai-grok-tools",
  "xai-grok-version",
+ "xai-grok-voice",
  "xai-grok-workspace",
  "xai-hooks-plugins-types",
  "xai-hunk-tracker",
@@ -14108,6 +14111,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wait-timeout",
  "which",
  "windows 0.61.3",
  "wiremock",

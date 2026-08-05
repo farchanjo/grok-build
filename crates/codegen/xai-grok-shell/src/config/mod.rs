@@ -561,6 +561,105 @@ impl ManagedMcpsConfig {
         result
     }
 }
+/// Policy for converting media into text that all active and compaction models
+/// can consume.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaMode {
+    /// Proactively understand unsupported media and lazily backfill descriptors.
+    #[default]
+    Auto,
+    /// Only explicit `read_file` calls may invoke media understanding.
+    ToolsOnly,
+    /// Never invoke auxiliary media inference.
+    Off,
+}
+
+/// Resolved `[media]` configuration. Model references use stable catalog IDs or
+/// the explicit `@session` sentinel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaConfig {
+    pub mode: MediaMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_model: Option<String>,
+    pub image_limit: usize,
+    pub audio_max_seconds: u64,
+    pub video_max_seconds: u64,
+    pub video_max_frames: usize,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            mode: MediaMode::Auto,
+            image_model: Some("@session".to_owned()),
+            audio_model: None,
+            video_model: None,
+            image_limit: 16,
+            audio_max_seconds: 120,
+            video_max_seconds: 600,
+            video_max_frames: 8,
+        }
+    }
+}
+
+impl MediaConfig {
+    pub fn resolve(
+        config: &toml::Value,
+        remote: Option<&crate::util::config::RemoteSettings>,
+    ) -> Self {
+        let mut result: Self = config
+            .get("media")
+            .and_then(|value| value.clone().try_into().ok())
+            .unwrap_or_default();
+        result.image_model = non_empty_model_override(result.image_model.as_deref());
+        result.audio_model = non_empty_model_override(result.audio_model.as_deref());
+        result.video_model = non_empty_model_override(result.video_model.as_deref());
+
+        let has_explicit_image_model = config
+            .get("media")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key("image_model"));
+        if !has_explicit_image_model {
+            let models = config.get("models").and_then(toml::Value::as_table);
+            let legacy_local = models
+                .and_then(|table| table.get("image_description"))
+                .and_then(toml::Value::as_str);
+            let legacy_env = std::env::var("GROK_IMAGE_DESCRIPTION_MODEL")
+                .ok()
+                .and_then(|value| non_empty_model_override(Some(&value)));
+            if legacy_env.is_some() || non_empty_model_override(legacy_local).is_some() {
+                static LEGACY_IMAGE_ROUTE_WARNING: std::sync::Once = std::sync::Once::new();
+                LEGACY_IMAGE_ROUTE_WARNING.call_once(|| {
+                    tracing::warn!(
+                        "legacy image-description routing is deprecated; migrate to [media].image_model"
+                    );
+                });
+            }
+            result.image_model = legacy_env
+                .or_else(|| non_empty_model_override(legacy_local))
+                .or_else(|| {
+                    remote.and_then(|settings| {
+                        non_empty_model_override(settings.image_description_model.as_deref())
+                    })
+                })
+                .or_else(|| Some("@session".to_owned()));
+        }
+        result.image_limit = result.image_limit.clamp(1, 64);
+        result.audio_max_seconds = result
+            .audio_max_seconds
+            .clamp(1, xai_grok_tools::util::ffmpeg::MAX_AUDIO_EXTRACT_SECONDS);
+        result.video_max_seconds = result.video_max_seconds.clamp(1, 7_200);
+        result.video_max_frames = result.video_max_frames.clamp(1, 32);
+        result
+    }
+}
+
 /// Auxiliary model overrides under `[models]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]

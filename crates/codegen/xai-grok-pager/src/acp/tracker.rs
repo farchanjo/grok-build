@@ -1667,6 +1667,12 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                             pages: pdf.total_pages,
                         });
                     }
+                    ReadFileOutput::AudioContent(_) => {
+                        block.media_kind = Some(ReadMediaKind::Audio);
+                    }
+                    ReadFileOutput::VideoContent(_) => {
+                        block.media_kind = Some(ReadMediaKind::Video);
+                    }
                 }
             } else if !success {
                 let text = content_text(tc);

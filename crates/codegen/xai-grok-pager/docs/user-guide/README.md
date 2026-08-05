@@ -55,6 +55,7 @@ Automate, script, and integrate Grok Build with other systems.
 | 25 | [Compaction Settings](25-compaction.md) | Strategy, trigger policy, band count, and model selection for history summarization |
 | 26 | [Anthropic Provider](26-anthropic-provider.md) | Anthropic API peer, native client, Files library-only, experimental Claude Agent CLI |
 | 27 | [Migrating to Anthropic Peer](27-anthropic-migration.md) | Non-destructive migration from custom Messages / env keys |
+| 28 | [Media Understanding](28-media-understanding.md) | Capability-aware image, audio, and video routing for text-only models |
 
 ---
 

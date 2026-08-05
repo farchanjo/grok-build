@@ -55,6 +55,25 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     } else {
         merge_section(table, "compaction", &config.compaction);
     }
+    if config.media == crate::config::MediaConfig::default() {
+        table.remove("media");
+    } else {
+        merge_section(table, "media", &config.media);
+        // merge_section preserves unmodeled keys and does not drop Option::None
+        // fields omitted by skip_serializing_if. Explicitly prune cleared model
+        // routes so a prior value cannot stick after the user selects Unset.
+        if let Some(TomlValue::Table(media)) = table.get_mut("media") {
+            if config.media.image_model.is_none() {
+                media.remove("image_model");
+            }
+            if config.media.audio_model.is_none() {
+                media.remove("audio_model");
+            }
+            if config.media.video_model.is_none() {
+                media.remove("video_model");
+            }
+        }
+    }
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;

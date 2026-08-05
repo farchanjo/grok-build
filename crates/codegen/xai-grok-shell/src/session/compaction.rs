@@ -27,8 +27,9 @@ use crate::session::two_pass::{
 use agent_client_protocol as acp;
 use std::sync::Arc;
 use xai_chat_state::compaction_utils::{
-    CompactedHistoryInput, CompactionAttempt, build_compacted_history, is_degenerate_summary,
-    prepare_conversation_for_verbatim_summarization, sanitize_compacted_history,
+    CompactedHistoryInput, CompactionAttempt, CompactionMediaDescriptors, build_compacted_history,
+    is_degenerate_summary, prepare_conversation_for_verbatim_summarization_with_descriptors,
+    sanitize_compacted_history, sanitize_compaction_images_with_descriptors,
     validate_compacted_history,
 };
 use xai_grok_inference_types::ConversationItem;
@@ -163,6 +164,56 @@ impl SessionActor {
         let agent = self.agent.borrow();
         agent.compaction_policy().two_pass_enabled
     }
+
+    /// Freeze one immutable media-descriptor map for a compact / recap / flush
+    /// attempt. External agents are fail-closed for lazy backfill; `tools_only`
+    /// and `off` also skip backfill. Existing store entries are always folded.
+    pub(crate) async fn freeze_compaction_media_descriptors(
+        &self,
+        conversation: &[ConversationItem],
+    ) -> Arc<CompactionMediaDescriptors> {
+        let media = self.media_config.borrow().clone();
+        let allow_lazy_backfill = !self.execution_backend.get().is_external()
+            && matches!(media.mode, crate::config::MediaMode::Auto)
+            && xai_chat_state::compaction_utils::conversation_contains_images(conversation);
+
+        let (client, model, provider) = if allow_lazy_backfill {
+            let active_session_config = self.reconstruct_full_config().await;
+            let image_description_model = media.image_model.as_deref().unwrap_or("@session");
+            let resolved = self
+                .resolve_aux_inference_config(image_description_model)
+                .await;
+            let (describe_model, sampler_config) =
+                crate::agent::config::finalize_image_describe_inference_config(
+                    resolved,
+                    &active_session_config,
+                    self.client_identifier.clone(),
+                    Some(self.max_retries),
+                );
+            let client = xai_grok_inference::InferenceClient::new(sampler_config).ok();
+            (
+                client,
+                Some(describe_model),
+                Some(active_session_config.provider_identity.label().to_owned()),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        let image_limit = media.image_limit;
+        crate::session::media_pipeline::freeze_compaction_media_descriptors(
+            &self.image_describe_cache,
+            &self.media_descriptor_store,
+            conversation,
+            allow_lazy_backfill,
+            client,
+            model.as_deref(),
+            provider.as_deref(),
+            image_limit,
+        )
+        .await
+    }
+
     /// Run one summarization sample over a fully-built two-pass history (the
     /// prompt is already embedded, so this bypasses the single-pass sampler and
     /// calls `generate_session_compact` directly). Returns `None` on any error
@@ -172,8 +223,12 @@ impl SessionActor {
     /// held across `.await`). Prefire is `spawn_local` on the same LocalSet as
     /// the turn loop; a long-lived borrow would race with turn/compact/cancel
     /// and panic on double-borrow.
-    async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
-        let history = xai_chat_state::compaction_utils::sanitize_compaction_images(history);
+    async fn two_pass_sample(
+        &self,
+        history: Vec<ConversationItem>,
+        media_descriptors: &CompactionMediaDescriptors,
+    ) -> Option<CompactOutput> {
+        let history = sanitize_compaction_images_with_descriptors(history, media_descriptors);
         let inference_config = self.reconstruct_full_config().await;
         let client = match self.prepare_chat_completion(false).await {
             Ok(c) => c,
@@ -284,6 +339,9 @@ impl SessionActor {
         if split.prefix.is_empty() || split.tail.is_empty() {
             return PrefireOutcome::EmptySplit.into();
         }
+        let media_descriptors = self
+            .freeze_compaction_media_descriptors(&conversation)
+            .await;
         let sampling_cfg = self.chat_state_handle.get_inference_settings().await;
         // Prefire is also a summarization call; provider-specific reasoning
         // replay is unnecessary and can make a later route reject the input.
@@ -292,8 +350,11 @@ impl SessionActor {
             .as_ref()
             .map(|c| c.model.to_string())
             .unwrap_or_default();
-        let prefix_prepared =
-            prepare_conversation_for_verbatim_summarization(split.prefix.to_vec(), strips);
+        let prefix_prepared = prepare_conversation_for_verbatim_summarization_with_descriptors(
+            split.prefix.to_vec(),
+            strips,
+            &media_descriptors,
+        );
         let prefix_est_tokens = prefix_prepared
             .iter()
             .map(xai_chat_state::estimate_item_tokens)
@@ -301,7 +362,9 @@ impl SessionActor {
         let prompt = build_two_pass_compaction_prompt(None);
         let pass1_history = build_two_pass_pass1_history(&prefix_prepared, &prompt);
         let started = std::time::Instant::now();
-        let out = self.two_pass_sample(pass1_history).await;
+        let out = self
+            .two_pass_sample(pass1_history, &media_descriptors)
+            .await;
         let pass1_latency_ms = started.elapsed().as_millis() as u64;
         let attempted = |outcome: PrefireOutcome, note1_chars: Option<usize>| PrefirePass1Run {
             outcome,
@@ -394,13 +457,19 @@ impl SessionActor {
         }
         let prefix = &live[..cache.prefix_len];
         let tail = &live[cache.prefix_len..];
-        let prepared_tail =
-            prepare_conversation_for_verbatim_summarization(tail.to_vec(), strips_reasoning);
+        let media_descriptors = self.freeze_compaction_media_descriptors(&live).await;
+        let prepared_tail = prepare_conversation_for_verbatim_summarization_with_descriptors(
+            tail.to_vec(),
+            strips_reasoning,
+            &media_descriptors,
+        );
         let prompt = build_two_pass_compaction_prompt(user_context);
         let pass2_history =
             build_two_pass_pass2_history(prefix, &prepared_tail, &cache.note1, &prompt);
         let started = std::time::Instant::now();
-        let mut out = self.two_pass_sample(pass2_history).await?;
+        let mut out = self
+            .two_pass_sample(pass2_history, &media_descriptors)
+            .await?;
         if is_degenerate_summary(&out.content) {
             tracing::Span::current().record("compaction_prefire_stale", true);
             tracing::info!(
@@ -1082,9 +1151,16 @@ impl SessionActor {
         })?;
         let source_had_images =
             xai_chat_state::compaction_utils::conversation_contains_images(&full_conversation);
+        // One immutable descriptor map for this compact attempt. Route
+        // fallback, ImageSanitization recovery, and input-ladder step-down all
+        // reuse it — never re-invoke media understanding mid-compact.
+        let media_descriptors = self
+            .freeze_compaction_media_descriptors(&full_conversation)
+            .await;
         let segment_messages = if self.compaction.compaction_mode.writes_segments() {
-            xai_chat_state::compaction_utils::prepare_conversation_for_segment(
+            xai_chat_state::compaction_utils::prepare_conversation_for_segment_with_descriptors(
                 full_conversation.clone(),
+                &media_descriptors,
             )
         } else {
             Vec::new()
@@ -1092,13 +1168,15 @@ impl SessionActor {
         const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
         let verbatim_input_enabled = self.compaction.verbatim_input;
         let simplified_messages = if verbatim_input_enabled {
-            xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
+            xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization_with_descriptors(
                 full_conversation,
                 summary_strips_reasoning,
+                &media_descriptors,
             )
         } else {
-            xai_chat_state::compaction_utils::prepare_conversation_for_summarization(
+            xai_chat_state::compaction_utils::prepare_conversation_for_summarization_with_descriptors(
                 full_conversation,
+                &media_descriptors,
             )
         };
         if conv_len == 0 {
@@ -1322,9 +1400,10 @@ impl SessionActor {
                                     let budget = context_window
                                         .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS)
                                         .saturating_sub(compaction_tool_tokens);
-                                    let verbatim = xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
+                                    let verbatim = xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization_with_descriptors(
                                         conv,
                                         summary_strips_reasoning,
+                                        &media_descriptors,
                                     );
                                     xai_chat_state::compaction_utils::fit_conversation_to_budget(
                                         verbatim, budget,
@@ -1334,8 +1413,9 @@ impl SessionActor {
                                     let lossy_budget = (context_window.saturating_mul(7) / 10)
                                         .saturating_sub(compaction_tool_tokens);
                                     xai_chat_state::compaction_utils::fit_conversation_to_budget(
-                                        xai_chat_state::compaction_utils::prepare_conversation_for_summarization(
+                                        xai_chat_state::compaction_utils::prepare_conversation_for_summarization_with_descriptors(
                                             conv,
+                                            &media_descriptors,
                                         ),
                                         lossy_budget,
                                     )
@@ -2450,6 +2530,9 @@ mod inline_auto_compact_flow_tests {
                 stream_tool_calls: None,
                 supports_native_schema: None,
                 supports_strict_tools: None,
+                supports_image_input: None,
+                supports_audio_input: None,
+                supports_video_input: None,
             },
             Box::new(xai_chat_state::NullChatPersistence),
             chat_event_tx,
@@ -2643,9 +2726,17 @@ mod inline_auto_compact_flow_tests {
             external_runtime: std::cell::RefCell::new(None),
             external_agent_runtime: std::cell::RefCell::new(None),
             rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-            image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+            media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+                image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+                ..Default::default()
+            }),
             image_describe_cache: Arc::new(
                 crate::session::image_describe::ImageDescribeCache::new(),
+            ),
+            media_descriptor_store: Arc::new(
+                crate::session::media_descriptors::MediaDescriptorStore::empty(
+                    std::path::Path::new("/tmp"),
+                ),
             ),
             subagent_token_records: parking_lot::Mutex::new(std::collections::HashMap::new()),
             workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),

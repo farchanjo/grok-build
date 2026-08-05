@@ -15,6 +15,14 @@ impl FileMetadata {
     pub fn is_pdf(&self) -> bool {
         self.mime_type == "application/pdf"
     }
+
+    pub fn is_audio(&self) -> bool {
+        crate::util::ffmpeg::mime_is_audio(&self.mime_type)
+    }
+
+    pub fn is_video(&self) -> bool {
+        crate::util::ffmpeg::mime_is_video(&self.mime_type)
+    }
 }
 
 const PDF_MAGIC: &[u8; 5] = b"%PDF-";

@@ -593,6 +593,24 @@ pub enum Action {
     SetCompactionFallbackModel(acp::ModelId),
     /// Clear the persisted fallback compaction model.
     ClearCompactionFallbackModel,
+    /// Set media routing (`auto` | `tools_only` | `off`).
+    /// SHELL-owned: persisted to `[media].mode` via `Effect::PersistSetting`.
+    SetMediaRouting(String),
+    /// Set the image understanding route to a stable catalog `ModelId`.
+    /// Persisted as `[media].image_model`.
+    SetMediaImageModel(acp::ModelId),
+    /// Restore the image understanding route to `@session`.
+    ClearMediaImageModel,
+    /// Set the audio understanding route to a stable catalog `ModelId`
+    /// (including the explicit `@session` sentinel).
+    SetMediaAudioModel(acp::ModelId),
+    /// Clear the persisted audio understanding model.
+    ClearMediaAudioModel,
+    /// Set the video understanding route to a stable catalog `ModelId`
+    /// (including the explicit `@session` sentinel).
+    SetMediaVideoModel(acp::ModelId),
+    /// Clear the persisted video understanding model.
+    ClearMediaVideoModel,
     /// Commit the `show_tips` preference. Persisted to `[cli].show_tips`.
     /// Restart-required — tips are resolved once at startup.
     SetShowTips(bool),

@@ -60,6 +60,9 @@ async fn create_test_actor(
             stream_tool_calls: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
         },
         Box::new(xai_chat_state::NullChatPersistence),
         event_tx,
@@ -249,8 +252,16 @@ async fn create_test_actor(
         ),
         external_runtime: std::cell::RefCell::new(None),
         external_agent_runtime: std::cell::RefCell::new(None),
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+            image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+            ..Default::default()
+        }),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
+        media_descriptor_store: Arc::new(
+            crate::session::media_descriptors::MediaDescriptorStore::empty(std::path::Path::new(
+                "/tmp",
+            )),
+        ),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
         trace_config_template: std::cell::RefCell::new(None),
@@ -580,6 +591,9 @@ async fn create_test_actor_with_memory(
             stream_tool_calls: None,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
         },
         Box::new(xai_chat_state::NullChatPersistence),
         event_tx,
@@ -783,8 +797,16 @@ async fn create_test_actor_with_memory(
         ),
         external_runtime: std::cell::RefCell::new(None),
         external_agent_runtime: std::cell::RefCell::new(None),
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+            image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+            ..Default::default()
+        }),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
+        media_descriptor_store: Arc::new(
+            crate::session::media_descriptors::MediaDescriptorStore::empty(std::path::Path::new(
+                "/tmp",
+            )),
+        ),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
         trace_config_template: std::cell::RefCell::new(None),
@@ -1357,6 +1379,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     stream_tool_calls: None,
                     supports_native_schema: None,
                     supports_strict_tools: None,
+                    supports_image_input: None,
+                    supports_audio_input: None,
+                    supports_video_input: None,
                 },
                 Box::new(xai_chat_state::NullChatPersistence),
                 event_tx,
@@ -1572,9 +1597,17 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 ),
                 external_runtime: std::cell::RefCell::new(None),
                 external_agent_runtime: std::cell::RefCell::new(None),
-                image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+                media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+                    image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+                    ..Default::default()
+                }),
                 image_describe_cache: Arc::new(
                     crate::session::image_describe::ImageDescribeCache::new(),
+                ),
+                media_descriptor_store: Arc::new(
+                    crate::session::media_descriptors::MediaDescriptorStore::empty(
+                        std::path::Path::new("/tmp"),
+                    ),
                 ),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),

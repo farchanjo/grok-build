@@ -414,20 +414,34 @@ pub(crate) async fn run_read_file(
             });
         }
     };
-    if let Ok(metadata) = bytes_to_metadata(&file_bytes)
-        && metadata.is_image()
-    {
-        return Ok(crate::implementations::read_file::image::image_read_output(
-            file_bytes,
-            metadata.mime_type,
-        )
-        .await);
-    }
     let extension = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
+    let magic_mime = bytes_to_metadata(&file_bytes)
+        .ok()
+        .map(|metadata| metadata.mime_type);
+    if let Some(mime_type) = magic_mime
+        .as_deref()
+        .filter(|mime| mime.starts_with("image/"))
+    {
+        return Ok(crate::implementations::read_file::image::image_read_output(
+            file_bytes,
+            mime_type.to_owned(),
+        )
+        .await);
+    }
+    // Audio/video must be classified before the binary rejection path so the
+    // shell can convert them to text without a dedicated ToolKind.
+    if let Some(media) = crate::implementations::read_file::maybe_media_read_output(
+        &path,
+        &file_bytes,
+        &extension,
+        magic_mime.as_deref(),
+    ) {
+        return Ok(media);
+    }
     if is_pdf_file(&file_bytes, &extension) {
         let mut output =
             handle_pdf(file_bytes, &path, input.pages, input.format.as_deref()).await?;

@@ -304,7 +304,9 @@ pub(crate) struct SubagentSpawnContext {
     pub permission_handle: Option<xai_grok_workspace::permission::PermissionHandle>,
     pub worktree_type: crate::util::config::WorktreeType,
     pub api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
-    pub image_description_model: String,
+    /// Parent session's complete resolved media policy. Child sessions inherit
+    /// routes, bounds, and mode together rather than reconstructing defaults.
+    pub media_config: crate::config::MediaConfig,
     /// Dual-mode workspace operations handle.
     pub workspace_ops: xai_grok_workspace::WorkspaceOps,
     pub auth_manager: std::sync::Arc<crate::auth::AuthManager>,
@@ -1088,8 +1090,11 @@ async fn read_parent_inference_config(
                     doom_loop_recovery: ctx.inference_config.doom_loop_recovery,
                     header_injector: ctx.inference_config.header_injector.clone(),
                     provider_identity: ctx.inference_config.provider_identity,
-                    supports_native_schema: None,
-                    supports_strict_tools: None,
+                    supports_native_schema: ctx.inference_config.supports_native_schema,
+                    supports_strict_tools: ctx.inference_config.supports_strict_tools,
+                    supports_image_input: ctx.inference_config.supports_image_input,
+                    supports_audio_input: ctx.inference_config.supports_audio_input,
+                    supports_video_input: ctx.inference_config.supports_video_input,
                 }
             };
 

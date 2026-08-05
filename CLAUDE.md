@@ -1,11 +1,14 @@
 # Grok Build — Claude Agent Compatibility Entry Point
 
 This file is a concise compatibility entry point for Claude-compatible agents
-working in the Grok Build repository. It repeats only safety-critical rules and
-high-level workflow. The full bindings are:
+working in the Grok Build repository. It repeats safety-critical rules and a
+condensed rapid-development workflow only. It is **not** a substitute for the
+full references:
 
-- [`AGENTS.md`](AGENTS.md) — mandatory operational rules.
-- [`GROK.md`](GROK.md) — canonical architecture and local development guide.
+- [`AGENTS.md`](AGENTS.md) — enforceable operations policy, including the
+  mandatory rapid development checklist.
+- [`GROK.md`](GROK.md) — detailed canonical architecture and local
+  development guide.
 
 Read `AGENTS.md` and `GROK.md` in full before editing code, proposing changes,
 or running repository commands.
@@ -34,14 +37,16 @@ or running repository commands.
 
 ## Quick build/test workflow
 
-- Direct crate-targeted development commands (normal daily work):
+For ordinary development, **prefer the helpers** and run **one at a time**.
+They enforce the isolated `~/.grokdev` profile and share one worktree-local
+`./target-dev` directory. Waiting on Cargo's shared target lock is expected and
+smaller than recompiling the same graph in a second directory.
+
+- Focused check first (for example, the crate you are editing):
 
   ```sh
-  cargo check -p xai-grok-pager-bin
-  cargo test -p xai-grok-config
-  cargo clippy -p xai-grok-shell
-  cargo fmt --all --check
-  cargo build -p xai-grok-pager-bin --release
+  ./grok-check.sh -p xai-grok-shell
+  ./grok-check.sh -p xai-grok-pager-bin
   ```
 
 - Fast local test runner with `cargo-nextest` (canonical name; not
@@ -54,21 +59,51 @@ or running repository commands.
   ./grok-test.sh -p xai-grok-shell --no-run
   ```
 
-  `cargo test -p xai-grok-shell` remains supported; `cargo test` ignores
-  `.config/nextest.toml`.
+  `cargo test` remains supported for shared-process semantics; it ignores
+  `.config/nextest.toml`. Keep nextest as the fast default.
 
-- Experimental `claude-cli-runtime` run with isolated `./target-dev` artifacts:
+- Direct `cargo` commands only when a helper cannot express the operation.
+  From Bash, `source ./grok-dev-env.sh` first so direct commands share
+  `./target-dev` and the isolated profile:
+
+  ```sh
+  source ./grok-dev-env.sh
+  cargo clippy -p xai-grok-shell
+  cargo fmt --all --check
+  cargo test -p xai-grok-config
+  ```
+
+- Experimental `claude-cli-runtime` run (only when needed):
 
   ```sh
   ./grok-dev-runner.sh --no-leader --no-auto-update
   ```
 
-- Release-dist/deployment builds (not for normal development):
+- Isolated parallel experiment with a separate target directory:
+
+  ```sh
+  CARGO_TARGET_DIR=/tmp/grok-local-target ./grok-check.sh -p xai-grok-shell
+  ```
+
+- Release-dist/deployment builds (not for ordinary edit loops; require
+  explicit user request):
 
   ```sh
   make build
   make build FEATURES=claude-cli-runtime
   ```
+
+Start narrow (affected package or test), validate direct consumers, and expand
+to workspace or release-dist only in proportion to risk. Do not delete Cargo
+file locks or kill another build to bypass waiting.
+
+## Mandatory checklist
+
+Before every normal edit loop, consult the checklist in `AGENTS.md`:
+`GROK_HOME=${HOME}/.grokdev`, prefer `./grok-check.sh`/`./grok-test.sh`,
+source `./grok-dev-env.sh` before direct `cargo` commands, run one helper at a
+time, start narrow, keep `make build` for deliberate release validation, and
+preserve `Cargo.lock` discipline.
 
 ## Cargo.lock discipline
 
@@ -83,8 +118,10 @@ or running repository commands.
   `cargo update`.
 - If `--locked` fails, diagnose the manifest/lock mismatch instead of removing
   `--locked` or deleting the lockfile.
-- Use separate `CARGO_TARGET_DIR` for independent runners or worktrees; do not
-  delete transient `.cargo` file locks.
+- Normal development helpers (`grok-check.sh`, `grok-test.sh`,
+  `grok-dev-runner.sh`) share `./target-dev` for artifact reuse. Run one at a
+  time; use a separate `CARGO_TARGET_DIR` for isolated experiments or other
+  worktrees; do not delete transient `.cargo` file locks.
 
 ## Tooling notes
 

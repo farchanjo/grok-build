@@ -193,6 +193,24 @@ pub fn acp_tool_update(
                         .collect();
                     (Some(blocks), acp::ToolCallStatus::Completed)
                 }
+                // Phase-1 media understanding: path-centric typed content is
+                // surfaced as text. Inference/transcription happens elsewhere.
+                ReadFileOutput::AudioContent(audio) => {
+                    let content = Some(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                        acp::TextContent::new(
+                            xai_grok_tools::implementations::read_file::audio_prompt_summary(audio),
+                        ),
+                    ))]);
+                    (content, acp::ToolCallStatus::Completed)
+                }
+                ReadFileOutput::VideoContent(video) => {
+                    let content = Some(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                        acp::TextContent::new(
+                            xai_grok_tools::implementations::read_file::video_prompt_summary(video),
+                        ),
+                    ))]);
+                    (content, acp::ToolCallStatus::Completed)
+                }
             };
             Some(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),

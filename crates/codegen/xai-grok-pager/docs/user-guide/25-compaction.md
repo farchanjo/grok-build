@@ -205,6 +205,15 @@ $GROK_HOME/sessions/<encoded-cwd>/<session-id>/compaction_checkpoints/
 
 The checkpoint and replacement history are written before a durable marker is appended to `updates.jsonl`. The marker is the commit record; an unreferenced checkpoint file is ignored by replay.
 
+Media descriptions and transcripts are stored separately in the session's
+`media_descriptors.jsonl`. Before a host-owned compaction attempt, Grok freezes
+one immutable descriptor snapshot and reuses it across rolling chunks, two-pass
+sampling, route fallback, recap, and memory flush. Raw media is never sent to a
+text-only compaction model. In `[media] mode = "auto"`, missing image descriptors
+may be backfilled before the snapshot; `tools_only`, `off`, and external-agent
+runtimes do not perform that lazy backfill. See
+[Media Understanding](28-media-understanding.md).
+
 If marker durability cannot be determined, Grok fail-stops the live session before accepting another conversation mutation. Restarting the session invokes journal recovery, which selects the committed or previous base deterministically and preserves any later append-only tail. Recovery fails closed if the history matches neither recorded base.
 
 ### Rewinding Past Compaction
@@ -322,4 +331,5 @@ enabled = false    # Flush memory before compaction
 - [Configuration](05-configuration.md) — Full `config.toml` reference
 - [Session Management](17-sessions.md) — Session persistence and rewind
 - [Memory](13-memory.md) — Pre-compaction memory flush
+- [Media Understanding](28-media-understanding.md) — Descriptor persistence and compaction enrichment
 - [Slash Commands](04-slash-commands.md) — `/compact`, `/rewind`, `/session-info`

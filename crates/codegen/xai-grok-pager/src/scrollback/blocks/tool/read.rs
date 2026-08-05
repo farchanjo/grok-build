@@ -27,6 +27,10 @@ pub enum ReadMediaKind {
     Image,
     /// PDF rendered as page images.
     Pdf { pages: usize },
+    /// Audio file (mp3, wav, …) classified by read_file.
+    Audio,
+    /// Video file (mp4, mov, …) classified by read_file.
+    Video,
 }
 
 /// Read file tool call.
@@ -200,6 +204,8 @@ impl ReadToolCallBlock {
             match media {
                 ReadMediaKind::Image => " (image)".to_string(),
                 ReadMediaKind::Pdf { pages } => format!(" ({pages} pages)"),
+                ReadMediaKind::Audio => " (audio)".to_string(),
+                ReadMediaKind::Video => " (video)".to_string(),
             }
         } else {
             String::new()

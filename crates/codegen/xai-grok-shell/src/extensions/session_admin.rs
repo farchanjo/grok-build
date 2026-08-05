@@ -576,11 +576,31 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         let mut agent_config = agent.cfg.borrow_mut();
         agent_config.models = toml_config.models.clone();
         agent_config.config_models = toml_config.config_models.clone();
+        agent_config.endpoints = toml_config.endpoints.clone();
+        agent_config.voice = toml_config.voice.clone();
         agent_config.web_search_model = overrides.web_search;
         agent_config.session_summary_model = overrides.session_summary;
-        agent_config.image_description_model = overrides.image_description;
+        agent_config.media_config = crate::config::MediaConfig::resolve(
+            &disk_config,
+            agent_config.remote_settings.as_ref(),
+        );
+        agent_config.image_description_model = agent_config.media_config.image_model.clone();
         agent_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
     }
+    let media_config = agent.cfg.borrow().media_config.clone();
+    let sessions = agent.sessions.borrow();
+    let updated_media_sessions = sessions
+        .values()
+        .filter(|session| {
+            session
+                .cmd_tx
+                .send(SessionCommand::UpdateMediaConfig {
+                    media: Box::new(media_config.clone()),
+                })
+                .is_ok()
+        })
+        .count();
+    drop(sessions);
     // Recompute the campaign overlay + `pre_campaign_default` (the catalog-miss
     // fallback) so reload matches spawn; `new_from_toml_cfg` reset it to None.
     {
@@ -593,10 +613,17 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     agent.sync_process_static_api_key(None);
 
     let count = agent.models_manager.models().len();
-    tracing::info!(count, "model list reloaded from config.toml");
-    ExtMethodResult::success(serde_json::json!({ "models": count }))
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+    tracing::info!(
+        count,
+        updated_media_sessions,
+        "model list and media policy reloaded from config.toml"
+    );
+    ExtMethodResult::success(serde_json::json!({
+        "models": count,
+        "updated_media_sessions": updated_media_sessions,
+    }))
+    .to_ext_response()
+    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
 // internal/reload_models_cache

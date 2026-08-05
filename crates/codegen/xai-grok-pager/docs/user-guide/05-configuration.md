@@ -80,12 +80,24 @@ trigger_policy = "fixed"              # fixed | dynamic
 rolling_band_count = 4                 # 3..=8; used by rolling compaction
 models = ["@session"]                 # primary, then optional fallback
 
+[media]
+mode = "auto"                         # auto | tools_only | off
+image_model = "@session"              # session route or catalog model ID
+# audio_model = "xai-streaming-stt"    # optional; xAI streaming STT aliases only
+# video_model = "my-vision-model"       # optional frame-description model
+image_limit = 16                       # 1..=64
+audio_max_seconds = 120                # 1..=900
+video_max_seconds = 600                # 1..=7200
+video_max_frames = 8                   # 1..=32
+
 [tools]
 respect_gitignore = false              # default: false; set true to make every tool skip gitignored files
 ```
 
 For automatic compaction strategy, trigger, band, and model details, see
-[Compaction Settings](25-compaction.md).
+[Compaction Settings](25-compaction.md). For capability-aware image, audio, and
+video routing, bounded extraction, persistence, privacy, and migration from the
+legacy image-description setting, see [Media Understanding](28-media-understanding.md).
 
 #### Input mode
 
@@ -231,6 +243,10 @@ temperature = 0.7                     # sampling temperature (0.0-2.0)
 top_p = 0.95                          # nucleus sampling parameter
 max_completion_tokens = 8192          # max tokens per response
 context_window = 128000               # context window size (for auto-compact)
+# Declare only capabilities verified for this endpoint. Omitted = unknown.
+supports_image_input = true
+supports_audio_input = false
+supports_video_input = false
 # Non-secret headers only:
 # extra_headers = { "X-Request-Tags" = "team=example" }
 ```

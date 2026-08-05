@@ -1,10 +1,15 @@
 //! Shared image/PDF/metadata helpers for read tools (grok_build, etc.).
 
 pub mod image;
+pub mod media;
 pub mod metadata;
 pub mod pdf;
 pub mod pptx;
 
+pub use media::{
+    audio_prompt_summary, audio_read_output, maybe_media_read_output, video_prompt_summary,
+    video_read_output,
+};
 pub use metadata::{FileMetadata, bytes_to_metadata};
 pub use pdf::{PDF_MAX_PAGES_PER_READ, parse_page_range};
 

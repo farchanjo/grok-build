@@ -10,12 +10,14 @@ use super::setters::{
     set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
     set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
-    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
-    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
-    set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
-    set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
-    set_voice_capture_mode_inner, set_voice_stt_language_inner,
+    set_media_audio_model_inner, set_media_image_model_inner, set_media_routing_inner,
+    set_media_video_model_inner, set_multiline_mode, set_page_flip_on_send_inner,
+    set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
+    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
+    set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
+    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
+    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
+    set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};
 use crate::app::app_view::{ActiveView, AppView};
@@ -56,6 +58,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let compaction_config_from_app = app.compaction_config.clone();
+    let media_config_from_app = app.media_config.clone();
     for agent in app.agents.values_mut() {
         // Walk both `Settings` and `ResetSettingsConfirm` — the
         // confirm dialog embeds settings state that must stay fresh
@@ -70,19 +73,21 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
         if let Some(state) = state_opt {
             state.rebuild_rows();
             state.ui_snapshot = ui_snapshot.clone();
+            let available_models: Vec<(String, acp::ModelId)> = agent
+                .session
+                .models
+                .available
+                .iter()
+                .map(|(id, info)| (info.name.clone(), id.clone()))
+                .collect();
+            let external_ids = external_model_ids(&agent.session.models);
             state.pager_snapshot = crate::settings::PagerLocalSnapshot {
                 multiline_mode: agent.multiline_mode,
                 yolo_mode: agent.session.is_yolo(),
                 auto_mode: agent.session.is_auto(),
                 current_model_name: agent.session.models.current_model_name(),
-                available_models: agent
-                    .session
-                    .models
-                    .available
-                    .iter()
-                    .map(|(id, info)| (info.name.clone(), id.clone()))
-                    .collect(),
-                external_model_ids: external_model_ids(&agent.session.models),
+                available_models: available_models.clone(),
+                external_model_ids: external_ids.clone(),
                 coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
                 // Prefer optimistic pending over confirmed active.
                 plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
@@ -94,9 +99,12 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
                 auto_mode_gate: auto_mode_gate_from_app,
                 ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
                 voice_stt_language: voice_stt_language_from_app.clone(),
-                ..compaction_snapshot_fields(
+                ..merge_compaction_and_media_snapshot(
                     &compaction_config_from_app,
                     agent.session.tracker.activity(),
+                    &media_config_from_app,
+                    &available_models,
+                    &external_ids,
                 )
             };
         }
@@ -347,6 +355,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     let ask_user_question_timeout_enabled_from_app = app.ask_user_question_timeout_enabled;
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let compaction_config_from_app = app.compaction_config.clone();
+    let media_config_from_app = app.media_config.clone();
 
     let Some(agent) = app.agents.get_mut(&id) else {
         return effects;
@@ -370,18 +379,21 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
 
     tracing::info!(target: "settings", "opened modal");
 
+    let available_models: Vec<(String, acp::ModelId)> = agent
+        .session
+        .models
+        .available
+        .iter()
+        .map(|(id, info)| (info.name.clone(), id.clone()))
+        .collect();
+    let external_ids = external_model_ids(&agent.session.models);
     let pager_snapshot = crate::settings::PagerLocalSnapshot {
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),
         auto_mode: agent.session.is_auto(),
         current_model_name: agent.session.models.current_model_name(),
-        available_models: agent
-            .session
-            .models
-            .available
-            .iter()
-            .map(|(id, info)| (info.name.clone(), id.clone()))
-            .collect(),
+        available_models: available_models.clone(),
+        external_model_ids: external_ids.clone(),
         coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
         // Prefer optimistic pending over confirmed active.
         plan_mode_active: agent.plan_mode_pending.unwrap_or(agent.plan_mode_active),
@@ -393,9 +405,12 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
         auto_mode_gate: auto_mode_gate_from_app,
         ask_user_question_timeout_enabled: ask_user_question_timeout_enabled_from_app,
         voice_stt_language: voice_stt_language_from_app,
-        ..compaction_snapshot_fields(
+        ..merge_compaction_and_media_snapshot(
             &compaction_config_from_app,
             agent.session.tracker.activity(),
+            &media_config_from_app,
+            &available_models,
+            &external_ids,
         )
     };
     let mut state = Box::new(SettingsModalState::new(
@@ -915,22 +930,117 @@ fn compaction_snapshot_fields(
     }
 }
 
+fn media_model_status_label(
+    model: Option<&str>,
+    available_models: &[(String, acp::ModelId)],
+    external_ids: &std::collections::HashSet<String>,
+) -> String {
+    match model {
+        None => "Unset".to_owned(),
+        Some("@session") => "Session model".to_owned(),
+        Some(id) => {
+            let display = available_models
+                .iter()
+                .find(|(_, model_id)| model_id.0.as_ref() == id)
+                .map(|(name, _)| name.as_str())
+                .unwrap_or(id);
+            if external_ids.contains(id) {
+                format!("{display} (external provider)")
+            } else {
+                display.to_owned()
+            }
+        }
+    }
+}
+
+fn format_media_status(
+    config: &xai_grok_shell::config::MediaConfig,
+    available_models: &[(String, acp::ModelId)],
+    external_ids: &std::collections::HashSet<String>,
+) -> String {
+    let mode = match config.mode {
+        xai_grok_shell::config::MediaMode::Auto => "Auto",
+        xai_grok_shell::config::MediaMode::ToolsOnly => "Tools only",
+        xai_grok_shell::config::MediaMode::Off => "Off",
+    };
+    let image = media_model_status_label(
+        config.image_model.as_deref(),
+        available_models,
+        external_ids,
+    );
+    let audio = match config.audio_model.as_deref() {
+        None => "Automatic xAI STT".to_owned(),
+        Some("@session" | "xai" | "xai-stt" | "xai-streaming-stt") => {
+            "xAI streaming STT".to_owned()
+        }
+        Some(route) => format!("Unsupported route: {route}"),
+    };
+    let video = media_model_status_label(
+        config.video_model.as_deref(),
+        available_models,
+        external_ids,
+    );
+    format!("{mode} · image: {image} · audio: {audio} · video: {video}")
+}
+
+fn media_snapshot_fields(
+    config: &xai_grok_shell::config::MediaConfig,
+    available_models: &[(String, acp::ModelId)],
+    external_ids: &std::collections::HashSet<String>,
+) -> crate::settings::PagerLocalSnapshot {
+    crate::settings::PagerLocalSnapshot {
+        media_routing: match config.mode {
+            xai_grok_shell::config::MediaMode::Auto => "auto",
+            xai_grok_shell::config::MediaMode::ToolsOnly => "tools_only",
+            xai_grok_shell::config::MediaMode::Off => "off",
+        }
+        .to_string(),
+        media_image_model: config
+            .image_model
+            .clone()
+            .unwrap_or_else(|| "@session".to_string()),
+        media_audio_model: config.audio_model.clone().unwrap_or_default(),
+        media_video_model: config.video_model.clone().unwrap_or_default(),
+        media_status: format_media_status(config, available_models, external_ids),
+        ..Default::default()
+    }
+}
+
+fn merge_compaction_and_media_snapshot(
+    compaction: &xai_grok_shell::agent::config::CompactionConfig,
+    activity: Option<crate::acp::tracker::TurnActivity>,
+    media: &xai_grok_shell::config::MediaConfig,
+    available_models: &[(String, acp::ModelId)],
+    external_ids: &std::collections::HashSet<String>,
+) -> crate::settings::PagerLocalSnapshot {
+    let mut snap = compaction_snapshot_fields(compaction, activity);
+    let media_fields = media_snapshot_fields(media, available_models, external_ids);
+    snap.media_routing = media_fields.media_routing;
+    snap.media_image_model = media_fields.media_image_model;
+    snap.media_audio_model = media_fields.media_audio_model;
+    snap.media_video_model = media_fields.media_video_model;
+    snap.media_status = media_fields.media_status;
+    snap
+}
+
 /// Build a `PagerLocalSnapshot` from the current `AppView`.
 pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocalSnapshot {
+    let available_models = agent_available_models(app);
+    let external_ids = match app.active_view {
+        ActiveView::Agent(id) => app
+            .agents
+            .get(&id)
+            .map(|agent| external_model_ids(&agent.session.models))
+            .unwrap_or_default(),
+        _ => Default::default(),
+    };
     crate::settings::PagerLocalSnapshot {
         multiline_mode: agent_multiline_mode(app),
         yolo_mode: agent_yolo_mode(app),
         auto_mode: agent_auto_mode(app),
         current_model_name: agent_current_model_name(app),
-        available_models: agent_available_models(app),
-        external_model_ids: match app.active_view {
-            ActiveView::Agent(id) => app
-                .agents
-                .get(&id)
-                .map(|agent| external_model_ids(&agent.session.models))
-                .unwrap_or_default(),
-            _ => Default::default(),
-        },
+        available_models: available_models.clone(),
+        external_model_ids: external_ids.clone(),
         coding_data_sharing_opt_out: app.coding_data_retention_opt_out,
         plan_mode_active: agent_plan_mode(app),
         show_tips: app.show_tips,
@@ -941,7 +1051,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
         auto_mode_gate: app.auto_mode_gate,
         ask_user_question_timeout_enabled: app.ask_user_question_timeout_enabled,
         voice_stt_language: app.voice_config.language.clone(),
-        ..compaction_snapshot_fields(
+        ..merge_compaction_and_media_snapshot(
             &app.compaction_config,
             match app.active_view {
                 ActiveView::Agent(id) => app
@@ -950,6 +1060,9 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
                     .and_then(|agent| agent.session.tracker.activity()),
                 _ => None,
             },
+            &app.media_config,
+            &available_models,
+            &external_ids,
         )
     }
 }
@@ -1161,6 +1274,29 @@ pub(in crate::app::dispatch) fn action_for_reset(
                 Some(Action::SetCompactionFallbackModel(acp::ModelId::new(
                     s.clone(),
                 )))
+            }
+        }
+        // --- Media settings ---
+        ("media_routing", SettingValue::Enum(s)) => Some(Action::SetMediaRouting(s.to_string())),
+        ("media_image_model", SettingValue::String(s)) => {
+            if s.is_empty() || s == "@session" {
+                Some(Action::ClearMediaImageModel)
+            } else {
+                Some(Action::SetMediaImageModel(acp::ModelId::new(s.clone())))
+            }
+        }
+        ("media_audio_model", SettingValue::String(s)) => {
+            if s.is_empty() {
+                Some(Action::ClearMediaAudioModel)
+            } else {
+                Some(Action::SetMediaAudioModel(acp::ModelId::new(s.clone())))
+            }
+        }
+        ("media_video_model", SettingValue::String(s)) => {
+            if s.is_empty() {
+                Some(Action::ClearMediaVideoModel)
+            } else {
+                Some(Action::SetMediaVideoModel(acp::ModelId::new(s.clone())))
             }
         }
 
@@ -1455,6 +1591,19 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("compaction_fallback_model", SettingValue::String(s)) => {
             set_compaction_fallback_model_inner(app, s.clone());
+        }
+        // --- Media settings rollback ---
+        ("media_routing", SettingValue::Enum(s)) => {
+            set_media_routing_inner(app, s);
+        }
+        ("media_image_model", SettingValue::String(s)) => {
+            set_media_image_model_inner(app, s.clone());
+        }
+        ("media_audio_model", SettingValue::String(s)) => {
+            set_media_audio_model_inner(app, s.clone());
+        }
+        ("media_video_model", SettingValue::String(s)) => {
+            set_media_video_model_inner(app, s.clone());
         }
 
         _ => {

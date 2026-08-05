@@ -48,6 +48,14 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
             // visible without closing and reopening the picker.
             agent.prompt.refresh_slash(&agent.session.models);
         }
+        // The shell emits this notification after config/model reload. Refresh
+        // the pager-owned media snapshot after the agent loop so `/settings`
+        // agrees with the policy already fanned out to active sessions. Tests
+        // may not have a GROK_HOME-backed config, so keep the current snapshot
+        // when loading fails.
+        if let Some(media) = crate::app::event_loop::load_media_config_from_disk() {
+            app.media_config = media;
+        }
         true
     } else {
         tracing::warn!("Failed to parse x.ai/models/update");

@@ -256,8 +256,16 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         external_runtime: std::cell::RefCell::new(None),
         external_agent_runtime: std::cell::RefCell::new(None),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        media_config: std::cell::RefCell::new(crate::config::MediaConfig {
+            image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+            ..Default::default()
+        }),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
+        media_descriptor_store: Arc::new(
+            crate::session::media_descriptors::MediaDescriptorStore::empty(std::path::Path::new(
+                "/tmp",
+            )),
+        ),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
         trace_config_template: std::cell::RefCell::new(None),

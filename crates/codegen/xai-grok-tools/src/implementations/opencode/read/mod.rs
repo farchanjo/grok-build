@@ -219,15 +219,28 @@ impl xai_tool_runtime::Tool for ReadTool {
         // Check for images via magic-byte detection. Route through
         // compression — raw bytes (truncated or non-endpoint formats)
         // must never reach the conversation.
-        if let Ok(meta) =
+        let magic_mime =
             crate::implementations::grok_build::read_file::bytes_to_metadata(&file_bytes)
-            && meta.is_image()
+                .ok()
+                .map(|meta| meta.mime_type);
+        if let Some(mime_type) = magic_mime
+            .as_deref()
+            .filter(|mime| mime.starts_with("image/"))
         {
             return Ok(crate::implementations::read_file::image::image_read_output(
                 file_bytes,
-                meta.mime_type,
+                mime_type.to_owned(),
             )
             .await);
+        }
+
+        if let Some(media) = crate::implementations::read_file::maybe_media_read_output(
+            &path,
+            &file_bytes,
+            &extension,
+            magic_mime.as_deref(),
+        ) {
+            return Ok(media);
         }
 
         // Check for PDF by extension (magic-byte detection doesn't always catch PDFs).

@@ -414,6 +414,20 @@ pub struct InferenceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
 
+    /// Whether the model explicitly accepts image input. `None` means unknown;
+    /// callers that require a guaranteed multimodal route must treat unknown as
+    /// ineligible and use an auxiliary media route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+
+    /// Whether the provider adapter and model explicitly accept audio input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio_input: Option<bool>,
+
+    /// Whether the provider adapter and model explicitly accept video input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_video_input: Option<bool>,
+
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default)]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -485,6 +499,9 @@ impl std::fmt::Debug for InferenceConfig {
             .field("supports_backend_search", &self.supports_backend_search)
             .field("supports_native_schema", &self.supports_native_schema)
             .field("supports_strict_tools", &self.supports_strict_tools)
+            .field("supports_image_input", &self.supports_image_input)
+            .field("supports_audio_input", &self.supports_audio_input)
+            .field("supports_video_input", &self.supports_video_input)
             .field("compactions_remaining", &self.compactions_remaining)
             .field("compaction_at_tokens", &self.compaction_at_tokens)
             .field("doom_loop_recovery", &self.doom_loop_recovery)
@@ -534,6 +551,9 @@ impl Default for InferenceConfig {
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,

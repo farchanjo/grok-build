@@ -71,6 +71,9 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -136,7 +139,10 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         permission_handle: None,
         worktree_type: crate::util::config::WorktreeType::Linked,
         api_key_provider: None,
-        image_description_model: crate::test_support::TEST_MODEL.to_owned(),
+        media_config: crate::config::MediaConfig {
+            image_model: Some(crate::test_support::TEST_MODEL.to_owned()),
+            ..Default::default()
+        },
         workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
         auth_manager: Arc::new(crate::auth::AuthManager::new(
             std::path::Path::new("/tmp/nonexistent-grok-test"),

@@ -643,7 +643,7 @@ impl MvpAgent {
             api_key_provider: Some(Arc::new(crate::auth::manager::SharedAuthKeyProvider(
                 am.clone(),
             ))),
-            image_description_model: self.resolve_image_description_model(),
+            media_config: self.resolve_media_config(),
             workspace_ops: parent_workspace_ops.clone(),
             auth_manager: am.clone(),
             attribution_callback: parent_attribution_callback,

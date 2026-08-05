@@ -111,6 +111,9 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .unwrap_or_default(),
         privacy: section(table, "privacy"),
         compaction: section(table, "compaction"),
+        // Raw `[media]` section only — env / legacy image_description
+        // layering lives in `MediaConfig::resolve` for runtime consumers.
+        media: section(table, "media"),
     }
 }
 /// Resolve permission config with project override semantics.

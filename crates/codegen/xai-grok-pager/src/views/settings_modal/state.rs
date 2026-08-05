@@ -961,6 +961,8 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "compaction_strategy" => Some(Action::SetCompactionStrategy(choice.to_string())),
         // Trigger policy: enum round-trip.
         "compaction_trigger_policy" => Some(Action::SetCompactionTriggerPolicy(choice.to_string())),
+        // --- Media settings ---
+        "media_routing" => Some(Action::SetMediaRouting(choice.to_string())),
         _ => None,
     }
 }
@@ -1007,6 +1009,28 @@ pub(super) fn action_for_string(
                 Some(Action::ClearCompactionFallbackModel)
             } else {
                 Some(Action::SetCompactionFallbackModel(acp::ModelId::new(value)))
+            }
+        }
+        // --- Media model settings ---
+        "media_image_model" => {
+            if value.is_empty() || value == "@session" {
+                Some(Action::ClearMediaImageModel)
+            } else {
+                Some(Action::SetMediaImageModel(acp::ModelId::new(value)))
+            }
+        }
+        "media_audio_model" => {
+            if value.is_empty() {
+                Some(Action::ClearMediaAudioModel)
+            } else {
+                Some(Action::SetMediaAudioModel(acp::ModelId::new(value)))
+            }
+        }
+        "media_video_model" => {
+            if value.is_empty() {
+                Some(Action::ClearMediaVideoModel)
+            } else {
+                Some(Action::SetMediaVideoModel(acp::ModelId::new(value)))
             }
         }
 

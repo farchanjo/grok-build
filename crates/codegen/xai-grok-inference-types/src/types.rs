@@ -1488,6 +1488,14 @@ pub struct InferenceSettings {
     /// never mark Grok tools strict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_strict_tools: Option<bool>,
+    /// Durable tri-state input-modality capabilities. Native media routing is
+    /// allowed only for `Some(true)`; absent metadata remains unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_video_input: Option<bool>,
 }
 
 impl InferenceSettings {

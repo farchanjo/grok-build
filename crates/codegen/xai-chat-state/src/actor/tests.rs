@@ -34,6 +34,9 @@ fn test_config_with_window(context_window: u64) -> InferenceSettings {
         stream_tool_calls: None,
         supports_native_schema: None,
         supports_strict_tools: None,
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
     }
 }
 
@@ -1180,6 +1183,9 @@ async fn update_inference_settings_is_queryable() {
         stream_tool_calls: None,
         supports_native_schema: None,
         supports_strict_tools: None,
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
     };
     h.handle.update_inference_settings(new_config.clone());
 
@@ -1568,6 +1574,9 @@ async fn build_request_uses_inference_settings() {
         stream_tool_calls: None,
         supports_native_schema: None,
         supports_strict_tools: None,
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
     };
     let h = TestHarness::with_config(vec![ConversationItem::user("hi")], config);
 
@@ -3717,6 +3726,9 @@ async fn inference_settings_survives_compaction_replacement() {
         stream_tool_calls: None,
         supports_native_schema: None,
         supports_strict_tools: None,
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
     };
 
     let h = TestHarness::with_config(
@@ -3804,6 +3816,9 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
         stream_tool_calls: None,
         supports_native_schema: None,
         supports_strict_tools: None,
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
     };
 
     let h = TestHarness::with_config(
@@ -3898,6 +3913,9 @@ async fn context_window_downgrade_triggers_auto_compact() {
         stream_tool_calls: None,
         supports_native_schema: None,
         supports_strict_tools: None,
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
     };
 
     let h = TestHarness::with_config(vec![], config);

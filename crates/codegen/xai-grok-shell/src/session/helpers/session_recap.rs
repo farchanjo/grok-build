@@ -129,6 +129,24 @@ pub(crate) fn budget_recap_items(
     strip_reasoning: bool,
     context_window: u64,
 ) -> Vec<ConversationItem> {
+    budget_recap_items_with_descriptors(
+        conversation,
+        tag,
+        strip_reasoning,
+        context_window,
+        &compaction_utils::CompactionMediaDescriptors::empty(),
+    )
+}
+
+/// [`budget_recap_items`] with a frozen media-descriptor map for the over-budget
+/// trim path (fast path keeps raw history for KV-cache warmth).
+pub(crate) fn budget_recap_items_with_descriptors(
+    conversation: Vec<ConversationItem>,
+    tag: &str,
+    strip_reasoning: bool,
+    context_window: u64,
+    media_descriptors: &compaction_utils::CompactionMediaDescriptors,
+) -> Vec<ConversationItem> {
     let effective_window = context_window.min(RECAP_CONTEXT_WINDOW_CAP);
     let prompt_budget = (effective_window.saturating_mul(RECAP_BUDGET_THRESHOLD_PERCENT) / 100)
         .saturating_sub(RECAP_BUDGET_HEADROOM_TOKENS);
@@ -145,7 +163,11 @@ pub(crate) fn budget_recap_items(
 
     // Normalize the trailing boundary BEFORE trimming (ordering matters — see doc).
     let mut snapshot =
-        compaction_utils::prepare_conversation_for_verbatim_summarization(conversation, true);
+        compaction_utils::prepare_conversation_for_verbatim_summarization_with_descriptors(
+            conversation,
+            true,
+            media_descriptors,
+        );
     pop_trailing_tool_run(&mut snapshot);
     let mut items = compaction_utils::fit_conversation_to_budget(snapshot, snapshot_budget);
     let post_tokens = estimate_conversation_tokens(&items);

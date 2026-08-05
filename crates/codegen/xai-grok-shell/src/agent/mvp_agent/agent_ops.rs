@@ -44,13 +44,8 @@ impl MvpAgent {
         }
         session_ids.len()
     }
-    pub(super) fn resolve_image_description_model(&self) -> String {
-        self.cfg
-            .borrow()
-            .image_description_model
-            .as_deref()
-            .unwrap_or(crate::models::default_image_description_model())
-            .to_owned()
+    pub(super) fn resolve_media_config(&self) -> crate::config::MediaConfig {
+        self.cfg.borrow().media_config.clone()
     }
     fn resolve_session_summary_model(&self) -> String {
         self.cfg
@@ -3756,7 +3751,7 @@ impl MvpAgent {
                             ),
                         ),
                     ),
-                    self.resolve_image_description_model(),
+                    self.resolve_media_config(),
                     agent_hook_registry_override,
                     workspace_ops.clone(),
                     {

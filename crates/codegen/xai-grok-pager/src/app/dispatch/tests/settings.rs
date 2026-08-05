@@ -1477,6 +1477,48 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             // Status is read-only, no action to dispatch
             panic!("compaction_status is read-only, no action to dispatch");
         }
+        "media_routing" => {
+            let _ = dispatch(Action::SetMediaRouting("tools_only".to_string()), app);
+        }
+        "media_image_model" => {
+            use agent_client_protocol as acp;
+            use std::sync::Arc;
+            if let ActiveView::Agent(aid) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&aid)
+            {
+                let id = acp::ModelId::new(Arc::from("vision-test-model"));
+                let info = acp::ModelInfo::new(id.clone(), "Vision Test".to_string());
+                agent.session.models.available.insert(id.clone(), info);
+                let _ = dispatch(Action::SetMediaImageModel(id), app);
+            }
+        }
+        "media_audio_model" => {
+            use agent_client_protocol as acp;
+            use std::sync::Arc;
+            if let ActiveView::Agent(aid) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&aid)
+            {
+                let id = acp::ModelId::new(Arc::from("audio-test-model"));
+                let info = acp::ModelInfo::new(id.clone(), "Audio Test".to_string());
+                agent.session.models.available.insert(id.clone(), info);
+                let _ = dispatch(Action::SetMediaAudioModel(id), app);
+            }
+        }
+        "media_video_model" => {
+            use agent_client_protocol as acp;
+            use std::sync::Arc;
+            if let ActiveView::Agent(aid) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&aid)
+            {
+                let id = acp::ModelId::new(Arc::from("video-test-model"));
+                let info = acp::ModelInfo::new(id.clone(), "Video Test".to_string());
+                agent.session.models.available.insert(id.clone(), info);
+                let _ = dispatch(Action::SetMediaVideoModel(id), app);
+            }
+        }
+        "media_status" => {
+            panic!("media_status is read-only, no action to dispatch");
+        }
         other => {
             panic!(
                 "move_setting_away_from_default: no arm for `{other}`. \
@@ -3513,6 +3555,132 @@ fn set_compaction_strategy_emits_persist_setting() {
         }
         other => panic!("expected PersistSetting, got {other:?}"),
     }
+}
+
+/// Test that SetMediaRouting emits PersistSetting with correct payload.
+#[test]
+fn set_media_routing_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetMediaRouting("tools_only".to_string()), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "media_routing");
+            assert_eq!(*value, SettingValue::Enum("tools_only"));
+            assert_eq!(*rollback_value, SettingValue::Enum("auto"));
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(
+        app.media_config.mode,
+        xai_grok_shell::config::MediaMode::ToolsOnly
+    );
+}
+
+/// Setting media routing to the already-effective default is idempotent.
+#[test]
+fn set_media_routing_idempotent_when_default() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetMediaRouting("auto".to_string()), &mut app);
+    assert!(
+        effects.is_empty(),
+        "default media routing already resolves to auto"
+    );
+}
+
+/// Test that SetMediaImageModel emits PersistSetting with correct payload.
+#[test]
+fn set_media_image_model_emits_persist_setting() {
+    use crate::settings::SettingValue;
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    let mut app = test_app_with_agent();
+    let id = acp::ModelId::new(Arc::from("vision-pro"));
+    let info = acp::ModelInfo::new(id.clone(), "Vision Pro".to_string());
+    if let ActiveView::Agent(aid) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&aid)
+    {
+        agent.session.models.available.insert(id.clone(), info);
+    }
+    let effects = dispatch(Action::SetMediaImageModel(id), &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "media_image_model");
+            assert_eq!(*value, SettingValue::String("vision-pro".to_string()));
+            assert_eq!(
+                *rollback_value,
+                SettingValue::String("@session".to_string())
+            );
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.media_config.image_model.as_deref(), Some("vision-pro"));
+}
+
+/// Clearing the media image model restores `@session`.
+#[test]
+fn clear_media_image_model_restores_session() {
+    use crate::settings::SettingValue;
+    let mut app = test_app_with_agent();
+    app.media_config.image_model = Some("vision-pro".to_owned());
+    let effects = dispatch(Action::ClearMediaImageModel, &mut app);
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        Effect::PersistSetting {
+            key,
+            value,
+            rollback_value,
+        } => {
+            assert_eq!(*key, "media_image_model");
+            assert_eq!(*value, SettingValue::String("@session".to_string()));
+            assert_eq!(
+                *rollback_value,
+                SettingValue::String("vision-pro".to_string())
+            );
+        }
+        other => panic!("expected PersistSetting, got {other:?}"),
+    }
+    assert_eq!(app.media_config.image_model.as_deref(), Some("@session"));
+}
+
+/// Build pager snapshot includes external-provider disclosure in media_status.
+#[test]
+fn media_status_in_snapshot_discloses_external_provider() {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    let mut app = test_app_with_agent();
+    let id = acp::ModelId::new(Arc::from("openrouter:vision"));
+    let mut info = acp::ModelInfo::new(id.clone(), "External Vision".to_string());
+    // Missing / non-xAI providerIdentity is treated as external.
+    info.meta = Some(
+        serde_json::json!({ "providerIdentity": "openrouter" })
+            .as_object()
+            .cloned()
+            .expect("object meta"),
+    );
+    if let ActiveView::Agent(aid) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&aid)
+    {
+        agent.session.models.available.insert(id.clone(), info);
+    }
+    app.media_config.image_model = Some("openrouter:vision".to_owned());
+    let snapshot = build_pager_snapshot(&app);
+    assert!(
+        snapshot.media_status.contains("external provider"),
+        "expected external disclosure in {}",
+        snapshot.media_status
+    );
+    assert!(snapshot.media_status.contains("External Vision"));
 }
 
 /// Test that setting the already-effective default is idempotent.

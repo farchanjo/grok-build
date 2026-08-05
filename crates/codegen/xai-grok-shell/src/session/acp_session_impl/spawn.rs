@@ -186,7 +186,7 @@ pub(crate) async fn spawn_session_actor(
     models_manager: crate::agent::models::ModelsManager,
     inherited_permission_handle: Option<xai_grok_workspace::permission::PermissionHandle>,
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
-    image_description_model: String,
+    media_config: crate::config::MediaConfig,
     hook_registry_override: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
     workspace_ops: xai_grok_workspace::WorkspaceOps,
     cli_permission_rules: Vec<xai_grok_workspace::permission::types::PermissionRule>,
@@ -424,6 +424,9 @@ pub(crate) async fn spawn_session_actor(
         stream_tool_calls: Some(inference_config.stream_tool_calls),
         supports_native_schema: inference_config.supports_native_schema,
         supports_strict_tools: inference_config.supports_strict_tools,
+        supports_image_input: inference_config.supports_image_input,
+        supports_audio_input: inference_config.supports_audio_input,
+        supports_video_input: inference_config.supports_video_input,
     };
     let actor_pruning_config = xai_chat_state::PruningConfig {
         enabled: session_pruning_config.enabled,
@@ -1675,8 +1678,25 @@ pub(crate) async fn spawn_session_actor(
         external_runtime: std::cell::RefCell::new(None),
         external_agent_runtime: std::cell::RefCell::new(None),
         rebuild_spec: rebuild_spec.clone(),
-        image_description_model,
+        media_config: std::cell::RefCell::new(media_config),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
+        media_descriptor_store: Arc::new(
+            crate::session::media_descriptors::MediaDescriptorStore::load(
+                &crate::session::persistence::session_dir(&crate::session::info::Info {
+                    id: session_info.id.clone(),
+                    cwd: session_info.cwd.clone(),
+                }),
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to load media descriptor store; starting empty");
+                crate::session::media_descriptors::MediaDescriptorStore::empty(
+                    &crate::session::persistence::session_dir(&crate::session::info::Info {
+                        id: session_info.id.clone(),
+                        cwd: session_info.cwd.clone(),
+                    }),
+                )
+            }),
+        ),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
         trace_config_template: std::cell::RefCell::new(None),
@@ -2166,7 +2186,7 @@ pub(crate) async fn spawn_session_on_thread(
     parent_traceparent: Option<String>,
     inherited_permission_handle: Option<xai_grok_workspace::permission::PermissionHandle>,
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
-    image_description_model: String,
+    media_config: crate::config::MediaConfig,
     hook_registry_override: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
     workspace_ops: xai_grok_workspace::WorkspaceOps,
     cli_permission_rules: Vec<xai_grok_workspace::permission::types::PermissionRule>,
@@ -2330,7 +2350,7 @@ pub(crate) async fn spawn_session_on_thread(
                         models_manager,
                         inherited_permission_handle,
                         api_key_provider,
-                        image_description_model,
+                        media_config,
                         hook_registry_override,
                         workspace_ops,
                         cli_permission_rules,

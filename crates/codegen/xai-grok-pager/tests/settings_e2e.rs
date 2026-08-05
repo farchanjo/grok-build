@@ -77,6 +77,12 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "contextual_hints.small_screen",
     "contextual_hints.word_select",
     "contextual_hints.ssh_wrap",
+    // Media understanding rows under Models.
+    "media_routing",
+    "media_image_model",
+    "media_audio_model",
+    "media_video_model",
+    "media_status",
     // Dedicated compaction strategy, trigger, bands, model routes, and status.
     "compaction_strategy",
     "compaction_trigger_policy",
@@ -1835,6 +1841,7 @@ fn registry_kind_membership_through_pr_14() {
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "media_routing",
             "permission_mode",
             "plan_mode",
             "render_mermaid",
@@ -1862,6 +1869,9 @@ fn registry_kind_membership_through_pr_14() {
             "compaction_primary_model",
             "default_model",
             "fork_secondary_model",
+            "media_audio_model",
+            "media_image_model",
+            "media_video_model",
         ],
         "DynamicEnum kind membership drift",
     );
@@ -1890,7 +1900,7 @@ fn registry_kind_membership_through_pr_14() {
     let status_keys = by_kind.remove("Status").unwrap_or_default();
     assert_eq!(
         status_keys,
-        vec!["compaction_status"],
+        vec!["compaction_status", "media_status"],
         "Status kind membership drift",
     );
 
@@ -1923,6 +1933,7 @@ fn enum_settings_membership_through_pr_14() {
             "default_selected_permission",
             "hunk_tracker_mode",
             "keep_text_selection",
+            "media_routing",
             "permission_mode",
             "plan_mode",
             "render_mermaid",
@@ -2007,6 +2018,13 @@ fn defaults_round_trip_through_registry() {
             "compaction_primary_model" => SettingValue::String("@session".to_string()),
             "compaction_fallback_model" => SettingValue::String(String::new()),
             "compaction_status" => SettingValue::String("Idle".to_string()),
+            "media_routing" => SettingValue::Enum("auto"),
+            "media_image_model" => SettingValue::String("@session".to_string()),
+            "media_audio_model" => SettingValue::String(String::new()),
+            "media_video_model" => SettingValue::String(String::new()),
+            "media_status" => SettingValue::String(
+                "Auto · image: Session model · audio: Unset · video: Unset".to_string(),
+            ),
             "show_thinking_blocks" => SettingValue::Bool(true),
             "prompt_suggestions" => SettingValue::Bool(true),
             "group_tool_verbs" => SettingValue::Bool(true),
@@ -8378,4 +8396,132 @@ fn no_duplicate_session_in_both_catalogs() {
             .any(|choice| choice.canonical == "@session"),
         "@session should be excluded from primary when it is the fallback"
     );
+}
+
+// ============================================================================
+// Media settings (Models category)
+// ============================================================================
+
+/// Media routing is an Enum with auto / tools_only / off.
+#[test]
+fn media_routing_is_enum_with_correct_choices_and_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg.find("media_routing").expect("media_routing registered");
+    let SettingKind::Enum {
+        default,
+        choices,
+        supports_preview,
+    } = &meta.kind
+    else {
+        panic!("media_routing must be Enum");
+    };
+    assert_eq!(*default, "auto", "media_routing default must be 'auto'");
+    assert!(!*supports_preview, "media_routing must not support preview");
+    let canonicals: Vec<&str> = choices.iter().map(|c| c.canonical).collect();
+    assert_eq!(canonicals, vec!["auto", "tools_only", "off"]);
+    assert_eq!(meta.category, SettingCategory::Models);
+}
+
+/// Image media model is DynamicEnum with @session default.
+#[test]
+fn media_image_model_is_dynamic_enum_with_session_default() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("media_image_model")
+        .expect("media_image_model registered");
+    let SettingKind::DynamicEnum {
+        default, source, ..
+    } = &meta.kind
+    else {
+        panic!("media_image_model must be DynamicEnum");
+    };
+    assert_eq!(*default, "@session");
+    use xai_grok_pager::settings::DynamicEnumSource;
+    assert_eq!(*source, DynamicEnumSource::MediaImageModelCatalog);
+    assert_eq!(meta.category, SettingCategory::Models);
+}
+
+/// Audio/video media models default to empty (unset).
+#[test]
+fn media_audio_and_video_models_default_to_unset() {
+    let reg = SettingsRegistry::defaults();
+    for (key, source_expected) in [
+        ("media_audio_model", "MediaAudioModelCatalog"),
+        ("media_video_model", "MediaVideoModelCatalog"),
+    ] {
+        let meta = reg.find(key).expect("media model registered");
+        let SettingKind::DynamicEnum {
+            default, source, ..
+        } = &meta.kind
+        else {
+            panic!("{key} must be DynamicEnum");
+        };
+        assert_eq!(*default, "", "{key} default must be empty");
+        use xai_grok_pager::settings::DynamicEnumSource;
+        match source_expected {
+            "MediaAudioModelCatalog" => {
+                assert_eq!(*source, DynamicEnumSource::MediaAudioModelCatalog)
+            }
+            "MediaVideoModelCatalog" => {
+                assert_eq!(*source, DynamicEnumSource::MediaVideoModelCatalog)
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(meta.category, SettingCategory::Models);
+    }
+}
+
+/// Media status is read-only Status kind under Models.
+#[test]
+fn media_status_is_read_only_status_kind() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg.find("media_status").expect("media_status registered");
+    let SettingKind::Status = &meta.kind else {
+        panic!("media_status must be Status kind (read-only)");
+    };
+    assert_eq!(meta.category, SettingCategory::Models);
+}
+
+/// Media status renders the effective summary with external-provider disclosure.
+#[test]
+fn media_status_shows_external_provider_disclosure() {
+    let snapshot = PagerLocalSnapshot {
+        media_status:
+            "Auto · image: External Vision (external provider) · audio: Unset · video: Unset"
+                .to_owned(),
+        ..PagerLocalSnapshot::default()
+    };
+    let value = xai_grok_pager::settings::current_value_for(
+        "media_status",
+        &UiConfig::default(),
+        &snapshot,
+    );
+    let Some(SettingValue::String(text)) = value else {
+        panic!("media_status should be a String value");
+    };
+    assert!(text.contains("external provider"));
+    assert!(text.contains("image:"));
+}
+
+/// External media catalog choices include the privacy warning in description.
+#[test]
+fn media_catalog_external_choice_has_privacy_warning() {
+    use agent_client_protocol as acp;
+    use xai_grok_pager::settings::{DynamicEnumSource, dynamic_enum_choices};
+
+    let external_id = "openrouter:poolside/vision";
+    let snapshot = PagerLocalSnapshot {
+        available_models: vec![(
+            "External Vision".to_string(),
+            acp::ModelId::new(Arc::from(external_id)),
+        )],
+        external_model_ids: std::collections::HashSet::from([external_id.to_owned()]),
+        ..PagerLocalSnapshot::default()
+    };
+    let choices = dynamic_enum_choices(DynamicEnumSource::MediaImageModelCatalog, &snapshot);
+    let external = choices
+        .iter()
+        .find(|c| c.canonical == external_id)
+        .expect("external model");
+    assert!(external.description.contains("External provider"));
 }

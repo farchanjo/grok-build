@@ -426,7 +426,18 @@ pub(crate) mod chat_rebuild {
                         });
                     }
                 }
-                _ => {} // Audio, Resource, etc. not needed for chat replay
+                // Live turns normalize ACP audio before persistence. Replay of
+                // raw Audio chunks (legacy / external clients) still must not
+                // drop content and must not invent a conversation Audio variant.
+                acp::ContentBlock::Audio(audio) => {
+                    self.user_parts.push(ContentPart::Text {
+                        text: std::sync::Arc::<str>::from(format!(
+                            "[audio attachment mime={} — transcript not available on replay of raw ACP audio]",
+                            audio.mime_type
+                        )),
+                    });
+                }
+                _ => {} // Resource links etc. are not needed for chat replay
             }
 
             out

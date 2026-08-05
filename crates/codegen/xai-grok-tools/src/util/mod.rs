@@ -2,6 +2,7 @@ pub mod base64_images;
 pub mod binary;
 pub mod command_display;
 pub mod env;
+pub mod ffmpeg;
 pub mod fs;
 pub mod git_detect;
 pub mod grok_home;

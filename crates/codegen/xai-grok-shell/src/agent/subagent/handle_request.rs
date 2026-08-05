@@ -1252,7 +1252,7 @@ pub(crate) async fn handle_subagent_request(
             parent_traceparent,
             ctx.permission_handle.clone(),
             ctx.api_key_provider.clone(),
-            ctx.image_description_model.clone(),
+            ctx.media_config.clone(),
             ctx.hook_registry.clone(),
             ctx.workspace_ops.clone(),
             vec![],

@@ -96,6 +96,9 @@ impl SessionActor {
                 stream_tool_calls: Some(inference_config.stream_tool_calls),
                 supports_native_schema: inference_config.supports_native_schema,
                 supports_strict_tools: inference_config.supports_strict_tools,
+                supports_image_input: inference_config.supports_image_input,
+                supports_audio_input: inference_config.supports_audio_input,
+                supports_video_input: inference_config.supports_video_input,
             },
         );
         let existing = self.chat_state_handle.get_credentials().await;

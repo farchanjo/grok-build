@@ -1281,6 +1281,7 @@ pub(crate) async fn run(
     // stays sans-IO.
     app.current_ui = load_initial_ui_config();
     app.compaction_config = load_initial_compaction_config();
+    app.media_config = load_initial_media_config();
     // Field-tolerant: a whole-`UiConfig` default (malformed unrelated `[ui]`
     // field) must not wipe a valid `show_timeline` or leave appearance /
     // cache / `current_ui` disagreeing — `/timeline` and the rail all read
@@ -2793,6 +2794,17 @@ pub(crate) fn load_initial_compaction_config() -> xai_grok_shell::agent::config:
         .ok()
         .filter(|config| config.normalize_validate().is_ok())
         .unwrap_or_default()
+}
+
+/// Load the effective shell-owned `[media]` policy when config is readable.
+pub(crate) fn load_media_config_from_disk() -> Option<xai_grok_shell::config::MediaConfig> {
+    let root = xai_grok_shell::config::load_effective_config().ok()?;
+    Some(xai_grok_shell::config::MediaConfig::resolve(&root, None))
+}
+
+/// Load the effective shell-owned `[media]` policy for the settings snapshot.
+pub(crate) fn load_initial_media_config() -> xai_grok_shell::config::MediaConfig {
+    load_media_config_from_disk().unwrap_or_default()
 }
 
 /// Config `Option<bool>` mirrors seeded once at startup. `None` = no
