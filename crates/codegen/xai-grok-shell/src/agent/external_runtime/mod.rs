@@ -249,9 +249,47 @@ otherwise one process per turn on the retained runtime.";
     }
 
     /// Catalog model id for the experimental Claude Agent CLI entry.
+    ///
+    /// This row leaves model choice to the official CLI's own configuration;
+    /// the `_OPUS` / `_SONNET` rows pin one explicitly.
     pub const CLAUDE_CLI_CATALOG_MODEL_ID: &str = "claude-agent-cli";
+    /// Catalog id that pins the CLI session to the latest Opus.
+    pub const CLAUDE_CLI_CATALOG_MODEL_ID_OPUS: &str = "claude-agent-cli-opus";
+    /// Catalog id that pins the CLI session to the latest Sonnet.
+    pub const CLAUDE_CLI_CATALOG_MODEL_ID_SONNET: &str = "claude-agent-cli-sonnet";
 
-    /// When compile+env gates are open, ensure a catalog row exists for the
+    /// Catalog rows for the Claude Agent CLI: id, `--model` alias, UI label.
+    ///
+    /// A `None` alias means no `--model` flag is passed, so the official CLI
+    /// keeps its own configured default. Aliases are the ones the official CLI
+    /// documents (`opus`, `sonnet`); a Grok catalog id is never one of them.
+    pub const CLAUDE_CLI_CATALOG_ROWS: &[(&str, Option<&str>, &str)] = &[
+        (CLAUDE_CLI_CATALOG_MODEL_ID, None, CLAUDE_CLI_UI_LABEL),
+        (
+            CLAUDE_CLI_CATALOG_MODEL_ID_OPUS,
+            Some("opus"),
+            "Claude Agent CLI · Opus (Experimental)",
+        ),
+        (
+            CLAUDE_CLI_CATALOG_MODEL_ID_SONNET,
+            Some("sonnet"),
+            "Claude Agent CLI · Sonnet (Experimental)",
+        ),
+    ];
+
+    /// Translate a Grok catalog id into the official CLI `--model` value.
+    ///
+    /// `None` means the CLI default applies. Unknown ids also map to `None`:
+    /// forwarding a Grok catalog id verbatim makes the CLI refuse the session
+    /// ("not a model this version of Claude Code recognizes").
+    pub fn claude_cli_model_alias(catalog_id: &str) -> Option<&'static str> {
+        CLAUDE_CLI_CATALOG_ROWS
+            .iter()
+            .find(|(id, _, _)| *id == catalog_id)
+            .and_then(|(_, alias, _)| *alias)
+    }
+
+    /// When compile+env gates are open, ensure catalog rows exist for the
     /// experimental Claude CLI (still hidden until probe succeeds).
     /// Does not block or probe — call [`super::bootstrap_claude_cli_probe_if_gated`]
     /// from async provider refresh for the probe bootstrap.
@@ -261,22 +299,19 @@ otherwise one process per turn on the retained runtime.";
         if !claude_cli_gates_open() {
             return;
         }
-        if catalog.contains_key(CLAUDE_CLI_CATALOG_MODEL_ID) {
-            return;
+        for (id, _alias, label) in CLAUDE_CLI_CATALOG_ROWS {
+            if catalog.contains_key(*id) {
+                continue;
+            }
+            let mut entry = crate::agent::config::ModelEntry::fallback(id, &Default::default());
+            entry.info.execution_backend =
+                ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+            entry.info.hidden = true;
+            entry.info.user_selectable = false;
+            entry.info.name = Some((*label).to_owned());
+            entry.info.description = Some(format!("{label}. {CLAUDE_CLI_UI_LIMITATIONS}"));
+            catalog.insert((*id).to_owned(), entry);
         }
-        let mut entry = crate::agent::config::ModelEntry::fallback(
-            CLAUDE_CLI_CATALOG_MODEL_ID,
-            &Default::default(),
-        );
-        entry.info.execution_backend =
-            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
-        entry.info.hidden = true;
-        entry.info.user_selectable = false;
-        entry.info.name = Some(CLAUDE_CLI_UI_LABEL.to_owned());
-        entry.info.description = Some(format!(
-            "{CLAUDE_CLI_UI_LABEL}. {CLAUDE_CLI_UI_LIMITATIONS}"
-        ));
-        catalog.insert(CLAUDE_CLI_CATALOG_MODEL_ID.to_owned(), entry);
     }
 
     /// Apply catalog visibility from the live probe cache (non-blocking).

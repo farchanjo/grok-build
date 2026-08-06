@@ -303,8 +303,25 @@ Anthropic key is configured, independent of the CLI feature.
 | Cancel | Grok turn cancel | Cancel envelope / process teardown semantics (no hang) |
 | Cross-mode switch | N/A | After the first user turn, switching Native ↔ Claude CLI requires `/new` |
 
-UI label: **Claude Agent (CLI, Experimental)**. Catalog id when injected:
-`claude-agent-cli`.
+### Catalog rows and model selection
+
+When the gates are open, three catalog rows are injected (all hidden until the
+binary probe succeeds):
+
+| Catalog id | `--model` passed to the CLI | UI label |
+|------------|-----------------------------|----------|
+| `claude-agent-cli` | *(none — CLI keeps its own default)* | Claude Agent (CLI, Experimental) |
+| `claude-agent-cli-opus` | `opus` | Claude Agent CLI · Opus (Experimental) |
+| `claude-agent-cli-sonnet` | `sonnet` | Claude Agent CLI · Sonnet (Experimental) |
+
+Grok catalog ids are **never** forwarded as `--model`: the official CLI only
+accepts its own aliases (for example `opus`, `sonnet`) or a full model name, and
+rejects anything else. Unknown ids fail closed to the CLI default.
+
+Switching between the two **pinned** rows mid-session is a model change on the
+Claude session and requires `/new` (same rule as Native ↔ Claude CLI). The
+unpinned row imposes no model constraint, so it keeps resuming across turns
+whatever model the CLI reports for the session.
 
 ### Foreign tools and permission bridge
 

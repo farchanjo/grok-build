@@ -480,3 +480,115 @@ mod with_feature {
         assert!(!st.summary.to_ascii_lowercase().contains("sk-"));
     }
 }
+
+#[test]
+fn cli_model_alias_never_forwards_a_grok_catalog_id() {
+    // The official CLI rejects a Grok catalog id as `--model`; every row must
+    // resolve to a documented alias or to "use the CLI default" (None).
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID),
+        None
+    );
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(
+            capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID_OPUS
+        ),
+        Some("opus")
+    );
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(
+            capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID_SONNET
+        ),
+        Some("sonnet")
+    );
+    // Unknown ids fail closed to the CLI default rather than leaking an id.
+    for unknown in [
+        "",
+        "claude-agent-cli-nope",
+        "anthropic-claude-opus-5",
+        "grok-build",
+    ] {
+        assert_eq!(
+            capability_matrix::claude_cli_model_alias(unknown),
+            None,
+            "unknown id {unknown:?} must not resolve to an alias"
+        );
+    }
+    for (id, alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        if let Some(alias) = alias {
+            assert_ne!(alias, id, "alias must differ from the catalog id");
+            assert!(
+                !alias.starts_with("claude-agent-cli"),
+                "alias {alias:?} looks like a catalog id"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(claude_cli_env)]
+fn injected_cli_catalog_rows_cover_opus_and_sonnet() {
+    if !gates::claude_cli_feature_compiled() {
+        return;
+    }
+    let _env = xai_grok_test_support::EnvGuard::set(CLAUDE_CLI_ENV_OPT_IN, "1");
+    let mut catalog = IndexMap::new();
+    capability_matrix::inject_claude_cli_catalog_entry_if_gated(&mut catalog);
+
+    for (id, _alias, label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let entry = catalog
+            .get(*id)
+            .unwrap_or_else(|| panic!("row {id} injected"));
+        assert_eq!(entry.info.name.as_deref(), Some(*label));
+        assert_eq!(
+            entry.info.execution_backend,
+            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli)
+        );
+        // Rows stay invisible until the binary probe succeeds.
+        assert!(entry.info.hidden, "row {id} must start hidden");
+        assert!(
+            !entry.info.user_selectable,
+            "row {id} must start unselectable"
+        );
+    }
+
+    // Idempotent: a second injection does not duplicate or overwrite rows.
+    let before = catalog.len();
+    capability_matrix::inject_claude_cli_catalog_entry_if_gated(&mut catalog);
+    assert_eq!(catalog.len(), before);
+
+    // With gates open and a successful probe, every row becomes selectable
+    // together — this is what makes the pinned Opus row reachable from /model.
+    capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, Some(true));
+    for (id, _alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let entry = catalog.get(*id).expect("row retained");
+        assert!(!entry.info.hidden, "row {id} must be visible after probe");
+        assert!(
+            entry.info.user_selectable,
+            "row {id} must be selectable after probe"
+        );
+    }
+}
+
+#[test]
+fn every_cli_catalog_row_is_hidden_without_probe() {
+    let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+    for (id, _alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let mut entry = ModelEntry::fallback(id, &Default::default());
+        entry.info.execution_backend =
+            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+        entry.info.user_selectable = true;
+        entry.info.hidden = false;
+        catalog.insert((*id).to_owned(), entry);
+    }
+
+    capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, Some(false));
+    for (id, _alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let entry = catalog.get(*id).expect("row retained");
+        assert!(entry.info.hidden, "row {id} must be hidden without probe");
+        assert!(
+            !entry.info.user_selectable,
+            "row {id} must not be selectable without probe"
+        );
+    }
+}

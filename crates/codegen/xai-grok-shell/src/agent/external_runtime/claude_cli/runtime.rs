@@ -29,6 +29,7 @@ use super::provider_status::{self, ClaudeCliProviderStatus};
 use super::resume_guard::{self, supports_persistent_input};
 use super::sandbox_probe;
 use crate::agent::execution_backend::ExternalAgentKind;
+use crate::agent::external_runtime::capability_matrix;
 use crate::agent::external_runtime::probe_cache;
 use crate::agent::external_runtime::{
     ExternalAgentRuntime, ExternalRuntimeCapabilities, ExternalRuntimeEnvelope,
@@ -246,10 +247,16 @@ impl ClaudeCliRuntime {
         ClaudeCliTurnArgv {
             executable: d.executable.clone(),
             prompt: request.prompt.clone(),
-            model: request
-                .selected_model
-                .clone()
-                .or_else(|| envelope.selected_model.clone()),
+            // Grok catalog ids are not CLI model names — translate, never
+            // forward verbatim. `None` keeps the CLI's own default.
+            model: capability_matrix::claude_cli_model_alias(
+                request
+                    .selected_model
+                    .as_deref()
+                    .or(envelope.selected_model.as_deref())
+                    .unwrap_or_default(),
+            )
+            .map(str::to_owned),
             effort: request
                 .reasoning_effort
                 .clone()
@@ -531,10 +538,17 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             resume_guard::validate_resume(
                 envelope,
                 &d,
-                request
-                    .selected_model
-                    .as_deref()
-                    .or(envelope.selected_model.as_deref()),
+                // Compare CLI model names, not Grok catalog ids: after the first
+                // turn the envelope holds the model the CLI itself reported, so
+                // an untranslated catalog id would never match. The unpinned row
+                // maps to `None` and imposes no model constraint.
+                capability_matrix::claude_cli_model_alias(
+                    request
+                        .selected_model
+                        .as_deref()
+                        .or(envelope.selected_model.as_deref())
+                        .unwrap_or_default(),
+                ),
                 request
                     .reasoning_effort
                     .as_deref()
