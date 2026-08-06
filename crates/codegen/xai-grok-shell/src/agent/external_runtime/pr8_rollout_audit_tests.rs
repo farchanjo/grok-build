@@ -592,3 +592,43 @@ fn every_cli_catalog_row_is_hidden_without_probe() {
         );
     }
 }
+
+#[test]
+fn external_turn_only_refuses_for_an_actively_running_goal() {
+    use crate::session::acp_session::{ExternalTurnGoalAction, external_turn_goal_action};
+    use crate::session::goal_tracker::GoalStatus;
+
+    // Harness off: nothing to do.
+    assert_eq!(
+        external_turn_goal_action(false, None),
+        ExternalTurnGoalAction::Proceed
+    );
+    assert_eq!(
+        external_turn_goal_action(false, Some(GoalStatus::Active)),
+        ExternalTurnGoalAction::Proceed
+    );
+
+    // Harness merely available must not block an external turn — the host
+    // harness does not apply to a backend that owns its own loop.
+    assert_eq!(
+        external_turn_goal_action(true, None),
+        ExternalTurnGoalAction::DisableHarness
+    );
+    for paused in [
+        GoalStatus::UserPaused,
+        GoalStatus::BackOffPaused,
+        GoalStatus::NoProgressPaused,
+    ] {
+        assert_eq!(
+            external_turn_goal_action(true, Some(paused)),
+            ExternalTurnGoalAction::DisableHarness,
+            "paused goal {paused:?} must not block an external turn"
+        );
+    }
+
+    // Only a live goal run is refused.
+    assert_eq!(
+        external_turn_goal_action(true, Some(GoalStatus::Active)),
+        ExternalTurnGoalAction::Refuse
+    );
+}
