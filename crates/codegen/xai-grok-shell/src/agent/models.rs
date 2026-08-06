@@ -2098,6 +2098,12 @@ pub fn resolve_model_catalog(
     // Agent CLI) must not appear in the picker. Capability matrix is the gate;
     // config/remote/catalog entries that set execution_backend=external still
     // resolve for internal/resume use but stay hidden + non-selectable.
+    // `[[claude_cli.models]]` rows join the built-ins before visibility runs, so
+    // the same gates + probe decide whether any of them can appear.
+    crate::agent::external_runtime::capability_matrix::inject_claude_cli_configured_rows_if_gated(
+        &mut catalog,
+        &cfg.claude_cli.models,
+    );
     crate::agent::external_runtime::capability_matrix::apply_catalog_visibility(&mut catalog);
 
     // Persisted default first; CLI override below wins when set.

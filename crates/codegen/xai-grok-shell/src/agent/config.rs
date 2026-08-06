@@ -1521,6 +1521,10 @@ pub struct Config {
     pub goal: GoalConfig,
     #[serde(default)]
     pub workflows: WorkflowsConfig,
+    /// `[claude_cli]` section: extra Claude Agent CLI picker rows. See
+    /// [`ClaudeCliConfig`].
+    #[serde(default)]
+    pub claude_cli: ClaudeCliConfig,
     /// `[doom_loop_recovery]` section: the shared settings struct — ONE type
     /// serves this TOML table and the remote remote settings `doom_loop_recovery`
     /// object. See [`crate::util::config::DoomLoopRecoverySettings`].
@@ -1973,6 +1977,7 @@ impl Default for Config {
             features: Features::default(),
             goal: GoalConfig::default(),
             workflows: WorkflowsConfig::default(),
+            claude_cli: ClaudeCliConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
             worktree: WorktreeConfigSection::default(),
             auto_mode: AutoModeConfig::default(),
@@ -5046,6 +5051,39 @@ pub struct GoalConfig {
 pub struct WorkflowsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+}
+/// `[claude_cli]` section: extra `/model` rows for the experimental Claude Agent
+/// CLI (subscription) path.
+///
+/// The built-in rows already cover the aliases the official CLI documents, which
+/// track the newest model in each family. Declare entries here to pin a concrete
+/// version, or to offer a model the built-ins do not list yet — no Grok release
+/// is needed for either.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClaudeCliConfig {
+    /// Rows added to the picker, in declaration order, after the built-ins.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ClaudeCliModelConfig>,
+}
+/// One `[[claude_cli.models]]` entry.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClaudeCliModelConfig {
+    /// Passed verbatim as the official CLI's `--model` value: either an alias
+    /// that tracks a family's newest model (`opus`) or a pinned full name
+    /// (`claude-opus-5`). Never a Grok catalog id — the CLI rejects those.
+    pub model: String,
+    /// Picker label. Defaults to the `model` value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Context window shown in the UI. Display and accounting only: the CLI owns
+    /// its own context handling on this path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Max output tokens shown in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 /// `[auto_mode]` section: server-side configuration for Auto permission mode.
 /// ONE struct serves both the local `[auto_mode]` TOML table and the remote

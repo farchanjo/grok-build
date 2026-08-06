@@ -632,3 +632,142 @@ fn external_turn_only_refuses_for_an_actively_running_goal() {
         ExternalTurnGoalAction::Refuse
     );
 }
+
+#[test]
+fn configured_model_validation_rejects_flag_shaped_and_malformed_values() {
+    use capability_matrix::claude_cli_configured_model_is_valid as valid;
+
+    for good in [
+        "opus",
+        "sonnet",
+        "claude-opus-5",
+        "claude-haiku-4-5-20251001",
+        "claude-fable-5",
+    ] {
+        assert!(valid(good), "{good:?} must be accepted");
+    }
+
+    // A value that could pose as a CLI flag is the one that actually matters.
+    for bad in [
+        "",
+        "-p",
+        "--dangerously-skip-permissions",
+        "-",
+        "claude opus",
+        "claude\topus",
+        "claude\nopus",
+        "has:colon",
+        "claude-\u{7f}opus",
+    ] {
+        assert!(!valid(bad), "{bad:?} must be rejected");
+    }
+    assert!(
+        !valid(&"x".repeat(capability_matrix::MAX_CLAUDE_CLI_MODEL_LEN + 1)),
+        "over-long values must be rejected"
+    );
+}
+
+#[test]
+fn configured_row_ids_resolve_to_their_own_model_value() {
+    let id = capability_matrix::claude_cli_config_row_id("claude-opus-5");
+    assert_eq!(id, "claude-agent-cli:claude-opus-5");
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(&id),
+        Some("claude-opus-5")
+    );
+
+    // Defense in depth: an id that smuggles a flag-shaped value never resolves,
+    // even if it somehow reached the catalog.
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias("claude-agent-cli:-p"),
+        None
+    );
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(capability_matrix::CLAUDE_CLI_CONFIG_ROW_PREFIX),
+        None
+    );
+}
+
+#[test]
+#[serial_test::serial(claude_cli_env)]
+fn configured_rows_are_injected_hidden_and_skip_invalid_entries() {
+    use crate::agent::config::ClaudeCliModelConfig;
+
+    if !gates::claude_cli_feature_compiled() {
+        return;
+    }
+    let _env = xai_grok_test_support::EnvGuard::set(CLAUDE_CLI_ENV_OPT_IN, "1");
+
+    let configured = vec![
+        ClaudeCliModelConfig {
+            model: "claude-opus-5".into(),
+            name: Some("Opus 5 pinned".into()),
+            context_window: Some(1_000_000),
+            max_output_tokens: Some(128_000),
+        },
+        // Invalid: must be skipped without dropping the valid rows around it.
+        ClaudeCliModelConfig {
+            model: "--dangerously-skip-permissions".into(),
+            ..Default::default()
+        },
+        ClaudeCliModelConfig {
+            model: "  claude-haiku-4-5  ".into(),
+            ..Default::default()
+        },
+    ];
+
+    let mut catalog = IndexMap::new();
+    capability_matrix::inject_claude_cli_configured_rows_if_gated(&mut catalog, &configured);
+
+    let pinned = catalog
+        .get("claude-agent-cli:claude-opus-5")
+        .expect("valid row injected");
+    assert_eq!(
+        pinned.info.name.as_deref(),
+        Some("Claude Agent CLI · Opus 5 pinned (Experimental)")
+    );
+    assert_eq!(pinned.info.context_window.get(), 1_000_000);
+    assert_eq!(pinned.info.max_completion_tokens, Some(128_000));
+    assert!(pinned.info.hidden, "configured rows start hidden");
+    assert!(!pinned.info.user_selectable);
+    assert_eq!(
+        pinned.info.execution_backend,
+        ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli)
+    );
+
+    // Whitespace is trimmed, so the id carries the clean model value.
+    assert!(catalog.contains_key("claude-agent-cli:claude-haiku-4-5"));
+    // The flag-shaped entry never becomes a row.
+    assert_eq!(
+        catalog.len(),
+        2,
+        "invalid entry must be skipped: {catalog:?}"
+    );
+
+    // Same gating as the built-ins: no probe, nothing visible.
+    capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, Some(false));
+    for entry in catalog.values() {
+        assert!(entry.info.hidden);
+        assert!(!entry.info.user_selectable);
+    }
+}
+
+#[test]
+fn external_display_name_appends_the_resolved_model_once() {
+    use crate::session::acp_types::external_display_name_with_resolved as compose;
+
+    assert_eq!(
+        compose("Claude Agent CLI · Opus (Experimental)", "claude-opus-5").as_deref(),
+        Some("Claude Agent CLI · Opus (Experimental) → claude-opus-5")
+    );
+    // Nothing to add when the label already states the resolution, so repeated
+    // /session-info calls cannot stack arrows.
+    assert_eq!(
+        compose(
+            "Claude Agent CLI · Opus (Experimental) → claude-opus-5",
+            "claude-opus-5"
+        ),
+        None
+    );
+    assert_eq!(compose("Claude Agent CLI · Opus", "   "), None);
+}

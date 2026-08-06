@@ -471,8 +471,11 @@ pub fn apply_outcome_to_envelope(
     if !parsed.capabilities.is_empty() {
         env.capabilities = parsed.capabilities.clone();
     }
+    // What the CLI reports is the *resolved* model (an alias row like `opus`
+    // comes back as `claude-opus-5`). It is display data, never identity — the
+    // catalog id in `selected_model` stays untouched.
     if let Some(m) = parsed.model.clone() {
-        env.selected_model = Some(m);
+        env.resolved_model = Some(m);
     }
     env.result = parsed.result.clone();
     env.usage = parsed.usage.clone();

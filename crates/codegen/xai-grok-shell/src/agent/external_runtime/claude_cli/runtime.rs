@@ -396,7 +396,7 @@ fn partial_from_lines(
         env.capabilities = partial.capabilities.clone();
     }
     if let Some(model) = partial.model {
-        env.selected_model = Some(model);
+        env.resolved_model = Some(model);
     }
     env.usage = partial.usage.clone();
     let pointer = env.session_pointer.clone();
@@ -538,17 +538,13 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             resume_guard::validate_resume(
                 envelope,
                 &d,
-                // Compare CLI model names, not Grok catalog ids: after the first
-                // turn the envelope holds the model the CLI itself reported, so
-                // an untranslated catalog id would never match. The unpinned row
-                // maps to `None` and imposes no model constraint.
-                capability_matrix::claude_cli_model_alias(
-                    request
-                        .selected_model
-                        .as_deref()
-                        .or(envelope.selected_model.as_deref())
-                        .unwrap_or_default(),
-                ),
+                // Both sides are catalog ids: the envelope keeps the selected row
+                // and the CLI's own reported model lands in `resolved_model`, so
+                // identity never drifts to a concrete model name here.
+                request
+                    .selected_model
+                    .as_deref()
+                    .or(envelope.selected_model.as_deref()),
                 request
                     .reasoning_effort
                     .as_deref()

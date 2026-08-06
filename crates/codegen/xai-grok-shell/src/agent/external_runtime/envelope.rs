@@ -43,9 +43,19 @@ pub struct ExternalRuntimeEnvelope {
     /// Capability strings reported by the runtime (normalized, not raw).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
-    /// Model selected for the external runtime (may differ from catalog id).
+    /// Catalog id selected for the external runtime. Stable session identity —
+    /// never overwritten by what the runtime reports back (see
+    /// [`Self::resolved_model`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_model: Option<String>,
+    /// Concrete model the runtime reported for this session (for example
+    /// `claude-opus-5` when the catalog row asked for the `opus` alias).
+    ///
+    /// Display and diagnostics only: an alias row resolves to whatever the
+    /// runtime picks, so this can change between turns and must never be used
+    /// as session identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
     /// Effort / thinking level selected for the runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -74,6 +84,7 @@ impl ExternalRuntimeEnvelope {
             observed_version: None,
             capabilities: Vec::new(),
             selected_model: None,
+            resolved_model: None,
             reasoning_effort: None,
             token_budget: None,
             cwd: None,
@@ -111,6 +122,11 @@ impl ExternalRuntimeEnvelope {
         check_opt_str(
             "selected_model",
             self.selected_model.as_deref(),
+            MAX_MODEL_LEN,
+        )?;
+        check_opt_str(
+            "resolved_model",
+            self.resolved_model.as_deref(),
             MAX_MODEL_LEN,
         )?;
         check_opt_str(

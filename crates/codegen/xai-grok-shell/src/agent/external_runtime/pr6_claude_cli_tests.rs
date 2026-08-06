@@ -940,10 +940,13 @@ async fn turn_argv_translates_catalog_ids_to_cli_model_aliases() {
             let dir = tempfile::tempdir().unwrap();
             let fake = write_fake_claude(dir.path(), &argv_logging_turn_script());
             let home = tempfile::tempdir().unwrap();
-            unsafe {
-                std::env::set_var("HOME", home.path());
-                std::env::set_var("CLAUDE_CONFIG_DIR", home.path().join("claude-config"));
-            }
+            // Guards restore the real values on drop: under `cargo test` every
+            // test shares one process, so a leaked HOME breaks later tests.
+            let _home_guard = xai_grok_test_support::EnvGuard::set("HOME", home.path());
+            let _cfg_guard = xai_grok_test_support::EnvGuard::set(
+                "CLAUDE_CONFIG_DIR",
+                home.path().join("claude-config"),
+            );
 
             let runtime = ClaudeCliRuntime::new(Some(fake));
             runtime.probe().await.expect("probe");
