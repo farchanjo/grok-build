@@ -29,6 +29,7 @@ use super::provider_status::{self, ClaudeCliProviderStatus};
 use super::resume_guard::{self, supports_persistent_input};
 use super::sandbox_probe;
 use crate::agent::execution_backend::ExternalAgentKind;
+use crate::agent::external_runtime::capability_matrix;
 use crate::agent::external_runtime::probe_cache;
 use crate::agent::external_runtime::{
     ExternalAgentRuntime, ExternalRuntimeCapabilities, ExternalRuntimeEnvelope,
@@ -246,10 +247,16 @@ impl ClaudeCliRuntime {
         ClaudeCliTurnArgv {
             executable: d.executable.clone(),
             prompt: request.prompt.clone(),
-            model: request
-                .selected_model
-                .clone()
-                .or_else(|| envelope.selected_model.clone()),
+            // Grok catalog ids are not CLI model names — translate, never
+            // forward verbatim. `None` keeps the CLI's own default.
+            model: capability_matrix::claude_cli_model_alias(
+                request
+                    .selected_model
+                    .as_deref()
+                    .or(envelope.selected_model.as_deref())
+                    .unwrap_or_default(),
+            )
+            .map(str::to_owned),
             effort: request
                 .reasoning_effort
                 .clone()
@@ -389,7 +396,7 @@ fn partial_from_lines(
         env.capabilities = partial.capabilities.clone();
     }
     if let Some(model) = partial.model {
-        env.selected_model = Some(model);
+        env.resolved_model = Some(model);
     }
     env.usage = partial.usage.clone();
     let pointer = env.session_pointer.clone();
@@ -531,6 +538,9 @@ impl ExternalAgentRuntime for ClaudeCliRuntime {
             resume_guard::validate_resume(
                 envelope,
                 &d,
+                // Both sides are catalog ids: the envelope keeps the selected row
+                // and the CLI's own reported model lands in `resolved_model`, so
+                // identity never drifts to a concrete model name here.
                 request
                     .selected_model
                     .as_deref()

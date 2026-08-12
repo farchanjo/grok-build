@@ -549,11 +549,22 @@ impl SessionActor {
         let turn_index = self.chat_state_handle.get_prompt_index().await as u64;
         tracing::info!(turn_index, turns, resolved_model_id = ?model_metadata.resolved_model_id, model_fingerprint = ?model_metadata.model_fingerprint, "build_session_info");
         let model_fingerprint = model_metadata.model_fingerprint;
-        let resolved_model_id = model_metadata.resolved_model_id.filter(|resolved| {
-            model
-                .as_deref()
-                .is_some_and(|m| should_show_resolved_model(m, resolved))
-        });
+        let resolved_model_id = model_metadata
+            .resolved_model_id
+            .filter(|resolved| {
+                model
+                    .as_deref()
+                    .is_some_and(|m| should_show_resolved_model(m, resolved))
+            })
+            .or_else(|| {
+                // External backends never go through the inference path, so the
+                // concrete model comes from what the runtime reported for this
+                // session — an alias row like `opus` resolves to `claude-opus-5`.
+                self.external_runtime
+                    .borrow()
+                    .as_ref()
+                    .and_then(|env| env.resolved_model.clone())
+            });
         let signals = self.signals_handle().snapshot().await;
         let compaction_count = signals.as_ref().map(|s| s.compaction_count).unwrap_or(0);
         let turn_count = signals.as_ref().map(|s| s.turn_count).unwrap_or(0);

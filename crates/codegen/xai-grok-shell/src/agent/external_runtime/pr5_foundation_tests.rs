@@ -118,6 +118,7 @@ fn external_envelope_roundtrip_on_summary() {
         observed_version: Some("9.9.9".into()),
         capabilities: vec!["tools".into()],
         selected_model: Some("claude-sonnet-5".into()),
+        resolved_model: None,
         reasoning_effort: Some("high".into()),
         token_budget: Some(50_000),
         cwd: Some("/workspace".into()),

@@ -156,16 +156,27 @@ impl SessionActor {
             .await
             .map_err(|e| e.into_acp_error())?;
 
-        // Unsupported host operations for external turns (explicit report).
-        if self.goal_harness_enabled() {
-            return Err(
-                crate::agent::external_runtime::ExternalRuntimeError::new(
-                    crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
-                    "Goals are not supported on Claude Agent CLI sessions. Start /new with a native model.",
-                    Some(kind),
-                )
-                .into_acp_error(),
-            );
+        // The host goal harness never applies to an external backend, which owns
+        // its own loop. Merely having it available must not block the turn — only
+        // an actually running goal does.
+        match external_turn_goal_action(
+            self.goal_harness_enabled(),
+            self.goal_tracker.lock().status(),
+        ) {
+            ExternalTurnGoalAction::Proceed => {}
+            ExternalTurnGoalAction::DisableHarness => {
+                self.disable_goal_harness_for_external_turn();
+            }
+            ExternalTurnGoalAction::Refuse => {
+                return Err(
+                    crate::agent::external_runtime::ExternalRuntimeError::new(
+                        crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                        "A running /goal cannot drive a Claude Agent CLI session. Pause the goal, or start /new with a native model.",
+                        Some(kind),
+                    )
+                    .into_acp_error(),
+                );
+            }
         }
 
         let cwd = self.tool_context.cwd.as_str().to_owned();

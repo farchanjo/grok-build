@@ -900,6 +900,35 @@ pub(crate) fn goal_slash_and_harness_available(goal_enabled: bool, tool_names: &
     goal_enabled && tool_names.iter().any(|n| n == UPDATE_GOAL_TOOL_NAME)
 }
 
+/// What an external-runtime turn must do about the goal harness.
+///
+/// External backends own their own agent loop, so the host goal harness never
+/// applies to them. Having it merely *available* must not block the turn — only
+/// an actually running goal does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalTurnGoalAction {
+    /// Harness already off; nothing to do.
+    Proceed,
+    /// Harness available but no goal running — turn it off for this session.
+    DisableHarness,
+    /// A goal run is active and the external backend cannot drive it.
+    Refuse,
+}
+
+/// Decide how an external-runtime turn treats the goal harness.
+pub(crate) fn external_turn_goal_action(
+    harness_enabled: bool,
+    goal_status: Option<crate::session::goal_tracker::GoalStatus>,
+) -> ExternalTurnGoalAction {
+    if !harness_enabled {
+        return ExternalTurnGoalAction::Proceed;
+    }
+    if goal_status == Some(crate::session::goal_tracker::GoalStatus::Active) {
+        return ExternalTurnGoalAction::Refuse;
+    }
+    ExternalTurnGoalAction::DisableHarness
+}
+
 /// Active `/goal` session with goal harness enabled (laziness, continuation, TodoGate goal arm).
 pub(crate) fn laziness_injection_active(
     goal_harness_enabled: bool,
@@ -912,6 +941,15 @@ impl SessionActor {
     pub(super) fn goal_harness_enabled(&self) -> bool {
         self.goal_harness_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turn the harness off for a session running on an external backend.
+    ///
+    /// Re-applied at the start of every external turn, so a later
+    /// [`Self::refresh_goal_harness_enabled`] cannot leave it on for one.
+    pub(super) fn disable_goal_harness_for_external_turn(&self) {
+        self.goal_harness_enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// True while a `/goal` autonomous run is actively driving the turn

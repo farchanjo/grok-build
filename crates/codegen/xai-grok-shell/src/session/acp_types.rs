@@ -530,6 +530,20 @@ pub fn should_show_model_fingerprint(catalog_flag: bool, model_slug: &str) -> bo
 }
 
 /// Calculate and format the model name for display.
+/// Fold an external backend's resolved model into its catalog display name.
+///
+/// External rows always carry a catalog name, and a name short-circuits
+/// [`model_display_name`]'s resolved branch, so the resolution is appended here
+/// instead. Returns `None` when there is nothing to add — empty resolution, or a
+/// name that already states it.
+pub fn external_display_name_with_resolved(name: &str, resolved: &str) -> Option<String> {
+    let resolved = resolved.trim();
+    if resolved.is_empty() || name.contains(resolved) {
+        return None;
+    }
+    Some(format!("{name} → {resolved}"))
+}
+
 pub fn model_display_name(
     name: Option<&str>,
     model: &str,

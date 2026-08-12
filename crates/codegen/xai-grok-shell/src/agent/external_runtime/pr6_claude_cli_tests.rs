@@ -899,3 +899,100 @@ async fn bootstrap_probe_success_makes_catalog_selectable() {
     }
     probe_cache::clear_probe_cache();
 }
+
+/// Fake claude that appends its argv (one arg per line) to `argv.log` in cwd.
+fn argv_logging_turn_script() -> String {
+    r#"#!/bin/sh
+# Fake claude for argv assertions — no network.
+case "$1" in
+  --version) echo "2.1.250"; exit 0 ;;
+esac
+if [ "$1" = "auth" ]; then
+  echo '{"loggedIn":true,"email":"dev@example.com"}'
+  exit 0
+fi
+for a in "$@"; do printf '%s\n' "$a" >> argv.log; done
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-argv","model":"sonnet"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}'
+echo '{"type":"result","session_id":"fake-sess-argv","result":"ok","subtype":"success","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0}'
+exit 0
+"#
+    .to_owned()
+}
+
+/// A Grok catalog id must never reach the CLI as `--model`; each catalog row
+/// resolves to the documented alias, and the unpinned row omits the flag.
+#[tokio::test]
+#[serial_test::serial(claude_cli_env)]
+async fn turn_argv_translates_catalog_ids_to_cli_model_aliases() {
+    with_opt_in_async(|| async {
+        for (catalog_id, expected_alias) in [
+            (capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID, None),
+            (
+                capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID_OPUS,
+                Some("opus"),
+            ),
+            (
+                capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID_SONNET,
+                Some("sonnet"),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let fake = write_fake_claude(dir.path(), &argv_logging_turn_script());
+            let home = tempfile::tempdir().unwrap();
+            // Guards restore the real values on drop: under `cargo test` every
+            // test shares one process, so a leaked HOME breaks later tests.
+            let _home_guard = xai_grok_test_support::EnvGuard::set("HOME", home.path());
+            let _cfg_guard = xai_grok_test_support::EnvGuard::set(
+                "CLAUDE_CONFIG_DIR",
+                home.path().join("claude-config"),
+            );
+
+            let runtime = ClaudeCliRuntime::new(Some(fake));
+            runtime.probe().await.expect("probe");
+            let env = runtime
+                .start(ExternalStartRequest {
+                    cwd: dir.path().display().to_string(),
+                    worktree_identity: None,
+                    selected_model: Some(catalog_id.to_owned()),
+                    reasoning_effort: None,
+                    token_budget: None,
+                })
+                .await
+                .expect("start");
+            runtime
+                .turn(
+                    &env,
+                    ExternalTurnRequest {
+                        prompt: "hi".into(),
+                        selected_model: Some(catalog_id.to_owned()),
+                        reasoning_effort: None,
+                        token_budget: None,
+                    },
+                )
+                .await
+                .expect("turn");
+
+            let logged = std::fs::read_to_string(dir.path().join("argv.log")).expect("argv.log");
+            let args: Vec<&str> = logged.lines().collect();
+            assert!(
+                !args.contains(&catalog_id),
+                "catalog id {catalog_id} must not appear in argv: {args:?}"
+            );
+            match expected_alias {
+                None => assert!(
+                    !args.contains(&"--model"),
+                    "unpinned row must omit --model: {args:?}"
+                ),
+                Some(alias) => {
+                    let idx = args
+                        .iter()
+                        .position(|a| *a == "--model")
+                        .unwrap_or_else(|| panic!("--model missing for {catalog_id}: {args:?}"));
+                    assert_eq!(args.get(idx + 1).copied(), Some(alias));
+                }
+            }
+        }
+    })
+    .await;
+}

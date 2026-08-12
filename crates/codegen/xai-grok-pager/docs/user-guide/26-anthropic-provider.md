@@ -303,8 +303,71 @@ Anthropic key is configured, independent of the CLI feature.
 | Cancel | Grok turn cancel | Cancel envelope / process teardown semantics (no hang) |
 | Cross-mode switch | N/A | After the first user turn, switching Native ↔ Claude CLI requires `/new` |
 
-UI label: **Claude Agent (CLI, Experimental)**. Catalog id when injected:
-`claude-agent-cli`.
+### Catalog rows and model selection
+
+When the gates are open, these rows are injected (all hidden until the binary
+probe succeeds):
+
+| Catalog id | `--model` passed to the CLI | UI label |
+|------------|-----------------------------|----------|
+| `claude-agent-cli` | *(none — CLI keeps its own default)* | Claude Agent (CLI, Experimental) |
+| `claude-agent-cli-opus` | `opus` | Claude Agent CLI · Opus (Experimental) |
+| `claude-agent-cli-sonnet` | `sonnet` | Claude Agent CLI · Sonnet (Experimental) |
+| `claude-agent-cli-haiku` | `haiku` | Claude Agent CLI · Haiku (Experimental) |
+| `claude-agent-cli-fable` | `fable` | Claude Agent CLI · Fable (Experimental) |
+
+Grok catalog ids are **never** forwarded as `--model`: the official CLI only
+accepts its own aliases or a full model name, and rejects anything else. Unknown
+ids fail closed to the CLI default.
+
+Switching between **pinned** rows mid-session is a model change on the Claude
+session and requires `/new` (same rule as Native ↔ Claude CLI). The unpinned row
+imposes no model constraint, so it keeps resuming across turns whatever model the
+CLI reports for the session.
+
+### Adding rows without a Grok release
+
+The built-in rows use the CLI's aliases, which always track the newest model in
+each family. Declare `[[claude_cli.models]]` entries to pin a concrete version or
+to offer a model the built-ins do not list yet:
+
+```toml
+[[claude_cli.models]]
+model = "claude-opus-5"        # verbatim --model value: alias or full name
+name  = "Opus 5 (pinned)"     # optional label; defaults to the model value
+
+[[claude_cli.models]]
+model = "claude-haiku-4-5"
+context_window = 200000       # optional; display and accounting only
+max_output_tokens = 64000     # optional
+```
+
+Those rows get id `claude-agent-cli:<model>` — the same split the Anthropic peer
+uses between curated ids (`anthropic-claude-opus-5`) and upstream ones
+(`anthropic:<id>`). Maximum 20 entries.
+
+A `model` value must be non-empty, free of whitespace and control characters,
+must not contain `:`, and **must not start with `-`** — that last rule keeps a
+config entry from posing as a CLI flag. Invalid entries are skipped with a
+warning; the valid ones around them still load.
+
+Nothing validates a declared model against your account: there is no catalog
+endpoint on this path, so a model your plan does not cover fails at turn start
+with the CLI's own message ("It may not exist or you may not have access to it").
+
+### Seeing which version an alias resolved to
+
+An alias row asks for a family, not a version. The CLI reports the concrete model
+it used for the session, and Grok keeps it in the session envelope as
+`resolvedModel` — separate from the catalog id, which stays the session's
+identity. `/session-info` shows both once the session has run a turn:
+
+```
+Model: Claude Agent CLI · Opus (Experimental) → claude-opus-5
+```
+
+The resolution can change between sessions when an alias moves to a newer model,
+which is why it is never used as session identity and never cached.
 
 ### Foreign tools and permission bridge
 

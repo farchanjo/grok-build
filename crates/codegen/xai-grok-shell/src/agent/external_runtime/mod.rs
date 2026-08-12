@@ -249,9 +249,152 @@ otherwise one process per turn on the retained runtime.";
     }
 
     /// Catalog model id for the experimental Claude Agent CLI entry.
+    ///
+    /// This row leaves model choice to the official CLI's own configuration;
+    /// the `_OPUS` / `_SONNET` rows pin one explicitly.
     pub const CLAUDE_CLI_CATALOG_MODEL_ID: &str = "claude-agent-cli";
+    /// Catalog id that selects the latest Opus.
+    pub const CLAUDE_CLI_CATALOG_MODEL_ID_OPUS: &str = "claude-agent-cli-opus";
+    /// Catalog id that selects the latest Sonnet.
+    pub const CLAUDE_CLI_CATALOG_MODEL_ID_SONNET: &str = "claude-agent-cli-sonnet";
+    /// Catalog id that selects the latest Haiku.
+    pub const CLAUDE_CLI_CATALOG_MODEL_ID_HAIKU: &str = "claude-agent-cli-haiku";
+    /// Catalog id that selects the latest Fable.
+    pub const CLAUDE_CLI_CATALOG_MODEL_ID_FABLE: &str = "claude-agent-cli-fable";
 
-    /// When compile+env gates are open, ensure a catalog row exists for the
+    /// Catalog rows for the Claude Agent CLI: id, `--model` alias, UI label.
+    ///
+    /// A `None` alias means no `--model` flag is passed, so the official CLI
+    /// keeps its own configured default. The other rows use the aliases the
+    /// official CLI documents, which always track the newest model in their
+    /// family; a Grok catalog id is never a valid `--model` value. The concrete
+    /// model an alias resolves to is reported back per session and lands in
+    /// `ExternalRuntimeEnvelope::resolved_model`.
+    pub const CLAUDE_CLI_CATALOG_ROWS: &[(&str, Option<&str>, &str)] = &[
+        (CLAUDE_CLI_CATALOG_MODEL_ID, None, CLAUDE_CLI_UI_LABEL),
+        (
+            CLAUDE_CLI_CATALOG_MODEL_ID_OPUS,
+            Some("opus"),
+            "Claude Agent CLI · Opus (Experimental)",
+        ),
+        (
+            CLAUDE_CLI_CATALOG_MODEL_ID_SONNET,
+            Some("sonnet"),
+            "Claude Agent CLI · Sonnet (Experimental)",
+        ),
+        (
+            CLAUDE_CLI_CATALOG_MODEL_ID_HAIKU,
+            Some("haiku"),
+            "Claude Agent CLI · Haiku (Experimental)",
+        ),
+        (
+            CLAUDE_CLI_CATALOG_MODEL_ID_FABLE,
+            Some("fable"),
+            "Claude Agent CLI · Fable (Experimental)",
+        ),
+    ];
+
+    /// Catalog id prefix for `[[claude_cli.models]]` rows.
+    ///
+    /// Mirrors the split the Anthropic peer already uses between curated ids
+    /// (`anthropic-claude-opus-5`) and upstream ones (`anthropic:<id>`).
+    pub const CLAUDE_CLI_CONFIG_ROW_PREFIX: &str = "claude-agent-cli:";
+    /// Cap on `[[claude_cli.models]]` entries (same cap as `mcp_servers`).
+    pub const MAX_CLAUDE_CLI_CONFIG_ROWS: usize = 20;
+    /// Cap on a configured `--model` value.
+    pub const MAX_CLAUDE_CLI_MODEL_LEN: usize = 128;
+
+    /// Whether a configured `--model` value is safe to forward to the CLI.
+    ///
+    /// Rejects the empty string, whitespace and control characters, over-long
+    /// values, `:` (reserved by the id scheme), and — the one that matters for
+    /// argv safety — a **leading `-`**, which would let a config entry pose as a
+    /// CLI flag rather than a model name.
+    pub fn claude_cli_configured_model_is_valid(model: &str) -> bool {
+        !model.is_empty()
+            && model.len() <= MAX_CLAUDE_CLI_MODEL_LEN
+            && !model.starts_with('-')
+            && !model.contains(':')
+            && !model.chars().any(|c| c.is_whitespace() || c.is_control())
+    }
+
+    /// Catalog id for a configured row.
+    pub fn claude_cli_config_row_id(model: &str) -> String {
+        format!("{CLAUDE_CLI_CONFIG_ROW_PREFIX}{model}")
+    }
+
+    /// Translate a Grok catalog id into the official CLI `--model` value.
+    ///
+    /// `None` means the CLI default applies. Unknown ids also map to `None`:
+    /// forwarding a Grok catalog id verbatim makes the CLI refuse the session
+    /// ("not a model this version of Claude Code recognizes"). Configured rows
+    /// carry their own value in the id and are re-validated here, so an entry
+    /// that slipped past injection can still never become a flag.
+    pub fn claude_cli_model_alias(catalog_id: &str) -> Option<&str> {
+        if let Some(model) = catalog_id.strip_prefix(CLAUDE_CLI_CONFIG_ROW_PREFIX) {
+            return claude_cli_configured_model_is_valid(model).then_some(model);
+        }
+        CLAUDE_CLI_CATALOG_ROWS
+            .iter()
+            .find(|(id, _, _)| *id == catalog_id)
+            .and_then(|(_, alias, _)| *alias)
+    }
+
+    /// Inject `[[claude_cli.models]]` rows when compile+env gates are open.
+    ///
+    /// Invalid entries are skipped with a warning rather than failing the whole
+    /// catalog. Rows land hidden and non-selectable, exactly like the built-ins,
+    /// until the binary probe succeeds.
+    pub fn inject_claude_cli_configured_rows_if_gated(
+        catalog: &mut indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+        configured: &[crate::agent::config::ClaudeCliModelConfig],
+    ) {
+        if !claude_cli_gates_open() {
+            return;
+        }
+        if configured.len() > MAX_CLAUDE_CLI_CONFIG_ROWS {
+            tracing::warn!(
+                declared = configured.len(),
+                max = MAX_CLAUDE_CLI_CONFIG_ROWS,
+                "claude_cli.models: entries beyond the cap are ignored"
+            );
+        }
+        for row in configured.iter().take(MAX_CLAUDE_CLI_CONFIG_ROWS) {
+            let model = row.model.trim();
+            if !claude_cli_configured_model_is_valid(model) {
+                tracing::warn!(
+                    model = %model,
+                    "claude_cli.models: skipping invalid --model value"
+                );
+                continue;
+            }
+            let id = claude_cli_config_row_id(model);
+            if catalog.contains_key(&id) {
+                continue;
+            }
+            let label = row.name.as_deref().map(str::trim).unwrap_or(model);
+            let label = if label.is_empty() { model } else { label };
+            let mut entry = crate::agent::config::ModelEntry::fallback(&id, &Default::default());
+            entry.info.execution_backend =
+                ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+            entry.info.hidden = true;
+            entry.info.user_selectable = false;
+            entry.info.name = Some(format!("Claude Agent CLI · {label} (Experimental)"));
+            entry.info.description = Some(format!(
+                "Claude Agent CLI · {label} (Experimental). Runs the official CLI with \
+                 `--model {model}`. {CLAUDE_CLI_UI_LIMITATIONS}"
+            ));
+            if let Some(ctx) = row.context_window.and_then(std::num::NonZeroU64::new) {
+                entry.info.context_window = ctx;
+            }
+            if let Some(max_out) = row.max_output_tokens {
+                entry.info.max_completion_tokens = Some(u32::try_from(max_out).unwrap_or(u32::MAX));
+            }
+            catalog.insert(id, entry);
+        }
+    }
+
+    /// When compile+env gates are open, ensure catalog rows exist for the
     /// experimental Claude CLI (still hidden until probe succeeds).
     /// Does not block or probe — call [`super::bootstrap_claude_cli_probe_if_gated`]
     /// from async provider refresh for the probe bootstrap.
@@ -261,22 +404,19 @@ otherwise one process per turn on the retained runtime.";
         if !claude_cli_gates_open() {
             return;
         }
-        if catalog.contains_key(CLAUDE_CLI_CATALOG_MODEL_ID) {
-            return;
+        for (id, _alias, label) in CLAUDE_CLI_CATALOG_ROWS {
+            if catalog.contains_key(*id) {
+                continue;
+            }
+            let mut entry = crate::agent::config::ModelEntry::fallback(id, &Default::default());
+            entry.info.execution_backend =
+                ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+            entry.info.hidden = true;
+            entry.info.user_selectable = false;
+            entry.info.name = Some((*label).to_owned());
+            entry.info.description = Some(format!("{label}. {CLAUDE_CLI_UI_LIMITATIONS}"));
+            catalog.insert((*id).to_owned(), entry);
         }
-        let mut entry = crate::agent::config::ModelEntry::fallback(
-            CLAUDE_CLI_CATALOG_MODEL_ID,
-            &Default::default(),
-        );
-        entry.info.execution_backend =
-            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
-        entry.info.hidden = true;
-        entry.info.user_selectable = false;
-        entry.info.name = Some(CLAUDE_CLI_UI_LABEL.to_owned());
-        entry.info.description = Some(format!(
-            "{CLAUDE_CLI_UI_LABEL}. {CLAUDE_CLI_UI_LIMITATIONS}"
-        ));
-        catalog.insert(CLAUDE_CLI_CATALOG_MODEL_ID.to_owned(), entry);
     }
 
     /// Apply catalog visibility from the live probe cache (non-blocking).
@@ -387,7 +527,8 @@ mod tests {
             session_pointer: Some("sess_abc".into()),
             observed_version: Some("1.2.3".into()),
             capabilities: vec!["tools".into()],
-            selected_model: Some("claude-sonnet-5".into()),
+            selected_model: Some("claude-agent-cli-sonnet".into()),
+            resolved_model: Some("claude-sonnet-5".into()),
             reasoning_effort: Some("high".into()),
             token_budget: Some(100_000),
             cwd: Some("/tmp/ws".into()),
@@ -410,7 +551,21 @@ mod tests {
         let back: ExternalRuntimeEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.kind, ExternalAgentKind::ClaudeCli);
         assert_eq!(back.session_pointer.as_deref(), Some("sess_abc"));
-        assert_eq!(back.selected_model.as_deref(), Some("claude-sonnet-5"));
+        // Identity and the runtime-reported model round-trip as separate fields.
+        assert_eq!(
+            back.selected_model.as_deref(),
+            Some("claude-agent-cli-sonnet")
+        );
+        assert_eq!(back.resolved_model.as_deref(), Some("claude-sonnet-5"));
+
+        // Envelopes written before `resolved_model` existed still load.
+        let legacy = r#"{"kind":"claude_cli","selectedModel":"claude-agent-cli-opus"}"#;
+        let legacy: ExternalRuntimeEnvelope = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            legacy.selected_model.as_deref(),
+            Some("claude-agent-cli-opus")
+        );
+        assert_eq!(legacy.resolved_model, None);
     }
 
     #[test]

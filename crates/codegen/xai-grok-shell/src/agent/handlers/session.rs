@@ -125,11 +125,22 @@ async fn handle_session_info(
     });
 
     // Calculate the model's display name.
-    data.model_display_name = agent
-        .models_manager
-        .models()
-        .get(session.model_id.0.as_ref())
-        .and_then(|entry| entry.info.name.clone());
+    let models = agent.models_manager.models();
+    let entry = models.get(session.model_id.0.as_ref());
+    data.model_display_name = entry.and_then(|entry| entry.info.name.clone());
+
+    // External backends resolve their row to a concrete model per session
+    // (`opus` → `claude-opus-5`). A catalog name would otherwise hide that, since
+    // it short-circuits `model_display_name`'s resolved-id branch.
+    if let Some(entry) = entry
+        && entry.info.execution_backend.is_external()
+        && let Some(name) = data.model_display_name.as_deref()
+        && let Some(resolved) = data.resolved_model_id.as_deref()
+        && let Some(labelled) =
+            crate::session::acp_types::external_display_name_with_resolved(name, resolved)
+    {
+        data.model_display_name = Some(labelled);
+    }
 
     // Construct `SessionInfoResponse`.
     let response = SessionInfoResponse {

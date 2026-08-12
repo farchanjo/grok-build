@@ -480,3 +480,294 @@ mod with_feature {
         assert!(!st.summary.to_ascii_lowercase().contains("sk-"));
     }
 }
+
+#[test]
+fn cli_model_alias_never_forwards_a_grok_catalog_id() {
+    // The official CLI rejects a Grok catalog id as `--model`; every row must
+    // resolve to a documented alias or to "use the CLI default" (None).
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID),
+        None
+    );
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(
+            capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID_OPUS
+        ),
+        Some("opus")
+    );
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(
+            capability_matrix::CLAUDE_CLI_CATALOG_MODEL_ID_SONNET
+        ),
+        Some("sonnet")
+    );
+    // Unknown ids fail closed to the CLI default rather than leaking an id.
+    for unknown in [
+        "",
+        "claude-agent-cli-nope",
+        "anthropic-claude-opus-5",
+        "grok-build",
+    ] {
+        assert_eq!(
+            capability_matrix::claude_cli_model_alias(unknown),
+            None,
+            "unknown id {unknown:?} must not resolve to an alias"
+        );
+    }
+    for (id, alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        if let Some(alias) = alias {
+            assert_ne!(alias, id, "alias must differ from the catalog id");
+            assert!(
+                !alias.starts_with("claude-agent-cli"),
+                "alias {alias:?} looks like a catalog id"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(claude_cli_env)]
+fn injected_cli_catalog_rows_cover_opus_and_sonnet() {
+    if !gates::claude_cli_feature_compiled() {
+        return;
+    }
+    let _env = xai_grok_test_support::EnvGuard::set(CLAUDE_CLI_ENV_OPT_IN, "1");
+    let mut catalog = IndexMap::new();
+    capability_matrix::inject_claude_cli_catalog_entry_if_gated(&mut catalog);
+
+    for (id, _alias, label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let entry = catalog
+            .get(*id)
+            .unwrap_or_else(|| panic!("row {id} injected"));
+        assert_eq!(entry.info.name.as_deref(), Some(*label));
+        assert_eq!(
+            entry.info.execution_backend,
+            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli)
+        );
+        // Rows stay invisible until the binary probe succeeds.
+        assert!(entry.info.hidden, "row {id} must start hidden");
+        assert!(
+            !entry.info.user_selectable,
+            "row {id} must start unselectable"
+        );
+    }
+
+    // Idempotent: a second injection does not duplicate or overwrite rows.
+    let before = catalog.len();
+    capability_matrix::inject_claude_cli_catalog_entry_if_gated(&mut catalog);
+    assert_eq!(catalog.len(), before);
+
+    // With gates open and a successful probe, every row becomes selectable
+    // together — this is what makes the pinned Opus row reachable from /model.
+    capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, Some(true));
+    for (id, _alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let entry = catalog.get(*id).expect("row retained");
+        assert!(!entry.info.hidden, "row {id} must be visible after probe");
+        assert!(
+            entry.info.user_selectable,
+            "row {id} must be selectable after probe"
+        );
+    }
+}
+
+#[test]
+fn every_cli_catalog_row_is_hidden_without_probe() {
+    let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+    for (id, _alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let mut entry = ModelEntry::fallback(id, &Default::default());
+        entry.info.execution_backend =
+            ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+        entry.info.user_selectable = true;
+        entry.info.hidden = false;
+        catalog.insert((*id).to_owned(), entry);
+    }
+
+    capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, Some(false));
+    for (id, _alias, _label) in capability_matrix::CLAUDE_CLI_CATALOG_ROWS {
+        let entry = catalog.get(*id).expect("row retained");
+        assert!(entry.info.hidden, "row {id} must be hidden without probe");
+        assert!(
+            !entry.info.user_selectable,
+            "row {id} must not be selectable without probe"
+        );
+    }
+}
+
+#[test]
+fn external_turn_only_refuses_for_an_actively_running_goal() {
+    use crate::session::acp_session::{ExternalTurnGoalAction, external_turn_goal_action};
+    use crate::session::goal_tracker::GoalStatus;
+
+    // Harness off: nothing to do.
+    assert_eq!(
+        external_turn_goal_action(false, None),
+        ExternalTurnGoalAction::Proceed
+    );
+    assert_eq!(
+        external_turn_goal_action(false, Some(GoalStatus::Active)),
+        ExternalTurnGoalAction::Proceed
+    );
+
+    // Harness merely available must not block an external turn — the host
+    // harness does not apply to a backend that owns its own loop.
+    assert_eq!(
+        external_turn_goal_action(true, None),
+        ExternalTurnGoalAction::DisableHarness
+    );
+    for paused in [
+        GoalStatus::UserPaused,
+        GoalStatus::BackOffPaused,
+        GoalStatus::NoProgressPaused,
+    ] {
+        assert_eq!(
+            external_turn_goal_action(true, Some(paused)),
+            ExternalTurnGoalAction::DisableHarness,
+            "paused goal {paused:?} must not block an external turn"
+        );
+    }
+
+    // Only a live goal run is refused.
+    assert_eq!(
+        external_turn_goal_action(true, Some(GoalStatus::Active)),
+        ExternalTurnGoalAction::Refuse
+    );
+}
+
+#[test]
+fn configured_model_validation_rejects_flag_shaped_and_malformed_values() {
+    use capability_matrix::claude_cli_configured_model_is_valid as valid;
+
+    for good in [
+        "opus",
+        "sonnet",
+        "claude-opus-5",
+        "claude-haiku-4-5-20251001",
+        "claude-fable-5",
+    ] {
+        assert!(valid(good), "{good:?} must be accepted");
+    }
+
+    // A value that could pose as a CLI flag is the one that actually matters.
+    for bad in [
+        "",
+        "-p",
+        "--dangerously-skip-permissions",
+        "-",
+        "claude opus",
+        "claude\topus",
+        "claude\nopus",
+        "has:colon",
+        "claude-\u{7f}opus",
+    ] {
+        assert!(!valid(bad), "{bad:?} must be rejected");
+    }
+    assert!(
+        !valid(&"x".repeat(capability_matrix::MAX_CLAUDE_CLI_MODEL_LEN + 1)),
+        "over-long values must be rejected"
+    );
+}
+
+#[test]
+fn configured_row_ids_resolve_to_their_own_model_value() {
+    let id = capability_matrix::claude_cli_config_row_id("claude-opus-5");
+    assert_eq!(id, "claude-agent-cli:claude-opus-5");
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(&id),
+        Some("claude-opus-5")
+    );
+
+    // Defense in depth: an id that smuggles a flag-shaped value never resolves,
+    // even if it somehow reached the catalog.
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias("claude-agent-cli:-p"),
+        None
+    );
+    assert_eq!(
+        capability_matrix::claude_cli_model_alias(capability_matrix::CLAUDE_CLI_CONFIG_ROW_PREFIX),
+        None
+    );
+}
+
+#[test]
+#[serial_test::serial(claude_cli_env)]
+fn configured_rows_are_injected_hidden_and_skip_invalid_entries() {
+    use crate::agent::config::ClaudeCliModelConfig;
+
+    if !gates::claude_cli_feature_compiled() {
+        return;
+    }
+    let _env = xai_grok_test_support::EnvGuard::set(CLAUDE_CLI_ENV_OPT_IN, "1");
+
+    let configured = vec![
+        ClaudeCliModelConfig {
+            model: "claude-opus-5".into(),
+            name: Some("Opus 5 pinned".into()),
+            context_window: Some(1_000_000),
+            max_output_tokens: Some(128_000),
+        },
+        // Invalid: must be skipped without dropping the valid rows around it.
+        ClaudeCliModelConfig {
+            model: "--dangerously-skip-permissions".into(),
+            ..Default::default()
+        },
+        ClaudeCliModelConfig {
+            model: "  claude-haiku-4-5  ".into(),
+            ..Default::default()
+        },
+    ];
+
+    let mut catalog = IndexMap::new();
+    capability_matrix::inject_claude_cli_configured_rows_if_gated(&mut catalog, &configured);
+
+    let pinned = catalog
+        .get("claude-agent-cli:claude-opus-5")
+        .expect("valid row injected");
+    assert_eq!(
+        pinned.info.name.as_deref(),
+        Some("Claude Agent CLI · Opus 5 pinned (Experimental)")
+    );
+    assert_eq!(pinned.info.context_window.get(), 1_000_000);
+    assert_eq!(pinned.info.max_completion_tokens, Some(128_000));
+    assert!(pinned.info.hidden, "configured rows start hidden");
+    assert!(!pinned.info.user_selectable);
+    assert_eq!(
+        pinned.info.execution_backend,
+        ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli)
+    );
+
+    // Whitespace is trimmed, so the id carries the clean model value.
+    assert!(catalog.contains_key("claude-agent-cli:claude-haiku-4-5"));
+    // The flag-shaped entry never becomes a row.
+    assert_eq!(
+        catalog.len(),
+        2,
+        "invalid entry must be skipped: {catalog:?}"
+    );
+
+    // Same gating as the built-ins: no probe, nothing visible.
+    capability_matrix::apply_catalog_visibility_with_probe(&mut catalog, Some(false));
+    for entry in catalog.values() {
+        assert!(entry.info.hidden);
+        assert!(!entry.info.user_selectable);
+    }
+}
+
+#[test]
+fn external_display_name_appends_the_resolved_model_once() {
+    use crate::session::acp_types::external_display_name_with_resolved as compose;
+
+    assert_eq!(
+        compose("Claude Agent CLI · Opus (Experimental)", "claude-opus-5").as_deref(),
+        Some("Claude Agent CLI · Opus (Experimental) → claude-opus-5")
+    );
+    // Nothing to add when the label already states the resolution, so repeated
+    // /session-info calls cannot stack arrows.
+    assert_eq!(
+        compose(
+            "Claude Agent CLI · Opus (Experimental) → claude-opus-5",
+            "claude-opus-5"
+        ),
+        None
+    );
+    assert_eq!(compose("Claude Agent CLI · Opus", "   "), None);
+}
