@@ -1743,6 +1743,12 @@ mod rewind_synthetic_turn_tests;
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]
 mod subagent_usage_fold_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/tool_image_routing_tests.rs"]
+mod tool_image_routing_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/tool_video_routing_tests.rs"]
+mod tool_video_routing_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/turn_completion_emit_tests.rs"]
 mod turn_completion_emit_tests;
 #[cfg(test)]

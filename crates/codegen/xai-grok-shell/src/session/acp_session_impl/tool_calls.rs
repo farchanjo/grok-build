@@ -2109,6 +2109,62 @@ impl SessionActor {
                 had_commit_in_session: false,
             });
     }
+    pub(super) async fn understand_tool_video(
+        &self,
+        video: &xai_grok_tools::types::output::VideoContent,
+        media: &crate::config::MediaConfig,
+        active_supports_images: Option<bool>,
+        runner: &dyn xai_grok_tools::util::ffmpeg::ProcessRunner,
+        transcriber: Option<&dyn crate::session::media_stt::AsyncAudioTranscriber>,
+    ) -> String {
+        let active_session_config = self.reconstruct_full_config().await;
+        // Video understanding currently samples JPEG frames. A dedicated video
+        // route takes precedence, then the image route, then the active session.
+        let route = media
+            .video_model
+            .as_deref()
+            .or(media.image_model.as_deref())
+            .unwrap_or("@session")
+            .to_owned();
+        let resolved = self.resolve_aux_inference_config(&route).await;
+        let (describe_model, sampler_config) =
+            crate::agent::config::finalize_image_describe_inference_config(
+                resolved,
+                &active_session_config,
+                self.client_identifier.clone(),
+                Some(self.max_retries),
+            );
+        let provider = sampler_config.provider_identity;
+        let frame_route_policy = crate::session::media_pipeline::auxiliary_media_route_allowed(
+            provider,
+            self.auth_manager.as_ref(),
+        );
+        let frame_route_usable = !(route == "@session" && active_supports_images != Some(true));
+        let client = if frame_route_policy.is_ok() && frame_route_usable {
+            xai_grok_inference::InferenceClient::new(sampler_config).ok()
+        } else {
+            None
+        };
+        let (describe_model, provider_label) = if frame_route_policy.is_ok() {
+            (Some(describe_model.as_str()), Some(provider.label()))
+        } else {
+            (None, None)
+        };
+        crate::session::media_pipeline::understand_video(
+            video,
+            media,
+            &self.image_describe_cache,
+            &self.media_descriptor_store,
+            client,
+            describe_model,
+            provider_label,
+            frame_route_policy,
+            crate::session::image_describe::ImageDescribeSource::ToolRead,
+            runner,
+            transcriber,
+        )
+        .await
+    }
     pub(super) async fn handle_bridge_tool_success(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -2502,60 +2558,21 @@ impl SessionActor {
             .await;
         }
         if let ToolsToolOutput::ReadFile(ReadFileOutput::VideoContent(ref video)) = result.output {
-            let active_session_config = self.reconstruct_full_config().await;
-            let media = media.clone();
             let stt_config = self.models_manager.config_snapshot().voice;
             let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
                 self.auth_manager.as_ref(),
                 self.rebuild_spec.api_key_provider.as_ref(),
                 stt_config,
             );
-            // Frame descriptions reuse the image-describe route (tools hold no
-            // inference client; shell owns the conversion).
-            let route = media
-                .video_model
-                .as_deref()
-                .or(media.image_model.as_deref())
-                .unwrap_or("@session")
-                .to_owned();
-            let resolved = self.resolve_aux_inference_config(&route).await;
-            let (describe_model, sampler_config) =
-                crate::agent::config::finalize_image_describe_inference_config(
-                    resolved,
-                    &active_session_config,
-                    self.client_identifier.clone(),
-                    Some(self.max_retries),
-                );
-            let provider = sampler_config.provider_identity;
-            let frame_route_policy = crate::session::media_pipeline::auxiliary_media_route_allowed(
-                provider,
-                self.auth_manager.as_ref(),
-            );
-            let frame_route_usable = !(route == "@session" && active_supports_images != Some(true));
-            let client = if frame_route_policy.is_ok() && frame_route_usable {
-                xai_grok_inference::InferenceClient::new(sampler_config).ok()
-            } else {
-                None
-            };
-            let (describe_model, provider_label) = if frame_route_policy.is_ok() {
-                (Some(describe_model.as_str()), Some(provider.label()))
-            } else {
-                (None, None)
-            };
-            prompt_text = crate::session::media_pipeline::understand_video(
-                video,
-                &media,
-                &self.image_describe_cache,
-                &self.media_descriptor_store,
-                client,
-                describe_model,
-                provider_label,
-                frame_route_policy,
-                crate::session::image_describe::ImageDescribeSource::ToolRead,
-                &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
-                stt.as_deref(),
-            )
-            .await;
+            prompt_text = self
+                .understand_tool_video(
+                    video,
+                    &media,
+                    active_supports_images,
+                    &xai_grok_tools::util::ffmpeg::SystemProcessRunner,
+                    stt.as_deref(),
+                )
+                .await;
         }
         let tool_failed = result.output.is_error();
         let tool_chat = if inline_images.is_empty() {
