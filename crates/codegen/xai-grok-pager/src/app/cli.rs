@@ -972,6 +972,18 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
+    /// Absolute path to the Workbench CLI for external ACP backend mode.
+    ///
+    /// Requires `WORKBENCH_TERMINAL_BACKEND=1` or `GROK_AGENT_BACKEND=workbench`.
+    /// Launches `<path> agent stdio` with cwd = workspace root.
+    #[arg(
+        long = "workbench-executable",
+        value_name = "PATH",
+        env = "WORKBENCH_EXECUTABLE",
+        hide = true,
+        value_hint = ValueHint::FilePath
+    )]
+    pub workbench_executable: Option<PathBuf>,
     /// Initial prompt for the interactive session, e.g. `grok "fix the bug"` or `grok --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",

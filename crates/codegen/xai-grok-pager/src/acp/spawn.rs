@@ -1,7 +1,7 @@
 //! Agent spawning — creates the agent process and ACP channels.
 //!
-//! Simplified to only support GrokShell (in-process) mode.
-//! Subprocess and remote modes can be added later if needed.
+//! Default: in-process GrokShell ([`spawn_grok_shell`]).
+//! Optional external Workbench ACP backend: see [`super::workbench_backend`].
 
 use std::rc::Rc;
 use std::thread;
