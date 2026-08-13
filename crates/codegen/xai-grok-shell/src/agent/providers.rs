@@ -31,7 +31,7 @@ const OPENROUTER_CATALOG_TTL_ENV: &str = "GROK_OPENROUTER_CATALOG_TTL_SECS";
 const ANTHROPIC_CATALOG_DEFAULT_TTL_SECS: u64 = 6 * 60 * 60;
 const ANTHROPIC_CATALOG_TTL_ENV: &str = "GROK_ANTHROPIC_CATALOG_TTL_SECS";
 /// Direct Anthropic Messages base used by InferenceClient (`…/v1` + `/messages`).
-const ANTHROPIC_INFERENCE_BASE_URL: &str = "https://api.anthropic.com/v1";
+use super::model_providers::ANTHROPIC_INFERENCE_BASE_URL;
 
 /// A provider understood by the built-in provider screen.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -617,58 +617,20 @@ impl ProviderManager {
         config_models: &mut indexmap::IndexMap<String, super::config::ConfigModelOverride>,
     ) {
         use super::config::ConfigModelOverride;
-        use super::model_providers::ModelProviderConfig;
+        use super::model_providers::{
+            grok_build_anthropic_config, grok_build_openai_config, grok_build_openrouter_config,
+        };
         use crate::inference::ApiBackend;
 
         model_providers
             .entry("grok_build_openai".to_owned())
-            .or_insert_with(|| ModelProviderConfig {
-                kind: ModelProviderKind::OpenAi,
-                base_url: Some("https://api.openai.com/v1".to_owned()),
-                api_backend: Some(ApiBackend::Responses),
-                ..Default::default()
-            });
+            .or_insert_with(grok_build_openai_config);
         model_providers
             .entry("grok_build_openrouter".to_owned())
-            .or_insert_with(|| {
-                use super::model_providers::OpenRouterProviderPreferences;
-                let mut extra_headers = indexmap::IndexMap::<String, String>::new();
-                extra_headers
-                    .entry("X-OpenRouter-Title".to_owned())
-                    .or_insert("Grok Build".to_owned());
-                ModelProviderConfig {
-                    kind: ModelProviderKind::OpenRouter,
-                    base_url: Some("https://openrouter.ai/api/v1".to_owned()),
-                    api_backend: Some(ApiBackend::ChatCompletions),
-                    provider_preferences: Some(OpenRouterProviderPreferences {
-                        data_collection: Some("deny".to_owned()),
-                        require_parameters: Some(true),
-                        ..Default::default()
-                    }),
-                    extra_headers,
-                    ..Default::default()
-                }
-            });
+            .or_insert_with(grok_build_openrouter_config);
         model_providers
             .entry("grok_build_anthropic".to_owned())
-            .or_insert_with(|| {
-                let mut extra_headers = indexmap::IndexMap::<String, String>::new();
-                // Required for direct Anthropic identity only. Custom Messages
-                // backends never inherit this provider entry.
-                extra_headers.insert(
-                    "anthropic-version".to_owned(),
-                    xai_grok_inference::ANTHROPIC_VERSION.to_owned(),
-                );
-                ModelProviderConfig {
-                    kind: ModelProviderKind::Anthropic,
-                    base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
-                    // snake_case AuthScheme wire form (`x_api_key`).
-                    auth_scheme: Some("x_api_key".to_owned()),
-                    api_backend: Some(ApiBackend::Messages),
-                    extra_headers,
-                    ..Default::default()
-                }
-            });
+            .or_insert_with(grok_build_anthropic_config);
         // First-class Z.ai Model API profile (credentials never inlined).
         super::zai::install_zai_provider(model_providers);
         let openrouter_configured = credential_lookup_manager()

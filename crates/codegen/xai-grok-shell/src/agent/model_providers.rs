@@ -66,9 +66,84 @@ impl ModelProviderKind {
     }
 }
 
+/// Sidecar [`crate::provider_registry::ProviderKind`] converts from the
+/// existing sampler-side [`ModelProviderKind`] without replacing it. Both
+/// kinds stay valid for their respective consumers.
+impl From<ModelProviderKind> for crate::provider_registry::ProviderKind {
+    fn from(kind: ModelProviderKind) -> Self {
+        use crate::provider_registry::ProviderKind;
+        match kind {
+            ModelProviderKind::OpenAiCompatible => ProviderKind::OpenAiCompatible,
+            ModelProviderKind::Xai => ProviderKind::Xai,
+            ModelProviderKind::OpenAi => ProviderKind::OpenAi,
+            ModelProviderKind::OpenRouter => ProviderKind::OpenRouter,
+            ModelProviderKind::Anthropic => ProviderKind::Anthropic,
+            ModelProviderKind::Zai => ProviderKind::Zai,
+        }
+    }
+}
+
 // Re-exported from the sampler crate so the shell TOML layer and the sampler
 // wire layer share one definition (matching the `ProviderIdentity` precedent).
 pub use xai_grok_inference::{OpenRouterMaxPrice, OpenRouterPlugin, OpenRouterProviderPreferences};
+
+/// Direct Anthropic Messages base used by the built-in Anthropic preset
+/// (`…/v1` + `/messages`). Shared between the provider CLI/status preset
+/// installation and the provider service so neither specializes or drifts.
+pub(crate) const ANTHROPIC_INFERENCE_BASE_URL: &str = "https://api.anthropic.com/v1";
+
+/// Canonical `grok_build_openai` preset config. This is the single source of
+/// truth for the built-in OpenAI model-provider entry; the provider service
+/// reuses it as the preset source for the canonical `openai` product
+/// descriptor rather than hand-rolling a divergent default.
+pub(crate) fn grok_build_openai_config() -> ModelProviderConfig {
+    ModelProviderConfig {
+        kind: ModelProviderKind::OpenAi,
+        base_url: Some("https://api.openai.com/v1".into()),
+        api_backend: Some(ApiBackend::Responses),
+        ..Default::default()
+    }
+}
+
+/// Canonical `grok_build_openrouter` preset config (shared). Reused by the
+/// provider service as the canonical `openrouter` descriptor preset source.
+pub(crate) fn grok_build_openrouter_config() -> ModelProviderConfig {
+    let mut extra_headers = indexmap::IndexMap::<String, String>::new();
+    extra_headers
+        .entry("X-OpenRouter-Title".to_owned())
+        .or_insert("Grok Build".to_owned());
+    ModelProviderConfig {
+        kind: ModelProviderKind::OpenRouter,
+        base_url: Some("https://openrouter.ai/api/v1".into()),
+        api_backend: Some(ApiBackend::ChatCompletions),
+        provider_preferences: Some(OpenRouterProviderPreferences {
+            data_collection: Some("deny".to_owned()),
+            require_parameters: Some(true),
+            ..Default::default()
+        }),
+        extra_headers,
+        ..Default::default()
+    }
+}
+
+/// Canonical `grok_build_anthropic` preset config (shared). Reused by the
+/// provider service as the canonical `anthropic` descriptor preset source.
+pub(crate) fn grok_build_anthropic_config() -> ModelProviderConfig {
+    let mut extra_headers = indexmap::IndexMap::<String, String>::new();
+    extra_headers.insert(
+        "anthropic-version".to_owned(),
+        xai_grok_inference::ANTHROPIC_VERSION.to_owned(),
+    );
+    ModelProviderConfig {
+        kind: ModelProviderKind::Anthropic,
+        base_url: Some(ANTHROPIC_INFERENCE_BASE_URL.to_owned()),
+        // snake_case AuthScheme wire form (`x_api_key`).
+        auth_scheme: Some("x_api_key".to_owned()),
+        api_backend: Some(ApiBackend::Messages),
+        extra_headers,
+        ..Default::default()
+    }
+}
 
 /// Provider identity retained on a resolved [`super::config::ModelEntry`].
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -107,6 +182,14 @@ pub struct ResolvedModelProvider {
 #[serde(default)]
 pub struct ModelProviderConfig {
     pub kind: ModelProviderKind,
+    /// Optional additive sidecar request-surface override. Absent => the
+    /// backward-compatible default derived from `kind`. Never affects current
+    /// inference routing; reserved for the multi-account platform.
+    pub api_surface: Option<crate::provider_registry::ApiSurface>,
+    /// Optional additive sidecar credential-route override. Absent => the
+    /// backward-compatible default derived from `kind` and credential setup.
+    /// Never affects current credential resolution; reserved for the future.
+    pub credential_route: Option<crate::provider_registry::CredentialRoute>,
     /// Optional human-readable label for `/providers` and CLI output.
     pub display_name: Option<String>,
     pub base_url: Option<String>,
@@ -167,6 +250,8 @@ impl Default for ModelProviderConfig {
     fn default() -> Self {
         Self {
             kind: ModelProviderKind::default(),
+            api_surface: None,
+            credential_route: None,
             display_name: None,
             base_url: None,
             api_base_url: None,
@@ -298,7 +383,11 @@ pub(crate) fn parse_model_providers(
     };
     for (id, value) in table {
         let mut unknown = Vec::new();
-        match serde_ignored::deserialize::<_, _, ModelProviderConfig>(value.clone(), |path| {
+        // Lenient additive parsing: an invalid `api_surface` / `credential_route`
+        // value must warn+prune (field -> None/default) rather than drop the
+        // otherwise valid provider. Valid typed values remain stored.
+        let pruned = prune_invalid_sidecar_fields(id, value, &mut warnings);
+        match serde_ignored::deserialize::<_, _, ModelProviderConfig>(pruned, |path| {
             unknown.push(path.to_string());
         }) {
             Ok(provider) => {
@@ -426,6 +515,69 @@ pub(crate) fn parse_model_providers(
     (providers, warnings)
 }
 
+/// Prune an invalid additive sidecar field (`api_surface` / `credential_route`)
+/// from an otherwise valid `[model_providers.<id>]` entry so the provider is
+/// never dropped. The recognized field is validated in isolation: a value that
+/// does not deserialize to the canonical sidecar type is removed (defaulting to
+/// the backward-compatible value) and a structured `InvalidValue` warning is
+/// pushed. A valid typed value is left in place and stored by the struct.
+fn prune_invalid_sidecar_fields(
+    id: &str,
+    value: &toml::Value,
+    warnings: &mut Vec<ConfigWarning>,
+) -> toml::Value {
+    let Some(table) = value.as_table() else {
+        return value.clone();
+    };
+    let sidecar_ok = |key: &str| -> bool {
+        let Some(field) = table.get(key) else {
+            return true;
+        };
+        match key {
+            "api_surface" => field
+                .clone()
+                .try_into::<crate::provider_registry::ApiSurface>()
+                .is_ok(),
+            "credential_route" => field
+                .clone()
+                .try_into::<crate::provider_registry::CredentialRoute>()
+                .is_ok(),
+            _ => true,
+        }
+    };
+    let surface_ok = sidecar_ok("api_surface");
+    let route_ok = sidecar_ok("credential_route");
+    if surface_ok && route_ok {
+        return value.clone();
+    }
+    let mut out = value.clone();
+    if let Some(t) = out.as_table_mut() {
+        if !surface_ok {
+            t.remove("api_surface");
+            warnings.push(ConfigWarning::model_provider(
+                id,
+                Some("api_surface"),
+                ConfigWarningKind::InvalidValue,
+                "unrecognized api_surface value; ignored and the backward-compatible \
+                 default applies"
+                    .to_owned(),
+            ));
+        }
+        if !route_ok {
+            t.remove("credential_route");
+            warnings.push(ConfigWarning::model_provider(
+                id,
+                Some("credential_route"),
+                ConfigWarningKind::InvalidValue,
+                "unrecognized credential_route value; ignored and the backward-compatible \
+                 default applies"
+                    .to_owned(),
+            ));
+        }
+    }
+    out
+}
+
 impl ConfigModelOverride {
     pub(crate) fn with_provider_defaults(
         &self,
@@ -434,6 +586,8 @@ impl ConfigModelOverride {
     ) -> Self {
         let ModelProviderConfig {
             kind: _,
+            api_surface: _,
+            credential_route: _,
             display_name: _,
             base_url,
             api_base_url,
@@ -832,6 +986,84 @@ mod tests {
             }),
             "non-table section warns: {:?}",
             cfg.config_warnings
+        );
+    }
+
+    #[test]
+    fn invalid_additive_sidecar_fields_warn_and_prune_not_drop() {
+        use super::super::config_model_override_parse::{ConfigWarningKind, WarningTarget};
+
+        // Invalid recognized sidecar string values.
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.bad]
+            base_url = "https://bad.example/v1"
+            api_surface = "bogus_surface"
+            credential_route = "not-a-route"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        assert!(
+            cfg.model_providers.contains_key("bad"),
+            "an invalid sidecar value must not drop the provider"
+        );
+        let provider = &cfg.model_providers["bad"];
+        assert!(
+            provider.api_surface.is_none(),
+            "invalid api_surface pruned to None"
+        );
+        assert!(
+            provider.credential_route.is_none(),
+            "invalid credential_route pruned to None"
+        );
+        let has_field = |field: &str| {
+            cfg.config_warnings.iter().any(|w| {
+                w.kind == ConfigWarningKind::InvalidValue
+                    && matches!(
+                        &w.target,
+                        WarningTarget::ModelProvider { id, field: f }
+                            if id == "bad" && f.as_deref() == Some(field)
+                    )
+            })
+        };
+        assert!(
+            has_field("api_surface"),
+            "api_surface warns: {:?}",
+            cfg.config_warnings
+        );
+        assert!(
+            has_field("credential_route"),
+            "credential_route warns: {:?}",
+            cfg.config_warnings
+        );
+
+        // Wrong type also warns and prunes.
+        let raw_type: toml::Value = toml::from_str(
+            r#"
+            [model_providers.t]
+            base_url = "https://t.example/v1"
+            api_surface = 42
+            "#,
+        )
+        .unwrap();
+        let cfg2 = Config::new_from_toml_cfg(&raw_type).expect("config should parse");
+        assert!(
+            cfg2.model_providers.contains_key("t"),
+            "wrong-type provider retained"
+        );
+        assert!(cfg2.model_providers["t"].api_surface.is_none());
+        assert!(
+            cfg2.config_warnings.iter().any(|w| {
+                w.kind == ConfigWarningKind::InvalidValue
+                    && matches!(
+                        &w.target,
+                        WarningTarget::ModelProvider { id, field: f }
+                            if id == "t" && f.as_deref() == Some("api_surface")
+                    )
+            }),
+            "wrong-type api_surface warns: {:?}",
+            cfg2.config_warnings
         );
     }
 
