@@ -2460,6 +2460,7 @@ impl SessionActor {
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
         let mut auth_retry_schedule = AuthRetrySchedule::new();
+        let mut context_compaction_recovery_used = false;
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
@@ -2569,9 +2570,9 @@ impl SessionActor {
             }
             let compaction_strategy = self.agent.borrow().compaction_policy().strategy;
             if self.tool_context.task_output_token_budget.is_none()
-                && matches!(
+                && !matches!(
                     compaction_strategy,
-                    xai_grok_agent::CompactionStrategy::FullReplace
+                    xai_grok_agent::CompactionStrategy::Rolling
                 )
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
                 && let Err(e) = self.run_compact_only(trigger_info).await
@@ -2675,13 +2676,17 @@ impl SessionActor {
                 self.tool_context.fail_task_output_usage_closed();
                 return Err(err.into_acp_error());
             }
-            let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
+            let (response, latency) = match self
+                .run_turn_via_sampler(request.clone(), !context_compaction_recovery_used)
+                .await
+            {
                 Ok(InferenceTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
                 }
                 Ok(InferenceTurnOutcome::CompactAndResubmit) => {
+                    context_compaction_recovery_used = true;
                     auth_retry_schedule.reset();
                     continue;
                 }
@@ -2730,6 +2735,7 @@ impl SessionActor {
                 }
             };
             auth_retry_schedule.reset();
+            context_compaction_recovery_used = false;
             let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
             let usage = response.usage.as_ref();
             let prompt_tokens = usage.map(|u| u.prompt_tokens);

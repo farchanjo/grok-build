@@ -1357,6 +1357,15 @@ impl SessionActor {
         self: &Arc<Self>,
         error: xai_grok_inference::InferenceErrorInfo,
     ) -> Result<InferenceFailureRecovery, acp::Error> {
+        self.handle_sampling_failure_with_context_compaction(error, true)
+            .await
+    }
+
+    async fn handle_sampling_failure_with_context_compaction(
+        self: &Arc<Self>,
+        error: xai_grok_inference::InferenceErrorInfo,
+        allow_context_compaction: bool,
+    ) -> Result<InferenceFailureRecovery, acp::Error> {
         use xai_grok_inference::InferenceErrorKind;
         if self.tool_context.task_output_token_budget.is_some() {
             self.tool_context.fail_task_output_usage_closed();
@@ -1383,35 +1392,43 @@ impl SessionActor {
             );
             return Err(acp::Error::internal_error().data(message));
         }
-        if self.should_compact_on_error(&error).await {
+        if allow_context_compaction && self.should_compact_on_error(&error).await {
+            let inference_settings = self.chat_state_handle.get_inference_settings().await;
+            let fallback_context_window = inference_settings
+                .as_ref()
+                .map(|config| config.context_window.get())
+                .unwrap_or(crate::remote::DEFAULT_CONTEXT_WINDOW);
             let cw = error
                 .model_metadata
                 .as_ref()
-                .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+                .and_then(|metadata| metadata.context_window)
+                .filter(|window| *window > 0)
+                .unwrap_or(fallback_context_window);
+            let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+            let percentage = if xai_grok_inference_types::is_context_length_error(&error.message) {
+                100
+            } else {
+                xai_token_estimation::usage_percentage_u8(total_tokens, cw)
+            };
+            if let Some(mut cfg) = inference_settings
+                && let Some(new_cw) = std::num::NonZeroU64::new(cw)
+                && self.compaction.context_window_override.is_none()
             {
-                let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-                let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);
-                if let Some(mut cfg) = self.chat_state_handle.get_inference_settings().await
-                    && let Some(new_cw) = std::num::NonZeroU64::new(cw)
-                    && self.compaction.context_window_override.is_none()
-                {
-                    cfg.context_window = new_cw;
-                    self.chat_state_handle.update_inference_settings(cfg);
-                }
-                let trigger_info = compaction::AutoCompactTriggerInfo {
-                    tokens_used: total_tokens,
-                    context_window: cw,
-                    percentage,
-                };
-                if let Err(e) = self.run_compact_only(trigger_info).await {
-                    if Self::is_auth_compact_error(&e) {
-                        return Err(self.surface_compact_auth_failure(e).await);
-                    }
-                    return Err(e);
-                }
-                return Ok(InferenceFailureRecovery::CompactAndResubmit);
+                cfg.context_window = new_cw;
+                self.chat_state_handle.update_inference_settings(cfg);
             }
+            let trigger_info = compaction::AutoCompactTriggerInfo {
+                tokens_used: total_tokens,
+                context_window: cw,
+                percentage,
+            };
+            if let Err(e) = self.run_compact_only(trigger_info).await {
+                if Self::is_auth_compact_error(&e) {
+                    return Err(self.surface_compact_auth_failure(e).await);
+                }
+                return Err(e);
+            }
+            return Ok(InferenceFailureRecovery::CompactAndResubmit);
         }
         let detailed_message = error.message.clone();
         if matches!(error.kind, InferenceErrorKind::Api)
@@ -1775,11 +1792,15 @@ impl SessionActor {
     ///    ran, the outer turn loop should `continue`.
     /// * `Ok(InferenceTurnOutcome::RefreshAuthAndResubmit)` - auth 401
     ///    recovery succeeded, credentials refreshed, retry once.
+    ///
+    /// `allow_context_compaction` prevents consecutive overflow recovery from
+    /// looping when a successful compaction still cannot fit the same request.
     /// * `Err(acp::Error)` - terminal failure already reported via
     ///    `send_xai_notification(RetryState::Failed)`.
     pub(crate) async fn run_turn_via_sampler(
         self: &Arc<Self>,
         request: ConversationRequest,
+        allow_context_compaction: bool,
     ) -> Result<InferenceTurnOutcome, acp::Error> {
         self.prepare_sampler_for_turn().await;
         let stream_drained_rx = {
@@ -1821,7 +1842,10 @@ impl SessionActor {
             Err(rich_err) => {
                 self.turn_stream_drained.lock().take();
                 let info = xai_grok_inference::InferenceErrorInfo::from(&rich_err);
-                match self.handle_sampling_failure(info).await? {
+                match self
+                    .handle_sampling_failure_with_context_compaction(info, allow_context_compaction)
+                    .await?
+                {
                     InferenceFailureRecovery::CompactAndResubmit => {
                         Ok(InferenceTurnOutcome::CompactAndResubmit)
                     }

@@ -2097,10 +2097,13 @@ impl SessionActor {
             None
         }
     }
-    /// Returns true if the error response indicates tokens exceed the
-    /// model's context window. Inspects only the model-metadata
-    /// portion of the [`InferenceErrorInfo`] (the `context_window`
-    /// field) against the session's tracked token estimate.
+    /// Returns true when a failed request should recover through compaction.
+    ///
+    /// An explicit provider context-overflow message is authoritative. Streamed
+    /// errors do not carry response-header metadata, and the local bytes/4
+    /// estimate can be lower than the provider's serialized prompt count.
+    /// Without that signal, retain the model-metadata fallback for a context
+    /// window that shrank below the locally tracked estimate.
     ///
     /// Called from `handle_sampling_failure` with the
     /// `InferenceErrorInfo` the sampler hands back.
@@ -2116,15 +2119,17 @@ impl SessionActor {
         {
             return false;
         }
-        let Some(ref metadata) = err.model_metadata else {
-            return false;
-        };
-        let Some(context_window) = metadata.context_window else {
-            return false;
-        };
-        if context_window == 0 {
-            return false;
+        if xai_grok_inference_types::is_context_length_error(&err.message) {
+            return true;
         }
+        let Some(context_window) = err
+            .model_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.context_window)
+            .filter(|window| *window > 0)
+        else {
+            return false;
+        };
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         estimated_total > context_window
     }
@@ -4297,10 +4302,10 @@ mod inline_auto_compact_flow_tests {
             })
             .await;
     }
-    /// When tracked tokens are within the new limit, the error was not a context
-    /// overflow — do not compact.
+    /// A generic API error with tracked tokens inside the advertised window is
+    /// not enough to trigger compaction.
     #[tokio::test(flavor = "current_thread")]
-    async fn test_compact_on_error_no_trigger_when_tokens_within_new_window() {
+    async fn test_compact_on_error_no_trigger_for_generic_error_within_window() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -4308,26 +4313,27 @@ mod inline_auto_compact_flow_tests {
                 let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor =
                     create_test_actor(150_000, 1_000_000, 85, gateway_tx, persistence_tx).await;
-                let err = api_error_with_context_window(200_000);
+                let mut err = api_error_with_context_window(200_000);
+                err.message = "invalid request".to_string();
                 assert!(!actor.should_compact_on_error(&err).await);
             })
             .await;
     }
-    /// If the proxy hasn't been updated yet, model_metadata is None — must be
-    /// a no-op for backwards compatibility.
+    /// Explicit provider overflow is authoritative even when streamed errors do
+    /// not include response-header model metadata.
     #[tokio::test(flavor = "current_thread")]
-    async fn test_compact_on_error_noop_without_model_metadata() {
+    async fn test_compact_on_error_triggers_without_model_metadata() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
                 let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
                 let actor =
-                    create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
+                    create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await;
                 let err = xai_grok_inference::InferenceErrorInfo {
                     kind: xai_grok_inference::InferenceErrorKind::Api,
                     status_code: Some(400),
-                    message: "prompt is too long".to_string(),
+                    message: "stream error (invalid_request_error): Your input exceeds the context window of this model. Please adjust your input and try again.".to_string(),
                     is_retryable: false,
                     retry_after_secs: None,
                     model_metadata: None,
@@ -4336,7 +4342,7 @@ mod inline_auto_compact_flow_tests {
                     doom_loop_triggers: None,
                     doom_loop_aborted_at_chunk: None,
                 };
-                assert!(!actor.should_compact_on_error(&err).await);
+                assert!(actor.should_compact_on_error(&err).await);
             })
             .await;
     }

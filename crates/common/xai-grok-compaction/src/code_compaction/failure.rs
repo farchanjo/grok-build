@@ -30,6 +30,7 @@ pub fn is_context_length_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     m.contains("too long for this model")
         || m.contains("prompt is too long")
+        || m.contains("input exceeds the context window")
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
@@ -179,6 +180,7 @@ mod tests {
     fn context_length_error_matches_known_messages() {
         for msg in [
             "The prompt is too long for this model's context window.",
+            "Your input exceeds the context window of this model.",
             "prompt is too long: 250000 tokens > 200000 maximum",
             "exceeds the maximum prompt length",
             "This model's maximum context length is 128000 tokens",

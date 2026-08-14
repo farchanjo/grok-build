@@ -1290,17 +1290,18 @@ async fn test_compact_on_error_triggers_when_tokens_exceed_new_window() {
         })
         .await;
 }
-/// When tracked tokens are within the new limit, the error was not a context
-/// overflow — do not compact.
+/// A generic API error with tracked tokens inside the advertised window is
+/// not enough to trigger compaction.
 #[tokio::test(flavor = "current_thread")]
-async fn test_compact_on_error_no_trigger_when_tokens_within_new_window() {
+async fn test_compact_on_error_no_trigger_for_generic_error_within_window() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(150_000, 1_000_000, 85, gateway_tx, persistence_tx).await;
-            let err = api_error_with_context_window(200_000);
+            let mut err = api_error_with_context_window(200_000);
+            err.message = "invalid request".to_string();
             assert!(!actor.should_compact_on_error(&err).await);
         })
         .await;
@@ -1678,20 +1679,20 @@ async fn test_idle_resume_noop_when_not_idle_enough() {
         })
         .await;
 }
-/// If the proxy hasn't been updated yet, model_metadata is None — must be
-/// a no-op for backwards compatibility.
+/// Explicit provider overflow is authoritative even when streamed errors do
+/// not include response-header model metadata.
 #[tokio::test(flavor = "current_thread")]
-async fn test_compact_on_error_noop_without_model_metadata() {
+async fn test_compact_on_error_triggers_without_model_metadata() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(500_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            let actor = create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await;
             let err = xai_grok_inference::InferenceErrorInfo {
                 kind: xai_grok_inference::InferenceErrorKind::Api,
                 status_code: Some(400),
-                message: "prompt is too long".into(),
+                message: "stream error (invalid_request_error): Your input exceeds the context window of this model. Please adjust your input and try again.".into(),
                 is_retryable: false,
                 retry_after_secs: None,
                 model_metadata: None,
@@ -1700,7 +1701,7 @@ async fn test_compact_on_error_noop_without_model_metadata() {
                 doom_loop_triggers: None,
                 doom_loop_aborted_at_chunk: None,
             };
-            assert!(!actor.should_compact_on_error(&err).await);
+            assert!(actor.should_compact_on_error(&err).await);
         })
         .await;
 }

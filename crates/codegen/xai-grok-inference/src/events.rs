@@ -153,11 +153,10 @@ pub struct InferenceErrorInfo {
 
 /// Coarse-grained classification of a sampling failure.
 ///
-/// Intentionally narrow — context-window-exceeded does NOT have its own
-/// variant because the sampler cannot reliably detect it (it lacks
-/// tracked token counts). Context-window errors arrive as
-/// `Api { status: 400, .. }` with model metadata; the session inspects
-/// the metadata and decides whether to compact.
+/// Intentionally narrow — context-window-exceeded does not have its own
+/// variant. The session detects explicit overflow messages and also uses model
+/// metadata plus its tracked token estimate when response headers provide a
+/// revised context window. Streamed errors commonly have no model metadata.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InferenceErrorKind {
     Auth,

@@ -1056,7 +1056,8 @@ mod tests {
         // should_retry hint; without the context-length check it would retry the full budget.
         let err = InferenceError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "none: The prompt is too long for this model's context window.".into(),
+            message: "invalid_request_error: Your input exceeds the context window of this model."
+                .into(),
             model_metadata: None,
             retry_after_secs: None,
             should_retry: None,
