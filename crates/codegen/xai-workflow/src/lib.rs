@@ -35,7 +35,9 @@ pub(crate) fn with_rhai_hint(msg: String) -> String {
 }
 
 pub use engine::{WorkflowRunParams, run_workflow};
-pub use host::{AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostRequest};
+pub use host::{
+    AgentOpts, AgentResult, BudgetState, HostError, WorkflowHostEnvelope, WorkflowHostRequest,
+};
 pub use journal::{Journal, JournalEntry, JournalError};
 pub use meta::{MetaError, PhaseMeta, WorkflowMeta, extract_meta};
 pub use run::{PauseKind, WorkflowOutcome};

@@ -12,6 +12,20 @@ const _: [(); MAX_ASSIGNMENT_ENTRIES] = [(); xai_workflow::MAX_AGENT_BUDGET as u
 pub(crate) struct AssignmentKey(String);
 
 impl AssignmentKey {
+    pub(crate) fn workflow(run_id: &str, sequence: u64) -> Self {
+        // The sequence belongs to the contextual workflow envelope, never a
+        // process-global receive order.
+        Self(format!("wf-{run_id}-seq-{sequence}"))
+    }
+
+    pub(crate) fn goal(goal_id: &str, role: &str, skeptic_idx: Option<u32>) -> Option<Self> {
+        let suffix = match skeptic_idx {
+            Some(idx) => format!("skeptic-{idx}"),
+            None => role.to_owned(),
+        };
+        Self::new(format!("goal-{goal_id}-{suffix}"))
+    }
+
     pub(crate) fn new(raw: impl Into<String>) -> Option<Self> {
         let raw = raw.into();
         (!raw.is_empty()
@@ -68,6 +82,28 @@ impl Assignments {
         let route = self.routes.remove(key)?;
         self.bytes = self.bytes.saturating_sub(assignment_bytes(key, &route));
         Some(route)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_keys_are_stable_and_goal_roles_are_distinct() {
+        assert_eq!(AssignmentKey::workflow("run", 7).as_str(), "wf-run-seq-7");
+        assert_eq!(
+            AssignmentKey::goal("goal", "planner", None)
+                .unwrap()
+                .as_str(),
+            "goal-goal-planner"
+        );
+        assert_eq!(
+            AssignmentKey::goal("goal", "skeptic", Some(2))
+                .unwrap()
+                .as_str(),
+            "goal-goal-skeptic-2"
+        );
     }
 }
 
