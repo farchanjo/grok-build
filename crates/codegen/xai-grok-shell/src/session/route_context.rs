@@ -84,16 +84,38 @@ pub fn resolve_production_route_context(inputs: RouteResolutionInputs<'_>) -> Pr
         .unwrap_or_else(|_| ProviderRouteContext::legacy_from_config(inputs.inference))
 }
 
-/// Resolve using models manager and optional auth home.
+/// Compatibility helper: uses ModelsManager picker/default id.
+/// Production sessions must use [`resolve_for_models_manager_with_selection`].
 pub fn resolve_for_models_manager(
     inference: &xai_grok_inference::InferenceConfig,
     models_manager: &crate::agent::models::ModelsManager,
     grok_home: Option<&Path>,
 ) -> ProviderRouteContext {
+    let selection = models_manager.current_model_id();
+    resolve_for_models_manager_with_selection(
+        inference,
+        models_manager,
+        selection.0.as_ref(),
+        grok_home,
+    )
+}
+
+/// Production route resolution from an explicit **canonical selection** id.
+///
+/// Catalog lookup is exact canonical first — never by upstream wire id in
+/// `InferenceConfig.model`.
+pub fn resolve_for_models_manager_with_selection(
+    inference: &xai_grok_inference::InferenceConfig,
+    models_manager: &crate::agent::models::ModelsManager,
+    canonical_selection_id: &str,
+    grok_home: Option<&Path>,
+) -> ProviderRouteContext {
     let cfg = models_manager.config_snapshot();
     let models = models_manager.models();
-    let resolved = crate::agent::config::find_model_by_id(&models, &inference.model)
-        .and_then(|m| m.model_provider.clone());
+    let entry = models
+        .get(canonical_selection_id)
+        .or_else(|| crate::agent::config::find_model_by_id(&models, canonical_selection_id));
+    let resolved = entry.and_then(|m| m.model_provider.clone());
 
     let service = ProviderService::from_model_providers(&cfg.model_providers).ok();
     let registry_generation = service.as_ref().map(|s| s.generation()).unwrap_or(0);
@@ -102,7 +124,8 @@ pub fn resolve_for_models_manager(
     let descriptor = provider_id
         .as_deref()
         .and_then(|id| service.as_ref().and_then(|s| s.get(id)));
-    let descriptor_incarnation = descriptor.and_then(|d| d.incarnation.as_ref().map(|i| i.as_str()));
+    let descriptor_incarnation =
+        descriptor.and_then(|d| d.incarnation.as_ref().map(|i| i.as_str()));
     // Surface-aware selection: Codex vs Platform API by live base URL, not
     // primary-first (which would mis-attribute concurrent OAuth + API-key routes).
     let selected_route = descriptor.and_then(|d| select_descriptor_route(d, &inference.base_url));
@@ -224,9 +247,9 @@ fn derive_api_surface(
         RouteProviderKind::OpenAi => RouteApiSurface::OpenAiPlatform,
         RouteProviderKind::OpenRouter => RouteApiSurface::OpenRouterNative,
         RouteProviderKind::Anthropic => RouteApiSurface::AnthropicMessages,
-        RouteProviderKind::OpenAiCompatible | RouteProviderKind::Zai | RouteProviderKind::Custom => {
-            RouteApiSurface::OpenAiCompatibleSubset
-        }
+        RouteProviderKind::OpenAiCompatible
+        | RouteProviderKind::Zai
+        | RouteProviderKind::Custom => RouteApiSurface::OpenAiCompatibleSubset,
     }
 }
 
@@ -328,12 +351,11 @@ fn live_oauth_binding(
         let path = home.join("auth.json");
         return match read_auth_json(&path) {
             Ok(store) if lookup_auth(&store, OPENAI_OAUTH_SCOPE).is_some() => {
-                let generation = crate::auth::chatgpt_oauth::read_builtin_oauth_binding_generation(
-                    home,
-                )
-                .ok()
-                .flatten()
-                .unwrap_or(0);
+                let generation =
+                    crate::auth::chatgpt_oauth::read_builtin_oauth_binding_generation(home)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
                 (generation, RouteAuthority::Authoritative)
             }
             _ => (0, RouteAuthority::Unverified),
@@ -525,8 +547,9 @@ mod tests {
     #[test]
     fn clear_after_store_is_unverified_despite_retained_meta() {
         let dir = tempdir().unwrap();
-        let _ = store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "or-to-clear-zzzzzzzz")
-            .unwrap();
+        let _ =
+            store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "or-to-clear-zzzzzzzz")
+                .unwrap();
         crate::auth::clear_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE).unwrap();
         let inference = cfg("https://openrouter.ai/api/v1", "m");
         let r = resolved("openrouter", ModelProviderKind::OpenRouter);
