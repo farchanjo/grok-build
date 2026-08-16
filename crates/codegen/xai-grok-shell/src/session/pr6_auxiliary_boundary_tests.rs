@@ -223,39 +223,135 @@ fn web_search_prep_binds_exact_route_attribution_not_sibling() {
     .unwrap();
     // Stamp-from-session would have copied sibling callback; bind replaces or
     // clears it — never leaves a sibling primary identity on the aux pin.
-    let before_bind_was_session = resolved.inference.attribution_callback.is_some();
-    resolved.bind_attribution(
-        Some(&Arc::new(crate::auth::AuthManager::new(
-            dir.path(),
-            crate::auth::GrokComConfig::default(),
-        ))),
-        Some("ws-session".into()),
+    let am = Arc::new(crate::auth::AuthManager::new(
+        dir.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    resolved.bind_attribution(Some(&am), Some("ws-session".into()));
+    // Exact BYOK / configured pins (incl. Unverified) retain route-bound cb.
+    assert!(
+        resolved.supports_route_bound_attribution(),
+        "ws-prov BYOK pin must support route-bound attribution (auth={:?})",
+        resolved.route.authority()
     );
-    if resolved.route.is_authoritative()
-        && resolved.route.credential_route() != RouteCredentialRoute::None
-        && resolved.route.authority() != RouteAuthority::HostFallback
-    {
-        assert!(
-            resolved.inference.attribution_callback.is_some(),
-            "authoritative web-search route must bind exact-route attribution"
-        );
-    } else {
-        // Non-authoritative routes use no-op (no exact-account repair identity).
-        assert!(
-            resolved.inference.attribution_callback.is_none(),
-            "non-authoritative web-search route must clear sibling attribution"
-        );
-        assert!(
-            before_bind_was_session || resolved.inference.attribution_callback.is_none(),
-            "must not retain session sibling attribution on non-authoritative aux route"
-        );
-    }
+    assert!(
+        resolved.inference.attribution_callback.is_some(),
+        "exact web-search route must keep its own attribution after bind"
+    );
+    // Tool-side callback follows the same support gate.
+    let tool_cb = web_search_tool_attribution_for_route(
+        &am,
+        Some("ws-session".into()),
+        &resolved.route,
+        resolved.kind,
+    );
+    assert!(
+        tool_cb.is_some(),
+        "web-search tool callback must be route-bound for exact BYOK"
+    );
+    // Registry seam: dedicated present; session primary must never be selected.
+    let selected =
+        xai_grok_tools::registry::types::select_web_search_attribution_callback(tool_cb.as_ref());
+    assert!(selected.is_some());
+    let absent = xai_grok_tools::registry::types::select_web_search_attribution_callback(None);
+    assert!(
+        absent.is_none(),
+        "registry must not invent a session-primary fallback"
+    );
     assert_eq!(resolved.route.instance_id(), "ws-prov");
     assert_eq!(resolved.route.operation_partition(), "web_search");
     let client = resolved.client().unwrap();
     assert_eq!(
         client.route_context().map(|r| r.instance_id()),
         Some("ws-prov")
+    );
+}
+
+/// Production seam: HostFallback/legacy cannot inherit primary session attribution
+/// for web-search tool registration.
+#[test]
+fn legacy_and_host_fallback_web_search_tool_cb_stays_absent() {
+    let dir = tempdir().unwrap();
+    let mgr = manager(IndexMap::new(), IndexMap::new(), "default", dir.path());
+    let frozen = frozen();
+    let session = session_cfg();
+    let mut resolved = resolve_auxiliary_route(AuxiliaryRouteInputs {
+        explicit_pin_fail_closed: false,
+        ..base_inputs(
+            AuxiliaryPurpose::WebSearch,
+            // Historical default web-search wire slug → legacy_compat when catalog-absent.
+            crate::models::default_web_search_model(),
+            &mgr,
+            &frozen,
+            &session,
+            dir.path(),
+            Some("jwt"),
+        )
+    })
+    .unwrap();
+    assert_eq!(resolved.kind, AuxiliaryRouteKind::LegacyCompat);
+    assert!(!resolved.supports_route_bound_attribution());
+    let am = Arc::new(crate::auth::AuthManager::new(
+        dir.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    resolved.bind_attribution(Some(&am), Some("sid".into()));
+    assert!(resolved.inference.attribution_callback.is_none());
+    let tool_cb = web_search_tool_attribution_for_route(
+        &am,
+        Some("sid".into()),
+        &resolved.route,
+        resolved.kind,
+    );
+    assert!(tool_cb.is_none());
+    // Even if a session primary exists, registry selection stays None.
+    let selected =
+        xai_grok_tools::registry::types::select_web_search_attribution_callback(tool_cb.as_ref());
+    assert!(selected.is_none());
+}
+
+/// Production seam: Unverified BYOK with known instance retains exact callback.
+#[test]
+fn unverified_byok_retains_route_bound_attribution() {
+    let dir = tempdir().unwrap();
+    let mut models = IndexMap::new();
+    models.insert(
+        "byok".into(),
+        entry(
+            "byok-wire",
+            "byok-prov",
+            "https://byok.example/v1",
+            Some("byok-key"),
+        ),
+    );
+    let mgr = manager(models, IndexMap::new(), "byok", dir.path());
+    let frozen = frozen();
+    let session = session_cfg();
+    let mut resolved = resolve_auxiliary_route(base_inputs(
+        AuxiliaryPurpose::Compaction,
+        "byok",
+        &mgr,
+        &frozen,
+        &session,
+        dir.path(),
+        None,
+    ))
+    .unwrap();
+    // Temp home has no provider binding file → typically Unverified, not HostFallback.
+    assert_ne!(resolved.route.authority(), RouteAuthority::HostFallback);
+    assert_eq!(
+        resolved.route.credential_route(),
+        RouteCredentialRoute::ApiKey
+    );
+    assert!(resolved.supports_route_bound_attribution());
+    let am = Arc::new(crate::auth::AuthManager::new(
+        dir.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    resolved.bind_attribution(Some(&am), Some("byok-sid".into()));
+    assert!(
+        resolved.inference.attribution_callback.is_some(),
+        "Unverified BYOK must keep exact-instance attribution, not lose it to is_authoritative()"
     );
 }
 

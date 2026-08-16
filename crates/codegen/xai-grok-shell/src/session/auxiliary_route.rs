@@ -164,24 +164,48 @@ pub struct ResolvedAuxiliaryRoute {
 }
 
 impl ResolvedAuxiliaryRoute {
+    /// Whether this resolved route may bind its own exact-instance 401
+    /// attribution (telemetry + route-cell comparison).
+    ///
+    /// Clears only for truly non-authoritative compatibility identities:
+    /// `LegacyCompat`, [`RouteAuthority::HostFallback`],
+    /// [`RouteCredentialRoute::None`], or an empty / legacy instance id.
+    /// Exact BYOK / configured routes that resolve as `Unverified` (no on-disk
+    /// binding generation) still retain a route-bound callback when they have
+    /// a real credential route and instance id — without broadening
+    /// exact-account *repair* beyond what `ProviderRouteContext` authority
+    /// already encodes.
+    pub fn supports_route_bound_attribution(&self) -> bool {
+        use xai_grok_inference::{RouteAuthority, RouteCredentialRoute};
+        if self.kind == AuxiliaryRouteKind::LegacyCompat {
+            return false;
+        }
+        if self.route.authority() == RouteAuthority::HostFallback {
+            return false;
+        }
+        if self.route.credential_route() == RouteCredentialRoute::None {
+            return false;
+        }
+        let id = self.route.instance_id();
+        if id.is_empty() || id == AUX_LEGACY_COMPAT_INSTANCE {
+            return false;
+        }
+        true
+    }
+
     /// Bind exact-route 401 attribution for this aux sample.
     ///
     /// Replaces any session-primary attribution callback so a 401 cannot
-    /// attribute to a sibling account. Non-authoritative legacy_compat routes
-    /// clear the callback (no exact-account repair identity).
+    /// attribute to a sibling account. Truly non-authoritative
+    /// (`LegacyCompat` / HostFallback / None-credential) routes clear the
+    /// callback. Unverified BYOK pins with a known instance keep a
+    /// route-bound callback for exact-instance telemetry.
     pub fn bind_attribution(
         &mut self,
         auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
         session_id: Option<String>,
     ) {
-        use xai_grok_inference::{RouteAuthority, RouteCredentialRoute};
-        // Legacy / host-fallback / none-credential routes must not claim
-        // exact-account repair identity.
-        if self.kind == AuxiliaryRouteKind::LegacyCompat
-            || self.route.authority() == RouteAuthority::HostFallback
-            || self.route.credential_route() == RouteCredentialRoute::None
-            || !self.route.is_authoritative()
-        {
+        if !self.supports_route_bound_attribution() {
             self.inference.attribution_callback = None;
             return;
         }
@@ -221,6 +245,37 @@ impl ResolvedAuxiliaryRoute {
             "operation": self.route.operation_partition(),
         })
     }
+}
+
+/// Build a tool-side web-search 401 callback for a resolved aux route.
+///
+/// Returns `None` for HostFallback / legacy / none-credential routes so
+/// registration cannot inherit a sibling session tool callback. Unverified
+/// BYOK pins with a known instance id receive a route-bound callback.
+pub(crate) fn web_search_tool_attribution_for_route(
+    auth_manager: &std::sync::Arc<crate::auth::AuthManager>,
+    session_id: Option<String>,
+    route: &ProviderRouteContext,
+    kind: AuxiliaryRouteKind,
+) -> Option<xai_grok_tools::SharedAttributionCallback> {
+    let probe = ResolvedAuxiliaryRoute {
+        purpose: AuxiliaryPurpose::WebSearch,
+        kind,
+        canonical_selection_id: None,
+        upstream_model_id: String::new(),
+        inference: InferenceConfig::default(),
+        route: route.clone(),
+    };
+    if !probe.supports_route_bound_attribution() {
+        return None;
+    }
+    Some(
+        crate::auth::attribution::ShellAttribution::new_tool_callback_with_route(
+            auth_manager.clone(),
+            session_id,
+            route.clone(),
+        ),
+    )
 }
 
 /// Inputs for one auxiliary route resolution.

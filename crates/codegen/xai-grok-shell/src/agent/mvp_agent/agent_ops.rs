@@ -3524,24 +3524,16 @@ impl MvpAgent {
         let (web_search_inference_config, web_search_attribution_callback) =
             match self.prepare_web_search_inference_config() {
                 Some((cfg, route)) => {
-                    // Exact-route tool attribution for web search; non-
-                    // authoritative/legacy routes get no-op (None) so a
-                    // sibling session callback cannot claim repair.
-                    let cb = if route.is_authoritative()
-                        && route.credential_route()
-                            != xai_grok_inference::RouteCredentialRoute::None
-                        && route.authority() != xai_grok_inference::RouteAuthority::HostFallback
-                    {
-                        Some(
-                            crate::auth::attribution::ShellAttribution::new_tool_callback_with_route(
-                                self.auth_manager.clone(),
-                                None,
-                                route,
-                            ),
-                        )
-                    } else {
-                        None
-                    };
+                    // Exact-route tool attribution when the route supports
+                    // route-bound identity (incl. Unverified BYOK). Truly
+                    // non-authoritative HostFallback/legacy → None (no
+                    // sibling session fallback at tool registration).
+                    let cb = crate::session::auxiliary_route::web_search_tool_attribution_for_route(
+                        &self.auth_manager,
+                        None,
+                        &route,
+                        crate::session::auxiliary_route::AuxiliaryRouteKind::Explicit,
+                    );
                     (Some(cfg), cb)
                 }
                 None => (None, None),
