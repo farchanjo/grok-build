@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{assignment::AssignmentKey, exact_route::ExactRoute};
 
-const FILE: &str = "assignment_identity.json";
+const MAX_META_BYTES: usize = 1024 * 1024;
 const MAX_BYTES: usize = 16 * 1024;
 const VERSION: u32 = 1;
 
@@ -59,45 +59,52 @@ impl AssignmentIdentity {
 
 pub(crate) enum Lookup {
     Missing,
-    LegacyUnpaired,
+    LegacyPrimary,
     Valid(AssignmentIdentity),
 }
 
 pub(crate) fn commit(
-    child_session_dir: &Path,
+    target_dir: &Path,
+    primary_meta: &[u8],
     key: &AssignmentKey,
     child_session_id: &str,
     route: &ExactRoute,
 ) -> io::Result<String> {
-    let bytes = serde_json::to_vec(&AssignmentIdentity::from_route(
+    if primary_meta.len() > MAX_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "subagent metadata exceeds size limit",
+        ));
+    }
+    let companion = serde_json::to_vec(&AssignmentIdentity::from_route(
         key,
         child_session_id,
         route,
     ))
     .map_err(io::Error::other)?;
-    if bytes.len() > MAX_BYTES {
+    if companion.len() > MAX_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "assignment identity exceeds size limit",
         ));
     }
     crate::session::storage::model_route::commit_private_identity_pair(
-        child_session_dir,
-        FILE,
-        &bytes,
+        target_dir,
+        primary_meta,
+        &companion,
     )
 }
 
-pub(crate) fn lookup(child_session_dir: &Path) -> io::Result<Lookup> {
+pub(crate) fn lookup(target_dir: &Path) -> io::Result<Lookup> {
     use crate::session::storage::model_route::PrivateIdentityPair;
     match crate::session::storage::model_route::load_private_identity_pair(
-        child_session_dir,
-        FILE,
+        target_dir,
+        MAX_META_BYTES,
         MAX_BYTES,
     )? {
         PrivateIdentityPair::Missing => Ok(Lookup::Missing),
-        PrivateIdentityPair::LegacyUnpaired => Ok(Lookup::LegacyUnpaired),
-        PrivateIdentityPair::Valid { payload, .. } => serde_json::from_slice(&payload)
+        PrivateIdentityPair::LegacyPrimary(_) => Ok(Lookup::LegacyPrimary),
+        PrivateIdentityPair::ValidPair { companion, .. } => serde_json::from_slice(&companion)
             .map(Lookup::Valid)
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "malformed assignment identity")

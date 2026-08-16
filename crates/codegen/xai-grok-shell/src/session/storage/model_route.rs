@@ -41,12 +41,17 @@ const SUMMARY_TMP: &str = "summary.json.identity.tmp";
 const COMPANION_TMP: &str = "model_route.json.identity.tmp";
 const META_TMP: &str = "model_identity.meta.identity.tmp";
 
-// Generic private identity-pair transaction names. They share the same
-// dirfd-rooted, locked transaction discipline as the model-route pair.
+// Generic private identity transaction names. The public pair layout is fixed
+// so parent-side SubagentMeta bytes remain at `meta.json` and the private exact
+// route record remains at `assignment_identity.json`.
+const PRIVATE_PRIMARY_FILE: &str = "meta.json";
+const PRIVATE_COMPANION_FILE: &str = "assignment_identity.json";
 const PRIVATE_META_FILE: &str = "private_identity.meta";
 const PRIVATE_TXN_FILE: &str = "private_identity.txn";
+const PRIVATE_TXN_STAGING: &str = "private_identity.txn.staging";
 const PRIVATE_LOCK_FILE: &str = "private_identity.lock";
-const PRIVATE_PAYLOAD_TMP: &str = "private_identity.payload.tmp";
+const PRIVATE_PRIMARY_TMP: &str = "meta.json.private-identity.tmp";
+const PRIVATE_COMPANION_TMP: &str = "assignment_identity.json.private-identity.tmp";
 const PRIVATE_META_TMP: &str = "private_identity.meta.tmp";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,21 +67,27 @@ struct IdentityMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PrivateIdentityMeta {
     version: u32,
-    payload_name: String,
+    primary_name: String,
+    companion_name: String,
     owner_generation: String,
-    payload_sha256: String,
+    primary_sha256: String,
+    companion_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateTxnArtifact {
+    final_name: String,
+    staged_name: Option<String>,
+    previous_sha256: Option<String>,
+    intended_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PrivateTxnMarker {
     version: u32,
-    payload_name: String,
-    payload_tmp: String,
-    meta_tmp: String,
-    intended_payload_sha256: String,
-    intended_meta_sha256: String,
-    previous_payload_sha256: Option<String>,
-    previous_meta_sha256: Option<String>,
+    primary: PrivateTxnArtifact,
+    companion: PrivateTxnArtifact,
+    metadata: PrivateTxnArtifact,
     ready_to_commit: bool,
 }
 
@@ -184,6 +195,27 @@ mod contain {
             owner_mode_check_file(&f)?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)?;
+            Ok(buf)
+        }
+
+        pub fn read_regular_bounded(&self, name: &str, max_bytes: usize) -> io::Result<Vec<u8>> {
+            let f = self.openat(
+                name,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                0,
+            )?;
+            owner_mode_check_file(&f)?;
+            let limit = u64::try_from(max_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+            let mut buf = Vec::new();
+            f.take(limit).read_to_end(&mut buf)?;
+            if buf.len() > max_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "identity file exceeds size limit",
+                ));
+            }
             Ok(buf)
         }
 
@@ -516,6 +548,17 @@ mod contain {
             fs::read(self.path.join(name))
         }
 
+        pub fn read_regular_bounded(&self, name: &str, max_bytes: usize) -> io::Result<Vec<u8>> {
+            let bytes = self.read_regular(name)?;
+            if bytes.len() > max_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "identity file exceeds size limit",
+                ));
+            }
+            Ok(bytes)
+        }
+
         pub fn write_staged(&self, tmp_name: &str, bytes: &[u8]) -> io::Result<()> {
             validate_single_component(tmp_name)?;
             let p = self.path.join(tmp_name);
@@ -540,15 +583,20 @@ mod contain {
             }
         }
 
-        pub fn lock_exclusive(&self) -> io::Result<File> {
+        pub fn lock_named_exclusive(&self, name: &str) -> io::Result<File> {
+            validate_single_component(name)?;
             let f = OpenOptions::new()
                 .create(true)
                 .read(true)
                 .write(true)
-                .open(self.path.join(MODEL_IDENTITY_LOCK))?;
+                .open(self.path.join(name))?;
             use fs2::FileExt;
             f.lock_exclusive()?;
             Ok(f)
+        }
+
+        pub fn lock_exclusive(&self) -> io::Result<File> {
+            self.lock_named_exclusive(MODEL_IDENTITY_LOCK)
         }
 
         pub fn revalidate(&self) -> io::Result<()> {
@@ -1658,29 +1706,208 @@ mod tests {
     }
 }
 
-/// State returned by the generic private identity-pair reader. Legacy payloads
-/// are deliberately surfaced to callers; they are never silently trusted.
+/// State returned by the private identity reader. Only a standalone primary
+/// is legacy; any companion or private metadata without the complete bound set
+/// fails closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrivateIdentityPair {
     Missing,
-    LegacyUnpaired,
-    Valid {
-        payload: Vec<u8>,
+    LegacyPrimary(Vec<u8>),
+    ValidPair {
+        primary: Vec<u8>,
+        companion: Vec<u8>,
         owner_generation: String,
     },
 }
 
-const PRIVATE_IDENTITY_VERSION: u32 = 1;
+const PRIVATE_IDENTITY_VERSION: u32 = 2;
 const PRIVATE_IDENTITY_MAX_BYTES: usize = 1024 * 1024;
 
-fn private_tmp_name(payload_name: &str) -> io::Result<String> {
-    validate_single_component(payload_name)?;
-    let name = format!("{payload_name}.private-identity.tmp");
-    validate_single_component(&name)?;
-    Ok(name)
+#[derive(Debug)]
+enum PrivateIdentityState {
+    Missing,
+    LegacyPrimary(Vec<u8>),
+    ValidPair {
+        primary: Vec<u8>,
+        companion: Vec<u8>,
+        metadata: Vec<u8>,
+        owner_generation: String,
+    },
+}
+
+struct PrivateStageCleanup<'a> {
+    root: &'a SessionRoot,
+    active: bool,
+}
+
+impl PrivateStageCleanup<'_> {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PrivateStageCleanup<'_> {
+    fn drop(&mut self) {
+        if self.active && !self.root.exists_nofollow(PRIVATE_TXN_FILE).unwrap_or(true) {
+            for name in [
+                PRIVATE_PRIMARY_TMP,
+                PRIVATE_COMPANION_TMP,
+                PRIVATE_META_TMP,
+                PRIVATE_TXN_STAGING,
+            ] {
+                let _ = self.root.unlink_nofollow(name);
+            }
+        }
+    }
+}
+
+fn validate_private_bytes(bytes: &[u8], label: &str) -> io::Result<()> {
+    if bytes.len() > PRIVATE_IDENTITY_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("private identity {label} exceeds size limit"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_private_read_bounds(
+    max_primary_bytes: usize,
+    max_companion_bytes: usize,
+) -> io::Result<()> {
+    if max_primary_bytes == 0
+        || max_primary_bytes > PRIVATE_IDENTITY_MAX_BYTES
+        || max_companion_bytes == 0
+        || max_companion_bytes > PRIVATE_IDENTITY_MAX_BYTES
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private identity read bound invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_private_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn private_metadata_bytes(
+    owner_generation: &str,
+    primary: &[u8],
+    companion: &[u8],
+) -> io::Result<Vec<u8>> {
+    let metadata = PrivateIdentityMeta {
+        version: PRIVATE_IDENTITY_VERSION,
+        primary_name: PRIVATE_PRIMARY_FILE.to_owned(),
+        companion_name: PRIVATE_COMPANION_FILE.to_owned(),
+        owner_generation: owner_generation.to_owned(),
+        primary_sha256: sha256_hex(primary),
+        companion_sha256: sha256_hex(companion),
+    };
+    let bytes = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
+    if bytes.len() > MAX_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity metadata too large",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn private_artifact(
+    final_name: &str,
+    staged_name: &str,
+    previous: Option<&[u8]>,
+    intended: &[u8],
+) -> PrivateTxnArtifact {
+    let previous_sha256 = previous.map(sha256_hex);
+    let intended_sha256 = sha256_hex(intended);
+    PrivateTxnArtifact {
+        final_name: final_name.to_owned(),
+        staged_name: (previous_sha256.as_deref() != Some(intended_sha256.as_str()))
+            .then(|| staged_name.to_owned()),
+        previous_sha256,
+        intended_sha256,
+    }
+}
+
+fn private_marker(
+    previous_primary: Option<&[u8]>,
+    previous_companion: Option<&[u8]>,
+    previous_metadata: Option<&[u8]>,
+    primary: &[u8],
+    companion: &[u8],
+    metadata: &[u8],
+) -> PrivateTxnMarker {
+    PrivateTxnMarker {
+        version: PRIVATE_IDENTITY_VERSION,
+        primary: private_artifact(
+            PRIVATE_PRIMARY_FILE,
+            PRIVATE_PRIMARY_TMP,
+            previous_primary,
+            primary,
+        ),
+        companion: private_artifact(
+            PRIVATE_COMPANION_FILE,
+            PRIVATE_COMPANION_TMP,
+            previous_companion,
+            companion,
+        ),
+        metadata: private_artifact(
+            PRIVATE_META_FILE,
+            PRIVATE_META_TMP,
+            previous_metadata,
+            metadata,
+        ),
+        ready_to_commit: true,
+    }
+}
+
+fn validate_private_artifact(
+    artifact: &PrivateTxnArtifact,
+    final_name: &str,
+    staged_name: &str,
+) -> io::Result<()> {
+    let unchanged = artifact.previous_sha256.as_deref() == Some(&artifact.intended_sha256);
+    let expected_staged = (!unchanged).then_some(staged_name);
+    if artifact.final_name != final_name
+        || artifact.staged_name.as_deref() != expected_staged
+        || artifact
+            .previous_sha256
+            .as_deref()
+            .is_some_and(|digest| !valid_private_digest(digest))
+        || !valid_private_digest(&artifact.intended_sha256)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid private identity journal artifact",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_private_marker(marker: &PrivateTxnMarker) -> io::Result<()> {
+    if marker.version != PRIVATE_IDENTITY_VERSION || !marker.ready_to_commit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid private identity journal",
+        ));
+    }
+    validate_private_artifact(&marker.primary, PRIVATE_PRIMARY_FILE, PRIVATE_PRIMARY_TMP)?;
+    validate_private_artifact(
+        &marker.companion,
+        PRIVATE_COMPANION_FILE,
+        PRIVATE_COMPANION_TMP,
+    )?;
+    validate_private_artifact(&marker.metadata, PRIVATE_META_FILE, PRIVATE_META_TMP)
 }
 
 fn write_private_marker(root: &SessionRoot, marker: &PrivateTxnMarker) -> io::Result<()> {
+    validate_private_marker(marker)?;
     let bytes = serde_json::to_vec(marker).map_err(io::Error::other)?;
     if bytes.len() > MAX_META_BYTES {
         return Err(io::Error::new(
@@ -1688,10 +1915,9 @@ fn write_private_marker(root: &SessionRoot, marker: &PrivateTxnMarker) -> io::Re
             "private identity journal too large",
         ));
     }
-    let staging = "private_identity.txn.staging";
-    let _ = root.unlink_nofollow(staging);
-    root.write_staged(staging, &bytes)?;
-    root.rename_nofollow(staging, PRIVATE_TXN_FILE)?;
+    root.unlink_nofollow(PRIVATE_TXN_STAGING)?;
+    root.write_staged(PRIVATE_TXN_STAGING, &bytes)?;
+    root.rename_nofollow(PRIVATE_TXN_STAGING, PRIVATE_TXN_FILE)?;
     root.fsync_dir()
 }
 
@@ -1700,211 +1926,388 @@ fn clear_private_marker(root: &SessionRoot) -> io::Result<()> {
     root.fsync_dir()
 }
 
-fn private_artifact_matches(root: &SessionRoot, tmp: &str, final_name: &str, digest: &str) -> bool {
-    root.read_regular(tmp)
-        .or_else(|_| root.read_regular(final_name))
-        .is_ok_and(|bytes| sha256_hex(&bytes) == digest)
+fn private_artifact_bound(final_name: &str) -> usize {
+    if final_name == PRIVATE_META_FILE {
+        MAX_META_BYTES
+    } else {
+        PRIVATE_IDENTITY_MAX_BYTES
+    }
+}
+
+fn finish_private_artifact(root: &SessionRoot, artifact: &PrivateTxnArtifact) -> io::Result<()> {
+    let final_bytes = if root.exists_nofollow(&artifact.final_name)? {
+        Some(root.read_regular_bounded(
+            &artifact.final_name,
+            private_artifact_bound(&artifact.final_name),
+        )?)
+    } else {
+        None
+    };
+    let final_digest = final_bytes.as_deref().map(sha256_hex);
+
+    if final_digest.as_deref() == Some(&artifact.intended_sha256) {
+        if let Some(staged_name) = &artifact.staged_name {
+            if root.exists_nofollow(staged_name)? {
+                let staged = root.read_regular_bounded(
+                    staged_name,
+                    private_artifact_bound(&artifact.final_name),
+                )?;
+                if sha256_hex(&staged) != artifact.intended_sha256 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "private identity staged digest mismatch",
+                    ));
+                }
+                root.unlink_nofollow(staged_name)?;
+                root.fsync_dir()?;
+            }
+        }
+        return Ok(());
+    }
+
+    let still_previous = match (&artifact.previous_sha256, &final_digest) {
+        (Some(previous), Some(actual)) => previous == actual,
+        (None, None) => true,
+        _ => false,
+    };
+    if !still_previous {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity final digest does not match journal",
+        ));
+    }
+    let staged_name = artifact.staged_name.as_deref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity journal is missing staged artifact",
+        )
+    })?;
+    let staged =
+        root.read_regular_bounded(staged_name, private_artifact_bound(&artifact.final_name))?;
+    if sha256_hex(&staged) != artifact.intended_sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity staged digest mismatch",
+        ));
+    }
+    root.rename_nofollow(staged_name, &artifact.final_name)?;
+    root.fsync_dir()
+}
+
+fn roll_forward_private_identity_txn(
+    root: &SessionRoot,
+    marker: &PrivateTxnMarker,
+) -> io::Result<()> {
+    validate_private_marker(marker)?;
+    finish_private_artifact(root, &marker.primary)?;
+    finish_private_artifact(root, &marker.companion)?;
+    finish_private_artifact(root, &marker.metadata)?;
+    clear_private_marker(root)
+}
+
+fn cleanup_private_staging(root: &SessionRoot) -> io::Result<()> {
+    for name in [
+        PRIVATE_PRIMARY_TMP,
+        PRIVATE_COMPANION_TMP,
+        PRIVATE_META_TMP,
+        PRIVATE_TXN_STAGING,
+    ] {
+        root.unlink_nofollow(name)?;
+    }
+    root.fsync_dir()
 }
 
 fn recover_private_identity_txn(root: &SessionRoot) -> io::Result<()> {
     if !root.exists_nofollow(PRIVATE_TXN_FILE)? {
-        return Ok(());
+        return cleanup_private_staging(root);
     }
-    let marker_bytes = root.read_regular(PRIVATE_TXN_FILE)?;
-    if marker_bytes.len() > MAX_META_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "private identity journal too large",
-        ));
-    }
+    let marker_bytes = root.read_regular_bounded(PRIVATE_TXN_FILE, MAX_META_BYTES)?;
     let marker: PrivateTxnMarker = serde_json::from_slice(&marker_bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "malformed private identity journal",
         )
     })?;
-    if marker.version != PRIVATE_IDENTITY_VERSION
-        || !marker.ready_to_commit
-        || validate_single_component(&marker.payload_name).is_err()
-        || validate_single_component(&marker.payload_tmp).is_err()
-        || validate_single_component(&marker.meta_tmp).is_err()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid private identity journal",
-        ));
-    }
-    if private_artifact_matches(
-        root,
-        &marker.payload_tmp,
-        &marker.payload_name,
-        &marker.intended_payload_sha256,
-    ) && private_artifact_matches(
-        root,
-        &marker.meta_tmp,
-        PRIVATE_META_FILE,
-        &marker.intended_meta_sha256,
-    ) {
-        if root.exists_nofollow(&marker.payload_tmp)? {
-            root.rename_nofollow(&marker.payload_tmp, &marker.payload_name)?;
-        }
-        if root.exists_nofollow(&marker.meta_tmp)? {
-            root.rename_nofollow(&marker.meta_tmp, PRIVATE_META_FILE)?;
-        }
-        clear_private_marker(root)?;
-        return Ok(());
-    }
-    // A malformed/incomplete transaction is not safe to adopt. Preserve old
-    // finals and remove only trusted staged names.
-    root.unlink_nofollow(&marker.payload_tmp)?;
-    root.unlink_nofollow(&marker.meta_tmp)?;
-    clear_private_marker(root)
+    roll_forward_private_identity_txn(root, &marker)
 }
 
-/// Atomically replace a caller-owned metadata payload and its private identity
-/// companion. The private companion carries a new owner generation every time,
-/// including replacement of a legacy unpaired payload. A future caller can use
-/// that generation to reject a delayed owner before cleanup or promotion.
-pub(crate) fn commit_private_identity_pair(
-    session_dir: &Path,
-    payload_name: &str,
-    payload: &[u8],
-) -> io::Result<String> {
-    validate_single_component(payload_name)?;
-    if payload.is_empty() || payload.len() > PRIVATE_IDENTITY_MAX_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "private identity payload size invalid",
-        ));
-    }
-    let root = SessionRoot::open(session_dir)?;
-    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
-    recover_private_identity_txn(&root)?;
-    let payload_tmp = private_tmp_name(payload_name)?;
-    let old_payload = root
-        .exists_nofollow(payload_name)?
-        .then(|| root.read_regular(payload_name))
-        .transpose()?;
-    let old_meta = root
-        .exists_nofollow(PRIVATE_META_FILE)?
-        .then(|| root.read_regular(PRIVATE_META_FILE))
-        .transpose()?;
-    let _ = root.unlink_nofollow(&payload_tmp);
-    let _ = root.unlink_nofollow(PRIVATE_META_TMP);
-    root.write_staged(&payload_tmp, payload)?;
-    let owner_generation = uuid::Uuid::new_v4().to_string();
-    let meta = PrivateIdentityMeta {
-        version: PRIVATE_IDENTITY_VERSION,
-        payload_name: payload_name.to_owned(),
-        owner_generation: owner_generation.clone(),
-        payload_sha256: sha256_hex(payload),
-    };
-    let meta_bytes = serde_json::to_vec(&meta).map_err(io::Error::other)?;
-    if meta_bytes.len() > MAX_META_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "private identity metadata too large",
-        ));
-    }
-    root.write_staged(PRIVATE_META_TMP, &meta_bytes)?;
-    root.revalidate()?;
-    let marker = PrivateTxnMarker {
-        version: PRIVATE_IDENTITY_VERSION,
-        payload_name: payload_name.to_owned(),
-        payload_tmp: payload_tmp.clone(),
-        meta_tmp: PRIVATE_META_TMP.to_owned(),
-        intended_payload_sha256: sha256_hex(payload),
-        intended_meta_sha256: sha256_hex(&meta_bytes),
-        previous_payload_sha256: old_payload.as_deref().map(sha256_hex),
-        previous_meta_sha256: old_meta.as_deref().map(sha256_hex),
-        ready_to_commit: true,
-    };
-    write_private_marker(&root, &marker)?;
-    root.rename_nofollow(&payload_tmp, payload_name)?;
-    root.fsync_dir()?;
-    root.rename_nofollow(PRIVATE_META_TMP, PRIVATE_META_FILE)?;
-    root.fsync_dir()?;
-    clear_private_marker(&root)?;
-    Ok(owner_generation)
-}
+fn read_private_identity_state_locked(
+    root: &SessionRoot,
+    max_primary_bytes: usize,
+    max_companion_bytes: usize,
+) -> io::Result<PrivateIdentityState> {
+    validate_private_read_bounds(max_primary_bytes, max_companion_bytes)?;
+    let primary_exists = root.exists_nofollow(PRIVATE_PRIMARY_FILE)?;
+    let companion_exists = root.exists_nofollow(PRIVATE_COMPANION_FILE)?;
+    let metadata_exists = root.exists_nofollow(PRIVATE_META_FILE)?;
 
-/// Read only a complete, digest-bound private identity pair. A pre-existing
-/// payload without the companion is returned as `LegacyUnpaired` for explicit
-/// migration; malformed or half-written records are rejected.
-pub(crate) fn load_private_identity_pair(
-    session_dir: &Path,
-    payload_name: &str,
-    max_payload_bytes: usize,
-) -> io::Result<PrivateIdentityPair> {
-    validate_single_component(payload_name)?;
-    if max_payload_bytes == 0 || max_payload_bytes > PRIVATE_IDENTITY_MAX_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "private identity read bound invalid",
-        ));
-    }
-    let root = SessionRoot::open(session_dir)?;
-    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
-    recover_private_identity_txn(&root)?;
-    let payload_exists = root.exists_nofollow(payload_name)?;
-    let meta_exists = root.exists_nofollow(PRIVATE_META_FILE)?;
-    match (payload_exists, meta_exists) {
-        (false, false) => return Ok(PrivateIdentityPair::Missing),
-        // Even migration candidates must be opened through the checked fd so
-        // a legacy payload cannot hide a symlink or hard-link attack.
-        (true, false) => {
-            let payload = root.read_regular(payload_name)?;
-            if payload.len() > max_payload_bytes {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "private identity payload too large",
-                ));
-            }
-            return Ok(PrivateIdentityPair::LegacyUnpaired);
+    match (primary_exists, companion_exists, metadata_exists) {
+        (false, false, false) => return Ok(PrivateIdentityState::Missing),
+        (true, false, false) => {
+            return root
+                .read_regular_bounded(PRIVATE_PRIMARY_FILE, max_primary_bytes)
+                .map(PrivateIdentityState::LegacyPrimary);
         }
-        (false, true) => {
+        (true, true, true) => {}
+        _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "private identity pair incomplete",
+                "private identity artifacts are incomplete",
             ));
         }
-        (true, true) => {}
     }
-    let payload = root.read_regular(payload_name)?;
-    if payload.len() > max_payload_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "private identity payload too large",
-        ));
-    }
-    let meta_bytes = root.read_regular(PRIVATE_META_FILE)?;
-    if meta_bytes.len() > MAX_META_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "private identity metadata too large",
-        ));
-    }
-    let meta: PrivateIdentityMeta = serde_json::from_slice(&meta_bytes).map_err(|_| {
+
+    let primary = root.read_regular_bounded(PRIVATE_PRIMARY_FILE, max_primary_bytes)?;
+    let companion = root.read_regular_bounded(PRIVATE_COMPANION_FILE, max_companion_bytes)?;
+    let metadata = root.read_regular_bounded(PRIVATE_META_FILE, MAX_META_BYTES)?;
+    let parsed: PrivateIdentityMeta = serde_json::from_slice(&metadata).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "malformed private identity metadata",
         )
     })?;
-    if meta.version != PRIVATE_IDENTITY_VERSION
-        || meta.payload_name != payload_name
-        || meta.owner_generation.is_empty()
-        || meta.owner_generation.len() > 128
-        || meta.payload_sha256 != sha256_hex(&payload)
+    if parsed.version != PRIVATE_IDENTITY_VERSION
+        || parsed.primary_name != PRIVATE_PRIMARY_FILE
+        || parsed.companion_name != PRIVATE_COMPANION_FILE
+        || uuid::Uuid::parse_str(&parsed.owner_generation).is_err()
+        || parsed.primary_sha256 != sha256_hex(&primary)
+        || parsed.companion_sha256 != sha256_hex(&companion)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "private identity validation failed",
         ));
     }
-    Ok(PrivateIdentityPair::Valid {
-        payload,
-        owner_generation: meta.owner_generation,
+    Ok(PrivateIdentityState::ValidPair {
+        primary,
+        companion,
+        metadata,
+        owner_generation: parsed.owner_generation,
     })
+}
+
+fn commit_private_artifacts_locked(
+    root: &SessionRoot,
+    previous_primary: Option<&[u8]>,
+    previous_companion: Option<&[u8]>,
+    previous_metadata: Option<&[u8]>,
+    primary: &[u8],
+    companion: &[u8],
+    owner_generation: &str,
+) -> io::Result<()> {
+    let metadata = private_metadata_bytes(owner_generation, primary, companion)?;
+    let marker = private_marker(
+        previous_primary,
+        previous_companion,
+        previous_metadata,
+        primary,
+        companion,
+        &metadata,
+    );
+    if marker.primary.staged_name.is_none()
+        && marker.companion.staged_name.is_none()
+        && marker.metadata.staged_name.is_none()
+    {
+        return Ok(());
+    }
+
+    let mut cleanup = PrivateStageCleanup { root, active: true };
+    cleanup_private_staging(root)?;
+    for (artifact, bytes) in [
+        (&marker.primary, primary),
+        (&marker.companion, companion),
+        (&marker.metadata, metadata.as_slice()),
+    ] {
+        if let Some(staged_name) = &artifact.staged_name {
+            root.write_staged(staged_name, bytes)?;
+        }
+    }
+    root.revalidate()?;
+    // Drop cleans staging only while no marker exists. If marker publication
+    // succeeds but its directory fsync reports an error, retain every staged
+    // file so the next locked operation can recover.
+    write_private_marker(root, &marker)?;
+    cleanup.disarm();
+    roll_forward_private_identity_txn(root, &marker)
+}
+
+/// Commit the first complete primary + companion + private metadata set and
+/// mint its owner generation. Existing artifacts require explicit replacement.
+pub(crate) fn commit_private_identity_pair(
+    target_dir: &Path,
+    primary: &[u8],
+    companion: &[u8],
+) -> io::Result<String> {
+    validate_private_bytes(primary, "primary")?;
+    validate_private_bytes(companion, "companion")?;
+    let root = SessionRoot::open(target_dir)?;
+    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
+    recover_private_identity_txn(&root)?;
+    match read_private_identity_state_locked(
+        &root,
+        PRIVATE_IDENTITY_MAX_BYTES,
+        PRIVATE_IDENTITY_MAX_BYTES,
+    )? {
+        PrivateIdentityState::Missing => {}
+        PrivateIdentityState::LegacyPrimary(_) | PrivateIdentityState::ValidPair { .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "private identity artifacts already exist",
+            ));
+        }
+    }
+    let owner_generation = uuid::Uuid::new_v4().to_string();
+    commit_private_artifacts_locked(
+        &root,
+        None,
+        None,
+        None,
+        primary,
+        companion,
+        &owner_generation,
+    )?;
+    Ok(owner_generation)
+}
+
+/// Update either public final under the existing owner generation. The expected
+/// generation is checked under the transaction lock before any files are staged.
+pub(crate) fn update_private_identity_pair(
+    target_dir: &Path,
+    expected_owner_generation: &str,
+    primary: Option<&[u8]>,
+    companion: Option<&[u8]>,
+) -> io::Result<()> {
+    if primary.is_none() && companion.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private identity update has no artifacts",
+        ));
+    }
+    if let Some(primary) = primary {
+        validate_private_bytes(primary, "primary")?;
+    }
+    if let Some(companion) = companion {
+        validate_private_bytes(companion, "companion")?;
+    }
+    let root = SessionRoot::open(target_dir)?;
+    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
+    recover_private_identity_txn(&root)?;
+    let PrivateIdentityState::ValidPair {
+        primary: previous_primary,
+        companion: previous_companion,
+        metadata: previous_metadata,
+        owner_generation,
+    } = read_private_identity_state_locked(
+        &root,
+        PRIVATE_IDENTITY_MAX_BYTES,
+        PRIVATE_IDENTITY_MAX_BYTES,
+    )?
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity update requires a valid assigned pair",
+        ));
+    };
+    if owner_generation != expected_owner_generation {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private identity owner generation is stale",
+        ));
+    }
+    let intended_primary = primary.unwrap_or(&previous_primary);
+    let intended_companion = companion.unwrap_or(&previous_companion);
+    commit_private_artifacts_locked(
+        &root,
+        Some(&previous_primary),
+        Some(&previous_companion),
+        Some(&previous_metadata),
+        intended_primary,
+        intended_companion,
+        &owner_generation,
+    )
+}
+
+/// Explicitly replace a missing, legacy-primary, or valid set and rotate its
+/// owner generation. Partial or tampered assigned artifacts are never replaced.
+pub(crate) fn replace_private_identity_pair(
+    target_dir: &Path,
+    primary: &[u8],
+    companion: &[u8],
+) -> io::Result<String> {
+    validate_private_bytes(primary, "primary")?;
+    validate_private_bytes(companion, "companion")?;
+    let root = SessionRoot::open(target_dir)?;
+    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
+    recover_private_identity_txn(&root)?;
+    let state = read_private_identity_state_locked(
+        &root,
+        PRIVATE_IDENTITY_MAX_BYTES,
+        PRIVATE_IDENTITY_MAX_BYTES,
+    )?;
+    let owner_generation = uuid::Uuid::new_v4().to_string();
+    match state {
+        PrivateIdentityState::Missing => commit_private_artifacts_locked(
+            &root,
+            None,
+            None,
+            None,
+            primary,
+            companion,
+            &owner_generation,
+        )?,
+        PrivateIdentityState::LegacyPrimary(previous_primary) => commit_private_artifacts_locked(
+            &root,
+            Some(&previous_primary),
+            None,
+            None,
+            primary,
+            companion,
+            &owner_generation,
+        )?,
+        PrivateIdentityState::ValidPair {
+            primary: previous_primary,
+            companion: previous_companion,
+            metadata: previous_metadata,
+            ..
+        } => commit_private_artifacts_locked(
+            &root,
+            Some(&previous_primary),
+            Some(&previous_companion),
+            Some(&previous_metadata),
+            primary,
+            companion,
+            &owner_generation,
+        )?,
+    }
+    Ok(owner_generation)
+}
+
+/// Recover under the private lock and return only the three permitted states.
+pub(crate) fn load_private_identity_pair(
+    target_dir: &Path,
+    max_primary_bytes: usize,
+    max_companion_bytes: usize,
+) -> io::Result<PrivateIdentityPair> {
+    validate_private_read_bounds(max_primary_bytes, max_companion_bytes)?;
+    let root = SessionRoot::open(target_dir)?;
+    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
+    recover_private_identity_txn(&root)?;
+    match read_private_identity_state_locked(&root, max_primary_bytes, max_companion_bytes)? {
+        PrivateIdentityState::Missing => Ok(PrivateIdentityPair::Missing),
+        PrivateIdentityState::LegacyPrimary(primary) => {
+            Ok(PrivateIdentityPair::LegacyPrimary(primary))
+        }
+        PrivateIdentityState::ValidPair {
+            primary,
+            companion,
+            owner_generation,
+            ..
+        } => Ok(PrivateIdentityPair::ValidPair {
+            primary,
+            companion,
+            owner_generation,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1917,69 +2320,323 @@ mod private_identity_tests {
         dir
     }
 
-    #[test]
-    fn pair_round_trips_and_rotates_owner_generation() {
-        let dir = root();
-        let child = dir.path().join("child");
-        let first = commit_private_identity_pair(&child, "meta.json", b"one").unwrap();
-        let PrivateIdentityPair::Valid {
-            payload,
+    fn child(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("child")
+    }
+
+    fn load(path: &Path) -> PrivateIdentityPair {
+        load_private_identity_pair(path, 1024, 1024).unwrap()
+    }
+
+    fn valid(path: &Path) -> (Vec<u8>, Vec<u8>, String) {
+        let PrivateIdentityPair::ValidPair {
+            primary,
+            companion,
             owner_generation,
-        } = load_private_identity_pair(&child, "meta.json", 64).unwrap()
+        } = load(path)
         else {
-            panic!("expected validated pair")
+            panic!("expected valid private identity pair")
         };
-        assert_eq!(payload, b"one");
-        assert_eq!(owner_generation, first);
-        let second = commit_private_identity_pair(&child, "meta.json", b"two").unwrap();
-        assert_ne!(first, second);
-        let PrivateIdentityPair::Valid {
-            payload,
-            owner_generation,
-        } = load_private_identity_pair(&child, "meta.json", 64).unwrap()
-        else {
-            panic!("expected replacement pair")
-        };
-        assert_eq!(payload, b"two");
-        assert_eq!(owner_generation, second);
+        (primary, companion, owner_generation)
+    }
+
+    fn final_bytes(path: &Path) -> [Vec<u8>; 3] {
+        [
+            std::fs::read(path.join(PRIVATE_PRIMARY_FILE)).unwrap(),
+            std::fs::read(path.join(PRIVATE_COMPANION_FILE)).unwrap(),
+            std::fs::read(path.join(PRIVATE_META_FILE)).unwrap(),
+        ]
     }
 
     #[test]
-    fn legacy_payload_is_explicit_and_companion_tamper_fails_closed() {
+    fn initial_pair_round_trips() {
         let dir = root();
-        let child = dir.path().join("child");
-        std::fs::write(child.join("meta.json"), b"legacy").unwrap();
+        let path = child(&dir);
+        let generation = commit_private_identity_pair(&path, b"primary", b"companion").unwrap();
         assert_eq!(
-            load_private_identity_pair(&child, "meta.json", 64).unwrap(),
-            PrivateIdentityPair::LegacyUnpaired
+            valid(&path),
+            (b"primary".to_vec(), b"companion".to_vec(), generation)
         );
-        commit_private_identity_pair(&child, "meta.json", b"fresh").unwrap();
-        std::fs::write(child.join(PRIVATE_META_FILE), b"{}").unwrap();
-        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
     }
 
     #[test]
-    fn partial_or_corrupt_journal_fails_closed() {
+    fn update_preserves_generation() {
         let dir = root();
-        let child = dir.path().join("child");
-        std::fs::write(child.join(PRIVATE_META_FILE), b"{}").unwrap();
-        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
-        std::fs::remove_file(child.join(PRIVATE_META_FILE)).unwrap();
-        std::fs::write(child.join(PRIVATE_TXN_FILE), b"not-json").unwrap();
-        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
+        let path = child(&dir);
+        let generation = commit_private_identity_pair(&path, b"one", b"route-one").unwrap();
+        update_private_identity_pair(&path, &generation, Some(b"two"), None).unwrap();
+        assert_eq!(
+            valid(&path),
+            (b"two".to_vec(), b"route-one".to_vec(), generation.clone())
+        );
+        update_private_identity_pair(&path, &generation, None, Some(b"route-two")).unwrap();
+        assert_eq!(
+            valid(&path),
+            (b"two".to_vec(), b"route-two".to_vec(), generation)
+        );
+    }
+
+    #[test]
+    fn replace_rotates_generation() {
+        let dir = root();
+        let path = child(&dir);
+        let first = commit_private_identity_pair(&path, b"one", b"route-one").unwrap();
+        let second = replace_private_identity_pair(&path, b"two", b"route-two").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            valid(&path),
+            (b"two".to_vec(), b"route-two".to_vec(), second)
+        );
+    }
+
+    #[test]
+    fn stale_update_preserves_replacement_byte_for_byte() {
+        let dir = root();
+        let path = child(&dir);
+        let stale = commit_private_identity_pair(&path, b"one", b"route-one").unwrap();
+        replace_private_identity_pair(&path, b"two", b"route-two").unwrap();
+        let before = final_bytes(&path);
+        let error = update_private_identity_pair(
+            &path,
+            &stale,
+            Some(b"stale-primary"),
+            Some(b"stale-companion"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(final_bytes(&path), before);
+    }
+
+    #[test]
+    fn standalone_meta_json_is_legacy_and_can_be_explicitly_replaced() {
+        let dir = root();
+        let path = child(&dir);
+        std::fs::write(path.join(PRIVATE_PRIMARY_FILE), b"legacy").unwrap();
+        assert_eq!(
+            load(&path),
+            PrivateIdentityPair::LegacyPrimary(b"legacy".to_vec())
+        );
+        let generation = replace_private_identity_pair(&path, b"current", b"assignment").unwrap();
+        assert_eq!(
+            valid(&path),
+            (b"current".to_vec(), b"assignment".to_vec(), generation)
+        );
+    }
+
+    #[test]
+    fn companion_or_private_partial_state_is_never_legacy() {
+        for mask in 1_u8..8 {
+            if mask == 1 {
+                continue;
+            }
+            let dir = root();
+            let path = child(&dir);
+            if mask & 1 != 0 {
+                std::fs::write(path.join(PRIVATE_PRIMARY_FILE), b"primary").unwrap();
+            }
+            if mask & 2 != 0 {
+                std::fs::write(path.join(PRIVATE_COMPANION_FILE), b"companion").unwrap();
+            }
+            if mask & 4 != 0 {
+                std::fs::write(path.join(PRIVATE_META_FILE), b"metadata").unwrap();
+            }
+            assert!(
+                load_private_identity_pair(&path, 1024, 1024).is_err(),
+                "partial mask {mask} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn tampering_primary_companion_or_private_digest_fails_closed() {
+        for name in [PRIVATE_PRIMARY_FILE, PRIVATE_COMPANION_FILE] {
+            let dir = root();
+            let path = child(&dir);
+            commit_private_identity_pair(&path, b"primary", b"companion").unwrap();
+            let mut tampered = std::fs::read(path.join(name)).unwrap();
+            let index = tampered.len() / 2;
+            tampered[index] ^= 1;
+            std::fs::write(path.join(name), tampered).unwrap();
+            assert!(
+                load_private_identity_pair(&path, 1024, 1024).is_err(),
+                "tampered {name} must fail closed"
+            );
+        }
+
+        let dir = root();
+        let path = child(&dir);
+        commit_private_identity_pair(&path, b"primary", b"companion").unwrap();
+        let mut metadata: PrivateIdentityMeta =
+            serde_json::from_slice(&std::fs::read(path.join(PRIVATE_META_FILE)).unwrap()).unwrap();
+        metadata.primary_sha256 = "f".repeat(64);
+        std::fs::write(
+            path.join(PRIVATE_META_FILE),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        assert!(load_private_identity_pair(&path, 1024, 1024).is_err());
+    }
+
+    fn stage_crash(
+        path: &Path,
+        previous: Option<(&[u8], &[u8], &[u8])>,
+        primary: &[u8],
+        companion: &[u8],
+        owner_generation: &str,
+        completed_renames: usize,
+    ) -> PrivateTxnMarker {
+        let root = SessionRoot::open(path).unwrap();
+        let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE).unwrap();
+        recover_private_identity_txn(&root).unwrap();
+        let metadata = private_metadata_bytes(owner_generation, primary, companion).unwrap();
+        let (previous_primary, previous_companion, previous_metadata) = previous
+            .map(|(primary, companion, metadata)| (Some(primary), Some(companion), Some(metadata)))
+            .unwrap_or((None, None, None));
+        let marker = private_marker(
+            previous_primary,
+            previous_companion,
+            previous_metadata,
+            primary,
+            companion,
+            &metadata,
+        );
+        cleanup_private_staging(&root).unwrap();
+        for (artifact, bytes) in [
+            (&marker.primary, primary),
+            (&marker.companion, companion),
+            (&marker.metadata, metadata.as_slice()),
+        ] {
+            if let Some(staged_name) = &artifact.staged_name {
+                root.write_staged(staged_name, bytes).unwrap();
+            }
+        }
+        write_private_marker(&root, &marker).unwrap();
+        for artifact in [&marker.primary, &marker.companion, &marker.metadata]
+            .into_iter()
+            .take(completed_renames)
+        {
+            if let Some(staged_name) = &artifact.staged_name {
+                root.rename_nofollow(staged_name, &artifact.final_name)
+                    .unwrap();
+                root.fsync_dir().unwrap();
+            }
+        }
+        marker
+    }
+
+    #[test]
+    fn crash_before_journal_cleans_each_staging_boundary() {
+        for staged_count in 1..=3 {
+            let dir = root();
+            let path = child(&dir);
+            let root = SessionRoot::open(&path).unwrap();
+            let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE).unwrap();
+            let generation = uuid::Uuid::new_v4().to_string();
+            let metadata = private_metadata_bytes(&generation, b"primary", b"companion").unwrap();
+            for (name, bytes) in [
+                (PRIVATE_PRIMARY_TMP, b"primary".as_slice()),
+                (PRIVATE_COMPANION_TMP, b"companion".as_slice()),
+                (PRIVATE_META_TMP, metadata.as_slice()),
+            ]
+            .into_iter()
+            .take(staged_count)
+            {
+                root.write_staged(name, bytes).unwrap();
+            }
+            drop(_lock);
+            drop(root);
+            assert_eq!(load(&path), PrivateIdentityPair::Missing);
+            for name in [PRIVATE_PRIMARY_TMP, PRIVATE_COMPANION_TMP, PRIVATE_META_TMP] {
+                assert!(!path.join(name).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn crash_recovery_completes_every_initial_rename_boundary() {
+        for completed_renames in 0..=3 {
+            let dir = root();
+            let path = child(&dir);
+            let generation = uuid::Uuid::new_v4().to_string();
+            stage_crash(
+                &path,
+                None,
+                b"primary",
+                b"companion",
+                &generation,
+                completed_renames,
+            );
+            assert_eq!(
+                valid(&path),
+                (b"primary".to_vec(), b"companion".to_vec(), generation),
+                "recovery failed after {completed_renames} final renames"
+            );
+            assert!(!path.join(PRIVATE_TXN_FILE).exists());
+        }
+    }
+
+    #[test]
+    fn crash_recovery_accepts_unchanged_sibling_previous_hashes() {
+        for completed_renames in 0..=3 {
+            let dir = root();
+            let path = child(&dir);
+            let generation = commit_private_identity_pair(&path, b"old", b"unchanged").unwrap();
+            let previous = final_bytes(&path);
+            let marker = stage_crash(
+                &path,
+                Some((&previous[0], &previous[1], &previous[2])),
+                b"new",
+                b"unchanged",
+                &generation,
+                completed_renames,
+            );
+            assert_eq!(marker.companion.staged_name, None);
+            assert_eq!(
+                marker.companion.previous_sha256,
+                Some(marker.companion.intended_sha256.clone())
+            );
+            assert_eq!(
+                valid(&path),
+                (b"new".to_vec(), b"unchanged".to_vec(), generation),
+                "recovery with an unchanged sibling failed after {completed_renames} boundaries"
+            );
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlink_and_hard_link_payloads_are_rejected() {
+    fn symlink_and_hard_link_finals_are_rejected() {
         use std::os::unix::fs::symlink;
-        let dir = root();
-        let child = dir.path().join("child");
-        symlink("/etc/passwd", child.join("meta.json")).unwrap();
-        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
-        std::fs::remove_file(child.join("meta.json")).unwrap();
-        std::fs::write(child.join("meta.json"), b"legacy").unwrap();
-        std::fs::hard_link(child.join("meta.json"), child.join("meta-copy.json")).unwrap();
-        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
+
+        for name in [
+            PRIVATE_PRIMARY_FILE,
+            PRIVATE_COMPANION_FILE,
+            PRIVATE_META_FILE,
+        ] {
+            let dir = root();
+            let path = child(&dir);
+            commit_private_identity_pair(&path, b"primary", b"companion").unwrap();
+            std::fs::remove_file(path.join(name)).unwrap();
+            symlink("untrusted", path.join(name)).unwrap();
+            assert!(
+                load_private_identity_pair(&path, 1024, 1024).is_err(),
+                "symlink final {name} must fail closed"
+            );
+        }
+
+        for name in [
+            PRIVATE_PRIMARY_FILE,
+            PRIVATE_COMPANION_FILE,
+            PRIVATE_META_FILE,
+        ] {
+            let dir = root();
+            let path = child(&dir);
+            commit_private_identity_pair(&path, b"primary", b"companion").unwrap();
+            std::fs::hard_link(path.join(name), path.join(format!("{name}.copy"))).unwrap();
+            assert!(
+                load_private_identity_pair(&path, 1024, 1024).is_err(),
+                "hard-linked final {name} must fail closed"
+            );
+        }
     }
 }
