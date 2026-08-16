@@ -41,6 +41,14 @@ const SUMMARY_TMP: &str = "summary.json.identity.tmp";
 const COMPANION_TMP: &str = "model_route.json.identity.tmp";
 const META_TMP: &str = "model_identity.meta.identity.tmp";
 
+// Generic private identity-pair transaction names. They share the same
+// dirfd-rooted, locked transaction discipline as the model-route pair.
+const PRIVATE_META_FILE: &str = "private_identity.meta";
+const PRIVATE_TXN_FILE: &str = "private_identity.txn";
+const PRIVATE_LOCK_FILE: &str = "private_identity.lock";
+const PRIVATE_PAYLOAD_TMP: &str = "private_identity.payload.tmp";
+const PRIVATE_META_TMP: &str = "private_identity.meta.tmp";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct IdentityMeta {
     version: u32,
@@ -49,6 +57,27 @@ struct IdentityMeta {
     summary_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     companion_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateIdentityMeta {
+    version: u32,
+    payload_name: String,
+    owner_generation: String,
+    payload_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateTxnMarker {
+    version: u32,
+    payload_name: String,
+    payload_tmp: String,
+    meta_tmp: String,
+    intended_payload_sha256: String,
+    intended_meta_sha256: String,
+    previous_payload_sha256: Option<String>,
+    previous_meta_sha256: Option<String>,
+    ready_to_commit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +242,27 @@ mod contain {
                 return Err(err);
             }
             Ok(())
+        }
+
+        pub fn lock_named_exclusive(&self, name: &str) -> io::Result<File> {
+            let f = match self.openat(
+                name,
+                libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            ) {
+                Ok(f) => f,
+                Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "refusing symlink identity lock",
+                    ));
+                }
+                Err(e) => return Err(e),
+            };
+            owner_mode_check_file(&f)?;
+            use fs2::FileExt;
+            f.lock_exclusive()?;
+            Ok(f)
         }
 
         pub fn lock_exclusive(&self) -> io::Result<File> {
@@ -407,6 +457,18 @@ mod contain {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "identity file not owned by current user",
+            ));
+        }
+        if meta.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "identity file has unexpected hard links",
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "identity file permissions are not owner-only",
             ));
         }
         Ok(())
@@ -1593,5 +1655,331 @@ mod tests {
         fs::create_dir_all(&session).unwrap();
         let err = root.revalidate().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+}
+
+/// State returned by the generic private identity-pair reader. Legacy payloads
+/// are deliberately surfaced to callers; they are never silently trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrivateIdentityPair {
+    Missing,
+    LegacyUnpaired,
+    Valid {
+        payload: Vec<u8>,
+        owner_generation: String,
+    },
+}
+
+const PRIVATE_IDENTITY_VERSION: u32 = 1;
+const PRIVATE_IDENTITY_MAX_BYTES: usize = 1024 * 1024;
+
+fn private_tmp_name(payload_name: &str) -> io::Result<String> {
+    validate_single_component(payload_name)?;
+    let name = format!("{payload_name}.private-identity.tmp");
+    validate_single_component(&name)?;
+    Ok(name)
+}
+
+fn write_private_marker(root: &SessionRoot, marker: &PrivateTxnMarker) -> io::Result<()> {
+    let bytes = serde_json::to_vec(marker).map_err(io::Error::other)?;
+    if bytes.len() > MAX_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity journal too large",
+        ));
+    }
+    let staging = "private_identity.txn.staging";
+    let _ = root.unlink_nofollow(staging);
+    root.write_staged(staging, &bytes)?;
+    root.rename_nofollow(staging, PRIVATE_TXN_FILE)?;
+    root.fsync_dir()
+}
+
+fn clear_private_marker(root: &SessionRoot) -> io::Result<()> {
+    root.unlink_nofollow(PRIVATE_TXN_FILE)?;
+    root.fsync_dir()
+}
+
+fn private_artifact_matches(root: &SessionRoot, tmp: &str, final_name: &str, digest: &str) -> bool {
+    root.read_regular(tmp)
+        .or_else(|_| root.read_regular(final_name))
+        .is_ok_and(|bytes| sha256_hex(&bytes) == digest)
+}
+
+fn recover_private_identity_txn(root: &SessionRoot) -> io::Result<()> {
+    if !root.exists_nofollow(PRIVATE_TXN_FILE)? {
+        return Ok(());
+    }
+    let marker_bytes = root.read_regular(PRIVATE_TXN_FILE)?;
+    if marker_bytes.len() > MAX_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity journal too large",
+        ));
+    }
+    let marker: PrivateTxnMarker = serde_json::from_slice(&marker_bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed private identity journal",
+        )
+    })?;
+    if marker.version != PRIVATE_IDENTITY_VERSION
+        || !marker.ready_to_commit
+        || validate_single_component(&marker.payload_name).is_err()
+        || validate_single_component(&marker.payload_tmp).is_err()
+        || validate_single_component(&marker.meta_tmp).is_err()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid private identity journal",
+        ));
+    }
+    if private_artifact_matches(
+        root,
+        &marker.payload_tmp,
+        &marker.payload_name,
+        &marker.intended_payload_sha256,
+    ) && private_artifact_matches(
+        root,
+        &marker.meta_tmp,
+        PRIVATE_META_FILE,
+        &marker.intended_meta_sha256,
+    ) {
+        if root.exists_nofollow(&marker.payload_tmp)? {
+            root.rename_nofollow(&marker.payload_tmp, &marker.payload_name)?;
+        }
+        if root.exists_nofollow(&marker.meta_tmp)? {
+            root.rename_nofollow(&marker.meta_tmp, PRIVATE_META_FILE)?;
+        }
+        clear_private_marker(root)?;
+        return Ok(());
+    }
+    // A malformed/incomplete transaction is not safe to adopt. Preserve old
+    // finals and remove only trusted staged names.
+    root.unlink_nofollow(&marker.payload_tmp)?;
+    root.unlink_nofollow(&marker.meta_tmp)?;
+    clear_private_marker(root)
+}
+
+/// Atomically replace a caller-owned metadata payload and its private identity
+/// companion. The private companion carries a new owner generation every time,
+/// including replacement of a legacy unpaired payload. A future caller can use
+/// that generation to reject a delayed owner before cleanup or promotion.
+pub(crate) fn commit_private_identity_pair(
+    session_dir: &Path,
+    payload_name: &str,
+    payload: &[u8],
+) -> io::Result<String> {
+    validate_single_component(payload_name)?;
+    if payload.is_empty() || payload.len() > PRIVATE_IDENTITY_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private identity payload size invalid",
+        ));
+    }
+    let root = SessionRoot::open(session_dir)?;
+    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
+    recover_private_identity_txn(&root)?;
+    let payload_tmp = private_tmp_name(payload_name)?;
+    let old_payload = root
+        .exists_nofollow(payload_name)?
+        .then(|| root.read_regular(payload_name))
+        .transpose()?;
+    let old_meta = root
+        .exists_nofollow(PRIVATE_META_FILE)?
+        .then(|| root.read_regular(PRIVATE_META_FILE))
+        .transpose()?;
+    let _ = root.unlink_nofollow(&payload_tmp);
+    let _ = root.unlink_nofollow(PRIVATE_META_TMP);
+    root.write_staged(&payload_tmp, payload)?;
+    let owner_generation = uuid::Uuid::new_v4().to_string();
+    let meta = PrivateIdentityMeta {
+        version: PRIVATE_IDENTITY_VERSION,
+        payload_name: payload_name.to_owned(),
+        owner_generation: owner_generation.clone(),
+        payload_sha256: sha256_hex(payload),
+    };
+    let meta_bytes = serde_json::to_vec(&meta).map_err(io::Error::other)?;
+    if meta_bytes.len() > MAX_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity metadata too large",
+        ));
+    }
+    root.write_staged(PRIVATE_META_TMP, &meta_bytes)?;
+    root.revalidate()?;
+    let marker = PrivateTxnMarker {
+        version: PRIVATE_IDENTITY_VERSION,
+        payload_name: payload_name.to_owned(),
+        payload_tmp: payload_tmp.clone(),
+        meta_tmp: PRIVATE_META_TMP.to_owned(),
+        intended_payload_sha256: sha256_hex(payload),
+        intended_meta_sha256: sha256_hex(&meta_bytes),
+        previous_payload_sha256: old_payload.as_deref().map(sha256_hex),
+        previous_meta_sha256: old_meta.as_deref().map(sha256_hex),
+        ready_to_commit: true,
+    };
+    write_private_marker(&root, &marker)?;
+    root.rename_nofollow(&payload_tmp, payload_name)?;
+    root.fsync_dir()?;
+    root.rename_nofollow(PRIVATE_META_TMP, PRIVATE_META_FILE)?;
+    root.fsync_dir()?;
+    clear_private_marker(&root)?;
+    Ok(owner_generation)
+}
+
+/// Read only a complete, digest-bound private identity pair. A pre-existing
+/// payload without the companion is returned as `LegacyUnpaired` for explicit
+/// migration; malformed or half-written records are rejected.
+pub(crate) fn load_private_identity_pair(
+    session_dir: &Path,
+    payload_name: &str,
+    max_payload_bytes: usize,
+) -> io::Result<PrivateIdentityPair> {
+    validate_single_component(payload_name)?;
+    if max_payload_bytes == 0 || max_payload_bytes > PRIVATE_IDENTITY_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private identity read bound invalid",
+        ));
+    }
+    let root = SessionRoot::open(session_dir)?;
+    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
+    recover_private_identity_txn(&root)?;
+    let payload_exists = root.exists_nofollow(payload_name)?;
+    let meta_exists = root.exists_nofollow(PRIVATE_META_FILE)?;
+    match (payload_exists, meta_exists) {
+        (false, false) => return Ok(PrivateIdentityPair::Missing),
+        // Even migration candidates must be opened through the checked fd so
+        // a legacy payload cannot hide a symlink or hard-link attack.
+        (true, false) => {
+            let payload = root.read_regular(payload_name)?;
+            if payload.len() > max_payload_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "private identity payload too large",
+                ));
+            }
+            return Ok(PrivateIdentityPair::LegacyUnpaired);
+        }
+        (false, true) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private identity pair incomplete",
+            ));
+        }
+        (true, true) => {}
+    }
+    let payload = root.read_regular(payload_name)?;
+    if payload.len() > max_payload_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity payload too large",
+        ));
+    }
+    let meta_bytes = root.read_regular(PRIVATE_META_FILE)?;
+    if meta_bytes.len() > MAX_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity metadata too large",
+        ));
+    }
+    let meta: PrivateIdentityMeta = serde_json::from_slice(&meta_bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed private identity metadata",
+        )
+    })?;
+    if meta.version != PRIVATE_IDENTITY_VERSION
+        || meta.payload_name != payload_name
+        || meta.owner_generation.is_empty()
+        || meta.owner_generation.len() > 128
+        || meta.payload_sha256 != sha256_hex(&payload)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private identity validation failed",
+        ));
+    }
+    Ok(PrivateIdentityPair::Valid {
+        payload,
+        owner_generation: meta.owner_generation,
+    })
+}
+
+#[cfg(test)]
+mod private_identity_tests {
+    use super::*;
+
+    fn root() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("child")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pair_round_trips_and_rotates_owner_generation() {
+        let dir = root();
+        let child = dir.path().join("child");
+        let first = commit_private_identity_pair(&child, "meta.json", b"one").unwrap();
+        let PrivateIdentityPair::Valid {
+            payload,
+            owner_generation,
+        } = load_private_identity_pair(&child, "meta.json", 64).unwrap()
+        else {
+            panic!("expected validated pair")
+        };
+        assert_eq!(payload, b"one");
+        assert_eq!(owner_generation, first);
+        let second = commit_private_identity_pair(&child, "meta.json", b"two").unwrap();
+        assert_ne!(first, second);
+        let PrivateIdentityPair::Valid {
+            payload,
+            owner_generation,
+        } = load_private_identity_pair(&child, "meta.json", 64).unwrap()
+        else {
+            panic!("expected replacement pair")
+        };
+        assert_eq!(payload, b"two");
+        assert_eq!(owner_generation, second);
+    }
+
+    #[test]
+    fn legacy_payload_is_explicit_and_companion_tamper_fails_closed() {
+        let dir = root();
+        let child = dir.path().join("child");
+        std::fs::write(child.join("meta.json"), b"legacy").unwrap();
+        assert_eq!(
+            load_private_identity_pair(&child, "meta.json", 64).unwrap(),
+            PrivateIdentityPair::LegacyUnpaired
+        );
+        commit_private_identity_pair(&child, "meta.json", b"fresh").unwrap();
+        std::fs::write(child.join(PRIVATE_META_FILE), b"{}").unwrap();
+        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
+    }
+
+    #[test]
+    fn partial_or_corrupt_journal_fails_closed() {
+        let dir = root();
+        let child = dir.path().join("child");
+        std::fs::write(child.join(PRIVATE_META_FILE), b"{}").unwrap();
+        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
+        std::fs::remove_file(child.join(PRIVATE_META_FILE)).unwrap();
+        std::fs::write(child.join(PRIVATE_TXN_FILE), b"not-json").unwrap();
+        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_and_hard_link_payloads_are_rejected() {
+        use std::os::unix::fs::symlink;
+        let dir = root();
+        let child = dir.path().join("child");
+        symlink("/etc/passwd", child.join("meta.json")).unwrap();
+        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
+        std::fs::remove_file(child.join("meta.json")).unwrap();
+        std::fs::write(child.join("meta.json"), b"legacy").unwrap();
+        std::fs::hard_link(child.join("meta.json"), child.join("meta-copy.json")).unwrap();
+        assert!(load_private_identity_pair(&child, "meta.json", 64).is_err());
     }
 }
