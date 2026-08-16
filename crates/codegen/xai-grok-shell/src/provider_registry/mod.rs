@@ -16,7 +16,10 @@ pub mod toml_edit;
 pub use cache::{
     CAPABILITY_CACHE_VERSION, CATALOG_CACHE_VERSION, CacheOrigin, CacheValidationError,
     CapabilityCacheEntry, CapabilityCacheStore, CatalogCacheEntry, CatalogCacheStore,
-    remove_all_provider_caches,
+    CredentialBindingId, FingerprintError, LegacyImportMarker, OriginNormalizeError,
+    ProviderCacheIdentity, ProviderCacheState, ProviderCacheStore, ProviderCacheTxnFault,
+    STATE_CACHE_VERSION, normalize_endpoint_origin, org_project_fingerprint,
+    remove_all_provider_caches, validate_org_project_fingerprint,
 };
 pub use gate::{
     MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED, MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_enabled,

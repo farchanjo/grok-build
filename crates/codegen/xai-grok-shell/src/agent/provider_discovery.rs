@@ -85,6 +85,14 @@ pub async fn discover_provider_models(
             .unwrap_or(0),
         models: models.iter().map(|id| json!({"id": id})).collect(),
         baseline_version: None,
+        incarnation: None,
+        provider_kind: None,
+        api_surface: None,
+        credential_route: None,
+        credential_binding_id: None,
+        org_project_fingerprint: None,
+        catalog_generation: 0,
+        lifecycle_generation: None,
     };
     let _ = CatalogCacheStore::store(grok_home, &entry);
 
