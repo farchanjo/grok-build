@@ -14,6 +14,26 @@ fn query_value<T: serde::Serialize + ?Sized>(v: &T) -> String {
     }
 }
 
+/// Provider-native OpenRouter credential class. GET /key is application;
+/// keys/BYOK/workspaces/guardrails/observability/organization management is admin.
+fn openrouter_credential(path: &str) -> CredentialKind {
+    const ADMIN_PREFIXES: &[&str] = &[
+        "/keys",
+        "/auth/keys",
+        "/byok",
+        "/workspaces",
+        "/guardrails",
+        "/observability",
+        "/organization",
+    ];
+    for prefix in ADMIN_PREFIXES {
+        if path == *prefix || path.starts_with(&format!("{prefix}/")) {
+            return CredentialKind::Admin;
+        }
+    }
+    CredentialKind::Application
+}
+
 impl crate::openai_platform::client::OpenRouterClient {
     /// `GET /activity` — `getUserActivity` (json).
     /// Transports: http_json.
@@ -35,10 +55,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -60,10 +80,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -88,10 +108,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -117,10 +137,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: true,
             multipart: false,
@@ -149,10 +169,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: true,
@@ -177,10 +197,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -205,10 +225,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -245,10 +265,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -282,10 +302,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -310,10 +330,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -339,10 +359,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -368,10 +388,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -400,10 +420,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "PATCH",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -428,10 +448,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -456,10 +476,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: true,
             expect_binary: false,
             multipart: false,
@@ -484,10 +504,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -509,10 +529,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -524,7 +544,7 @@ impl crate::openai_platform::client::OpenRouterClient {
     }
 
     /// `POST /credits/coinbase` — `createCoinbaseCharge` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, unknown.
     pub async fn create_coinbase_charge(
         &self,
         _request: CreateCoinbaseChargeParams,
@@ -534,10 +554,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -580,10 +600,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -626,10 +646,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -654,10 +674,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -682,10 +702,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: true,
             expect_binary: false,
             multipart: false,
@@ -713,10 +733,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -738,10 +758,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -769,10 +789,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -801,10 +821,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: true,
@@ -830,10 +850,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -862,10 +882,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -895,10 +915,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: true,
             multipart: false,
@@ -924,10 +944,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -950,10 +970,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -978,10 +998,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1012,10 +1032,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1040,10 +1060,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1071,10 +1091,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1102,10 +1122,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1131,10 +1151,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1160,10 +1180,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1192,10 +1212,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "PATCH",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1227,10 +1247,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1259,10 +1279,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1291,10 +1311,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1326,10 +1346,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1358,10 +1378,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1390,10 +1410,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1418,10 +1438,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1446,10 +1466,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: true,
             expect_binary: false,
             multipart: false,
@@ -1471,10 +1491,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1504,10 +1524,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1529,10 +1549,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1560,10 +1580,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1585,10 +1605,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1611,10 +1631,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1637,10 +1657,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1666,10 +1686,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "PATCH",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1694,10 +1714,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1722,10 +1742,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: true,
             expect_binary: false,
             multipart: false,
@@ -1752,10 +1772,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1861,10 +1881,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1889,10 +1909,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1920,10 +1940,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1953,10 +1973,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -1987,10 +2007,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2015,10 +2035,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2044,10 +2064,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2073,10 +2093,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2105,10 +2125,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "PATCH",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2167,10 +2187,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2193,10 +2213,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2209,6 +2229,8 @@ impl crate::openai_platform::client::OpenRouterClient {
 
     /// `POST /presets/{slug}/chat/completions` — `createPresetsChatCompletions` (json).
     /// Transports: http_json.
+    /// `POST /presets/{slug}/chat/completions` — `createPresetsChatCompletions` (json).
+    /// Transports: http_json, http_sse.
     pub async fn create_presets_chat_completions(
         &self,
         request: CreatePresetsChatCompletionsParams,
@@ -2225,10 +2247,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2239,8 +2261,40 @@ impl crate::openai_platform::client::OpenRouterClient {
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
     }
 
+    /// `POST /presets/{slug}/chat/completions` — `createPresetsChatCompletions` (sse).
+    /// Transports: http_json, http_sse.
+    pub async fn create_presets_chat_completions_stream(
+        &self,
+        request: CreatePresetsChatCompletionsParams,
+    ) -> PlatformResult<CreatePresetsChatCompletionsSseResult> {
+        let mut path = String::from("/presets/{slug}/chat/completions");
+        path = path.replace(
+            "{slug}",
+            &crate::openai_platform::url_policy::encode_path_segment(&request.slug),
+        );
+        let query: BTreeMap<String, String> = BTreeMap::new();
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
+        let spec = HttpRequestSpec {
+            method: "POST",
+            credential: openrouter_credential(&path),
+            path,
+            query,
+            body,
+            expect_sse: true,
+            expect_binary: false,
+            multipart: false,
+            operation_id: "createPresetsChatCompletions",
+            idempotent: false,
+        };
+        let events = self.transport.execute_sse(spec).await?;
+        Ok(CreatePresetsChatCompletionsSseResult { events })
+    }
+
     /// `POST /presets/{slug}/messages` — `createPresetsMessages` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, http_sse.
     pub async fn create_presets_messages(
         &self,
         request: CreatePresetsMessagesParams,
@@ -2257,10 +2311,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2271,8 +2325,40 @@ impl crate::openai_platform::client::OpenRouterClient {
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
     }
 
+    /// `POST /presets/{slug}/messages` — `createPresetsMessages` (sse).
+    /// Transports: http_json, http_sse.
+    pub async fn create_presets_messages_stream(
+        &self,
+        request: CreatePresetsMessagesParams,
+    ) -> PlatformResult<CreatePresetsMessagesSseResult> {
+        let mut path = String::from("/presets/{slug}/messages");
+        path = path.replace(
+            "{slug}",
+            &crate::openai_platform::url_policy::encode_path_segment(&request.slug),
+        );
+        let query: BTreeMap<String, String> = BTreeMap::new();
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
+        let spec = HttpRequestSpec {
+            method: "POST",
+            credential: openrouter_credential(&path),
+            path,
+            query,
+            body,
+            expect_sse: true,
+            expect_binary: false,
+            multipart: false,
+            operation_id: "createPresetsMessages",
+            idempotent: false,
+        };
+        let events = self.transport.execute_sse(spec).await?;
+        Ok(CreatePresetsMessagesSseResult { events })
+    }
+
     /// `POST /presets/{slug}/responses` — `createPresetsResponses` (json).
-    /// Transports: http_json.
+    /// Transports: http_json, http_sse.
     pub async fn create_presets_responses(
         &self,
         request: CreatePresetsResponsesParams,
@@ -2289,10 +2375,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2301,6 +2387,38 @@ impl crate::openai_platform::client::OpenRouterClient {
         };
         let raw = self.transport.execute_json(spec).await?;
         serde_json::from_value(raw).map_err(|e| PlatformError::Decode(e.to_string()))
+    }
+
+    /// `POST /presets/{slug}/responses` — `createPresetsResponses` (sse).
+    /// Transports: http_json, http_sse.
+    pub async fn create_presets_responses_stream(
+        &self,
+        request: CreatePresetsResponsesParams,
+    ) -> PlatformResult<CreatePresetsResponsesSseResult> {
+        let mut path = String::from("/presets/{slug}/responses");
+        path = path.replace(
+            "{slug}",
+            &crate::openai_platform::url_policy::encode_path_segment(&request.slug),
+        );
+        let query: BTreeMap<String, String> = BTreeMap::new();
+        let body = Some(
+            serde_json::to_value(&request.body)
+                .map_err(|e| PlatformError::InvalidRequest(e.to_string()))?,
+        );
+        let spec = HttpRequestSpec {
+            method: "POST",
+            credential: openrouter_credential(&path),
+            path,
+            query,
+            body,
+            expect_sse: true,
+            expect_binary: false,
+            multipart: false,
+            operation_id: "createPresetsResponses",
+            idempotent: false,
+        };
+        let events = self.transport.execute_sse(spec).await?;
+        Ok(CreatePresetsResponsesSseResult { events })
     }
 
     /// `GET /presets/{slug}/versions` — `listPresetVersions` (json).
@@ -2324,10 +2442,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2357,10 +2475,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2382,10 +2500,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2410,10 +2528,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2438,10 +2556,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: true,
             expect_binary: false,
             multipart: false,
@@ -2466,10 +2584,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2494,10 +2612,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: true,
             expect_binary: false,
             multipart: false,
@@ -2522,10 +2640,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2547,10 +2665,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2573,10 +2691,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2606,10 +2724,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: true,
             multipart: false,
@@ -2640,10 +2758,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2668,10 +2786,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2697,10 +2815,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2726,10 +2844,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2758,10 +2876,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "PATCH",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2787,10 +2905,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2820,10 +2938,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "DELETE",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2856,10 +2974,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "PUT",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2891,10 +3009,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         let body: Option<serde_json::Value> = None;
         let spec = HttpRequestSpec {
             method: "GET",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2923,10 +3041,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,
@@ -2955,10 +3073,10 @@ impl crate::openai_platform::client::OpenRouterClient {
         );
         let spec = HttpRequestSpec {
             method: "POST",
+            credential: openrouter_credential(&path),
             path,
             query,
             body,
-            credential: CredentialKind::Application,
             expect_sse: false,
             expect_binary: false,
             multipart: false,

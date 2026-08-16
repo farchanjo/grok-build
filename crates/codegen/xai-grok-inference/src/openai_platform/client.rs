@@ -162,9 +162,11 @@ impl OpenRouterClient {
         cancel: CancellationToken,
     ) -> PlatformResult<Self> {
         config.validate()?;
+        // Provider-native dual slot: application and management/admin keys are
+        // both available, but CredentialKind selection never borrows the other.
         let creds = Arc::new(StaticCredentials {
             application: config.application_token,
-            admin: None,
+            admin: config.admin_token,
         });
         let transport = PlatformTransport::new(
             &config.base_url,
@@ -243,6 +245,71 @@ mod tests {
         ));
         // Structural: admin key is never returned for Application.
         assert!(!format!("{err:?}").contains("admin-key"));
+    }
+
+    #[test]
+    fn openrouter_client_keeps_dual_slots_without_borrow() {
+        let cfg = PlatformClientConfig {
+            provider_id: "openrouter".into(),
+            display_name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            admin_base_url: None,
+            application_token: Some("app-key".into()),
+            admin_token: Some("admin-key".into()),
+            extra_headers: Default::default(),
+            policy: TransportPolicy::default(),
+        };
+        let client = OpenRouterClient::from_config(cfg, CancellationToken::new()).unwrap();
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Application)
+                .unwrap()
+                .as_deref(),
+            Some("app-key")
+        );
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Admin)
+                .unwrap()
+                .as_deref(),
+            Some("admin-key")
+        );
+    }
+
+    #[test]
+    fn openrouter_admin_missing_does_not_borrow_application() {
+        let cfg = PlatformClientConfig {
+            provider_id: "openrouter".into(),
+            display_name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            admin_base_url: None,
+            application_token: Some("app-key".into()),
+            admin_token: None,
+            extra_headers: Default::default(),
+            policy: TransportPolicy::default(),
+        };
+        let client = OpenRouterClient::from_config(cfg, CancellationToken::new()).unwrap();
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Admin)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Application)
+                .unwrap()
+                .as_deref(),
+            Some("app-key")
+        );
     }
 
     #[test]

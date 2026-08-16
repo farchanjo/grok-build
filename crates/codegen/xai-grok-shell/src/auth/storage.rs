@@ -428,6 +428,12 @@ pub const OPENAI_API_KEY_SCOPE: &str = "openai::api_key";
 /// Codex endpoints or the Platform API key for `api.openai.com`.
 pub const OPENAI_OAUTH_SCOPE: &str = "openai::oauth";
 pub const OPENROUTER_API_KEY_SCOPE: &str = "openrouter::api_key";
+/// OpenRouter management/admin key (keys, BYOK, workspaces, guardrails,
+/// observability, organization). Never used as a substitute for
+/// [`OPENROUTER_API_KEY_SCOPE`].
+pub const OPENROUTER_ADMIN_KEY_SCOPE: &str = "openrouter::admin_key";
+/// Alias scope for OpenRouter management credentials (same isolation rules).
+pub const OPENROUTER_MANAGEMENT_KEY_SCOPE: &str = "openrouter::management_key";
 /// Direct Anthropic Messages API key (`x-api-key`). Never falls through to xAI.
 pub const ANTHROPIC_API_KEY_SCOPE: &str = "anthropic::api_key";
 /// Optional OpenAI administration key (organization APIs only).
@@ -439,6 +445,8 @@ fn validate_provider_scope(scope: &str) -> std::io::Result<()> {
         scope,
         OPENAI_API_KEY_SCOPE
             | OPENROUTER_API_KEY_SCOPE
+            | OPENROUTER_ADMIN_KEY_SCOPE
+            | OPENROUTER_MANAGEMENT_KEY_SCOPE
             | ANTHROPIC_API_KEY_SCOPE
             | OPENAI_ADMIN_KEY_SCOPE
     ) {

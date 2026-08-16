@@ -3,8 +3,9 @@
 use super::id::{ProviderId, ProviderIdError, validate_provider_id_str};
 use super::instance::ProviderIncarnation;
 use crate::auth::{
-    ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE,
-    clear_provider_api_key, read_provider_api_key, store_provider_api_key,
+    ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENROUTER_ADMIN_KEY_SCOPE,
+    OPENROUTER_API_KEY_SCOPE, OPENROUTER_MANAGEMENT_KEY_SCOPE, clear_provider_api_key,
+    read_provider_api_key, store_provider_api_key,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -141,14 +142,22 @@ pub fn built_in_application_scope(provider: super::id::BuiltInProviderId) -> Opt
 
 /// Parse and validate a provider secret scope. Never accepts arbitrary scopes.
 ///
-/// Public shape matches PR1: five variants only. Configured OAuth is parsed
-/// separately via [`parse_configured_oauth_scope`] and is never an API-key scope.
+/// Built-in product scopes plus configured openai_compatible scopes. Configured
+/// OAuth is parsed separately via [`parse_configured_oauth_scope`] and is never
+/// an API-key scope. OpenRouter admin/management scopes are distinct from the
+/// application key and never alias it.
 pub fn parse_secret_scope(scope: &str) -> Result<ParsedSecretScope, ScopeParseError> {
     if scope == OPENAI_API_KEY_SCOPE {
         return Ok(ParsedSecretScope::BuiltInOpenAiApp);
     }
     if scope == OPENROUTER_API_KEY_SCOPE {
         return Ok(ParsedSecretScope::BuiltInOpenRouterApp);
+    }
+    if scope == OPENROUTER_ADMIN_KEY_SCOPE {
+        return Ok(ParsedSecretScope::BuiltInOpenRouterAdmin);
+    }
+    if scope == OPENROUTER_MANAGEMENT_KEY_SCOPE {
+        return Ok(ParsedSecretScope::BuiltInOpenRouterManagement);
     }
     if scope == ANTHROPIC_API_KEY_SCOPE {
         return Ok(ParsedSecretScope::BuiltInAnthropicApp);
@@ -179,6 +188,10 @@ pub enum ParsedSecretScope {
     BuiltInOpenAiApp,
     BuiltInOpenAiAdmin,
     BuiltInOpenRouterApp,
+    /// OpenRouter management key (`openrouter::admin_key`).
+    BuiltInOpenRouterAdmin,
+    /// Alias management scope (`openrouter::management_key`).
+    BuiltInOpenRouterManagement,
     BuiltInAnthropicApp,
     Configured(ProviderSecretScope),
 }
@@ -285,8 +298,26 @@ mod tests {
             ParsedSecretScope::BuiltInOpenRouterApp
         ));
         assert!(matches!(
+            parse_secret_scope(OPENROUTER_ADMIN_KEY_SCOPE).unwrap(),
+            ParsedSecretScope::BuiltInOpenRouterAdmin
+        ));
+        assert!(matches!(
+            parse_secret_scope(OPENROUTER_MANAGEMENT_KEY_SCOPE).unwrap(),
+            ParsedSecretScope::BuiltInOpenRouterManagement
+        ));
+        assert!(matches!(
             parse_secret_scope(ANTHROPIC_API_KEY_SCOPE).unwrap(),
             ParsedSecretScope::BuiltInAnthropicApp
+        ));
+    }
+
+    #[test]
+    fn openrouter_admin_scope_never_aliases_application() {
+        assert_ne!(OPENROUTER_ADMIN_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE);
+        assert_ne!(OPENROUTER_MANAGEMENT_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE);
+        assert!(!matches!(
+            parse_secret_scope(OPENROUTER_ADMIN_KEY_SCOPE).unwrap(),
+            ParsedSecretScope::BuiltInOpenRouterApp
         ));
     }
 

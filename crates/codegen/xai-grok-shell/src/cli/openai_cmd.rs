@@ -368,9 +368,8 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
 }
 
 fn is_mutating(namespace: &str, operation_id: &str) -> bool {
-    find_cli_operation(namespace, operation_id)
-        .map(|op| matches!(op.method, "POST" | "PUT" | "PATCH" | "DELETE"))
-        .unwrap_or(true)
+    // Fail closed: unknown metadata requires confirmation.
+    super::generated_ops::operation_requires_confirmation(namespace, operation_id)
 }
 
 fn parse_files(files: &[String]) -> Result<Vec<(String, PathBuf)>, String> {
@@ -403,7 +402,7 @@ async fn call(
     query: &[String],
     input: Option<&str>,
     dry_run: bool,
-    _yes: bool,
+    yes: bool,
     stream: bool,
     output: Option<&std::path::Path>,
     files: &[(String, PathBuf)],
@@ -414,6 +413,14 @@ async fn call(
     if !op.typed_request {
         return Err(format!(
             "operation `{operation_id}` lacks a typed request binding"
+        ));
+    }
+    // Centralized fail-closed mutation confirmation from operation metadata.
+    // Unknown/missing metadata is handled by `operation_requires_confirmation`
+    // (returns true). Dry-run always proceeds.
+    if !dry_run && op.requires_confirmation && !yes {
+        return Err(format!(
+            "operation `{operation_id}` requires --yes confirmation (or --dry-run)"
         ));
     }
     if op.is_binary && output.is_none() {
@@ -515,6 +522,62 @@ mod tests {
                 ),
                 "bad method {} on {}",
                 op.method,
+                op.operation_id
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_confirmation_is_centralized_and_fail_closed() {
+        use super::super::generated_ops::operation_requires_confirmation;
+        // Inference-style safe exception.
+        assert!(!operation_requires_confirmation(
+            "openai",
+            "createChatCompletion"
+        ));
+        // Shared-state mutation requires --yes.
+        assert!(operation_requires_confirmation("openai", "deleteModel"));
+        assert!(operation_requires_confirmation(
+            "openai_admin",
+            "admin-api-keys-create"
+        ));
+        // Unknown/missing metadata fails closed.
+        assert!(operation_requires_confirmation(
+            "openai",
+            "definitelyNotARealOperation"
+        ));
+        // Dry-run path is tested via call() accepting dry_run without yes;
+        // GET never requires confirmation.
+        assert!(!operation_requires_confirmation("openai", "listModels"));
+    }
+
+    #[test]
+    fn openrouter_admin_classification_on_cli_ops() {
+        let key = find_cli_operation("openrouter", "getCurrentKey").expect("key");
+        assert!(!key.is_admin);
+        assert_eq!(key.credential_class, "application");
+        let keys = CLI_OPERATIONS
+            .iter()
+            .find(|op| op.provider_namespace == "openrouter" && op.path.starts_with("/keys"))
+            .expect("keys");
+        assert!(keys.is_admin);
+        assert_eq!(keys.credential_class, "admin");
+    }
+
+    #[test]
+    fn dispatch_arms_bind_real_methods_for_sse_companions() {
+        // Fixture: every SSE companion in the catalog has a typed client method
+        // name that appears in the generated dispatch runtime source.
+        let runtime = include_str!("typed_dispatch_runtime.rs");
+        for op in CLI_OPERATIONS.iter().filter(|op| op.is_sse) {
+            assert!(
+                runtime.contains(&format!(".{}(", op.client_method)),
+                "missing typed dispatch call for {}",
+                op.operation_id
+            );
+            assert!(
+                runtime.contains(&format!("\"{}\" =>", op.operation_id)),
+                "missing dispatch arm for {}",
                 op.operation_id
             );
         }
