@@ -2,18 +2,26 @@ use super::*;
 use serde::Deserialize;
 
 /// Handle `x.ai/models/update` — model list changed (etag-triggered refresh).
+///
+/// Updates are atomic and generation-tagged: the catalog map and
+/// `catalog_generation` swap together. Each agent's current selection is
+/// preserved by exact canonical id when still present; removed/recreated
+/// incarnations fall back without borrowing a sibling account.
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
         use crate::acp::model_state::ModelState;
         let new_models = ModelState::from(Some(model_state));
+        let generation = new_models.catalog_generation;
         tracing::info!(
             count = new_models.available.len(),
+            catalog_generation = generation,
             "models updated via x.ai/models/update"
         );
 
         let shell_fallback_current = new_models.current.clone();
 
-        // Override app-level default with the active agent's model.
+        // Override app-level default with the active agent's model when that
+        // exact canonical id is still in the catalog.
         let mut app_models = new_models.clone();
         if let ActiveView::Agent(id) = app.active_view
             && let Some(agent) = app.agents.get(&id)
@@ -36,16 +44,20 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
                     current_model = %current.0,
                     fallback = ?shell_fallback_current.as_ref().map(|m| m.0.as_ref()),
                     available_count = new_models.available.len(),
+                    catalog_generation = generation,
                     "models update removed this agent's current model; falling back"
                 );
             }
-            agent
-                .session
-                .models
-                .update_catalog(new_models.available.clone(), shell_fallback_current.clone());
+            agent.session.models.update_catalog_versioned(
+                new_models.available.clone(),
+                shell_fallback_current.clone(),
+                Some(generation),
+            );
             // `/model` arguments are cached in the open slash snapshot. Rebuild
             // it from the shell-authoritative catalog so provider changes are
-            // visible without closing and reopening the picker.
+            // visible without closing and reopening the picker. Generation
+            // drift is captured by the versioned update above so a stale open
+            // picker cannot mix pre/post-refresh rows.
             agent.prompt.refresh_slash(&agent.session.models);
         }
         // The shell emits this notification after config/model reload. Refresh

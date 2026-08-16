@@ -2496,7 +2496,12 @@ impl MvpAgent {
             );
             info.meta = Some(map);
         }
-        acp::SessionModelState::new(model_id, available_models)
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            crate::agent::config::META_CATALOG_GENERATION.to_string(),
+            serde_json::Value::Number(self.models_manager.catalog_generation().into()),
+        );
+        acp::SessionModelState::new(model_id, available_models).meta(Some(meta))
     }
     pub(super) fn session_config_options(
         &self,

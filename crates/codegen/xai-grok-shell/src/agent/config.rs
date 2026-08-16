@@ -6104,15 +6104,140 @@ pub fn resolve_web_search_inference_config(
     }
     resolved.map(crate::tools::config::web_search_inference_config)
 }
+/// Stable camelCase keys for secret-free account-aware model meta on ACP wire.
+pub const META_PROVIDER_INSTANCE_ID: &str = "providerInstanceId";
+pub const META_PROVIDER_KIND: &str = "providerKind";
+pub const META_UPSTREAM_MODEL_ID: &str = "upstreamModelId";
+pub const META_CANONICAL_SELECTION_ID: &str = "canonicalSelectionId";
+/// Catalog publication generation stamped on `SessionModelState._meta`.
+pub const META_CATALOG_GENERATION: &str = "catalogGeneration";
+
+/// Secret-free provider instance id for a catalog entry.
+///
+/// Uses the configured `model_provider.id` when present; otherwise falls back
+/// to a built-in kind label (`xai` / `custom`). Never returns credentials or
+/// URLs.
+pub fn provider_instance_id_for_entry(model: &ModelEntry) -> String {
+    if let Some(provider) = model.model_provider.as_ref() {
+        if !provider.id.is_empty() {
+            return provider.id.clone();
+        }
+        return provider_kind_label(provider.kind).to_string();
+    }
+    if model
+        .api_base_url
+        .as_deref()
+        .is_some_and(crate::util::is_xai_api_url)
+    {
+        "xai".to_string()
+    } else {
+        "custom".to_string()
+    }
+}
+
+/// Stable secret-free kind label for wire meta and search hits.
+pub fn provider_kind_label(kind: crate::agent::model_providers::ModelProviderKind) -> &'static str {
+    use crate::agent::model_providers::ModelProviderKind;
+    match kind {
+        ModelProviderKind::OpenRouter => "openrouter",
+        ModelProviderKind::OpenAi => "openai",
+        ModelProviderKind::Anthropic => "anthropic",
+        ModelProviderKind::Xai => "xai",
+        ModelProviderKind::Zai => "zai",
+        ModelProviderKind::OpenAiCompatible => "openai_compatible",
+    }
+}
+
+fn provider_identity_label(model: &ModelEntry) -> String {
+    model.model_provider.as_ref().map_or_else(
+        || {
+            if model
+                .api_base_url
+                .as_deref()
+                .is_some_and(crate::util::is_xai_api_url)
+            {
+                "xai".to_string()
+            } else {
+                "custom".to_string()
+            }
+        },
+        |provider| match provider.kind {
+            crate::agent::model_providers::ModelProviderKind::OpenRouter => {
+                "openrouter".to_string()
+            }
+            crate::agent::model_providers::ModelProviderKind::OpenAi => "openai".to_string(),
+            crate::agent::model_providers::ModelProviderKind::Anthropic => "anthropic".to_string(),
+            crate::agent::model_providers::ModelProviderKind::Xai => "xai".to_string(),
+            crate::agent::model_providers::ModelProviderKind::OpenAiCompatible
+            | crate::agent::model_providers::ModelProviderKind::Zai => "custom".to_string(),
+        },
+    )
+}
+
+/// Bare display label before instance qualification.
+pub fn bare_display_name_for_entry(model: &ModelEntry) -> String {
+    let info = model.info();
+    info.name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| info.model.clone())
+}
+
+/// Qualify display names when multiple catalog entries share the same bare
+/// label so sibling OpenAI/OpenRouter accounts remain distinguishable.
+///
+/// Exact canonical selection ids always remain unique keys; this only affects
+/// the human-readable `ModelInfo.name` field.
+pub fn qualify_display_name(
+    key: &str,
+    model: &ModelEntry,
+    bare_name_counts: &std::collections::HashMap<String, usize>,
+) -> String {
+    let bare = bare_display_name_for_entry(model);
+    let count = bare_name_counts
+        .get(&bare.to_ascii_lowercase())
+        .copied()
+        .unwrap_or(1);
+    if count <= 1 {
+        return bare;
+    }
+    let instance = provider_instance_id_for_entry(model);
+    // Prefer instance qualification; if the bare name already embeds the
+    // instance id, fall back to the canonical selection id suffix.
+    if bare
+        .to_ascii_lowercase()
+        .contains(&instance.to_ascii_lowercase())
+    {
+        format!("{bare} [{key}]")
+    } else {
+        format!("{bare} ({instance})")
+    }
+}
+
 pub fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+    // Count bare labels so duplicate sibling models get stable qualified names.
+    let mut bare_name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for model in models.values() {
+        let bare = bare_display_name_for_entry(model).to_ascii_lowercase();
+        *bare_name_counts.entry(bare).or_default() += 1;
+    }
+
     models
         .iter()
         .map(|(key, model)| {
             let info = model.info();
             let model_id = acp::ModelId::new(Arc::from(key.clone()));
             let total_context_tokens = info.context_window.get();
+            let instance_id = provider_instance_id_for_entry(model);
+            let provider_kind = model
+                .model_provider
+                .as_ref()
+                .map(|p| provider_kind_label(p.kind).to_string())
+                .unwrap_or_else(|| provider_identity_label(model));
+            let display_name = qualify_display_name(key, model, &bare_name_counts);
             let meta = {
                 let mut map = serde_json::Map::new();
                 map.insert(
@@ -6123,32 +6248,27 @@ pub fn to_acp_model_info(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
                 );
-                let provider_identity = model.model_provider.as_ref().map_or_else(
-                    || {
-                        if model
-                            .api_base_url
-                            .as_deref()
-                            .is_some_and(crate::util::is_xai_api_url)
-                        {
-                            "xai"
-                        } else {
-                            "custom"
-                        }
-                    },
-                    |provider| match provider.kind {
-                        crate::agent::model_providers::ModelProviderKind::OpenRouter => {
-                            "openrouter"
-                        }
-                        crate::agent::model_providers::ModelProviderKind::OpenAi => "openai",
-                        crate::agent::model_providers::ModelProviderKind::Anthropic => "anthropic",
-                        crate::agent::model_providers::ModelProviderKind::Xai => "xai",
-                        crate::agent::model_providers::ModelProviderKind::OpenAiCompatible
-                        | crate::agent::model_providers::ModelProviderKind::Zai => "custom",
-                    },
-                );
+                let provider_identity = provider_identity_label(model);
                 map.insert(
                     "providerIdentity".to_string(),
-                    serde_json::Value::String(provider_identity.to_string()),
+                    serde_json::Value::String(provider_identity),
+                );
+                // Account-aware structured fields (secret-free).
+                map.insert(
+                    META_PROVIDER_INSTANCE_ID.to_string(),
+                    serde_json::Value::String(instance_id),
+                );
+                map.insert(
+                    META_PROVIDER_KIND.to_string(),
+                    serde_json::Value::String(provider_kind),
+                );
+                map.insert(
+                    META_UPSTREAM_MODEL_ID.to_string(),
+                    serde_json::Value::String(info.model.clone()),
+                );
+                map.insert(
+                    META_CANONICAL_SELECTION_ID.to_string(),
+                    serde_json::Value::String(key.clone()),
                 );
                 map.insert(
                     REASONING_EFFORT_SELECTION_META_KEY.to_string(),
@@ -6222,12 +6342,9 @@ pub fn to_acp_model_info(
             };
             (
                 model_id.clone(),
-                acp::ModelInfo::new(
-                    model_id,
-                    info.name.clone().unwrap_or_else(|| info.model.clone()),
-                )
-                .description(info.description.clone())
-                .meta(meta),
+                acp::ModelInfo::new(model_id, display_name)
+                    .description(info.description.clone())
+                    .meta(meta),
             )
         })
         .collect()
@@ -8820,6 +8937,75 @@ reasoning_effort = "low"
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
     }
+    #[test]
+    fn acp_model_meta_exposes_account_aware_instance_fields_and_qualifies_duplicates() {
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+
+        let mut models = IndexMap::new();
+        let mut home = test_model_entry(
+            "openai:gpt-4o",
+            "https://api.openai.com/v1",
+            None,
+            None,
+            None,
+        );
+        home.info.name = Some("GPT-4o".to_string());
+        home.info.model = "gpt-4o".to_string();
+        home.model_provider = Some(ResolvedModelProvider {
+            id: "openai".into(),
+            kind: ModelProviderKind::OpenAi,
+            openrouter_fallback_models: vec![],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            command: vec![],
+        });
+        models.insert("openai:gpt-4o".to_string(), home);
+
+        let mut work = test_model_entry(
+            "openai_work:gpt-4o",
+            "https://api.openai.com/v1",
+            None,
+            None,
+            None,
+        );
+        work.info.name = Some("GPT-4o".to_string());
+        work.info.model = "gpt-4o".to_string();
+        work.model_provider = Some(ResolvedModelProvider {
+            id: "openai_work".into(),
+            kind: ModelProviderKind::OpenAi,
+            openrouter_fallback_models: vec![],
+            openrouter_provider_preferences: None,
+            openrouter_plugins: vec![],
+            openrouter_pacing: false,
+            command: vec![],
+        });
+        models.insert("openai_work:gpt-4o".to_string(), work);
+
+        let acp_models = to_acp_model_info(&models);
+        let home_info = acp_models
+            .get(&acp::ModelId::new("openai:gpt-4o"))
+            .expect("home");
+        let work_info = acp_models
+            .get(&acp::ModelId::new("openai_work:gpt-4o"))
+            .expect("work");
+        // Duplicate bare names are provider-qualified distinctly and stably.
+        assert_ne!(home_info.name, work_info.name);
+        assert!(home_info.name.contains("openai"));
+        assert!(work_info.name.contains("openai_work"));
+        let home_meta = home_info.meta.as_ref().expect("meta");
+        assert_eq!(home_meta[META_PROVIDER_INSTANCE_ID], "openai");
+        assert_eq!(home_meta[META_PROVIDER_KIND], "openai");
+        assert_eq!(home_meta[META_UPSTREAM_MODEL_ID], "gpt-4o");
+        assert_eq!(home_meta[META_CANONICAL_SELECTION_ID], "openai:gpt-4o");
+        let work_meta = work_info.meta.as_ref().expect("meta");
+        assert_eq!(work_meta[META_PROVIDER_INSTANCE_ID], "openai_work");
+        // Secret-free: no credential material.
+        let dump = format!("{acp_models:?}");
+        assert!(!dump.contains("sk-"));
+        assert!(!dump.contains("Authorization"));
+    }
+
     #[test]
     fn acp_model_meta_preserves_media_capability_tristate() {
         let mut models = IndexMap::new();

@@ -1,7 +1,7 @@
 //! Model fetching, resolution, and management.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -225,6 +225,10 @@ struct Inner {
     /// registry — no manual fan-out, no listener-leak risk, no
     /// `unregister` API to maintain.
     model_switch_watch: tokio::sync::watch::Sender<u64>,
+    /// Monotonic catalog publication generation. Bumped on every catalog
+    /// rebuild/hot-reload so open pickers can reject stale selections that
+    /// predate the current generation.
+    catalog_generation: AtomicU64,
 }
 
 impl Default for ModelsManager {
@@ -269,12 +273,25 @@ impl ModelsManager {
                 retry_in_flight: AtomicBool::new(false),
                 allowlist_excludes_all: AtomicBool::new(false),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
+                catalog_generation: AtomicU64::new(1),
             }),
         }
     }
 
     pub(crate) fn catalog_origins(&self) -> crate::agent::model_identity::CatalogOrigins {
         self.inner.catalog_origins.read().clone()
+    }
+
+    /// Current catalog publication generation for atomic picker refresh.
+    pub fn catalog_generation(&self) -> u64 {
+        self.inner.catalog_generation.load(Ordering::Acquire)
+    }
+
+    fn bump_catalog_generation(&self) -> u64 {
+        self.inner
+            .catalog_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
     }
 
     /// Subscribe to model-switch events. Returns a `watch::Receiver`
@@ -328,7 +345,7 @@ impl ModelsManager {
         }
 
         let (current_model_key, current_model, model_source) =
-            resolve_default_model(cfg, &catalog, is_session_auth);
+            resolve_default_model_with_origins(cfg, &catalog, &origins, is_session_auth);
 
         tracing::info!(
             model_id = %current_model.model,
@@ -397,6 +414,7 @@ impl ModelsManager {
         }
         *self.inner.models.write() = new_catalog;
         *self.inner.catalog_origins.write() = new_origins;
+        self.bump_catalog_generation();
 
         // A preferred-model flip caused only by a campaign overlay appearing or
         // disappearing must not yank an in-flight session whose current model is
@@ -768,6 +786,7 @@ impl ModelsManager {
         let (catalog, origins) = resolve_model_catalog_with_origins(cfg, prefetched);
         *self.inner.models.write() = catalog;
         *self.inner.catalog_origins.write() = origins;
+        self.bump_catalog_generation();
     }
 
     /// Refresh models when the etag changes.
@@ -853,6 +872,7 @@ impl ModelsManager {
     fn notify_models_updated(&self) {
         let available = self.available();
         let current = self.current_model_id();
+        let generation = self.catalog_generation();
         let count = available.len();
         xai_grok_telemetry::unified_log::info(
             "model catalog: notifying clients",
@@ -860,11 +880,18 @@ impl ModelsManager {
             Some(serde_json::json!({
                 "model_count": count,
                 "current_model_id": current.0.as_ref(),
+                "catalog_generation": generation,
             })),
         );
         if let Some(ref gw) = *self.inner.gateway.read() {
+            let mut meta = acp::Meta::new();
+            meta.insert(
+                config::META_CATALOG_GENERATION.to_string(),
+                serde_json::Value::Number(generation.into()),
+            );
             let model_state =
-                acp::SessionModelState::new(current, available.values().cloned().collect());
+                acp::SessionModelState::new(current, available.values().cloned().collect())
+                    .meta(Some(meta));
             if let Ok(params) = serde_json::value::to_raw_value(&model_state) {
                 gw.forward_fire_and_forget(acp::ExtNotification::new(
                     "x.ai/models/update",
@@ -1136,6 +1163,7 @@ impl ModelsManager {
         self.inner
             .allowlist_excludes_all
             .store(false, Ordering::Relaxed);
+        self.bump_catalog_generation();
     }
 
     /// Build a `InferenceConfig` from the current model + auth state.
@@ -1413,7 +1441,8 @@ impl ModelsManager {
         }
         let (key, _, source) = {
             let models = self.inner.models.read();
-            resolve_default_model(config, &models, self.is_session_auth())
+            let origins = self.inner.catalog_origins.read();
+            resolve_default_model_with_origins(config, &models, &origins, self.is_session_auth())
         };
         let new_id = acp::ModelId::new(Arc::from(key));
         tracing::info!(
@@ -1430,7 +1459,8 @@ impl ModelsManager {
     fn reselect_default_model(&self, config: &config::Config) {
         let (key, _, source) = {
             let models = self.inner.models.read();
-            resolve_default_model(config, &models, self.is_session_auth())
+            let origins = self.inner.catalog_origins.read();
+            resolve_default_model_with_origins(config, &models, &origins, self.is_session_auth())
         };
         let new_id = acp::ModelId::new(Arc::from(key));
         let current = self.inner.current_model_id.read().clone();
@@ -1965,17 +1995,49 @@ fn is_campaign_only_flip(
 /// Pick the default model: CLI > env > config > remote-settings hint, falling
 /// back to the bundled default when the catalog is empty or the preferred
 /// model isn't present.
+///
+/// Preferred values resolve through the origin-aware deterministic identity
+/// resolver (exact canonical / permanent alias / unique legacy alias).
+/// Ambiguous labels, missing instances, and gated additional-account keys
+/// fail closed into the fallback path — never silent sibling selection.
 pub(crate) fn resolve_default_model(
     cfg: &config::Config,
     catalog: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
 ) -> (String, ModelEntry, config::ConfigSource) {
+    // Empty origins treat every key as legacy-built-in for default resolution
+    // when callers do not supply the live side map (tests + early startup).
+    resolve_default_model_with_origins(
+        cfg,
+        catalog,
+        &crate::agent::model_identity::CatalogOrigins::new(),
+        is_session_auth,
+    )
+}
+
+/// Origin-aware default resolution (production path).
+pub(crate) fn resolve_default_model_with_origins(
+    cfg: &config::Config,
+    catalog: &IndexMap<String, ModelEntry>,
+    origins: &crate::agent::model_identity::CatalogOrigins,
+    is_session_auth: bool,
+) -> (String, ModelEntry, config::ConfigSource) {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
-        .filter(|(_, e)| {
-            e.info.visible_for_auth(is_session_auth)
-                && e.info.user_selectable
-                && has_required_provider_credential(e)
+        .filter(|(key, e)| {
+            if !e.info.visible_for_auth(is_session_auth)
+                || !e.info.user_selectable
+                || !has_required_provider_credential(e)
+            {
+                return false;
+            }
+            // Gate-off: additional-account keys cannot be selected as defaults.
+            if crate::agent::model_identity::is_additional_account_key(key, origins)
+                && !crate::provider_registry::multi_account_rollout_enabled()
+            {
+                return false;
+            }
+            true
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
@@ -1993,7 +2055,11 @@ pub(crate) fn resolve_default_model(
         if let Some((key, first)) = visible.first() {
             return (key.clone(), first.clone());
         }
-        if let Some((key, entry)) = catalog.iter().find(|(_, e)| e.info.user_selectable) {
+        if let Some((key, entry)) = catalog.iter().find(|(key, e)| {
+            e.info.user_selectable
+                && !(crate::agent::model_identity::is_additional_account_key(key, origins)
+                    && !crate::provider_registry::multi_account_rollout_enabled())
+        }) {
             tracing::warn!("no auth-visible selectable model; using first selectable entry");
             return (key.clone(), entry.clone());
         }
@@ -2011,18 +2077,62 @@ pub(crate) fn resolve_default_model(
         (default_id, entry)
     };
 
+    // Resolve a preferred string via the origin-aware identity resolver.
+    // Exact key / unique alias only. Ambiguous returns candidates so the
+    // fallback path can exclude those siblings (never silent pick).
+    enum PrefResolve {
+        Hit(String, ModelEntry),
+        Ambiguous(Vec<String>),
+        Miss,
+    }
+    let resolve_pref = |pref: &str| -> PrefResolve {
+        use crate::agent::model_identity::{
+            ModelIdentityResolution, resolve_model_identity_with_origins,
+        };
+        match resolve_model_identity_with_origins(&visible, origins, pref) {
+            ModelIdentityResolution::Resolved(resolved) => {
+                let key = resolved.canonical_id.as_str().to_owned();
+                match visible.get(&key) {
+                    Some(entry) => PrefResolve::Hit(key, entry.clone()),
+                    None => PrefResolve::Miss,
+                }
+            }
+            ModelIdentityResolution::Ambiguous { input, candidates } => {
+                let ids: Vec<String> = candidates.iter().map(|c| c.as_str().to_owned()).collect();
+                tracing::warn!(
+                    preferred = %input,
+                    candidates = ?ids,
+                    "preferred default model is ambiguous; refusing silent sibling selection"
+                );
+                PrefResolve::Ambiguous(ids)
+            }
+            ModelIdentityResolution::Missing { .. } => PrefResolve::Miss,
+        }
+    };
+
+    let fallback_excluding = |exclude: &[String]| -> (String, ModelEntry) {
+        if let Some((key, entry)) = visible
+            .iter()
+            .find(|(k, _)| !exclude.iter().any(|e| e == *k))
+        {
+            return (key.clone(), entry.clone());
+        }
+        first_or_fallback()
+    };
+
     match &model_pref {
         None => {
             let (key, first) = first_or_fallback();
             (key, first, config::ConfigSource::Default)
         }
         Some(pref) => {
-            let found = visible
-                .get_key_value(&pref.value)
-                .or_else(|| visible.iter().find(|(_, m)| m.model == pref.value));
-
-            if let Some((key, entry)) = found {
-                (key.clone(), entry.clone(), pref.source)
+            let (exclude_siblings, hit) = match resolve_pref(&pref.value) {
+                PrefResolve::Hit(key, entry) => (Vec::new(), Some((key, entry))),
+                PrefResolve::Ambiguous(candidates) => (candidates, None),
+                PrefResolve::Miss => (Vec::new(), None),
+            };
+            if let Some((key, entry)) = hit {
+                (key, entry, pref.source)
             } else {
                 let is_explicit = matches!(
                     pref.source,
@@ -2054,17 +2164,18 @@ pub(crate) fn resolve_default_model(
                         .pre_campaign_default
                         .as_deref()
                         .filter(|s| !s.is_empty())
-                    && let Some((key, entry)) = visible
-                        .get_key_value(prev)
-                        .or_else(|| visible.iter().find(|(_, m)| m.model == prev))
                 {
-                    tracing::info!(
-                        unavailable = %pref.value, fallback = %prev,
-                        "campaign-driven default unavailable in catalog; recovering the pre-campaign default"
-                    );
-                    return (key.clone(), entry.clone(), config::ConfigSource::Config);
+                    if let PrefResolve::Hit(key, entry) = resolve_pref(prev) {
+                        tracing::info!(
+                            unavailable = %pref.value, fallback = %prev,
+                            "campaign-driven default unavailable in catalog; recovering the pre-campaign default"
+                        );
+                        return (key, entry, config::ConfigSource::Config);
+                    }
                 }
-                let (key, first) = first_or_fallback();
+                // Exclude ambiguous candidates so we never "resolve" by
+                // picking the first sibling after an Ambiguous rejection.
+                let (key, first) = fallback_excluding(&exclude_siblings);
                 (key, first, config::ConfigSource::Default)
             }
         }
@@ -3946,6 +4057,66 @@ mod tests {
 
         let (key, _, _) = resolve_default_model(&cfg, &catalog, true);
         assert_eq!(key, "grok-build", "must match id, not first slug hit");
+    }
+
+    #[test]
+    fn resolve_default_model_ambiguous_upstream_falls_closed_without_sibling_pick() {
+        use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
+
+        fn sibling(instance: &str, kind: ModelProviderKind, upstream: &str) -> ModelEntry {
+            let mut entry = make_model_entry(upstream);
+            entry.info.user_selectable = true;
+            entry.info.model = upstream.to_string();
+            entry.model_provider = Some(ResolvedModelProvider {
+                id: instance.into(),
+                kind,
+                openrouter_fallback_models: vec![],
+                openrouter_provider_preferences: None,
+                openrouter_plugins: vec![],
+                openrouter_pacing: false,
+                command: vec![],
+            });
+            entry.api_key = Some("test-key".into());
+            entry
+        }
+
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        // Both reserved builtin prefixes share the same upstream wire slug.
+        catalog.insert(
+            "openai:gpt-4o".into(),
+            sibling("openai", ModelProviderKind::OpenAi, "gpt-4o"),
+        );
+        catalog.insert(
+            "openrouter:gpt-4o".into(),
+            sibling("openrouter", ModelProviderKind::OpenRouter, "gpt-4o"),
+        );
+        // Unique first-party selectable so fallback is deterministic.
+        catalog.insert("grok-build".into(), {
+            let mut e = make_model_entry("grok-build");
+            e.info.user_selectable = true;
+            e.api_key = Some("x".into());
+            e
+        });
+
+        let mut cfg = config::Config::default();
+        cfg.models.default = Some("gpt-4o".to_string());
+
+        let (key, _, source) = resolve_default_model(&cfg, &catalog, false);
+        assert_ne!(
+            key, "openai:gpt-4o",
+            "must not silently pick OpenAI sibling"
+        );
+        assert_ne!(
+            key, "openrouter:gpt-4o",
+            "must not silently pick OpenRouter sibling"
+        );
+        assert_eq!(key, "grok-build");
+        assert_eq!(source, config::ConfigSource::Default);
+
+        // Exact canonical still wins.
+        cfg.models.default = Some("openrouter:gpt-4o".to_string());
+        let (key, _, _) = resolve_default_model(&cfg, &catalog, false);
+        assert_eq!(key, "openrouter:gpt-4o");
     }
 
     /// No id field — falls back to slug as key.

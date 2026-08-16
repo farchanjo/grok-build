@@ -44,6 +44,33 @@ impl EffortTokenError {
     }
 }
 
+/// Outcome of resolving a user-typed name/id against the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelResolveResult {
+    /// Unique match (exact id, unique display name, or unique alias).
+    Resolved(acp::ModelId),
+    /// Multiple distinct catalog entries share the label — never auto-pick.
+    Ambiguous {
+        query: String,
+        candidates: Vec<acp::ModelId>,
+    },
+    /// No match.
+    Missing { query: String },
+}
+
+impl ModelResolveResult {
+    pub fn ok(self) -> Option<acp::ModelId> {
+        match self {
+            Self::Resolved(id) => Some(id),
+            Self::Ambiguous { .. } | Self::Missing { .. } => None,
+        }
+    }
+
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. })
+    }
+}
+
 /// Per-agent model state.
 #[derive(Debug, Clone, Default)]
 pub struct ModelState {
@@ -53,6 +80,9 @@ pub struct ModelState {
     /// The normalized reasoning effort selection state for the current model.
     /// Derived from ACP meta with legacy projection fallback.
     pub reasoning_effort_selection: ReasoningEffortSelection,
+    /// Catalog publication generation from the last atomic models/update.
+    /// Stale open-picker selections that predate this generation are rejected.
+    pub catalog_generation: u64,
     /// External override for the context window size (tokens).
     /// When set, `get_context_window()` returns this instead of
     /// reading from the current model's metadata. Used for subagent
@@ -138,15 +168,39 @@ impl ModelState {
     }
 
     /// Replace the available models, preserving current selection if still valid.
+    ///
+    /// When `catalog_generation` is `Some`, the state's generation is updated
+    /// atomically with the catalog swap. A lower or equal generation is still
+    /// applied (shell is authoritative) but the generation never moves backward
+    /// so open pickers can detect drift against a fresher snapshot.
     pub fn update_catalog(
         &mut self,
         new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
         fallback_current: Option<acp::ModelId>,
     ) {
+        self.update_catalog_versioned(new_available, fallback_current, None);
+    }
+
+    /// Versioned catalog update used by `x.ai/models/update`.
+    pub fn update_catalog_versioned(
+        &mut self,
+        new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
+        fallback_current: Option<acp::ModelId>,
+        catalog_generation: Option<u64>,
+    ) {
         let previous_current_model = self.current.clone();
         self.available = new_available;
+        if let Some(incoming_generation) = catalog_generation {
+            // Never move generation backward; a stale delayed notification
+            // must not unlock a selection that was already refreshed.
+            if incoming_generation > self.catalog_generation {
+                self.catalog_generation = incoming_generation;
+            }
+        }
         if let Some(ref id) = self.current {
             if !self.available.contains_key(id) {
+                // Preserve exact canonical selection when possible; only fall
+                // back when the selected incarnation was removed from catalog.
                 self.current = fallback_current;
             }
         } else {
@@ -167,6 +221,30 @@ impl ModelState {
                 }
             }
         }
+    }
+
+    /// Whether a picker selection opened at `opened_at_generation` is still
+    /// valid against the current catalog generation.
+    pub fn selection_generation_is_current(&self, opened_at_generation: u64) -> bool {
+        opened_at_generation == self.catalog_generation
+    }
+
+    /// Secret-free provider instance id from model meta (if present).
+    pub fn provider_instance_id(&self, id: &acp::ModelId) -> Option<&str> {
+        self.available
+            .get(id)
+            .and_then(|info| info.meta.as_ref())
+            .and_then(|m| m.get("providerInstanceId"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// Secret-free provider kind from model meta (if present).
+    pub fn provider_kind(&self, id: &acp::ModelId) -> Option<&str> {
+        self.available
+            .get(id)
+            .and_then(|info| info.meta.as_ref())
+            .and_then(|m| m.get("providerKind"))
+            .and_then(|v| v.as_str())
     }
 
     /// Set the current model and resolve reasoning effort from catalog meta.
@@ -302,14 +380,67 @@ impl ModelState {
 
     /// Resolve a user-supplied name to a `ModelId` via case-insensitive
     /// ASCII match against the catalog.
+    ///
+    /// **Deterministic, fail-closed on ambiguity:** exact catalog id wins;
+    /// unique display-name match resolves; multiple distinct ids that share a
+    /// label return `None` (use [`Self::resolve_by_name_or_id_detailed`] for
+    /// candidate lists). Never silently picks a sibling account.
     pub fn resolve_by_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        self.available.iter().find_map(|(id, info)| {
-            if info.name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
-                Some(id.clone())
-            } else {
-                None
-            }
-        })
+        self.resolve_by_name_or_id_detailed(query).ok()
+    }
+
+    /// Detailed resolve used by `/model` error surfaces.
+    pub fn resolve_by_name_or_id_detailed(&self, query: &str) -> ModelResolveResult {
+        let query = query.trim();
+        if query.is_empty() {
+            return ModelResolveResult::Missing {
+                query: query.to_owned(),
+            };
+        }
+
+        // 1. Exact canonical selection id (case-insensitive).
+        if let Some((id, _)) = self
+            .available
+            .iter()
+            .find(|(id, _)| id.0.as_ref().eq_ignore_ascii_case(query))
+        {
+            return ModelResolveResult::Resolved(id.clone());
+        }
+
+        // 2. Collect display-name and meta-upstream matches.
+        let mut candidates: Vec<acp::ModelId> = self
+            .available
+            .iter()
+            .filter(|(id, info)| {
+                info.name.eq_ignore_ascii_case(query)
+                    || info
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("upstreamModelId"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|u| u.eq_ignore_ascii_case(query))
+                    // Bare id after first colon (openai:gpt-4o → gpt-4o).
+                    || id
+                        .0
+                        .as_ref()
+                        .split_once(':')
+                        .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(query))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        candidates.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+        candidates.dedup_by(|a, b| a.0.as_ref() == b.0.as_ref());
+
+        match candidates.len() {
+            0 => ModelResolveResult::Missing {
+                query: query.to_owned(),
+            },
+            1 => ModelResolveResult::Resolved(candidates.remove(0)),
+            _ => ModelResolveResult::Ambiguous {
+                query: query.to_owned(),
+                candidates,
+            },
+        }
     }
 
     /// Look up the display name for a `ModelId` in the catalog.
@@ -338,6 +469,12 @@ impl From<Option<acp::SessionModelState>> for ModelState {
     fn from(state: Option<acp::SessionModelState>) -> Self {
         state
             .map(|state| {
+                let catalog_generation = state
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("catalogGeneration"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let mut models = IndexMap::new();
                 for model in state.available_models {
                     models.insert(model.model_id.clone(), model);
@@ -362,6 +499,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     current: current_model,
                     reasoning_effort,
                     reasoning_effort_selection,
+                    catalog_generation,
                     context_window_override: None,
                 }
             })
@@ -897,5 +1035,137 @@ mod tests {
             state.resolve_effort_token("xhigh"),
             Some(ReasoningEffort::Xhigh)
         );
+    }
+
+    fn sibling_openai_state() -> ModelState {
+        let mut state = ModelState::default();
+        let home = acp::ModelId::new(Arc::from("openai:gpt-4o"));
+        let work = acp::ModelId::new(Arc::from("openai_work:gpt-4o"));
+        state.available.insert(
+            home.clone(),
+            acp::ModelInfo::new(home.clone(), "GPT-4o (openai)".to_string()).meta(
+                serde_json::json!({
+                    "providerInstanceId": "openai",
+                    "providerKind": "openai",
+                    "upstreamModelId": "gpt-4o",
+                    "canonicalSelectionId": "openai:gpt-4o",
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        state.available.insert(
+            work.clone(),
+            acp::ModelInfo::new(work.clone(), "GPT-4o (openai_work)".to_string()).meta(
+                serde_json::json!({
+                    "providerInstanceId": "openai_work",
+                    "providerKind": "openai",
+                    "upstreamModelId": "gpt-4o",
+                    "canonicalSelectionId": "openai_work:gpt-4o",
+                })
+                .as_object()
+                .cloned(),
+            ),
+        );
+        state.current = Some(home);
+        state.catalog_generation = 3;
+        state
+    }
+
+    #[test]
+    fn resolve_rejects_ambiguous_upstream_sibling_labels() {
+        let state = sibling_openai_state();
+        // Exact canonical ids resolve.
+        assert_eq!(
+            state
+                .resolve_by_name_or_id_detailed("openai:gpt-4o")
+                .ok()
+                .as_ref()
+                .map(|id| id.0.as_ref()),
+            Some("openai:gpt-4o")
+        );
+        assert_eq!(
+            state
+                .resolve_by_name_or_id_detailed("openai_work:gpt-4o")
+                .ok()
+                .as_ref()
+                .map(|id| id.0.as_ref()),
+            Some("openai_work:gpt-4o")
+        );
+        // Bare upstream / shared bare name is ambiguous — never silent pick.
+        match state.resolve_by_name_or_id_detailed("gpt-4o") {
+            ModelResolveResult::Ambiguous { candidates, .. } => {
+                let ids: Vec<&str> = candidates.iter().map(|c| c.0.as_ref()).collect();
+                assert!(ids.contains(&"openai:gpt-4o"));
+                assert!(ids.contains(&"openai_work:gpt-4o"));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        assert!(state.resolve_by_name_or_id("gpt-4o").is_none());
+    }
+
+    #[test]
+    fn update_catalog_versioned_preserves_exact_selection_and_generation() {
+        let mut state = sibling_openai_state();
+        let work = acp::ModelId::new(Arc::from("openai_work:gpt-4o"));
+        state.set_current(work.clone(), None);
+        assert_eq!(state.catalog_generation, 3);
+
+        // Refresh keeps work account by exact canonical id.
+        let mut refreshed = IndexMap::new();
+        refreshed.insert(
+            work.clone(),
+            acp::ModelInfo::new(work.clone(), "GPT-4o (openai_work)".to_string()),
+        );
+        let home = acp::ModelId::new(Arc::from("openai:gpt-4o"));
+        refreshed.insert(
+            home.clone(),
+            acp::ModelInfo::new(home, "GPT-4o (openai)".to_string()),
+        );
+        state.update_catalog_versioned(refreshed, Some(work.clone()), Some(7));
+        assert_eq!(
+            state.current.as_ref().map(|id| id.0.as_ref()),
+            Some("openai_work:gpt-4o")
+        );
+        assert_eq!(state.catalog_generation, 7);
+        assert!(state.selection_generation_is_current(7));
+        assert!(!state.selection_generation_is_current(3));
+
+        // Stale lower generation does not roll the counter backward.
+        state.update_catalog_versioned(state.available.clone(), Some(work), Some(2));
+        assert_eq!(state.catalog_generation, 7);
+    }
+
+    #[test]
+    fn update_catalog_removed_incarnation_falls_back_without_sibling_steal_on_missing_key() {
+        let mut state = sibling_openai_state();
+        let work = acp::ModelId::new(Arc::from("openai_work:gpt-4o"));
+        state.set_current(work.clone(), None);
+
+        // Work account removed; fallback is explicit home, not silent first-key.
+        let home = acp::ModelId::new(Arc::from("openai:gpt-4o"));
+        let mut refreshed = IndexMap::new();
+        refreshed.insert(
+            home.clone(),
+            acp::ModelInfo::new(home.clone(), "GPT-4o (openai)".to_string()),
+        );
+        state.update_catalog_versioned(refreshed, Some(home.clone()), Some(8));
+        assert_eq!(state.current, Some(home));
+        assert!(!state.available.contains_key(&work));
+    }
+
+    #[test]
+    fn from_session_model_state_reads_catalog_generation() {
+        let id = acp::ModelId::new(Arc::from("m"));
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "catalogGeneration".into(),
+            serde_json::Value::Number(42.into()),
+        );
+        let sms =
+            acp::SessionModelState::new(id.clone(), vec![acp::ModelInfo::new(id, "M".to_string())])
+                .meta(Some(meta));
+        let state = ModelState::from(Some(sms));
+        assert_eq!(state.catalog_generation, 42);
     }
 }

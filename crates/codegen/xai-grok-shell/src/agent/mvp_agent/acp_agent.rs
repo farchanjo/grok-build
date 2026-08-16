@@ -1864,20 +1864,46 @@ impl acp::Agent for MvpAgent {
         }
         let persisted_model = summary.current_model_id.clone();
         let models = self.models_manager.models();
+        let origins = self.models_manager.catalog_origins();
         let available = self.models_manager.available();
         self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
-        let resolved_catalog_key = resolve_catalog_key(&models, &persisted_model);
+        // Load optional route companion. Old summaries without companions remain
+        // compatible (no rewrite-on-read). Exact-route companions fail closed
+        // when the incarnation/account is gone rather than borrowing a sibling.
+        let resume_session_dir = crate::session::persistence::session_dir(&SessionInfo {
+            id: session_id.clone(),
+            cwd: cwd.as_str().to_owned(),
+        });
+        let route_companion = crate::session::storage::model_route::load_route_companion(
+            &resume_session_dir,
+            &summary,
+        )
+        .ok()
+        .flatten();
+        let exact_route_pinned = route_companion
+            .as_ref()
+            .is_some_and(|p| p.requires_exact_route());
+        let resolved_catalog_key = resolve_catalog_key_with_origins(
+            &models,
+            &origins,
+            &persisted_model,
+        );
         tracing::debug!(
             session_id = %session_id.0,
             persisted = %persisted_model.0,
             resolved_catalog_key = ?resolved_catalog_key.as_ref().map(|k| k.0.as_ref()),
             available_count = available.len(),
             contains_persisted = available.contains_key(&persisted_model),
+            exact_route_pinned,
             available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
             "load_session: restoring persisted model (debug)"
         );
         let is_grok_build = persisted_model.0.starts_with("grok-build");
-        let same_family_fallback = if is_grok_build {
+        let same_family_fallback = if exact_route_pinned {
+            // Exact-route sessions never silently adopt a sibling account /
+            // same-family slug when the pinned incarnation is gone.
+            None
+        } else if is_grok_build {
             available.keys().find(|id| id.0.starts_with("grok-build")).cloned()
         } else {
             available.keys().find(|id| !id.0.starts_with("grok-build")).cloned()
@@ -1887,6 +1913,55 @@ impl acp::Agent for MvpAgent {
             &available,
             &persisted_model,
         );
+        // When an exact companion is present, the selectable key must still
+        // match the companion's canonical model (if recorded) and live route.
+        let selectable_catalog_key = selectable_catalog_key.filter(|key| {
+            let Some(companion) = route_companion.as_ref() else {
+                return true;
+            };
+            if let Some(canon) = companion.canonical_model.as_deref() {
+                if key.0.as_ref() != canon && persisted_model.0.as_ref() != canon {
+                    tracing::warn!(
+                        session_id = %session_id.0,
+                        selected = %key.0,
+                        companion_canonical = %canon,
+                        "load_session: rejecting selectable key that does not match route companion"
+                    );
+                    return false;
+                }
+            }
+            if !companion.requires_exact_route() {
+                return true;
+            }
+            // Catalog-level exact-route guard: instance + upstream must match.
+            // Full incarnation/binding-generation comparison runs when the
+            // session actor freezes the live ProviderService route on apply.
+            // Here we only reject obvious sibling catalog rows so resume never
+            // silently adopts openai_work when the companion pins openai.
+            let Some(entry) = models.get(key.0.as_ref()) else {
+                return false;
+            };
+            let live_instance = entry
+                .model_provider
+                .as_ref()
+                .map(|p| p.id.as_str())
+                .unwrap_or("xai");
+            let live_upstream = entry.info.model.as_str();
+            let instance_ok = live_instance == companion.provider_instance_id.as_str();
+            let upstream_ok = live_upstream == companion.upstream_model.as_str();
+            if !instance_ok || !upstream_ok {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    live_instance,
+                    companion_instance = %companion.provider_instance_id,
+                    live_upstream,
+                    companion_upstream = %companion.upstream_model,
+                    "load_session: exact route companion rejected sibling catalog entry"
+                );
+                return false;
+            }
+            true
+        });
         let model_id = if let Some(catalog_key) = selectable_catalog_key {
             if catalog_key != persisted_model {
                 tracing::info!(
@@ -1907,7 +1982,7 @@ impl acp::Agent for MvpAgent {
                 );
             }
             catalog_key
-        } else if available.is_empty() {
+        } else if available.is_empty() && !exact_route_pinned {
             tracing::warn!(
                 session_id = %session_id.0,
                 persisted = %persisted_model.0,
@@ -1953,6 +2028,7 @@ impl acp::Agent for MvpAgent {
                 previous = %persisted_model.0,
                 fallback = %fallback.0,
                 available_count = available.len(),
+                exact_route_pinned,
                 available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
                 "Persisted model no longer available, no same-family fallback — blocking prompts for this session"
             );
@@ -1964,13 +2040,21 @@ impl acp::Agent for MvpAgent {
                     "persisted_model": persisted_model.0.as_ref(),
                     "fallback_model": fallback.0.as_ref(),
                     "available_count": available.len(),
+                    "exact_route_pinned": exact_route_pinned,
                 }),
                 ),
             );
-            let reason = format!(
-                "Model \"{}\" is no longer available. Please start a new session.",
-                persisted_model.0,
-            );
+            let reason = if exact_route_pinned {
+                format!(
+                    "Model \"{}\" is bound to a provider account that is no longer available. Please start a new session.",
+                    persisted_model.0,
+                )
+            } else {
+                format!(
+                    "Model \"{}\" is no longer available. Please start a new session.",
+                    persisted_model.0,
+                )
+            };
             let empty_id = acp::ModelId::new(String::new());
             self.send_model_auto_switched(
                     &session_id,

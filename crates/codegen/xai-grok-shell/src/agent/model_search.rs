@@ -93,6 +93,18 @@ fn provider_label(entry: &ModelEntry) -> String {
     "xai".to_string()
 }
 
+fn provider_instance_id(entry: &ModelEntry) -> String {
+    crate::agent::config::provider_instance_id_for_entry(entry)
+}
+
+fn provider_kind_str(entry: &ModelEntry) -> String {
+    entry
+        .model_provider
+        .as_ref()
+        .map(|p| crate::agent::config::provider_kind_label(p.kind).to_string())
+        .unwrap_or_else(|| provider_label(entry))
+}
+
 fn display_name(slug: &str, entry: &ModelEntry) -> String {
     entry
         .info
@@ -105,9 +117,10 @@ fn display_name(slug: &str, entry: &ModelEntry) -> String {
 fn to_document(slug: &str, entry: &ModelEntry, provider: &str) -> String {
     let name = display_name(slug, entry);
     let routing = entry.info.model.as_str();
+    let instance = provider_instance_id(entry);
     let desc = entry.info.description.as_deref().unwrap_or("");
-    let base = format!("{name} {slug} {routing} {provider} {desc}");
-    let extra: String = [name.as_str(), slug, routing, provider]
+    let base = format!("{name} {slug} {routing} {provider} {instance} {desc}");
+    let extra: String = [name.as_str(), slug, routing, provider, instance.as_str()]
         .into_iter()
         .flat_map(split_identifier)
         .collect::<Vec<_>>()
@@ -137,10 +150,29 @@ struct CatalogRow {
 }
 
 fn build_hit(row: &CatalogRow, score: Option<f32>) -> SearchModelsHit {
+    let instance = provider_instance_id(&row.entry);
+    let kind = provider_kind_str(&row.entry);
+    let upstream = row.entry.info.model.clone();
+    // Qualify display when instance differs from bare provider label so sibling
+    // accounts sharing an upstream slug remain distinguishable in results.
+    let bare = display_name(&row.slug, &row.entry);
+    let name = if bare
+        .to_ascii_lowercase()
+        .contains(&instance.to_ascii_lowercase())
+    {
+        bare
+    } else if instance != row.provider {
+        format!("{bare} ({instance})")
+    } else {
+        bare
+    };
     SearchModelsHit {
-        name: display_name(&row.slug, &row.entry),
+        name,
         slug: row.slug.clone(),
         provider: row.provider.clone(),
+        provider_instance_id: Some(instance),
+        provider_kind: Some(kind),
+        upstream_model_id: Some(upstream),
         task_eligible: row.task_eligible,
         supports_tools: row.entry.info.supports_tools,
         context_window: Some(row.entry.info.context_window.get()),
@@ -217,28 +249,64 @@ pub fn search_models_catalog(
         };
     }
 
-    let query_lower = q.to_ascii_lowercase();
-    // Exact short-circuit on catalog slug, routing model, or bare id after provider prefix.
-    if let Some(exact) = rows.iter().find(|r| {
-        r.slug.eq_ignore_ascii_case(q)
-            || r.entry.info.model.eq_ignore_ascii_case(q)
-            || r.slug
-                .rsplit_once(':')
-                .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(q))
-            || r.entry
-                .info
-                .name
-                .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(q))
-    }) {
-        return SearchModelsResult {
-            results: vec![build_hit(exact, Some(1.0))],
-            truncated: false,
-            note: None,
-        };
+    // Exact short-circuit: only when the match is unique. Multiple hits that
+    // share an upstream slug / display name (sibling OpenAI vs OpenRouter
+    // accounts) must remain distinguishable — never silently pick one.
+    let exact_matches: Vec<&CatalogRow> = rows
+        .iter()
+        .filter(|r| {
+            r.slug.eq_ignore_ascii_case(q)
+                || r.entry.info.model.eq_ignore_ascii_case(q)
+                || r.slug
+                    .rsplit_once(':')
+                    .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(q))
+                || r.entry
+                    .info
+                    .name
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(q))
+        })
+        .collect();
+    match exact_matches.len() {
+        1 => {
+            return SearchModelsResult {
+                results: vec![build_hit(exact_matches[0], Some(1.0))],
+                truncated: false,
+                note: None,
+            };
+        }
+        n if n > 1 => {
+            // Prefer a unique exact-canonical-id hit if the query is a full slug.
+            if let Some(canonical) = exact_matches
+                .iter()
+                .find(|r| r.slug.eq_ignore_ascii_case(q))
+            {
+                return SearchModelsResult {
+                    results: vec![build_hit(canonical, Some(1.0))],
+                    truncated: false,
+                    note: None,
+                };
+            }
+            // Ambiguous bare label / upstream slug: return all task-eligible
+            // siblings with canonical slugs so the agent can pick explicitly.
+            let mut results: Vec<SearchModelsHit> = exact_matches
+                .into_iter()
+                .map(|r| build_hit(r, Some(1.0)))
+                .collect();
+            results.sort_by(|a, b| a.slug.cmp(&b.slug));
+            let truncated = results.len() > query.limit;
+            results.truncate(query.limit);
+            return SearchModelsResult {
+                results,
+                truncated,
+                note: Some(
+                    "Multiple models match that label; use the exact slug (provider-qualified) to select one."
+                        .to_string(),
+                ),
+            };
+        }
+        _ => {}
     }
-    // Soft exact: name contains query as whole phrase (case-insensitive).
-    let _ = query_lower;
 
     let documents: Vec<String> = rows
         .iter()
@@ -439,5 +507,92 @@ mod tests {
         let n = normalize_query("GLM 5.2");
         assert!(n.to_ascii_lowercase().contains('5'));
         assert!(n.to_ascii_lowercase().contains("glm"));
+    }
+
+    fn openai_entry(instance: &str, routing: &str, name: &str) -> ModelEntry {
+        let mut info = crate::agent::config::ModelInfo::fallback(routing);
+        info.name = Some(name.to_string());
+        info.model = routing.to_string();
+        info.supports_tools = Some(true);
+        info.user_selectable = true;
+        info.context_window = NonZeroU64::new(128_000).unwrap();
+        ModelEntry {
+            info,
+            model_provider: Some(ResolvedModelProvider {
+                id: instance.into(),
+                kind: ModelProviderKind::OpenAi,
+                openrouter_fallback_models: vec![],
+                openrouter_provider_preferences: None,
+                openrouter_plugins: vec![],
+                openrouter_pacing: false,
+                command: vec![],
+            }),
+            api_key: Some("test-key".into()),
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        }
+    }
+
+    #[test]
+    fn ambiguous_upstream_slug_returns_all_siblings_not_silent_pick() {
+        let mgr = test_manager();
+        mgr.insert_test_entry("openai:gpt-4o", openai_entry("openai", "gpt-4o", "GPT-4o"));
+        mgr.insert_test_entry(
+            "openai_work:gpt-4o",
+            openai_entry("openai_work", "gpt-4o", "GPT-4o"),
+        );
+        let result = mgr.search_models(ModelCatalogQuery {
+            query: "gpt-4o".into(),
+            limit: 10,
+            provider: None,
+            task_eligible_only: true,
+        });
+        assert!(
+            result.results.len() >= 2,
+            "expected both siblings, got {:?}",
+            result.results
+        );
+        let slugs: Vec<&str> = result.results.iter().map(|h| h.slug.as_str()).collect();
+        assert!(slugs.contains(&"openai:gpt-4o"));
+        assert!(slugs.contains(&"openai_work:gpt-4o"));
+        assert!(
+            result
+                .note
+                .as_deref()
+                .unwrap_or("")
+                .contains("Multiple models match"),
+            "note={:?}",
+            result.note
+        );
+        // Structured instance metadata present and secret-free.
+        for hit in &result.results {
+            assert!(hit.provider_instance_id.is_some());
+            assert!(hit.upstream_model_id.as_deref() == Some("gpt-4o"));
+            assert!(!hit.slug.contains("test-key"));
+            assert!(!format!("{hit:?}").contains("test-key"));
+        }
+    }
+
+    #[test]
+    fn exact_canonical_slug_short_circuits_even_with_sibling_upstream() {
+        let mgr = test_manager();
+        mgr.insert_test_entry("openai:gpt-4o", openai_entry("openai", "gpt-4o", "GPT-4o"));
+        mgr.insert_test_entry(
+            "openai_work:gpt-4o",
+            openai_entry("openai_work", "gpt-4o", "GPT-4o"),
+        );
+        let result = mgr.search_models(ModelCatalogQuery {
+            query: "openai_work:gpt-4o".into(),
+            limit: 5,
+            provider: None,
+            task_eligible_only: true,
+        });
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].slug, "openai_work:gpt-4o");
+        assert_eq!(
+            result.results[0].provider_instance_id.as_deref(),
+            Some("openai_work")
+        );
     }
 }

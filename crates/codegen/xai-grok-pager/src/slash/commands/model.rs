@@ -74,39 +74,60 @@ impl SlashCommand for ModelCommand {
         // often contain spaces ("Grok 4.5"); if we split on the last token
         // first, a shorter catalog entry ("Grok") would steal the prefix and
         // treat "4.5" as an effort level.
-        if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
-            return CommandResult::Action(Action::SetDefaultModel(id));
+        //
+        // Ambiguous labels (sibling OpenAI/OpenRouter accounts sharing a
+        // display name or upstream slug) fail closed with the candidate list
+        // — never silently pick one account.
+        match ctx.models.resolve_by_name_or_id_detailed(trimmed) {
+            crate::acp::model_state::ModelResolveResult::Resolved(id) => {
+                return CommandResult::Action(Action::SetDefaultModel(id));
+            }
+            crate::acp::model_state::ModelResolveResult::Ambiguous { candidates, .. } => {
+                return CommandResult::Error(ambiguous_model_message(trimmed, &candidates));
+            }
+            crate::acp::model_state::ModelResolveResult::Missing { .. } => {}
         }
 
         // Trailing effort token + reasoning model → session-scoped switch
         // (not persisted as default). Resolve via the shared gate so a rejected
         // level (e.g. `none` on grok-4.5) surfaces the effort error with the
         // model's offered ids — not "Unknown model: … none".
-        if let Some((prefix, token)) = split_trailing_token(trimmed)
-            && let Some(id) = resolve_model(ctx.models, prefix)
-            && ctx
-                .models
-                .available
-                .get(&id)
-                .map(supports_reasoning_effort)
-                .unwrap_or(false)
-        {
-            return match ctx.models.resolve_effort_for_model(&id, token) {
-                Ok(effort) => CommandResult::Action(Action::SwitchModel {
-                    model_id: id,
-                    effort: Some(effort),
-                }),
-                Err(err) => CommandResult::Error(err.message()),
-            };
+        if let Some((prefix, token)) = split_trailing_token(trimmed) {
+            match ctx.models.resolve_by_name_or_id_detailed(prefix) {
+                crate::acp::model_state::ModelResolveResult::Resolved(id)
+                    if ctx
+                        .models
+                        .available
+                        .get(&id)
+                        .map(supports_reasoning_effort)
+                        .unwrap_or(false) =>
+                {
+                    return match ctx.models.resolve_effort_for_model(&id, token) {
+                        Ok(effort) => CommandResult::Action(Action::SwitchModel {
+                            model_id: id,
+                            effort: Some(effort),
+                        }),
+                        Err(err) => CommandResult::Error(err.message()),
+                    };
+                }
+                crate::acp::model_state::ModelResolveResult::Ambiguous { candidates, .. } => {
+                    return CommandResult::Error(ambiguous_model_message(prefix, &candidates));
+                }
+                _ => {}
+            }
         }
 
         CommandResult::Error(format!("Unknown model: {trimmed}"))
     }
 }
 
-/// Look up a model by case-insensitive display name OR model id match.
-fn resolve_model(models: &ModelState, name: &str) -> Option<acp::ModelId> {
-    models.resolve_by_name_or_id(name)
+fn ambiguous_model_message(query: &str, candidates: &[acp::ModelId]) -> String {
+    let list = candidates
+        .iter()
+        .map(|id| id.0.as_ref())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Ambiguous model '{query}': matches [{list}]. Use the exact provider-qualified id.")
 }
 
 fn supports_reasoning_effort(info: &acp::ModelInfo) -> bool {
