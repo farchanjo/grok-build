@@ -87,6 +87,15 @@ pub(super) fn task_model_override_error(
     )
 )]
 pub(crate) async fn handle_subagent_request(
+    request: SubagentRequest,
+    ctx: SubagentSpawnContext,
+    coordinator: &std::cell::RefCell<SubagentCoordinator>,
+    gateway: &GatewaySender,
+) {
+    handle_assigned_subagent_request(request, None, ctx, coordinator, gateway).await;
+}
+
+pub(crate) async fn handle_assigned_subagent_request(
     mut request: SubagentRequest,
     assigned_route: Option<crate::agent::subagent::exact_route::ExactRoute>,
     mut ctx: SubagentSpawnContext,

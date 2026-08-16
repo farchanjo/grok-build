@@ -39,12 +39,12 @@ use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
 pub(crate) mod assigned_spawn;
-mod assignment;
+pub(crate) mod assignment;
 mod coordinator_lifecycle;
 mod coordinator_query;
-mod exact_route;
+pub(crate) mod exact_route;
 mod handle_request;
-pub(crate) use handle_request::handle_subagent_request;
+pub(crate) use handle_request::{handle_assigned_subagent_request, handle_subagent_request};
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InitialContextSource {

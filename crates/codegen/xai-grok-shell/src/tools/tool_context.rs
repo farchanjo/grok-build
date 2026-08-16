@@ -397,6 +397,7 @@ mod tests {
                 prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
                 subagent_depth: 0,
                 subagent_event_tx: None,
+                assigned_spawn_sender: None,
                 lsp: None,
                 lsp_server_names: Vec::new(),
                 is_turn_active: None,

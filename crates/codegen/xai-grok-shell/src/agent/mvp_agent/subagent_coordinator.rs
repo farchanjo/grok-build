@@ -104,7 +104,7 @@ impl MvpAgent {
                                     ctx.parent_tool_snapshot =
                                         (!parent_tools.is_empty()).then_some(parent_tools);
                                 }
-                                crate::agent::subagent::handle_subagent_request(
+                                crate::agent::subagent::handle_assigned_subagent_request(
                                     request,
                                     assigned_route,
                                     ctx,

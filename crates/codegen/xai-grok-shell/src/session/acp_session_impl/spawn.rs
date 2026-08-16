@@ -1147,6 +1147,7 @@ pub(crate) async fn spawn_session_actor(
             grok_home,
         )
     };
+    let workflow_inference_config = inference_config_initial.clone();
     let sampler_handle = xai_grok_inference::InferenceActor::spawn_with_route_context(
         inference_config_initial,
         sampler_retry_policy,
@@ -1232,6 +1233,12 @@ pub(crate) async fn spawn_session_actor(
                 );
                 tokio::sync::mpsc::unbounded_channel().0
             }),
+            tool_context.assigned_spawn_sender.clone(),
+            models_manager.clone(),
+            workflow_inference_config,
+            auth_manager
+                .as_ref()
+                .map(|manager| manager.grok_home().to_path_buf()),
             Arc::new(|name: &str, fields: &serde_json::Value, replayed: bool| {
                 if !replayed {
                     tracing::info!(event = name, %fields, "workflow telemetry");

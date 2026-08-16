@@ -1,4 +1,4 @@
-use crate::host::{AgentResult, BudgetState, WorkflowHostRequest};
+use crate::host::{AgentResult, BudgetState, WorkflowHostMessage, WorkflowHostRequest};
 use crate::{Journal, WorkflowOutcome, WorkflowRunParams, extract_meta, run_workflow};
 
 #[derive(Debug, Clone)]
@@ -50,7 +50,11 @@ pub fn validate_script_with_agent_budget(
     let host = std::thread::spawn(move || {
         use WorkflowHostRequest as R;
         let mut agent_calls = 0u64;
-        while let Some(req) = host_rx.blocking_recv() {
+        while let Some(message) = host_rx.blocking_recv() {
+            let req = match message {
+                WorkflowHostMessage::Request(req) => req,
+                WorkflowHostMessage::AssignedSpawn(envelope) => envelope.request,
+            };
             match req {
                 R::ReserveAgentCalls { count, reply } => {
                     let requested = agent_calls.saturating_add(count);

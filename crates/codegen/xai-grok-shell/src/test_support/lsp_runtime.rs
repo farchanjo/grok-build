@@ -33,6 +33,7 @@ pub(crate) fn ctx_with_toggle_and_cmd_tx(
 }
 pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnContext {
     let (tx, _rx) = mpsc::unbounded_channel();
+    let (assigned_spawn_sender, _assigned_rx) = crate::agent::subagent::assigned_spawn::channel();
     SubagentSpawnContext {
         lsp: None,
         parent_max_turns: None,
@@ -90,6 +91,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         inherited_tool_overrides: None,
         yolo_mode: false,
         subagent_event_tx: tx,
+        assigned_spawn_sender,
         hunk_tracker_handle: xai_hunk_tracker::HunkTrackerHandle::noop(),
         hunk_tracking_enabled: false,
         fs: Arc::new(xai_grok_workspace::file_system::LocalFs::new(

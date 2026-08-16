@@ -74,6 +74,15 @@ impl WorkflowHostEnvelope {
     }
 }
 
+/// Transport between the deterministic workflow engine and its host. Public
+/// request shapes remain unchanged; only agent calls carry trusted assignment
+/// context.
+#[derive(Debug)]
+pub enum WorkflowHostMessage {
+    Request(WorkflowHostRequest),
+    AssignedSpawn(WorkflowHostEnvelope),
+}
+
 #[cfg(test)]
 mod envelope_tests {
     use super::*;
