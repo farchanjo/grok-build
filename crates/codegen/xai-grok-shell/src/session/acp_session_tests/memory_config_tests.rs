@@ -233,6 +233,9 @@ async fn create_test_actor_with_memory(
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         git_head_enabled: false,
         models_manager: Default::default(),
+        selection_model_id: std::cell::RefCell::new(acp::ModelId::new(
+            crate::test_support::TEST_MODEL,
+        )),
         route_context: std::cell::RefCell::new(None),
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),

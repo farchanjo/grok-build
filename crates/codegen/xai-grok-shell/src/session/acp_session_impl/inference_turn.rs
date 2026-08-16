@@ -657,11 +657,14 @@ impl SessionActor {
         };
         // Preserve media/backend fields needed by legacy_from_config fallback.
         inference_for_route.api_backend = cfg.api_backend.clone();
-        let production_route = crate::session::route_context::resolve_for_models_manager(
-            &inference_for_route,
-            &self.models_manager,
-            grok_home,
-        );
+        let selection_model_id = self.selection_model_id.borrow().clone();
+        let production_route =
+            crate::session::route_context::resolve_for_models_manager_with_selection(
+                &inference_for_route,
+                &self.models_manager,
+                selection_model_id.0.as_ref(),
+                grok_home,
+            );
         *self.route_context.borrow_mut() = Some(production_route.clone());
 
         // Exact-route credential for non-session routes: generation-gated.
@@ -1063,9 +1066,11 @@ impl SessionActor {
         // Recompute from the newly selected model + live credential binding so
         // a model/config switch never copies prior generations blindly.
         let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
-        let route = crate::session::route_context::resolve_for_models_manager(
+        let selection_model_id = self.selection_model_id.borrow().clone();
+        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
             &sampler_config,
             &self.models_manager,
+            selection_model_id.0.as_ref(),
             grok_home,
         );
         *self.route_context.borrow_mut() = Some(route.clone());

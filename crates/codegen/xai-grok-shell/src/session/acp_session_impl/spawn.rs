@@ -1140,9 +1140,10 @@ pub(crate) async fn spawn_session_actor(
         tokio::sync::mpsc::unbounded_channel::<xai_grok_inference::InferenceEvent>();
     let initial_route_context = {
         let grok_home = auth_manager.as_ref().map(|am| am.grok_home());
-        crate::session::route_context::resolve_for_models_manager(
+        crate::session::route_context::resolve_for_models_manager_with_selection(
             &inference_config_initial,
             &models_manager,
+            session_model_id.0.as_ref(),
             grok_home,
         )
     };

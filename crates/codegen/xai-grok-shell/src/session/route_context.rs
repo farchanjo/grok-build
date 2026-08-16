@@ -452,6 +452,7 @@ fn api_key_scope_for_instance(
 mod tests {
     use super::*;
     use crate::auth::store_provider_api_key;
+    use agent_client_protocol as acp;
     use tempfile::tempdir;
     use xai_grok_inference::InferenceConfig;
 
@@ -474,6 +475,82 @@ mod tests {
             openrouter_pacing: kind == ModelProviderKind::OpenRouter,
             command: vec![],
         }
+    }
+
+    fn catalog_entry(wire_model: &str, provider_id: &str) -> crate::agent::config::ModelEntry {
+        crate::agent::config::ModelEntry {
+            info: crate::agent::config::ModelInfo::fallback(wire_model),
+            model_provider: Some(resolved(provider_id, ModelProviderKind::OpenAiCompatible)),
+            api_key: None,
+            env_key: None,
+            auth_provider: None,
+            api_base_url: None,
+        }
+    }
+
+    #[test]
+    fn global_picker_change_cannot_alter_other_session_route_context() {
+        let dir = tempdir().unwrap();
+        let mut config = crate::agent::config::Config::default();
+        for provider_id in ["account-a", "account-b"] {
+            config.model_providers.insert(
+                provider_id.to_owned(),
+                ModelProviderConfig {
+                    base_url: Some(format!("https://{provider_id}.example/v1")),
+                    ..ModelProviderConfig::default()
+                },
+            );
+        }
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "session-a-selection".to_owned(),
+            catalog_entry("shared-wire-model", "account-a"),
+        );
+        models.insert(
+            "session-b-selection".to_owned(),
+            catalog_entry("shared-wire-model", "account-b"),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("session-a-selection"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let inference = cfg("https://account-a.example/v1", "shared-wire-model");
+
+        let session_a_before = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "session-a-selection",
+            Some(dir.path()),
+        );
+        let session_b = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "session-b-selection",
+            Some(dir.path()),
+        );
+        assert_eq!(session_a_before.instance_id(), "account-a");
+        assert_eq!(session_b.instance_id(), "account-b");
+
+        manager.set_current_model_id(acp::ModelId::new("session-b-selection"));
+        assert_eq!(
+            resolve_for_models_manager(&inference, &manager, Some(dir.path())).instance_id(),
+            "account-b",
+            "compatibility resolution must demonstrate that the shared picker moved",
+        );
+        let session_a_after = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "session-a-selection",
+            Some(dir.path()),
+        );
+        assert_eq!(session_a_after.instance_id(), "account-a");
+        assert_eq!(session_a_after, session_a_before);
     }
 
     #[test]

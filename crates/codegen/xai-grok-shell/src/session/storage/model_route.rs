@@ -547,42 +547,46 @@ fn recover_identity_txn(root: &SessionRoot) -> io::Result<()> {
 
     if marker.ready_to_commit {
         // Roll forward if staged digests match the journal.
+        let artifact_matches = |tmp: &str, final_name: &str, expected: &str| {
+            root.read_regular(tmp)
+                .or_else(|_| root.read_regular(final_name))
+                .is_ok_and(|bytes| sha256_hex(&bytes) == expected)
+        };
         let summary_ok = match (&marker.summary_tmp, &marker.new_summary_sha) {
-            (Some(tmp), Some(sha)) => match root.read_regular(tmp) {
-                Ok(b) => sha256_hex(&b) == *sha,
-                Err(_) => false,
-            },
+            (Some(tmp), Some(sha)) => artifact_matches(tmp, SUMMARY_FILE, sha),
             (None, None) => true,
             _ => false,
         };
         let companion_ok = match (&marker.companion_tmp, &marker.new_companion_sha) {
-            (Some(tmp), Some(sha)) => match root.read_regular(tmp) {
-                Ok(b) => sha256_hex(&b) == *sha,
-                Err(_) => false,
-            },
+            (Some(tmp), Some(sha)) => artifact_matches(tmp, MODEL_ROUTE_FILE, sha),
             (None, None) => true,
             (None, Some(_)) | (Some(_), None) => false,
         };
         let meta_ok = match (&marker.meta_tmp, &marker.new_meta_sha) {
-            (Some(tmp), Some(sha)) => match root.read_regular(tmp) {
-                Ok(b) => sha256_hex(&b) == *sha,
-                Err(_) => false,
-            },
+            (Some(tmp), Some(sha)) => artifact_matches(tmp, MODEL_IDENTITY_META, sha),
             (None, None) => true,
             _ => false,
         };
 
         if summary_ok && companion_ok && meta_ok {
-            if let Some(tmp) = &marker.summary_tmp {
+            if let Some(tmp) = &marker.summary_tmp
+                && root.exists_nofollow(tmp)?
+            {
                 root.rename_nofollow(tmp, SUMMARY_FILE)?;
             }
             if let Some(tmp) = &marker.companion_tmp {
-                root.rename_nofollow(tmp, MODEL_ROUTE_FILE)?;
-            } else {
-                // Intentional companion clear on roll-forward of a no-companion commit.
-                let _ = root.unlink_nofollow(MODEL_ROUTE_FILE);
+                if root.exists_nofollow(tmp)? {
+                    root.rename_nofollow(tmp, MODEL_ROUTE_FILE)?;
+                }
+            } else if marker.meta_tmp.is_none() {
+                // A transaction staging neither identity artifact intentionally
+                // commits a summary without provenance. Remove both old finals.
+                root.unlink_nofollow(MODEL_ROUTE_FILE)?;
+                root.unlink_nofollow(MODEL_IDENTITY_META)?;
             }
-            if let Some(tmp) = &marker.meta_tmp {
+            if let Some(tmp) = &marker.meta_tmp
+                && root.exists_nofollow(tmp)?
+            {
                 root.rename_nofollow(tmp, MODEL_IDENTITY_META)?;
             }
             clear_txn_marker(root)?;
@@ -712,6 +716,8 @@ pub fn identity_pair_present(session_dir: &Path) -> io::Result<bool> {
 }
 
 /// Commit summary + optional companion as one identity transaction.
+/// Without a companion, the transaction commits summary only and removes both
+/// identity artifacts so readers observe neither half of the pair.
 /// `leave_on_mismatch` / Leave with mismatch fails closed.
 ///
 /// Leave holds the identity lock across validate + digest rewrite so a
@@ -867,33 +873,37 @@ fn commit_artifacts(
     let summary_bytes = serde_json::to_vec_pretty(summary).map_err(io::Error::other)?;
     let summary_sha = sha256_hex(&summary_bytes);
 
-    let (companion_bytes, pair_id, companion_sha) = if let Some(c) = companion {
-        let pair = c
-            .pair_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mut c = c.clone();
-        if c.pair_id.is_none() {
-            c = c
-                .with_pair_id(&pair)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-        }
-        if c.canonical_model.is_none() {
-            c.canonical_model = Some(summary.current_model_id.0.to_string());
-        }
-        let bytes = serde_json::to_vec_pretty(&c).map_err(io::Error::other)?;
-        let sha = sha256_hex(&bytes);
-        (Some(bytes), pair, Some(sha))
-    } else {
-        (None, uuid::Uuid::new_v4().to_string(), None)
+    let Some(companion) = companion else {
+        return commit_summary_without_provenance(
+            root,
+            &summary_bytes,
+            &summary_sha,
+            previous_summary_bytes,
+        );
     };
+
+    let pair_id = companion
+        .pair_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut companion = companion.clone();
+    if companion.pair_id.is_none() {
+        companion = companion
+            .with_pair_id(&pair_id)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    }
+    if companion.canonical_model.is_none() {
+        companion.canonical_model = Some(summary.current_model_id.0.to_string());
+    }
+    let companion_bytes = serde_json::to_vec_pretty(&companion).map_err(io::Error::other)?;
+    let companion_sha = sha256_hex(&companion_bytes);
 
     let meta = IdentityMeta {
         version: META_VERSION,
         pair_id: pair_id.clone(),
         canonical_model: summary.current_model_id.0.to_string(),
         summary_sha256: summary_sha.clone(),
-        companion_sha256: companion_sha.clone(),
+        companion_sha256: Some(companion_sha.clone()),
     };
     let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(io::Error::other)?;
     let meta_sha = sha256_hex(&meta_bytes);
@@ -904,19 +914,17 @@ fn commit_artifacts(
     }
 
     root.write_staged(SUMMARY_TMP, &summary_bytes)?;
-    if let Some(bytes) = &companion_bytes {
-        root.write_staged(COMPANION_TMP, bytes)?;
-    }
+    root.write_staged(COMPANION_TMP, &companion_bytes)?;
     root.write_staged(META_TMP, &meta_bytes)?;
     root.revalidate()?;
 
     let marker = TxnMarker {
         version: TXN_VERSION,
         summary_tmp: Some(SUMMARY_TMP.into()),
-        companion_tmp: companion_bytes.as_ref().map(|_| COMPANION_TMP.into()),
+        companion_tmp: Some(COMPANION_TMP.into()),
         meta_tmp: Some(META_TMP.into()),
         new_summary_sha: Some(summary_sha),
-        new_companion_sha: companion_sha,
+        new_companion_sha: Some(companion_sha),
         new_meta_sha: Some(meta_sha),
         previous_summary_sha: previous_summary_bytes.map(sha256_hex),
         ready_to_commit: true,
@@ -925,14 +933,46 @@ fn commit_artifacts(
 
     // Commit order: summary → companion → meta, then drop journal.
     root.rename_nofollow(SUMMARY_TMP, SUMMARY_FILE)?;
-    if companion_bytes.is_some() {
-        root.rename_nofollow(COMPANION_TMP, MODEL_ROUTE_FILE)?;
-    } else {
-        let _ = root.unlink_nofollow(MODEL_ROUTE_FILE);
-    }
+    root.rename_nofollow(COMPANION_TMP, MODEL_ROUTE_FILE)?;
     root.rename_nofollow(META_TMP, MODEL_IDENTITY_META)?;
     clear_txn_marker(root)?;
     let _ = root.fsync_dir();
+    Ok(())
+}
+
+fn commit_summary_without_provenance(
+    root: &SessionRoot,
+    summary_bytes: &[u8],
+    summary_sha: &str,
+    previous_summary_bytes: Option<&[u8]>,
+) -> io::Result<()> {
+    for name in [SUMMARY_TMP, COMPANION_TMP, META_TMP] {
+        root.unlink_nofollow(name)?;
+    }
+    root.write_staged(SUMMARY_TMP, summary_bytes)?;
+    root.revalidate()?;
+
+    let marker = TxnMarker {
+        version: TXN_VERSION,
+        summary_tmp: Some(SUMMARY_TMP.into()),
+        companion_tmp: None,
+        meta_tmp: None,
+        new_summary_sha: Some(summary_sha.to_owned()),
+        new_companion_sha: None,
+        new_meta_sha: None,
+        previous_summary_sha: previous_summary_bytes.map(sha256_hex),
+        ready_to_commit: true,
+    };
+    write_txn_marker(root, &marker)?;
+
+    root.rename_nofollow(SUMMARY_TMP, SUMMARY_FILE)?;
+    root.fsync_dir()?;
+    root.unlink_nofollow(MODEL_ROUTE_FILE)?;
+    root.fsync_dir()?;
+    root.unlink_nofollow(MODEL_IDENTITY_META)?;
+    root.fsync_dir()?;
+    clear_txn_marker(root)?;
+    root.fsync_dir()?;
     Ok(())
 }
 
@@ -1233,6 +1273,69 @@ mod tests {
         fs::create_dir_all(&session).unwrap();
         let summary = sample_summary("grok-4.5");
         assert!(load_route_companion(&session, &summary).unwrap().is_none());
+    }
+
+    #[test]
+    fn no_provenance_commit_writes_summary_without_identity_pair() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("sess");
+        fs::create_dir_all(&session).unwrap();
+        let summary = sample_summary("grok-4.5");
+
+        commit_summary_and_companion(&session, &summary, None, false).unwrap();
+
+        assert_eq!(
+            read_summary_contained(&session).unwrap().current_model_id,
+            summary.current_model_id
+        );
+        assert!(!session.join(MODEL_ROUTE_FILE).exists());
+        assert!(!session.join(MODEL_IDENTITY_META).exists());
+        assert!(load_route_companion(&session, &summary).unwrap().is_none());
+    }
+
+    #[test]
+    fn no_provenance_recovery_removes_both_identity_artifacts() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("sess");
+        fs::create_dir_all(&session).unwrap();
+        let summary = sample_summary("openai-gpt-4o");
+        commit_summary_and_companion(
+            &session,
+            &summary,
+            Some(&provenance("openai-gpt-4o")),
+            false,
+        )
+        .unwrap();
+
+        let mut next = summary.clone();
+        next.current_model_id = acp::ModelId::new("grok-4.5");
+        let summary_bytes = serde_json::to_vec_pretty(&next).unwrap();
+        let summary_sha = sha256_hex(&summary_bytes);
+        fs::write(session.join(SUMMARY_TMP), &summary_bytes).unwrap();
+        let marker = TxnMarker {
+            version: TXN_VERSION,
+            summary_tmp: Some(SUMMARY_TMP.into()),
+            companion_tmp: None,
+            meta_tmp: None,
+            new_summary_sha: Some(summary_sha),
+            new_companion_sha: None,
+            new_meta_sha: None,
+            previous_summary_sha: Some(sha256_hex(&fs::read(session.join(SUMMARY_FILE)).unwrap())),
+            ready_to_commit: true,
+        };
+        fs::write(
+            session.join(MODEL_IDENTITY_TXN),
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_summary_contained(&session).unwrap().current_model_id,
+            next.current_model_id
+        );
+        assert!(!session.join(MODEL_ROUTE_FILE).exists());
+        assert!(!session.join(MODEL_IDENTITY_META).exists());
+        assert!(load_route_companion(&session, &next).unwrap().is_none());
     }
 
     #[test]
