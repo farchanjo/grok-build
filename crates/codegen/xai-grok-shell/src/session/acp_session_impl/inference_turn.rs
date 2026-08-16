@@ -1007,6 +1007,74 @@ impl SessionActor {
             .map_err(|error| acp::Error::invalid_params().data(error.to_string()))
     }
 
+    /// Resolve MediaStt exact route and build an xAI streaming STT handle only
+    /// when the frozen session is first-party xAI. Fail closed otherwise so a
+    /// non-xAI session never silently uses a sibling/current AuthManager bearer.
+    pub(super) async fn resolve_media_stt_transcriber(
+        &self,
+        audio_model_pin: Option<&str>,
+    ) -> Result<
+        (
+            crate::session::auxiliary_route::ResolvedAuxiliaryRoute,
+            std::sync::Arc<dyn crate::session::media_stt::AsyncAudioTranscriber>,
+        ),
+        crate::session::media_stt::AudioSttError,
+    > {
+        crate::session::media_stt::validate_audio_stt_route(audio_model_pin).map_err(|e| e)?;
+        let active = self.reconstruct_full_config().await;
+        let creds = self.chat_state_handle.get_credentials().await;
+        let session_key = self
+            .auth_manager
+            .as_ref()
+            .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
+        let disable_api_key_auth = self
+            .auth_manager
+            .as_ref()
+            .map(|am| am.grok_com_config().api_key_auth_disabled())
+            .unwrap_or(false);
+        let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
+        let selection_id = self.selection_model_id.borrow().0.to_string();
+        let frozen = self.route_context.borrow().clone();
+        let mut resolved = crate::session::auxiliary_route::resolve_media_stt_route(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::MediaStt,
+                requested: crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL,
+                models_manager: &self.models_manager,
+                frozen_session_route: frozen.as_ref(),
+                frozen_session_inference: &active,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home,
+                session_key: session_key.as_deref(),
+                disable_api_key_auth,
+                alpha_test_key: creds.alpha_test_key.as_deref(),
+                client_version: creds.client_version.as_deref(),
+                client_identifier: self.client_identifier.as_deref(),
+                max_retries: Some(self.max_retries),
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: true,
+            },
+            audio_model_pin,
+        )
+        .map_err(crate::session::media_stt::audio_stt_error_from_aux)?;
+        resolved.bind_attribution(
+            self.auth_manager.as_ref(),
+            Some(self.session_info.id.to_string()),
+        );
+        // Transport is typed xAI streaming STT; only after exact route validates.
+        let stt_config = self.models_manager.config_snapshot().voice;
+        let transcriber = crate::session::media_stt::maybe_xai_stt_transcriber(
+            self.auth_manager.as_ref(),
+            self.rebuild_spec.api_key_provider.as_ref(),
+            stt_config,
+        )
+        .ok_or(crate::session::media_stt::AudioSttError::AuthUnavailable)?;
+        debug_assert_eq!(
+            resolved.route.operation_partition(),
+            crate::session::auxiliary_route::AuxiliaryPurpose::MediaStt.operation_partition()
+        );
+        Ok((resolved, transcriber))
+    }
+
     /// Resolve the ordered primary/fallback compaction routes through exact
     /// auxiliary route handles. `@session` copies the frozen session route.
     pub(super) async fn prepare_compaction_routes(

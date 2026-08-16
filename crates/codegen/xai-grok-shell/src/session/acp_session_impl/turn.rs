@@ -1214,12 +1214,17 @@ impl SessionActor {
                     cwd: self.session_info.cwd.clone(),
                 });
             let media = media.clone();
-            let stt_config = self.models_manager.config_snapshot().voice;
-            let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
-                self.auth_manager.as_ref(),
-                self.rebuild_spec.api_key_provider.as_ref(),
-                stt_config,
-            );
+            // Gate B MediaStt: exact xAI session route before any STT bearer use.
+            let stt = match self
+                .resolve_media_stt_transcriber(media.audio_model.as_deref())
+                .await
+            {
+                Ok((_route, tx)) => Some(tx),
+                Err(error) => {
+                    tracing::debug!(%error, "user-audio STT route closed");
+                    None
+                }
+            };
             let mut envelopes = Vec::with_capacity(raw_audios.len());
             for audio in &raw_audios {
                 envelopes.push(

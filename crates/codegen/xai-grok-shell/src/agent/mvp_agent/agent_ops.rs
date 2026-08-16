@@ -69,10 +69,15 @@ impl MvpAgent {
                 cfg.client_version.clone(),
             )
         };
-        // Production seam: SessionTitleSamplerPairing keeps route provenance
-        // paired with the sampler so a later soft-fallback cannot drop it.
-        let frozen = xai_grok_inference::ProviderRouteContext::legacy_from_config(primary);
+        // Production seam: exact session route freeze (not legacy_from_config)
+        // + SessionTitleSamplerPairing; soft-fallback keeps primary route+purpose.
         let selection_id = self.models_manager.current_model_id().0.to_string();
+        let frozen = crate::session::route_context::resolve_for_models_manager_with_selection(
+            primary,
+            &self.models_manager,
+            selection_id.as_str(),
+            Some(self.auth_manager.grok_home()),
+        );
         let pair = crate::session::auxiliary_route::SessionTitleSamplerPairing::for_session_new(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {
                 purpose: crate::session::auxiliary_route::AuxiliaryPurpose::SessionTitle,
@@ -94,10 +99,8 @@ impl MvpAgent {
         );
         let (config, model, route_ctx) = match pair {
             Ok(mut pair) => {
-                pair.route.bind_attribution(
-                    Some(&self.auth_manager),
-                    None,
-                );
+                pair.route
+                    .bind_attribution(Some(&self.auth_manager), None);
                 (
                     pair.route.inference.clone(),
                     pair.route.upstream_model_id.clone(),
@@ -105,10 +108,21 @@ impl MvpAgent {
                 )
             }
             Err(err) => {
-                // Soft-fallback keeps the true primary upstream wire model —
-                // never write an unresolved selection slug onto the wire field.
+                // Soft-fallback: true primary upstream + exact primary route
+                // with SessionTitle purpose (never drop route context).
                 tracing::debug!(error = %err, "session title aux route soft-fallback to primary");
-                (primary.clone(), primary.model.clone(), None)
+                let mut fallback =
+                    crate::session::auxiliary_route::session_title_soft_fallback_route(
+                        &frozen,
+                        primary,
+                        selection_id.as_str(),
+                    );
+                fallback.bind_attribution(Some(&self.auth_manager), None);
+                (
+                    fallback.inference.clone(),
+                    fallback.upstream_model_id.clone(),
+                    Some(fallback.route.clone()),
+                )
             }
         };
         let client = OaiCompatClient::new_with_route_context(config, route_ctx)
@@ -1436,8 +1450,15 @@ impl MvpAgent {
         let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
         let client_version = self.cfg.borrow().client_version.clone();
         let primary = self.inference_config.borrow().clone();
-        let frozen = xai_grok_inference::ProviderRouteContext::legacy_from_config(&primary);
         let selection_id = self.models_manager.current_model_id().0.to_string();
+        // Exact production freeze (instance/incarnation/generations), not
+        // legacy_from_config host-fallback identity.
+        let frozen = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &primary,
+            &self.models_manager,
+            selection_id.as_str(),
+            Some(self.auth_manager.grok_home()),
+        );
         let disable_api_key_auth = self.cfg.borrow().grok_com_config.api_key_auth_disabled();
         let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {

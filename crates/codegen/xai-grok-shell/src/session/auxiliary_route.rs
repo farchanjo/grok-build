@@ -55,6 +55,10 @@ pub enum AuxiliaryPurpose {
     GoalEvaluator,
     GoalClassifier,
     AutoClassifier,
+    /// `/btw` side-question one-shot (inherits frozen session route).
+    SideQuestion,
+    /// Laziness / stalled-turn classifier one-shot (inherits frozen session).
+    LazinessClassifier,
 }
 
 impl AuxiliaryPurpose {
@@ -74,6 +78,8 @@ impl AuxiliaryPurpose {
             Self::GoalEvaluator => "goal_evaluator",
             Self::GoalClassifier => "goal_classifier",
             Self::AutoClassifier => "auto_classifier",
+            Self::SideQuestion => "side_question",
+            Self::LazinessClassifier => "laziness_classifier",
         }
     }
 
@@ -625,6 +631,81 @@ pub fn resolve_media_describe_route(
     inputs.purpose = purpose;
     inputs.explicit_pin_fail_closed = true;
     resolve_auxiliary_route(inputs)
+}
+
+/// Fixed xAI streaming-STT transport labels accepted as `MediaStt` pins.
+pub const MEDIA_STT_ROUTE_ALIASES: &[&str] = &[
+    SESSION_ROUTE_SENTINEL,
+    "xai",
+    "xai-stt",
+    "xai-streaming-stt",
+];
+
+/// Production seam: resolve file-audio STT under the central aux contract.
+///
+/// Transport remains the typed xAI streaming STT WebSocket, but Gate B still
+/// requires an exact `MediaStt` route handle first:
+/// - accepted pins: empty/`None`/`@session`/`xai`/`xai-stt`/`xai-streaming-stt`
+/// - inherits the **frozen session** route with `media_stt` operation partition
+/// - fails closed when the frozen route is not first-party xAI (never silently
+///   borrow a sibling/current AuthManager xAI bearer while the session pin is
+///   a foreign account)
+/// - fails closed for any other catalog/audio-model slug
+pub fn resolve_media_stt_route(
+    mut inputs: AuxiliaryRouteInputs<'_>,
+    audio_model_pin: Option<&str>,
+) -> Result<ResolvedAuxiliaryRoute, AuxiliaryRouteError> {
+    inputs.purpose = AuxiliaryPurpose::MediaStt;
+    inputs.explicit_pin_fail_closed = true;
+    let pin = audio_model_pin.map(str::trim).filter(|s| !s.is_empty());
+    match pin {
+        None => {}
+        Some(p) if MEDIA_STT_ROUTE_ALIASES.iter().any(|a| *a == p) => {}
+        Some(other) => {
+            return Err(AuxiliaryRouteError::ExplicitPinFailed {
+                selection: other.to_owned(),
+            });
+        }
+    }
+    let frozen = inputs
+        .frozen_session_route
+        .ok_or(AuxiliaryRouteError::SessionRouteRequired)?;
+    // STT transport is xAI-only. Refuse non-xAI session pins so production
+    // never uses a current/sibling xAI bearer under a foreign session route.
+    let is_xai = matches!(
+        frozen.provider_kind(),
+        xai_grok_inference::RouteProviderKind::Xai
+    ) || matches!(frozen.credential_route(), RouteCredentialRoute::XaiSession);
+    if !is_xai {
+        return Err(AuxiliaryRouteError::ConstructionFailed {
+            selection: pin.unwrap_or(SESSION_ROUTE_SENTINEL).to_owned(),
+            detail: "xAI streaming STT requires an exact xAI session route".to_owned(),
+        });
+    }
+    // Always inherit frozen session with MediaStt purpose (exact generations).
+    inputs.requested = SESSION_ROUTE_SENTINEL;
+    resolve_auxiliary_route(inputs)
+}
+
+/// Soft-fallback title path: keep primary upstream wire model **and** exact
+/// primary route with `SessionTitle` operation partition (never drop route).
+pub fn session_title_soft_fallback_route(
+    frozen_session_route: &ProviderRouteContext,
+    frozen_session_inference: &InferenceConfig,
+    frozen_session_selection_id: &str,
+) -> ResolvedAuxiliaryRoute {
+    let route = frozen_session_route
+        .with_operation_partition(AuxiliaryPurpose::SessionTitle.operation_partition());
+    let mut inference = frozen_session_inference.clone();
+    // Wire model stays the true primary upstream — never an unresolved slug.
+    ResolvedAuxiliaryRoute {
+        purpose: AuxiliaryPurpose::SessionTitle,
+        kind: AuxiliaryRouteKind::SessionInherit,
+        canonical_selection_id: Some(frozen_session_selection_id.to_owned()),
+        upstream_model_id: inference.model.clone(),
+        inference,
+        route,
+    }
 }
 
 /// Paired title-sampler construction that cannot drop route provenance.

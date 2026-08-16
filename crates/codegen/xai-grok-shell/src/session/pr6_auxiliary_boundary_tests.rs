@@ -435,7 +435,8 @@ fn title_pairing_and_soft_fallback_keep_primary_upstream() {
         Some("title-p")
     );
 
-    // Soft-fallback path (mirrors build_summary_client): keep primary.model.
+    // Soft-fallback path (mirrors build_summary_client): keep primary.model
+    // AND exact primary route with SessionTitle purpose (F-PR6-5).
     let missing = SessionTitleSamplerPairing::for_session_new(base_inputs(
         AuxiliaryPurpose::SessionTitle,
         "missing-title-slug",
@@ -446,9 +447,25 @@ fn title_pairing_and_soft_fallback_keep_primary_upstream() {
         None,
     ));
     assert!(missing.is_err());
-    let fallback_model = primary.model.clone(); // never assign unresolved slug
-    assert_eq!(fallback_model, "session-wire");
-    assert_ne!(fallback_model, "missing-title-slug");
+    let mut fallback = session_title_soft_fallback_route(&frozen, &primary, "session-a");
+    assert_eq!(fallback.upstream_model_id, "session-wire");
+    assert_ne!(fallback.upstream_model_id, "missing-title-slug");
+    assert_eq!(fallback.route.operation_partition(), "session_title");
+    assert_eq!(fallback.route.instance_id(), frozen.instance_id());
+    assert_eq!(
+        fallback.route.binding_generation(),
+        frozen.binding_generation()
+    );
+    let am = Arc::new(crate::auth::AuthManager::new(
+        dir.path(),
+        crate::auth::GrokComConfig::default(),
+    ));
+    fallback.bind_attribution(Some(&am), None);
+    let client = fallback.client().unwrap();
+    assert_eq!(
+        client.route_context().map(|r| r.operation_partition()),
+        Some("session_title")
+    );
 }
 
 /// Production seam: media PDF/video purposes apply distinct operation partitions.
@@ -635,4 +652,270 @@ fn sibling_accounts_never_borrow_credentials() {
         a_client.route_context().map(|r| r.instance_id()),
         b_client.route_context().map(|r| r.instance_id())
     );
+}
+
+// --- Gate B F-PR6-1..6 production-seam coverage ---
+
+fn frozen_xai() -> ProviderRouteContext {
+    ProviderRouteContext::builder()
+        .instance_id("xai")
+        .provider_kind(RouteProviderKind::Xai)
+        .api_surface(RouteApiSurface::OpenAiCompatibleSubset)
+        .credential_route(RouteCredentialRoute::XaiSession)
+        .binding_generation(7)
+        .registry_generation(3)
+        .authority(RouteAuthority::Authoritative)
+        .origin_from_base_url("https://api.x.ai/v1")
+        .model_partition("session-wire")
+        .build()
+        .unwrap()
+}
+
+/// F-PR6-1: SessionRecap @session inherit carries purpose partition + route client.
+#[test]
+fn session_recap_session_inherit_carries_route_and_purpose() {
+    let dir = tempdir().unwrap();
+    let mgr = manager(IndexMap::new(), IndexMap::new(), "session-a", dir.path());
+    let frozen = frozen_xai();
+    let session = session_cfg();
+    let resolved = resolve_auxiliary_route(base_inputs(
+        AuxiliaryPurpose::SessionRecap,
+        SESSION_ROUTE_SENTINEL,
+        &mgr,
+        &frozen,
+        &session,
+        dir.path(),
+        Some("jwt"),
+    ))
+    .unwrap();
+    assert_eq!(resolved.kind, AuxiliaryRouteKind::SessionInherit);
+    assert_eq!(resolved.purpose, AuxiliaryPurpose::SessionRecap);
+    assert_eq!(resolved.route.operation_partition(), "session_recap");
+    assert_eq!(resolved.route.instance_id(), "xai");
+    assert_eq!(resolved.route.binding_generation(), 7);
+    let client = resolved.client().unwrap();
+    assert_eq!(
+        client.route_context().map(|r| r.operation_partition()),
+        Some("session_recap")
+    );
+}
+
+/// F-PR6-2: MediaStt requires exact xAI session route; foreign session fails closed.
+#[test]
+fn media_stt_requires_xai_session_route_and_rejects_foreign() {
+    let dir = tempdir().unwrap();
+    let mgr = manager(IndexMap::new(), IndexMap::new(), "session-a", dir.path());
+    let session = session_cfg();
+
+    let xai = frozen_xai();
+    let ok = resolve_media_stt_route(
+        base_inputs(
+            AuxiliaryPurpose::MediaStt,
+            SESSION_ROUTE_SENTINEL,
+            &mgr,
+            &xai,
+            &session,
+            dir.path(),
+            Some("jwt"),
+        ),
+        None,
+    )
+    .unwrap();
+    assert_eq!(ok.purpose, AuxiliaryPurpose::MediaStt);
+    assert_eq!(ok.route.operation_partition(), "media_stt");
+    assert_eq!(ok.route.instance_id(), "xai");
+    assert_eq!(ok.route.binding_generation(), 7);
+
+    // Foreign OpenAI-compatible frozen route must not borrow xAI AuthManager bearer.
+    let foreign = frozen(); // OpenAiCompatible account-a
+    let err = resolve_media_stt_route(
+        base_inputs(
+            AuxiliaryPurpose::MediaStt,
+            SESSION_ROUTE_SENTINEL,
+            &mgr,
+            &foreign,
+            &session,
+            dir.path(),
+            Some("jwt"),
+        ),
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        AuxiliaryRouteError::ConstructionFailed { .. }
+    ));
+
+    // Arbitrary catalog audio pin fails closed.
+    let err2 = resolve_media_stt_route(
+        base_inputs(
+            AuxiliaryPurpose::MediaStt,
+            SESSION_ROUTE_SENTINEL,
+            &mgr,
+            &xai,
+            &session,
+            dir.path(),
+            Some("jwt"),
+        ),
+        Some("some-catalog-audio-model"),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err2,
+        AuxiliaryRouteError::ExplicitPinFailed { selection }
+        if selection == "some-catalog-audio-model"
+    ));
+}
+
+/// F-PR6-3: production freeze preserves instance/binding gens (not legacy_from_config).
+#[test]
+fn production_freeze_preserves_instance_and_binding_not_legacy_host() {
+    let dir = tempdir().unwrap();
+    let mut models = IndexMap::new();
+    models.insert(
+        "session-a".into(),
+        entry(
+            "session-wire",
+            "account-a",
+            "https://account-a.example/v1",
+            Some("key-a"),
+        ),
+    );
+    let mut providers = IndexMap::new();
+    providers.insert(
+        "account-a".into(),
+        ModelProviderConfig {
+            base_url: Some("https://account-a.example/v1".into()),
+            ..Default::default()
+        },
+    );
+    let mgr = manager(models, providers, "session-a", dir.path());
+    let primary = session_cfg();
+    let frozen = crate::session::route_context::resolve_for_models_manager_with_selection(
+        &primary,
+        &mgr,
+        "session-a",
+        Some(dir.path()),
+    );
+    // Not a kind-only legacy freeze.
+    assert_ne!(frozen.instance_id(), "openai");
+    assert_ne!(frozen.instance_id(), "open_ai_compatible");
+    // Production path may be Unverified without on-disk binding, but must not
+    // be HostFallback legacy identity for a real catalog selection.
+    assert_ne!(frozen.authority(), RouteAuthority::HostFallback);
+    // @session inherit preserves generations from freeze.
+    let inherited = resolve_auxiliary_route(base_inputs(
+        AuxiliaryPurpose::WebSearch,
+        SESSION_ROUTE_SENTINEL,
+        &mgr,
+        &frozen,
+        &primary,
+        dir.path(),
+        None,
+    ))
+    .unwrap();
+    assert_eq!(inherited.route.instance_id(), frozen.instance_id());
+    assert_eq!(
+        inherited.route.binding_generation(),
+        frozen.binding_generation()
+    );
+    assert_eq!(inherited.route.operation_partition(), "web_search");
+}
+
+/// F-PR6-4: compaction purpose route client carries operation partition (prefire seam).
+#[test]
+fn compaction_route_client_operation_partition_for_two_pass_seam() {
+    let dir = tempdir().unwrap();
+    let mut models = IndexMap::new();
+    models.insert(
+        "compact".into(),
+        entry(
+            "compact-wire",
+            "compact-p",
+            "https://compact.example/v1",
+            Some("compact-key"),
+        ),
+    );
+    let mgr = manager(models, IndexMap::new(), "compact", dir.path());
+    let frozen = frozen();
+    let session = session_cfg();
+    let resolved = resolve_auxiliary_route(base_inputs(
+        AuxiliaryPurpose::Compaction,
+        "compact",
+        &mgr,
+        &frozen,
+        &session,
+        dir.path(),
+        None,
+    ))
+    .unwrap();
+    let client = resolved.client().unwrap();
+    assert_eq!(
+        client.route_context().map(|r| r.operation_partition()),
+        Some("compaction")
+    );
+    assert_eq!(
+        client.route_context().map(|r| r.instance_id()),
+        Some("compact-p")
+    );
+}
+
+/// F-PR6-6: GoalEvaluator active-session path is @session inherit with purpose.
+#[test]
+fn goal_evaluator_session_inherit_carries_purpose() {
+    let dir = tempdir().unwrap();
+    let mgr = manager(IndexMap::new(), IndexMap::new(), "session-a", dir.path());
+    let frozen = frozen();
+    let session = session_cfg();
+    let resolved = resolve_auxiliary_route(base_inputs(
+        AuxiliaryPurpose::GoalEvaluator,
+        SESSION_ROUTE_SENTINEL,
+        &mgr,
+        &frozen,
+        &session,
+        dir.path(),
+        Some("jwt"),
+    ))
+    .unwrap();
+    assert_eq!(resolved.kind, AuxiliaryRouteKind::SessionInherit);
+    assert_eq!(resolved.route.operation_partition(), "goal_evaluator");
+    let client = resolved.client().unwrap();
+    assert_eq!(
+        client.route_context().map(|r| r.operation_partition()),
+        Some("goal_evaluator")
+    );
+}
+
+/// N5: SideQuestion + LazinessClassifier inherit frozen route with purpose.
+#[test]
+fn side_question_and_laziness_session_inherit_purposes() {
+    let dir = tempdir().unwrap();
+    let mgr = manager(IndexMap::new(), IndexMap::new(), "session-a", dir.path());
+    let frozen = frozen();
+    let session = session_cfg();
+    for purpose in [
+        AuxiliaryPurpose::SideQuestion,
+        AuxiliaryPurpose::LazinessClassifier,
+    ] {
+        let resolved = resolve_auxiliary_route(base_inputs(
+            purpose,
+            SESSION_ROUTE_SENTINEL,
+            &mgr,
+            &frozen,
+            &session,
+            dir.path(),
+            Some("jwt"),
+        ))
+        .unwrap();
+        assert_eq!(resolved.kind, AuxiliaryRouteKind::SessionInherit);
+        assert_eq!(
+            resolved.route.operation_partition(),
+            purpose.operation_partition()
+        );
+        assert_eq!(
+            resolved.route.binding_generation(),
+            frozen.binding_generation()
+        );
+        assert!(resolved.client().is_ok());
+    }
 }

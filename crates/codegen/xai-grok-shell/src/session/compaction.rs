@@ -242,14 +242,22 @@ impl SessionActor {
         media_descriptors: &CompactionMediaDescriptors,
     ) -> Option<CompactOutput> {
         let history = sanitize_compaction_images_with_descriptors(history, media_descriptors);
-        let inference_config = self.reconstruct_full_config().await;
-        let client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Gate B: two-pass prefire uses exact compaction route handles (same
+        // as full-replace/rolling), not a route-less primary client.
+        let routes = match self.prepare_compaction_routes().await {
+            Ok(r) if !r.is_empty() => r,
+            Ok(_) => {
+                tracing::warn!("two_pass: no compaction routes configured");
+                return None;
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "two_pass: failed to prepare sampling client");
+                tracing::warn!(error = %e, "two_pass: failed to prepare compaction routes");
                 return None;
             }
         };
+        let first = &routes[0];
+        let client = first.client.clone();
+        let inference_config = first.inference_config.clone();
         let tool_defs = self.prepare_tool_definitions().await;
         let tools = self.turn_base_tool_specs(&tool_defs);
         let wall_clock_budget_secs = self

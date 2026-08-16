@@ -23,10 +23,21 @@ impl SessionActor {
         let parent_session_id = self.session_info.id.to_string();
         let asked_at = chrono::Utc::now();
 
-        let sampling_client = self
-            .prepare_chat_completion(false)
+        // Exact @session inherit with SideQuestion purpose/provenance.
+        let sampling_client = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::SideQuestion,
+                crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL,
+            )
             .await
-            .map_err(|e| format!("failed to prepare client: {e}"))?;
+        {
+            Ok(route) => route
+                .client()
+                .map_err(|e| format!("failed to prepare side-question client: {e}"))?,
+            Err(e) => {
+                return Err(format!("side-question aux route unavailable: {e}"));
+            }
+        };
 
         // Full conversation snapshot including system prompt, tool calls, and results.
         // Strip reasoning/thinking blocks from assistant items so we don't send
@@ -196,10 +207,28 @@ impl SessionActor {
         // (not on failure/empty/cancel) so auto can retry later for this turn if needed.
         let clear_in_flight = || self.recap_in_flight.set(false);
 
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Gate B: recap is a named aux consumer — exact @session inherit with
+        // SessionRecap purpose/partition and route-bound attribution.
+        let sampling_client = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::SessionRecap,
+                crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL,
+            )
+            .await
+        {
+            Ok(route) => match route.client() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "recap: failed to build route-aware client");
+                    clear_in_flight();
+                    if !auto {
+                        self.emit_recap_unavailable().await;
+                    }
+                    return;
+                }
+            },
             Err(e) => {
-                tracing::warn!(error = %e, "recap: failed to prepare sampling client");
+                tracing::warn!(error = %e, "recap: session recap aux route unavailable");
                 clear_in_flight();
                 // A manual `/recap` shows a loading spinner; clear it on failure.
                 if !auto {

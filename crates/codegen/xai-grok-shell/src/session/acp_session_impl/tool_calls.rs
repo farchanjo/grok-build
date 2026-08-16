@@ -2512,12 +2512,17 @@ impl SessionActor {
         // Never persist Audio/Video content variants into conversation history.
         if let ToolsToolOutput::ReadFile(ReadFileOutput::AudioContent(ref audio)) = result.output {
             let media = media.clone();
-            let stt_config = self.models_manager.config_snapshot().voice;
-            let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
-                self.auth_manager.as_ref(),
-                self.rebuild_spec.api_key_provider.as_ref(),
-                stt_config,
-            );
+            // Gate B MediaStt: exact route first; fail closed if non-xAI session.
+            let stt = match self
+                .resolve_media_stt_transcriber(media.audio_model.as_deref())
+                .await
+            {
+                Ok((_route, tx)) => Some(tx),
+                Err(error) => {
+                    tracing::debug!(%error, "tool audio STT route closed");
+                    None
+                }
+            };
             prompt_text = crate::session::media_pipeline::understand_audio(
                 audio,
                 &media,
@@ -2530,12 +2535,16 @@ impl SessionActor {
         }
         if let ToolsToolOutput::ReadFile(ReadFileOutput::VideoContent(ref video)) = result.output {
             let media = media.clone();
-            let stt_config = self.models_manager.config_snapshot().voice;
-            let stt = crate::session::media_stt::maybe_xai_stt_transcriber(
-                self.auth_manager.as_ref(),
-                self.rebuild_spec.api_key_provider.as_ref(),
-                stt_config,
-            );
+            let stt = match self
+                .resolve_media_stt_transcriber(media.audio_model.as_deref())
+                .await
+            {
+                Ok((_route, tx)) => Some(tx),
+                Err(error) => {
+                    tracing::debug!(%error, "tool video-audio STT route closed");
+                    None
+                }
+            };
             // Frame descriptions use MediaVideo purpose so pacing/attribution
             // operation partition is distinct from image describe.
             let route = media
