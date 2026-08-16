@@ -839,6 +839,13 @@ pub struct AgentView {
     /// starts connect/reconnect/save from a matching failure context.
     /// Echoed on completion; delayed prior tokens never match after replace.
     pub in_flight_repair: Option<crate::app::agent::CredentialRepairScope>,
+    /// Exact-route binding meta keyed by `(provider_id, failure_generation)`.
+    /// Filled from notification `_meta`; used only for stashing repair scope
+    /// fields. Sibling provider failures never overwrite each other.
+    pub pending_route_bindings: std::collections::HashMap<
+        (String, u64),
+        xai_grok_shell::extensions::notification::ProviderRouteBindingMeta,
+    >,
     /// Currently active modal dialog (blocks all other input).
     pub active_modal: Option<ActiveModal>,
     /// Hit areas for modal buttons (from last render).

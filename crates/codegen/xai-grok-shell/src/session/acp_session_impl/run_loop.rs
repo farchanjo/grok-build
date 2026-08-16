@@ -824,8 +824,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
+                        SessionCommand::SetSessionModel { selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::GetExecutionBackend { responds_to } => {
@@ -871,13 +871,9 @@ pub(super) async fn run_session(
                                 if let Some(ref env) = external_runtime {
                                     env.validate().map_err(|e| e.to_string())?;
                                 }
-                                let model = session
-                                    .chat_state_handle
-                                    .get_inference_settings()
-                                    .await
-                                    .map(|c| c.model)
-                                    .unwrap_or_default();
-                                let model_id = acp::ModelId::new(model);
+                                // Persist the session-private canonical selection id —
+                                // never the upstream wire slug from InferenceConfig.model.
+                                let model_id = session.selection_model_id.borrow().clone();
                                 let agent_name = session.agent.borrow().definition().name.clone();
                                 session
                                     .notifications
@@ -888,6 +884,7 @@ pub(super) async fn run_session(
                                         reasoning_effort: None,
                                         execution_backend: Some(execution_backend),
                                         external_runtime: Some(external_runtime),
+                                        route_provenance: None,
                                     })
                                     .map_err(|_| {
                                         "PersistExecutionMode: persistence channel closed"

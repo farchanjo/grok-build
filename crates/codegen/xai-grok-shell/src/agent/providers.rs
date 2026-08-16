@@ -973,18 +973,36 @@ impl ProviderManager {
     /// display (true headless). macOS/Windows never have `DISPLAY`, so the old
     /// "no DISPLAY" heuristic incorrectly forced device auth and hid the code.
     pub async fn chatgpt_oauth_login(&self) -> Result<(), ProviderError> {
+        self.chatgpt_oauth_login_binding_generation()
+            .await
+            .map(|_| ())
+    }
+
+    /// Like [`Self::chatgpt_oauth_login`], but returns the exact durable
+    /// binding generation committed by the OAuth token store.
+    pub async fn chatgpt_oauth_login_binding_generation(&self) -> Result<u64, ProviderError> {
         use crate::auth::chatgpt_oauth;
         let result = if prefer_chatgpt_device_auth() {
-            chatgpt_oauth::login_device(&self.grok_home).await
+            chatgpt_oauth::login_device_route_generation(
+                &self.grok_home,
+                &chatgpt_oauth::ChatGptOAuthRoute::BuiltIn,
+            )
+            .await
+            .map(|(_, generation)| generation)
         } else {
-            chatgpt_oauth::login_browser(&self.grok_home).await
+            chatgpt_oauth::login_browser_route_generation(
+                &self.grok_home,
+                &chatgpt_oauth::ChatGptOAuthRoute::BuiltIn,
+            )
+            .await
+            .map(|(_, generation)| generation)
         };
-        result.map_err(|e| {
+        let generation = result.map_err(|e| {
             tracing::warn!(error = %e, "ChatGPT OAuth login failed");
             ProviderError::CodexFailed
         })?;
         let _ = save_codex_catalog_cache(&self.grok_home, &static_chatgpt_oauth_presets());
-        Ok(())
+        Ok(generation)
     }
 
     /// Clear ChatGPT OAuth credentials for OpenAI.
@@ -1002,8 +1020,35 @@ impl ProviderManager {
     pub async fn codex_login(&self) -> Result<(), ProviderError> {
         self.chatgpt_oauth_login().await
     }
+    /// ChatGPT OAuth login returning the exact store-committed binding generation.
+    pub async fn codex_login_binding_generation(&self) -> Result<u64, ProviderError> {
+        self.chatgpt_oauth_login_binding_generation().await
+    }
     pub async fn codex_logout(&self) -> Result<(), ProviderError> {
         self.chatgpt_oauth_logout().await
+    }
+
+    /// Store an API key and return the exact durable binding generation when
+    /// the store can name one. Built-in xAI has no generation contract yet and
+    /// returns `Ok(None)` so automatic repair fails closed for that route.
+    pub fn set_api_key_binding_generation(
+        &self,
+        provider: ProviderId,
+        api_key: &str,
+    ) -> Result<Option<u64>, ProviderError> {
+        let api_key = api_key.trim();
+        if api_key.is_empty() || api_key.len() > MAX_API_KEY_BYTES {
+            return Err(ProviderError::InvalidApiKey);
+        }
+        if provider == ProviderId::Xai {
+            crate::auth::store_api_key(&self.grok_home, api_key)
+                .map_err(|_| ProviderError::CredentialStore)?;
+            return Ok(None);
+        }
+        let generation =
+            crate::auth::store_provider_api_key(&self.grok_home, provider.auth_scope()?, api_key)
+                .map_err(|_| ProviderError::CredentialStore)?;
+        Ok(Some(generation))
     }
 
     pub fn set_api_key(&self, provider: ProviderId, api_key: &str) -> Result<(), ProviderError> {
@@ -1020,6 +1065,7 @@ impl ProviderManager {
                 .map_err(|_| ProviderError::CredentialStore);
         }
         crate::auth::store_provider_api_key(&self.grok_home, provider.auth_scope()?, api_key)
+            .map(|_| ())
             .map_err(|_| ProviderError::CredentialStore)
     }
 

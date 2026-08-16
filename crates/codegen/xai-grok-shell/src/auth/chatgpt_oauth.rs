@@ -486,13 +486,56 @@ fn read_route_auth(
     }
 }
 
+/// Secret-free binding sidecar for the built-in `openai::oauth` token scope.
+const OPENAI_OAUTH_META_SCOPE: &str = "openai::oauth::meta";
+const OPENAI_OAUTH_META_MARKER: &str = "meta";
+
+fn encode_builtin_oauth_meta(generation: u64) -> GrokAuth {
+    GrokAuth {
+        key: OPENAI_OAUTH_META_MARKER.to_owned(),
+        auth_mode: AuthMode::ApiKey,
+        create_time: chrono::Utc::now(),
+        user_id: generation.to_string(),
+        ..Default::default()
+    }
+}
+
+fn decode_builtin_oauth_meta(entry: &GrokAuth) -> std::io::Result<u64> {
+    if entry.key != OPENAI_OAUTH_META_MARKER || entry.refresh_token.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "malformed built-in ChatGPT OAuth binding record",
+        ));
+    }
+    entry
+        .user_id
+        .parse::<u64>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Read the durable secret-free binding generation for built-in ChatGPT OAuth.
+pub fn read_builtin_oauth_binding_generation(grok_home: &Path) -> std::io::Result<Option<u64>> {
+    let path = grok_home.join("auth.json");
+    let store = match read_auth_json(&path) {
+        Ok(store) => store,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match store.get(OPENAI_OAUTH_META_SCOPE) {
+        Some(meta) => decode_builtin_oauth_meta(meta).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Persist route auth, preserving `WouldBlock` so post-refresh callers can
 /// retry lock contention without dropping a just-rotated refresh token.
+///
+/// Returns the exact durable binding generation committed by this write.
 fn store_route_auth_io(
     grok_home: &Path,
     route: &ChatGptOAuthRoute,
     auth: &GrokAuth,
-) -> std::io::Result<()> {
+) -> std::io::Result<u64> {
     match route {
         ChatGptOAuthRoute::BuiltIn => {
             let path = grok_home.join("auth.json");
@@ -502,17 +545,27 @@ fn store_route_auth_io(
                 return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
             }
             let mut store = read_auth_json_or_empty(&path)?;
+            let prev_generation = match store.get(OPENAI_OAUTH_META_SCOPE) {
+                Some(meta) => decode_builtin_oauth_meta(meta)?,
+                None => 0,
+            };
+            let generation = prev_generation.saturating_add(1).max(1);
             store.insert(OPENAI_OAUTH_SCOPE.to_owned(), auth.clone());
+            store.insert(
+                OPENAI_OAUTH_META_SCOPE.to_owned(),
+                encode_builtin_oauth_meta(generation),
+            );
             if !lock.still_live(&path) {
                 return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
             }
-            write_auth_json(&path, &store)
+            write_auth_json(&path, &store)?;
+            Ok(generation)
         }
         ChatGptOAuthRoute::Configured {
             provider_id,
             incarnation,
         } => store_provider_oauth_auth(grok_home, provider_id, incarnation.as_ref(), auth)
-            .map(|_| ()),
+            .map(|binding| binding.generation),
     }
 }
 
@@ -520,7 +573,7 @@ fn store_route_auth(
     grok_home: &Path,
     route: &ChatGptOAuthRoute,
     auth: &GrokAuth,
-) -> Result<(), ChatGptOAuthError> {
+) -> Result<u64, ChatGptOAuthError> {
     store_route_auth_io(grok_home, route, auth).map_err(|_| ChatGptOAuthError::Store)
 }
 
@@ -541,7 +594,7 @@ async fn store_tokens_route_after_refresh(
     let deadline = tokio::time::Instant::now() + POST_REFRESH_STORE_TIMEOUT;
     loop {
         match store_route_auth_io(grok_home, route, &auth) {
-            Ok(()) => return Ok(()),
+            Ok(_generation) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(ChatGptOAuthError::Store);
@@ -590,6 +643,16 @@ pub fn store_tokens_route(
     route: &ChatGptOAuthRoute,
     tokens: &ChatGptOAuthTokens,
 ) -> Result<(), ChatGptOAuthError> {
+    store_tokens_route_generation(grok_home, route, tokens).map(|_| ())
+}
+
+/// Like [`store_tokens_route`], but returns the exact durable binding
+/// generation committed by the store (for operation-bound repair receipts).
+pub fn store_tokens_route_generation(
+    grok_home: &Path,
+    route: &ChatGptOAuthRoute,
+    tokens: &ChatGptOAuthTokens,
+) -> Result<u64, ChatGptOAuthError> {
     store_route_auth(grok_home, route, &tokens_to_auth(tokens))
 }
 
@@ -720,6 +783,7 @@ pub async fn valid_access_token(
 /// Store an OpenAI Platform API key without changing ChatGPT OAuth tokens.
 pub fn store_api_key(grok_home: &Path, api_key: &str) -> Result<(), ChatGptOAuthError> {
     crate::auth::store_provider_api_key(grok_home, OPENAI_API_KEY_SCOPE, api_key)
+        .map(|_| ())
         .map_err(|_| ChatGptOAuthError::Store)
 }
 
@@ -764,10 +828,12 @@ fn callback_state_matches(got: Option<&str>, expected: &str) -> bool {
 /// Browser PKCE login for a specific route/account. Binds `localhost:1455`
 /// (Codex redirect_uri). The interactive callback port is globally serialized;
 /// each callback's `state` is a per-login random value.
-pub async fn login_browser_route(
+///
+/// Returns tokens and the exact durable binding generation from the store write.
+pub async fn login_browser_route_generation(
     grok_home: &Path,
     route: &ChatGptOAuthRoute,
-) -> Result<ChatGptOAuthTokens, ChatGptOAuthError> {
+) -> Result<(ChatGptOAuthTokens, u64), ChatGptOAuthError> {
     let _port_guard = acquire_callback_port().await;
     let redirect_uri = format!("http://localhost:{OAUTH_PORT}{OAUTH_CALLBACK_PATH}");
     let pkce = generate_pkce();
@@ -887,8 +953,18 @@ pub async fn login_browser_route(
     .await
     .map_err(|_| ChatGptOAuthError::Timeout)??;
 
-    store_tokens_route(grok_home, route, &tokens)?;
-    Ok(tokens)
+    let generation = store_tokens_route_generation(grok_home, route, &tokens)?;
+    Ok((tokens, generation))
+}
+
+/// Browser PKCE login for a specific route/account (tokens only).
+pub async fn login_browser_route(
+    grok_home: &Path,
+    route: &ChatGptOAuthRoute,
+) -> Result<ChatGptOAuthTokens, ChatGptOAuthError> {
+    login_browser_route_generation(grok_home, route)
+        .await
+        .map(|(tokens, _)| tokens)
 }
 
 /// Backward-compatible built-in wrapper (default route).
@@ -958,12 +1034,12 @@ pub async fn start_device_login() -> Result<DeviceLoginStart, ChatGptOAuthError>
 
 /// Poll device login to completion for a specific route/account. Tokens are
 /// stored under the route's scope so a configured account never touches the
-/// built-in entry.
-pub async fn complete_device_login_route(
+/// built-in entry. Returns the exact store-committed binding generation.
+pub async fn complete_device_login_route_generation(
     grok_home: &Path,
     route: &ChatGptOAuthRoute,
     start: &DeviceLoginStart,
-) -> Result<ChatGptOAuthTokens, ChatGptOAuthError> {
+) -> Result<(ChatGptOAuthTokens, u64), ChatGptOAuthError> {
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + BROWSER_TIMEOUT;
     loop {
@@ -996,8 +1072,8 @@ pub async fn complete_device_login_route(
                 &data.code_verifier,
             )
             .await?;
-            store_tokens_route(grok_home, route, &tokens)?;
-            return Ok(tokens);
+            let generation = store_tokens_route_generation(grok_home, route, &tokens)?;
+            return Ok((tokens, generation));
         }
 
         if response.status().as_u16() != 403 && response.status().as_u16() != 404 {
@@ -1009,6 +1085,17 @@ pub async fn complete_device_login_route(
 
         tokio::time::sleep(start.interval + DEVICE_POLL_SAFETY_MARGIN).await;
     }
+}
+
+/// Poll device login to completion; returns tokens only.
+pub async fn complete_device_login_route(
+    grok_home: &Path,
+    route: &ChatGptOAuthRoute,
+    start: &DeviceLoginStart,
+) -> Result<ChatGptOAuthTokens, ChatGptOAuthError> {
+    complete_device_login_route_generation(grok_home, route, start)
+        .await
+        .map(|(tokens, _)| tokens)
 }
 
 /// Backward-compatible built-in wrapper (default route).
@@ -1029,6 +1116,16 @@ pub async fn login_device_route(
     grok_home: &Path,
     route: &ChatGptOAuthRoute,
 ) -> Result<ChatGptOAuthTokens, ChatGptOAuthError> {
+    login_device_route_generation(grok_home, route)
+        .await
+        .map(|(tokens, _)| tokens)
+}
+
+/// Device login that also returns the exact store-committed binding generation.
+pub async fn login_device_route_generation(
+    grok_home: &Path,
+    route: &ChatGptOAuthRoute,
+) -> Result<(ChatGptOAuthTokens, u64), ChatGptOAuthError> {
     let start = start_device_login().await?;
     // Print before opening the browser so the code is visible if focus moves.
     eprintln!();
@@ -1043,7 +1140,7 @@ pub async fn login_device_route(
         "ChatGPT device login: enter the code in the browser"
     );
     let _ = open_browser(&start.verification_url).await;
-    complete_device_login_route(grok_home, route, &start).await
+    complete_device_login_route_generation(grok_home, route, &start).await
 }
 
 /// Backward-compatible built-in wrapper (default route).

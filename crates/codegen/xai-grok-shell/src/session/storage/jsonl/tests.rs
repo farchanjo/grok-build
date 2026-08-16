@@ -3720,3 +3720,119 @@ async fn load_session_without_updates_survives_merged_chat_line() {
             "resume succeeds; only the merged record is dropped"
         );
 }
+
+/// Intermediate `sessions` symlink: production `read_summary_sync` must fail
+/// closed (no path-follow adoption of attacker summary.json).
+#[cfg(unix)]
+#[test]
+fn intermediate_sessions_symlink_read_summary_sync_fails_closed() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cwd = "/project";
+    let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
+    let evil_sess = root
+        .join("evil")
+        .join("sessions")
+        .join(&encoded)
+        .join("sid");
+    std::fs::create_dir_all(&evil_sess).unwrap();
+    let attacker = br#"{"current_model_id":"attacker-wire-slug","info":{"id":"sid","cwd":"/project"}}"#;
+    std::fs::write(evil_sess.join("summary.json"), attacker).unwrap();
+    symlink(root.join("evil").join("sessions"), root.join("sessions")).unwrap();
+
+    let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
+    let info = Info {
+        id: acp::SessionId::new("sid"),
+        cwd: cwd.into(),
+    };
+    let err = adapter.read_summary_sync(&info).unwrap_err();
+    assert!(
+        err.raw_os_error() == Some(libc::ELOOP)
+            || err.raw_os_error() == Some(libc::ENOTDIR)
+            || err.kind() == std::io::ErrorKind::NotADirectory
+            || err.kind() == std::io::ErrorKind::InvalidData
+            || err.kind() == std::io::ErrorKind::PermissionDenied
+            || err.kind() == std::io::ErrorKind::Other
+            || err.kind() == std::io::ErrorKind::NotFound,
+        "unexpected err: {err:?}"
+    );
+    // Attacker file not adopted as Ok(Summary).
+    assert_eq!(std::fs::read(evil_sess.join("summary.json")).unwrap(), attacker);
+}
+
+/// Intermediate `sessions` symlink: `init_session` must not load attacker summary.
+#[cfg(unix)]
+#[tokio::test]
+async fn intermediate_sessions_symlink_init_session_fails_closed() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cwd = "/project";
+    let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
+    let evil_sess = root
+        .join("evil")
+        .join("sessions")
+        .join(&encoded)
+        .join("sid");
+    std::fs::create_dir_all(&evil_sess).unwrap();
+    let attacker = br#"{"current_model_id":"attacker-wire-slug","info":{"id":"sid","cwd":"/project"},"created_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:00:00Z","num_messages":0,"num_chat_messages":0,"cwd_generation":0,"cwd_switch_bookkeeping_generation":0,"session_summary":"","chat_format_version":1,"next_trace_turn":0,"title_is_manual":false,"execution_backend":"native_inference"}"#;
+    std::fs::write(evil_sess.join("summary.json"), attacker).unwrap();
+    symlink(root.join("evil").join("sessions"), root.join("sessions")).unwrap();
+
+    let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
+    let info = Info {
+        id: acp::SessionId::new("sid"),
+        cwd: cwd.into(),
+    };
+    let err = adapter
+        .init_session(&info, acp::ModelId::new("legit"))
+        .await
+        .unwrap_err();
+    assert!(
+        err.raw_os_error() == Some(libc::ELOOP)
+            || err.raw_os_error() == Some(libc::ENOTDIR)
+            || err.kind() == std::io::ErrorKind::NotADirectory
+            || err.kind() == std::io::ErrorKind::InvalidData
+            || err.kind() == std::io::ErrorKind::PermissionDenied
+            || err.kind() == std::io::ErrorKind::Other,
+        "init_session must fail closed, not adopt attacker: {err:?}"
+    );
+    // Attacker bytes unchanged.
+    assert_eq!(std::fs::read(evil_sess.join("summary.json")).unwrap(), attacker);
+}
+
+/// Intermediate `sessions` symlink: listing must skip attacker entries (not path-read).
+#[cfg(unix)]
+#[tokio::test]
+async fn intermediate_sessions_symlink_list_sessions_skips_unsafe() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cwd = "/project";
+    let encoded = crate::util::grok_home::encode_cwd_dirname(cwd);
+    let evil_sess = root
+        .join("evil")
+        .join("sessions")
+        .join(&encoded)
+        .join("evil-sid");
+    std::fs::create_dir_all(&evil_sess).unwrap();
+    let attacker = br#"{"current_model_id":"attacker-wire-slug","info":{"id":"evil-sid","cwd":"/project"},"created_at":"2020-01-01T00:00:00Z","updated_at":"2099-01-01T00:00:00Z","num_messages":99,"num_chat_messages":99,"cwd_generation":0,"cwd_switch_bookkeeping_generation":0,"session_summary":"evil","chat_format_version":1,"next_trace_turn":0,"title_is_manual":false,"execution_backend":"native_inference"}"#;
+    std::fs::write(evil_sess.join("summary.json"), attacker).unwrap();
+    symlink(root.join("evil").join("sessions"), root.join("sessions")).unwrap();
+
+    let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
+    let listed = adapter.list_sessions(None).await.unwrap();
+    assert!(
+        listed.iter().all(|s| s.info.id.0.as_ref() != "evil-sid"
+            && s.current_model_id.0.as_ref() != "attacker-wire-slug"),
+        "list must not adopt attacker summary: {listed:?}"
+    );
+    let recent = adapter.list_sessions_recent(10).await.unwrap();
+    assert!(
+        recent.iter().all(|s| s.info.id.0.as_ref() != "evil-sid"
+            && s.current_model_id.0.as_ref() != "attacker-wire-slug"),
+        "list_recent must not adopt attacker summary: {recent:?}"
+    );
+    assert_eq!(std::fs::read(evil_sess.join("summary.json")).unwrap(), attacker);
+}

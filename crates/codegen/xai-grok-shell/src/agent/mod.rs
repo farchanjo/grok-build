@@ -11,6 +11,7 @@ pub mod feedback_client;
 pub mod folder_trust;
 pub(crate) mod handlers;
 pub mod init;
+pub mod model_identity;
 pub mod model_providers;
 pub mod model_search;
 pub mod models;

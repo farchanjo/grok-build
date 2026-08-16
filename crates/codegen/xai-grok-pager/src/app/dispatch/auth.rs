@@ -237,6 +237,21 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
 /// Mint a repair scope if an agent has a stashed failure for `provider_id`.
 /// Binds a fresh never-reused token to the stash's frozen generation.
 ///
+/// Re-resolve the durable binding generation after a repair completes.
+/// Uses the app's auth home (process config home in production; optional
+/// tempfile override in hermetic tests). Missing sources return `None`.
+pub(in crate::app::dispatch) fn live_binding_gen_for_resume(
+    auth_home: &std::path::Path,
+    scope: &crate::app::agent::CredentialRepairScope,
+) -> Option<u64> {
+    xai_grok_shell::session::route_context::live_binding_generation_for_route(
+        auth_home,
+        &scope.provider_id,
+        &scope.credential_route,
+        scope.incarnation.as_deref(),
+    )
+}
+
 /// Returns `(agent_id, scope)` so cancel/complete can target only that agent.
 pub(in crate::app::dispatch) fn begin_credential_repair(
     app: &mut AppView,
@@ -244,28 +259,47 @@ pub(in crate::app::dispatch) fn begin_credential_repair(
 ) -> Option<(AgentId, crate::app::agent::CredentialRepairScope)> {
     use crate::app::agent::{CredentialRepairScope, mint_credential_repair_token};
 
-    let (agent_id, generation) = match app.active_view {
+    let (
+        agent_id,
+        generation,
+        incarnation,
+        registry_generation,
+        failed_binding_generation,
+        credential_route,
+        correlation_token,
+    ) = match app.active_view {
         ActiveView::Agent(id) => {
             let agent = app.agents.get(&id)?;
             let stashed = agent.reauth_stashed_prompt.as_ref()?;
             if stashed.provider_id != provider_id {
                 return None;
             }
-            // Generation 0 is reserved / non-resumable — never mint a repair token.
-            if stashed.credential_generation == 0 {
+            if !stashed.repair_eligible() {
                 return None;
             }
-            (id, stashed.credential_generation)
+            (
+                id,
+                stashed.credential_generation,
+                stashed.incarnation.clone(),
+                stashed.registry_generation,
+                stashed.binding_generation,
+                stashed.credential_route.clone(),
+                stashed.correlation_token.clone(),
+            )
         }
-        _ => {
-            // Not on an agent view: first agent with a matching resumable stash.
-            app.agents.iter().find_map(|(id, agent)| {
-                agent.reauth_stashed_prompt.as_ref().and_then(|s| {
-                    (s.provider_id == provider_id && s.credential_generation != 0)
-                        .then_some((*id, s.credential_generation))
-                })
-            })?
-        }
+        _ => app.agents.iter().find_map(|(id, agent)| {
+            agent.reauth_stashed_prompt.as_ref().and_then(|s| {
+                (s.provider_id == provider_id && s.repair_eligible()).then_some((
+                    *id,
+                    s.credential_generation,
+                    s.incarnation.clone(),
+                    s.registry_generation,
+                    s.binding_generation,
+                    s.credential_route.clone(),
+                    s.correlation_token.clone(),
+                ))
+            })
+        })?,
     };
 
     let token = mint_credential_repair_token(&mut app.next_credential_repair_token)?;
@@ -273,6 +307,11 @@ pub(in crate::app::dispatch) fn begin_credential_repair(
         token,
         provider_id: provider_id.to_owned(),
         credential_generation: generation,
+        incarnation,
+        registry_generation,
+        failed_binding_generation,
+        credential_route,
+        correlation_token,
     };
     app.agents.get_mut(&agent_id)?.in_flight_repair = Some(scope.clone());
     Some((agent_id, scope))
@@ -403,6 +442,7 @@ pub(super) fn handle_auth_complete(
     request_seq: u64,
     meta: Option<serde_json::Value>,
     repair: Option<crate::app::agent::CredentialRepairScope>,
+    credential_write_receipt: Option<crate::app::agent::CredentialWriteReceipt>,
 ) -> Vec<Effect> {
     if let AuthState::Authenticating {
         request_seq: current_seq,
@@ -430,6 +470,7 @@ pub(super) fn handle_auth_complete(
 
             let mut retry_effects = Vec::new();
             let mut page_flips = Vec::new();
+            let auth_home = app.auth_home();
 
             // Only the agent bound to the immutable completion scope may be
             // stripped/resumed. Unbound (repair=None) or mismatched completions
@@ -456,7 +497,11 @@ pub(super) fn handle_auth_complete(
                     && let Some(agent) = app.agents.get_mut(&agent_id)
                 {
                     if let Some(stashed) = agent.reauth_stashed_prompt.take() {
-                        if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed) {
+                        let live = live_binding_gen_for_resume(&auth_home, repair_scope);
+                        if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed)
+                            && repair_scope
+                                .validate_write_receipt(credential_write_receipt.as_ref(), live)
+                        {
                             agent.in_flight_repair = None;
                             // Strip only this agent's credential CTA after exact match.
                             strip_trailing_auth_error_blocks(agent);

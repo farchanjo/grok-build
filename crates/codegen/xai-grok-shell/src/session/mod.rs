@@ -332,6 +332,8 @@ pub mod inference_metrics;
 pub(crate) mod media_descriptors;
 pub(crate) mod media_pipeline;
 pub(crate) mod media_stt;
+/// Production sampler route context resolution (credential-free).
+pub mod route_context;
 pub use xai_grok_shared::session::info;
 pub mod managed_mcp;
 pub(crate) mod mcp_descriptors;

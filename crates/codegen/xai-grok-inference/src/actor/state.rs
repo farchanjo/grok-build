@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::pacing::InferencePacer;
 use crate::config::{InferenceConfig, RetryPolicy};
+use crate::route_context::{ProviderRouteContext, RouteContextUpdate};
 use crate::types::RequestId;
 
 /// In-flight request bookkeeping.
@@ -27,15 +28,22 @@ pub(crate) struct ActiveRequest {
 pub(crate) struct ActorState {
     pub(crate) active_requests: HashMap<RequestId, ActiveRequest>,
     pub(crate) config: InferenceConfig,
+    /// Explicit route context when known; otherwise derived from config.
+    pub(crate) route_context: Option<ProviderRouteContext>,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) inference_pacer: Arc<InferencePacer>,
 }
 
 impl ActorState {
-    pub(crate) fn new(config: InferenceConfig, retry_policy: RetryPolicy) -> Self {
+    pub(crate) fn new_with_route(
+        config: InferenceConfig,
+        retry_policy: RetryPolicy,
+        route_context: Option<ProviderRouteContext>,
+    ) -> Self {
         Self {
             active_requests: HashMap::new(),
             config,
+            route_context,
             retry_policy,
             inference_pacer: InferencePacer::shared(),
         }
@@ -69,10 +77,31 @@ impl ActorState {
         }
     }
 
-    /// Replace the default config. The next request submitted without
-    /// an override will use this.
-    pub(crate) fn update_config(&mut self, config: InferenceConfig) {
+    /// Atomically replace config and route context together.
+    pub(crate) fn apply_config_update(
+        &mut self,
+        config: InferenceConfig,
+        route: RouteContextUpdate,
+    ) {
         self.config = config;
+        match route {
+            RouteContextUpdate::DeriveLegacy => {
+                self.route_context = None;
+            }
+            RouteContextUpdate::Replace(ctx) => {
+                self.route_context = Some(ctx);
+            }
+            RouteContextUpdate::Clear => {
+                self.route_context = None;
+            }
+        }
+    }
+
+    /// Effective route context for the next request.
+    pub(crate) fn effective_route_context(&self) -> ProviderRouteContext {
+        self.route_context
+            .clone()
+            .unwrap_or_else(|| ProviderRouteContext::legacy_from_config(&self.config))
     }
 }
 
@@ -122,18 +151,21 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
         }
     }
 
     #[test]
     fn cancel_unknown_request_returns_false() {
-        let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut state = ActorState::new_with_route(cfg(), RetryPolicy::default(), None);
         assert!(!state.cancel(&RequestId::from("unknown")));
     }
 
     #[test]
     fn register_then_cancel_removes() {
-        let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut state = ActorState::new_with_route(cfg(), RetryPolicy::default(), None);
         let id = RequestId::from("req-1");
         state.register(
             id.clone(),
@@ -148,7 +180,7 @@ mod tests {
 
     #[test]
     fn register_returns_previous_when_same_id() {
-        let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut state = ActorState::new_with_route(cfg(), RetryPolicy::default(), None);
         let id = RequestId::from("req-1");
         let first = ActiveRequest {
             cancel_token: CancellationToken::new(),

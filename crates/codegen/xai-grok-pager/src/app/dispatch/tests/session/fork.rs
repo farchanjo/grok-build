@@ -276,6 +276,7 @@ fn auth_complete_dispatches_deferred_worktree() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -311,6 +312,7 @@ fn auth_complete_resume_plus_worktree_creates_worktree_with_session() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );

@@ -2536,6 +2536,9 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
             provider_identity: crate::config::ProviderIdentity::default(),
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
         }
     }
 

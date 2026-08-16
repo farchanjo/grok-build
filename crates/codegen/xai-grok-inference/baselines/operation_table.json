@@ -1,18 +1,12 @@
 {
-  "format_version": 5,
-  "total": 396,
-  "generic_value_body_count": 0,
-  "multipart_count": 19,
-  "sse_count": 20,
-  "binary_count": 7,
-  "binary_primary_count": 7,
-  "websocket_count": 0,
-  "openai_app": 192,
-  "openai_admin": 106,
-  "openrouter": 98,
+  "format_version": 1,
+  "source": "inventories+ops",
   "openai_primary_count": 287,
   "openrouter_primary_count": 89,
-  "bindings": [
+  "sse_companion_count": 20,
+  "binary_primary_count": 7,
+  "total": 396,
+  "operations": [
     {
       "provider": "openai",
       "operation_id": "listAssistants",

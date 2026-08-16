@@ -428,6 +428,12 @@ pub const OPENAI_API_KEY_SCOPE: &str = "openai::api_key";
 /// Codex endpoints or the Platform API key for `api.openai.com`.
 pub const OPENAI_OAUTH_SCOPE: &str = "openai::oauth";
 pub const OPENROUTER_API_KEY_SCOPE: &str = "openrouter::api_key";
+/// OpenRouter management/admin key (keys, BYOK, workspaces, guardrails,
+/// observability, organization). Never used as a substitute for
+/// [`OPENROUTER_API_KEY_SCOPE`].
+pub const OPENROUTER_ADMIN_KEY_SCOPE: &str = "openrouter::admin_key";
+/// Alias scope for OpenRouter management credentials (same isolation rules).
+pub const OPENROUTER_MANAGEMENT_KEY_SCOPE: &str = "openrouter::management_key";
 /// Direct Anthropic Messages API key (`x-api-key`). Never falls through to xAI.
 pub const ANTHROPIC_API_KEY_SCOPE: &str = "anthropic::api_key";
 /// Optional OpenAI administration key (organization APIs only).
@@ -439,6 +445,8 @@ fn validate_provider_scope(scope: &str) -> std::io::Result<()> {
         scope,
         OPENAI_API_KEY_SCOPE
             | OPENROUTER_API_KEY_SCOPE
+            | OPENROUTER_ADMIN_KEY_SCOPE
+            | OPENROUTER_MANAGEMENT_KEY_SCOPE
             | ANTHROPIC_API_KEY_SCOPE
             | OPENAI_ADMIN_KEY_SCOPE
     ) {
@@ -450,8 +458,69 @@ fn validate_provider_scope(scope: &str) -> std::io::Result<()> {
     Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
 }
 
+/// Marker stored in the `key` field of an API-key binding record so the entry
+/// can never be mistaken for token material.
+const PROVIDER_API_KEY_META_MARKER: &str = "meta";
+
+/// Secret-free binding for a provider API-key scope. Generation is monotonic
+/// across replace/clear so a stale route cannot attribute against a rotated
+/// key. Never derived from the secret value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderApiKeyBinding {
+    pub generation: u64,
+}
+
+fn api_key_meta_scope(scope: &str) -> String {
+    format!("{scope}::meta")
+}
+
+fn encode_provider_api_key_meta(binding: &ProviderApiKeyBinding) -> GrokAuth {
+    GrokAuth {
+        key: PROVIDER_API_KEY_META_MARKER.to_owned(),
+        auth_mode: AuthMode::ApiKey,
+        create_time: chrono::Utc::now(),
+        user_id: binding.generation.to_string(),
+        ..Default::default()
+    }
+}
+
+fn decode_provider_api_key_meta(entry: &GrokAuth) -> std::io::Result<ProviderApiKeyBinding> {
+    if entry.key != PROVIDER_API_KEY_META_MARKER || entry.refresh_token.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "malformed provider API-key binding record",
+        ));
+    }
+    let generation = entry
+        .user_id
+        .parse::<u64>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(ProviderApiKeyBinding { generation })
+}
+
+/// Read the secret-free binding generation for a provider API-key scope.
+///
+/// `None` means a legacy key without metadata (generation contract `0` only).
+pub fn read_provider_api_key_binding(
+    grok_home: &Path,
+    scope: &str,
+) -> std::io::Result<Option<ProviderApiKeyBinding>> {
+    validate_provider_scope(scope)?;
+    let path = grok_home.join("auth.json");
+    let store = match read_auth_json(&path) {
+        Ok(store) => store,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match store.get(&api_key_meta_scope(scope)) {
+        Some(meta) => decode_provider_api_key_meta(meta).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Read an API key from an explicitly provider-scoped auth entry. Missing
 /// stores/scopes are normal; unreadable or malformed stores fail closed.
+/// Ordinary reads remain non-destructive and do not require binding metadata.
 pub fn read_provider_api_key(grok_home: &Path, scope: &str) -> std::io::Result<Option<String>> {
     validate_provider_scope(scope)?;
     let path = grok_home.join("auth.json");
@@ -466,7 +535,14 @@ pub fn read_provider_api_key(grok_home: &Path, scope: &str) -> std::io::Result<O
 /// live `auth.json.lock` used by the normal authentication paths.  Lock
 /// contention and stale-lock races are errors so a UI action never clobbers a
 /// concurrent OAuth refresh.
-pub fn store_provider_api_key(grok_home: &Path, scope: &str, api_key: &str) -> std::io::Result<()> {
+///
+/// Also bumps the secret-free binding generation for exact-route attribution.
+/// Returns the new generation. Does not migrate or copy secrets across scopes.
+pub fn store_provider_api_key(
+    grok_home: &Path,
+    scope: &str,
+    api_key: &str,
+) -> std::io::Result<u64> {
     validate_provider_scope(scope)?;
     let path = grok_home.join("auth.json");
     let lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path)
@@ -475,6 +551,12 @@ pub fn store_provider_api_key(grok_home: &Path, scope: &str, api_key: &str) -> s
         return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
     }
     let mut store = read_auth_json_or_empty(&path)?;
+    let meta_scope = api_key_meta_scope(scope);
+    let prev_generation = match store.get(&meta_scope) {
+        Some(meta) => decode_provider_api_key_meta(meta)?.generation,
+        None => 0,
+    };
+    let generation = prev_generation.saturating_add(1).max(1);
     store.insert(
         scope.to_owned(),
         GrokAuth {
@@ -483,13 +565,21 @@ pub fn store_provider_api_key(grok_home: &Path, scope: &str, api_key: &str) -> s
             ..Default::default()
         },
     );
+    store.insert(
+        meta_scope,
+        encode_provider_api_key_meta(&ProviderApiKeyBinding { generation }),
+    );
     if !lock.still_live(&path) {
         return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
     }
-    write_auth_json(&path, &store)
+    write_auth_json(&path, &store)?;
+    Ok(generation)
 }
 
 /// Remove one provider API key without affecting any xAI/OAuth scope.
+///
+/// Bumps the binding generation so a delayed route cannot attribute against
+/// the cleared credential; the meta record is retained for monotonicity.
 pub fn clear_provider_api_key(grok_home: &Path, scope: &str) -> std::io::Result<()> {
     validate_provider_scope(scope)?;
     let path = grok_home.join("auth.json");
@@ -503,8 +593,18 @@ pub fn clear_provider_api_key(grok_home: &Path, scope: &str) -> std::io::Result<
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    if store.remove(scope).is_none() {
-        return Ok(());
+    let had_key = store.remove(scope).is_some();
+    let meta_scope = api_key_meta_scope(scope);
+    let prev_generation = match store.get(&meta_scope) {
+        Some(meta) => decode_provider_api_key_meta(meta)?.generation,
+        None => 0,
+    };
+    if had_key || prev_generation > 0 {
+        let generation = prev_generation.saturating_add(1).max(1);
+        store.insert(
+            meta_scope,
+            encode_provider_api_key_meta(&ProviderApiKeyBinding { generation }),
+        );
     }
     if !lock.still_live(&path) {
         return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));

@@ -2480,6 +2480,10 @@ pub enum TaskResult {
         /// Echo of the repair scope attached when the op started (`None` for
         /// status refresh / unbound connect).
         repair: Option<crate::app::agent::CredentialRepairScope>,
+        /// Operation-bound write receipt from the store/connect that committed
+        /// the credential (`None` when the op did not write a durable binding
+        /// generation — resume fails closed).
+        credential_write_receipt: Option<crate::app::agent::CredentialWriteReceipt>,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {
@@ -2506,6 +2510,10 @@ pub enum TaskResult {
         meta: Option<serde_json::Value>,
         /// Echo of the repair scope from [`Effect::Authenticate`], if any.
         repair: Option<crate::app::agent::CredentialRepairScope>,
+        /// Operation-bound write receipt when authenticate committed a durable
+        /// binding generation. xAI session OAuth has no generation contract yet
+        /// and always yields `None` (fail closed for automatic resume).
+        credential_write_receipt: Option<crate::app::agent::CredentialWriteReceipt>,
     },
     /// Authentication failed.
     AuthFailed {

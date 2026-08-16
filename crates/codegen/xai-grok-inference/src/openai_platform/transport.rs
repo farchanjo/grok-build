@@ -234,10 +234,22 @@ pub trait CredentialResolver: Send + Sync {
 }
 
 /// Static bearer pair used by tests and simple CLI wiring.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct StaticCredentials {
     pub application: Option<String>,
     pub admin: Option<String>,
+}
+
+impl std::fmt::Debug for StaticCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticCredentials")
+            .field(
+                "application",
+                &self.application.as_ref().map(|_| "<redacted>"),
+            )
+            .field("admin", &self.admin.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl CredentialResolver for StaticCredentials {
@@ -513,8 +525,9 @@ impl PlatformTransport {
             }
         };
         if let Some(path) = sink {
-            tokio::fs::write(path, &bytes)
-                .await
+            // Same owner-only durable primitive as CLI write_binary (sync IO on
+            // the worker; sink writes are local filesystem only).
+            super::durable_write::write_owner_only_atomic(path, &bytes)
                 .map_err(|e| PlatformError::Transport(format!("write binary sink: {e}")))?;
         }
         Ok((bytes, content_type))

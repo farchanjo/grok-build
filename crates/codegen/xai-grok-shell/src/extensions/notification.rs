@@ -1267,6 +1267,136 @@ pub fn approved_provider_for_exact_host(host: &str) -> Option<(&'static str, &'s
     }
 }
 
+/// Private notification `_meta` key for exact-route repair binding.
+pub const PROVIDER_ROUTE_BINDING_META_KEY: &str = "xai.providerRouteBinding";
+
+/// Secret-free exact-route repair binding carried only via notification
+/// `_meta` so the public [`ProviderCredentialFailure`] shape stays source-
+/// compatible with the PR2 base.
+///
+/// Correlated to one failure via [`Self::correlation_token`] (session-local
+/// failure generation spelling) plus provider instance id / credential route.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRouteBindingMeta {
+    /// Stable provider instance id; must match `ProviderCredentialFailure.provider_id`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_instance_id: String,
+    /// Credential-route spelling (`api_key`, `chatgpt_oauth`, …).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub credential_route: String,
+    /// Route authority spelling (`authoritative`, `host_fallback`, `unverified`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub route_authority: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u64_ref")]
+    pub registry_generation: u64,
+    /// True when authority is host-fallback (exact-host heuristic only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_fallback: bool,
+    /// Durable API-key/OAuth binding generation frozen at failure.
+    #[serde(default, skip_serializing_if = "is_zero_u64_ref")]
+    pub binding_generation: u64,
+    /// When true the meta was present and complete enough for exact-route
+    /// repair of a configured account. Missing meta deserializes as false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binding_complete: bool,
+    /// Correlation with the public failure generation / prompt identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub correlation_token: String,
+}
+
+const fn is_zero_u64_ref(value: &u64) -> bool {
+    *value == 0
+}
+
+impl ProviderRouteBindingMeta {
+    pub const MAX_ID_LEN: usize = 64;
+
+    /// Build a `_meta` map fragment for `send_xai_notification_with_extra_meta`.
+    pub fn to_meta_map(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = serde_json::Map::new();
+        if let Ok(value) = serde_json::to_value(self)
+            && !value.is_null()
+            && value.as_object().is_some_and(|o| !o.is_empty())
+        {
+            map.insert(PROVIDER_ROUTE_BINDING_META_KEY.to_owned(), value);
+        }
+        map
+    }
+
+    /// Parse from a notification `_meta` map. Missing/malformed → empty
+    /// (fail closed for exact-route resume when incarnation/registry needed).
+    pub fn from_meta(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> Self {
+        let Some(m) = meta else {
+            return Self::default();
+        };
+        m.get(PROVIDER_ROUTE_BINDING_META_KEY)
+            .and_then(|v| serde_json::from_value::<Self>(v.clone()).ok())
+            .map(Self::sanitized)
+            .unwrap_or_default()
+    }
+
+    /// Also accept a free-form JSON value `_meta` object.
+    pub fn from_meta_value(meta: Option<&serde_json::Value>) -> Self {
+        let Some(serde_json::Value::Object(map)) = meta else {
+            return Self::default();
+        };
+        Self::from_meta(Some(map))
+    }
+
+    fn sanitized(mut self) -> Self {
+        if !Self::is_safe_id(&self.provider_instance_id) {
+            self.provider_instance_id.clear();
+        }
+        if !Self::is_safe_id(&self.credential_route) {
+            self.credential_route.clear();
+        }
+        if !Self::is_safe_id(&self.route_authority) {
+            self.route_authority.clear();
+        }
+        if !Self::is_safe_id(&self.correlation_token) {
+            self.correlation_token.clear();
+        }
+        if let Some(inc) = self.incarnation.as_deref()
+            && (inc.len() > 36 || inc.chars().any(|c| c.is_control()))
+        {
+            self.incarnation = None;
+        }
+        self
+    }
+
+    fn is_safe_id(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= Self::MAX_ID_LEN
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
+    }
+
+    /// Whether this meta matches a structured provider failure for stashing.
+    pub fn matches_failure(&self, provider_id: &str, credential_generation: u64) -> bool {
+        if self.provider_instance_id.is_empty() || self.provider_instance_id != provider_id {
+            return false;
+        }
+        if self.correlation_token.is_empty() {
+            return false;
+        }
+        match self.correlation_token.parse::<u64>() {
+            Ok(token_gen) => token_gen == credential_generation && credential_generation != 0,
+            Err(_) => false,
+        }
+    }
+
+    pub fn map_key(&self) -> Option<(String, u64)> {
+        let failure_gen = self.correlation_token.parse::<u64>().ok()?;
+        if self.provider_instance_id.is_empty() || failure_gen == 0 {
+            return None;
+        }
+        Some((self.provider_instance_id.clone(), failure_gen))
+    }
+}
+
 /// Bound opaque diagnostic ids (request/generation) to a safe length.
 pub fn bound_safe_id(raw: Option<&str>) -> Option<String> {
     let s = raw?.trim();

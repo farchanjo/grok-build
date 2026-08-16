@@ -29,6 +29,7 @@ use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
 };
+use crate::route_context::ProviderRouteContext;
 use crate::stream::responses::stream_responses_tracked;
 use crate::stream::{stream_chat_completions, stream_messages};
 use crate::types::RequestId;
@@ -84,6 +85,7 @@ pub(crate) async fn run_request_task(
     request_id: RequestId,
     request: ConversationRequest,
     config: InferenceConfig,
+    route_context: Option<ProviderRouteContext>,
     retry_policy: RetryPolicy,
     event_tx: mpsc::UnboundedSender<InferenceEvent>,
     cancel_token: CancellationToken,
@@ -91,6 +93,7 @@ pub(crate) async fn run_request_task(
     inference_pacer: Arc<InferencePacer>,
 ) -> RequestId {
     let mut completion_tx = completion_tx;
+    let route_ref = route_context.as_ref();
     let idle_timeout = Duration::from_secs(
         config
             .idle_timeout_secs
@@ -142,7 +145,10 @@ pub(crate) async fn run_request_task(
             return request_id;
         }
 
-        if !inference_pacer.wait_for_slot(&config, &cancel_token).await {
+        if !inference_pacer
+            .wait_for_slot(&config, route_ref, &cancel_token)
+            .await
+        {
             handle_cancellation(&event_tx, &request_id, &mut completion_tx);
             return request_id;
         }
@@ -175,7 +181,7 @@ pub(crate) async fn run_request_task(
                 response,
                 mut metrics,
             } => {
-                inference_pacer.note_success(&config).await;
+                inference_pacer.note_success(&config, route_ref).await;
                 metrics.attempts = retry_count + doom_retry_count + 1;
                 if let Some(policy) = doom_policy {
                     let confident = policy.confident_triggers(&response.doom_loop_signals);
@@ -232,6 +238,7 @@ pub(crate) async fn run_request_task(
                     &mut request,
                     &mut client,
                     &config,
+                    route_ref,
                     &cancel_token,
                     &mut completion_tx,
                     &inference_pacer,
@@ -287,6 +294,7 @@ pub(crate) async fn run_request_task(
                     &mut request,
                     &mut client,
                     &config,
+                    route_ref,
                     &cancel_token,
                     &mut completion_tx,
                     &inference_pacer,
@@ -311,6 +319,7 @@ pub(crate) async fn run_request_task(
                     &mut request,
                     &mut client,
                     &config,
+                    route_ref,
                     &cancel_token,
                     &mut completion_tx,
                     &inference_pacer,
@@ -340,6 +349,7 @@ async fn apply_retry_decision(
     request: &mut ConversationRequest,
     client: &mut InferenceClient,
     config: &InferenceConfig,
+    route: Option<&ProviderRouteContext>,
     cancel_token: &CancellationToken,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
     inference_pacer: &InferencePacer,
@@ -407,7 +417,7 @@ async fn apply_retry_decision(
                 // the backoff-guess slice.
                 let server_reset = err.rate_limit_reset_secs().map(Duration::from_secs);
                 inference_pacer
-                    .note_rate_limit(config, backoff, server_reset)
+                    .note_rate_limit(config, route, backoff, server_reset)
                     .await;
             }
             emit_retrying(
@@ -1084,6 +1094,7 @@ mod tests {
             &mut request,
             &mut client,
             &config,
+            None,
             &cancel_token,
             &mut completion_tx,
             &inference_pacer,

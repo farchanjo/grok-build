@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::InferenceConfig;
+use crate::route_context::ProviderRouteContext;
 
 const DEFAULT_MIN_INTERVAL_MS: u64 = 2_000;
 const DEFAULT_RECOVERY_REQUESTS: u32 = 8;
@@ -23,9 +24,20 @@ const MAX_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const RECOVERY_BACKOFF_SLICES: u32 = 12;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RouteKey {
-    base_url: String,
-    model: String,
+pub(crate) enum RouteKey {
+    /// Legacy partition used when no route context is supplied.
+    /// Preserves historical `{base_url, model}` behavior.
+    Legacy { base_url: String, model: String },
+    /// Account-aware partition: instance + credential route + incarnation +
+    /// origin + model/operation. Two accounts at the same URL/model never collide.
+    Account {
+        instance_id: String,
+        credential_route: String,
+        incarnation: Option<String>,
+        origin: String,
+        model: String,
+        operation: String,
+    },
 }
 
 #[derive(Debug)]
@@ -96,11 +108,13 @@ impl InferencePacer {
     pub(crate) async fn wait_for_slot(
         &self,
         config: &InferenceConfig,
+        route: Option<&ProviderRouteContext>,
         cancel_token: &CancellationToken,
     ) -> bool {
-        let Some(key) = route_key(config) else {
+        let Some(key) = route_key(config, route) else {
             return true;
         };
+        let minimum = minimum_interval_for(self.minimum_interval, route);
 
         loop {
             let delay = {
@@ -110,7 +124,7 @@ impl InferencePacer {
                     .entry(key.clone())
                     .or_insert_with(|| RouteState::new(now));
                 if state.next_allowed <= now {
-                    state.next_allowed = now + state.interval(self.minimum_interval);
+                    state.next_allowed = now + state.interval(minimum);
                     None
                 } else {
                     Some(state.next_allowed.duration_since(now))
@@ -139,10 +153,11 @@ impl InferencePacer {
     pub(crate) async fn note_rate_limit(
         &self,
         config: &InferenceConfig,
+        route: Option<&ProviderRouteContext>,
         backoff: Duration,
         server_reset: Option<Duration>,
     ) {
-        let Some(key) = route_key(config) else {
+        let Some(key) = route_key(config, route) else {
             return;
         };
         let now = Instant::now();
@@ -152,7 +167,8 @@ impl InferencePacer {
         let cooldown = server_reset.unwrap_or(backoff);
         let recovery_interval = (cooldown / RECOVERY_BACKOFF_SLICES)
             .clamp(MIN_RECOVERY_INTERVAL, MAX_RECOVERY_INTERVAL);
-        let recovery_interval_ms = if self.recovery_requests > 0 {
+        let recovery_requests = recovery_requests_for(self.recovery_requests, route);
+        let recovery_interval_ms = if recovery_requests > 0 {
             recovery_interval.as_millis() as u64
         } else {
             0
@@ -160,27 +176,31 @@ impl InferencePacer {
         let mut routes = self.routes.lock().await;
         let state = routes.entry(key).or_insert_with(|| RouteState::new(now));
         state.next_allowed = state.next_allowed.max(now + cooldown);
-        state.recovery_interval = (self.recovery_requests > 0).then(|| {
+        state.recovery_interval = (recovery_requests > 0).then(|| {
             state
                 .recovery_interval
                 .unwrap_or_default()
                 .max(recovery_interval)
         });
-        state.recovery_requests_remaining = self.recovery_requests;
+        state.recovery_requests_remaining = recovery_requests;
         tracing::warn!(
             target: crate::inference_log::TARGET,
             model = %config.model,
             backoff_ms = backoff.as_millis() as u64,
             server_reset_ms = server_reset.map(|d| d.as_millis() as u64),
             recovery_interval_ms,
-            recovery_requests = self.recovery_requests,
+            recovery_requests,
             "OpenRouter rate-limit pacing enabled"
         );
     }
 
     /// Count a successful request toward leaving conservative recovery mode.
-    pub(crate) async fn note_success(&self, config: &InferenceConfig) {
-        let Some(key) = route_key(config) else {
+    pub(crate) async fn note_success(
+        &self,
+        config: &InferenceConfig,
+        route: Option<&ProviderRouteContext>,
+    ) {
+        let Some(key) = route_key(config, route) else {
             return;
         };
         let mut routes = self.routes.lock().await;
@@ -193,9 +213,8 @@ impl InferencePacer {
         state.recovery_requests_remaining -= 1;
         if state.recovery_requests_remaining == 0 {
             state.recovery_interval = None;
-            state.next_allowed = state
-                .next_allowed
-                .min(Instant::now() + self.minimum_interval);
+            let minimum = minimum_interval_for(self.minimum_interval, route);
+            state.next_allowed = state.next_allowed.min(Instant::now() + minimum);
             tracing::info!(
                 target: crate::inference_log::TARGET,
                 model = %config.model,
@@ -205,16 +224,23 @@ impl InferencePacer {
     }
 }
 
-/// Whether OpenRouter request pacing applies to this config.
+/// Whether OpenRouter request pacing applies to this config / route.
 ///
 /// Precedence:
-/// 1. [`ProviderIdentity::OpenRouter`] — always paces (identity gate).
-/// 2. Explicit [`InferenceConfig::openrouter_pacing`] — opt-in for
+/// 1. Explicit route pacing override (`enabled: Some(true/false)`).
+/// 2. [`ProviderIdentity::OpenRouter`] — always paces (identity gate).
+/// 3. Explicit [`InferenceConfig::openrouter_pacing`] — opt-in for
 ///    OpenRouter-compatible proxies that keep a different identity.
-/// 3. Legacy hostname match on `openrouter.ai` — transitional fallback when
+/// 4. Legacy hostname match on `openrouter.ai` — transitional fallback when
 ///    identity was not propagated; does **not** enable OpenRouter request
 ///    extensions (provider/plugins/reasoning), only spacing.
-pub(crate) fn openrouter_pacing_applies(config: &InferenceConfig) -> bool {
+pub(crate) fn openrouter_pacing_applies(
+    config: &InferenceConfig,
+    route: Option<&ProviderRouteContext>,
+) -> bool {
+    if let Some(enabled) = route.and_then(|r| r.pacing().enabled) {
+        return enabled;
+    }
     if config.provider_identity.is_openrouter() {
         return true;
     }
@@ -228,20 +254,50 @@ fn host_is_openrouter(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;
     };
+    // Never trust userinfo-bearing authority for host matching.
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
     let Some(host) = url.host_str() else {
         return false;
     };
     host == "openrouter.ai" || host.ends_with(".openrouter.ai")
 }
 
-fn route_key(config: &InferenceConfig) -> Option<RouteKey> {
-    if !openrouter_pacing_applies(config) {
+fn route_key(config: &InferenceConfig, route: Option<&ProviderRouteContext>) -> Option<RouteKey> {
+    if !openrouter_pacing_applies(config, route) {
         return None;
     }
-    Some(RouteKey {
+    if let Some(route) = route {
+        let (instance_id, credential_route, incarnation, origin, model, operation) =
+            route.pacing_partition(&config.model);
+        return Some(RouteKey::Account {
+            instance_id,
+            credential_route,
+            incarnation,
+            origin,
+            model,
+            operation,
+        });
+    }
+    Some(RouteKey::Legacy {
         base_url: config.base_url.clone(),
         model: config.model.clone(),
     })
+}
+
+fn minimum_interval_for(default: Duration, route: Option<&ProviderRouteContext>) -> Duration {
+    route
+        .and_then(|r| r.pacing().min_interval_ms)
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+fn recovery_requests_for(default: u32, route: Option<&ProviderRouteContext>) -> u32 {
+    // RoutePacingOverride currently exposes enabled/min_interval only;
+    // recovery_requests fall through to process-wide default.
+    let _ = route;
+    default
 }
 
 fn duration_from_env(name: &str, default_ms: u64) -> Duration {
@@ -290,7 +346,7 @@ mod tests {
         let cancel = CancellationToken::new();
         assert!(
             pacer
-                .wait_for_slot(&config("https://api.openai.com/v1"), &cancel)
+                .wait_for_slot(&config("https://api.openai.com/v1"), None, &cancel)
                 .await
         );
     }
@@ -302,9 +358,9 @@ mod tests {
         let config = config("https://openrouter.ai/api/v1");
         let cancel = CancellationToken::new();
 
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         let started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(started),
             Duration::from_secs(2)
@@ -316,10 +372,10 @@ mod tests {
         let pacer = InferencePacer::new(Duration::from_secs(2), 8);
         let config = openrouter_identity_config("https://or-proxy.example/api/v1");
         let cancel = CancellationToken::new();
-        assert!(openrouter_pacing_applies(&config));
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(openrouter_pacing_applies(&config, None));
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         let started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(started),
             Duration::from_secs(2)
@@ -330,13 +386,13 @@ mod tests {
     async fn explicit_pacing_flag_opts_in_custom_proxy() {
         let pacer = InferencePacer::new(Duration::from_secs(2), 8);
         let mut config = config("https://custom-proxy.example/v1");
-        assert!(!openrouter_pacing_applies(&config));
+        assert!(!openrouter_pacing_applies(&config, None));
         config.openrouter_pacing = true;
-        assert!(openrouter_pacing_applies(&config));
+        assert!(openrouter_pacing_applies(&config, None));
         let cancel = CancellationToken::new();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         let started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(started),
             Duration::from_secs(2)
@@ -349,29 +405,29 @@ mod tests {
         let config = config("https://openrouter.ai/api/v1");
         let cancel = CancellationToken::new();
 
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         pacer
-            .note_rate_limit(&config, Duration::from_secs(60), None)
+            .note_rate_limit(&config, None, Duration::from_secs(60), None)
             .await;
 
         let cooldown_started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(cooldown_started),
             Duration::from_secs(60)
         );
-        pacer.note_success(&config).await;
+        pacer.note_success(&config, None).await;
 
         let recovery_started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(recovery_started),
             Duration::from_secs(5)
         );
-        pacer.note_success(&config).await;
+        pacer.note_success(&config, None).await;
 
         let normal_started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(normal_started),
             Duration::from_millis(100)
@@ -384,14 +440,14 @@ mod tests {
         let config = config("https://openrouter.ai/api/v1");
         let cancel = CancellationToken::new();
 
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         pacer
-            .note_rate_limit(&config, Duration::from_secs(60), None)
+            .note_rate_limit(&config, None, Duration::from_secs(60), None)
             .await;
 
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         let normal_started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(normal_started),
             Duration::from_millis(100)
@@ -409,28 +465,29 @@ mod tests {
         let config = config("https://openrouter.ai/api/v1");
         let cancel = CancellationToken::new();
 
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         // backoff=60s (jitter guess) but server_reset=12s wins.
         pacer
             .note_rate_limit(
                 &config,
+                None,
                 Duration::from_secs(60),
                 Some(Duration::from_secs(12)),
             )
             .await;
 
         let cooldown_started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         // Cooldown tracks the server reset (12s), not the backoff (60s).
         assert_eq!(
             Instant::now().duration_since(cooldown_started),
             Duration::from_secs(12)
         );
-        pacer.note_success(&config).await;
+        pacer.note_success(&config, None).await;
 
         // Recovery interval = 12s / 12 = 1s (clamped to MIN_RECOVERY_INTERVAL).
         let recovery_started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(recovery_started),
             Duration::from_secs(1)
@@ -445,13 +502,13 @@ mod tests {
         let config = config("https://openrouter.ai/api/v1");
         let cancel = CancellationToken::new();
 
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         pacer
-            .note_rate_limit(&config, Duration::from_secs(60), None)
+            .note_rate_limit(&config, None, Duration::from_secs(60), None)
             .await;
 
         let cooldown_started = Instant::now();
-        assert!(pacer.wait_for_slot(&config, &cancel).await);
+        assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         assert_eq!(
             Instant::now().duration_since(cooldown_started),
             Duration::from_secs(60)

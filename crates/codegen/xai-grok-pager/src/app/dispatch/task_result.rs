@@ -742,7 +742,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             request_seq,
             meta,
             repair,
-        } => handle_auth_complete(app, request_seq, meta, repair),
+            credential_write_receipt,
+        } => handle_auth_complete(app, request_seq, meta, repair, credential_write_receipt),
         TaskResult::AuthFailed { request_seq, error } => {
             if let AuthState::Authenticating {
                 request_seq: current_seq,
@@ -1306,6 +1307,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             status,
             claude_cli_status,
             repair,
+            credential_write_receipt,
         } => {
             use super::auth::strip_trailing_auth_error_blocks;
             use super::queue::{maybe_drain_queue, note_peek_page_flip};
@@ -1342,6 +1344,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if !connected {
                 return vec![];
             }
+            let auth_home = app.auth_home();
             let mut retry_effects = Vec::new();
             let mut page_flips = Vec::new();
             for agent in app.agents.values_mut() {
@@ -1355,7 +1358,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     }
                     continue;
                 };
-                if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed) {
+                let live = super::auth::live_binding_gen_for_resume(&auth_home, &repair_scope);
+                if repair_scope.allows_resume(agent.in_flight_repair.as_ref(), &stashed)
+                    && repair_scope.validate_write_receipt(credential_write_receipt.as_ref(), live)
+                {
                     agent.in_flight_repair = None;
                     strip_trailing_auth_error_blocks(agent);
                     agent.scrollback.push_block(RenderBlock::system(format!(

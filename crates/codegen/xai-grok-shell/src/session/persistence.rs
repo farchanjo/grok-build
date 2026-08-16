@@ -305,6 +305,7 @@ pub enum PersistenceMsg {
             tokio::sync::oneshot::Sender<Result<(), xai_chat_state::CompactionPersistenceError>>,
     },
     CurrentModel {
+        /// Canonical catalog selection id (never the upstream wire slug).
         model_id: acp::ModelId,
         /// The active agent definition name (e.g. `"grok-build"`).
         /// Persisted in `summary.agent_name` so session resume doesn't depend
@@ -317,6 +318,10 @@ pub enum PersistenceMsg {
         /// When `Some`, overwrite the durable external-runtime envelope
         /// (`Some(None)` clears it for native sessions).
         external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
+        /// Optional secret-free route companion written atomically with the
+        /// summary model fields. `None` leaves an existing pair (Leave path);
+        /// `Some(None)` clears the companion; `Some(Some(_))` installs a new pair.
+        route_provenance: Option<Option<xai_grok_models::ModelRouteProvenance>>,
     },
     PlanState(TodoState),
     /// Plan mode lifecycle state to persist
@@ -419,12 +424,13 @@ pub fn session_exists_for_cwd(session_id: &str, cwd: &str) -> bool {
     session_exists_for_cwd_in_root(session_id, cwd, &sessions_root)
 }
 
-/// A directory is a resumable session only if it has a `summary.json`; this
-/// skips `images/`-only stubs that would otherwise hijack `--resume`. Used by
-/// the resume/restore resolution path; `find_session_dir_by_id` intentionally
-/// stays dir-only for non-resume compatibility.
+/// A directory is a resumable session only if a contained walk can load
+/// `summary.json` (skips `images/`-only stubs and refuses intermediate
+/// `sessions` symlinks). Used by the resume/restore resolution path;
+/// `find_session_dir_by_id` intentionally stays dir-only for non-resume
+/// compatibility.
 fn is_persisted_session_dir(session_path: &Path) -> bool {
-    session_path.join("summary.json").is_file()
+    crate::session::storage::model_route::read_summary_contained(session_path).is_ok()
 }
 
 /// Inner implementation of `session_exists_for_cwd` with an injectable root.
@@ -560,33 +566,25 @@ fn find_local_child_for_remote_in_root(
         if !path.is_dir() {
             continue;
         }
-        let summary_path = path.join("summary.json");
-        if !summary_path.exists() {
+        // Contained summary read — skip walk failures (ELOOP / owner / missing).
+        let Ok(summary) = crate::session::storage::model_route::read_summary_contained(&path)
+        else {
+            continue;
+        };
+        if summary.parent_session_id.as_deref() != Some(remote_session_id) {
             continue;
         }
-        // Parse minimum fields without deserializing the full Summary,
-        // so we don't fail on missing/extra fields from older/newer formats.
-        if let Ok(raw) = std::fs::read_to_string(&summary_path)
-            && let Ok(partial) = serde_json::from_str::<serde_json::Value>(&raw)
-            && partial.get("parent_session_id").and_then(|v| v.as_str()) == Some(remote_session_id)
-            && let Some(session_id) = path.file_name().and_then(|n| n.to_str())
-        {
-            let updated_at = partial
-                .get("updated_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            // Directory mtime as a tie-breaker for equal updated_at values.
-            let dir_mtime = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            candidates.push((updated_at, dir_mtime, session_id.to_string()));
-        }
+        let Some(session_id) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let updated_at = summary.updated_at.to_rfc3339();
+        let dir_mtime = summary
+            .last_active_at
+            .unwrap_or(summary.updated_at)
+            .timestamp_nanos_opt()
+            .unwrap_or(0)
+            .max(0) as u128;
+        candidates.push((updated_at, dir_mtime, session_id.to_string()));
     }
 
     // Sort descending by all three keys for full determinism.
@@ -682,13 +680,14 @@ pub(crate) fn find_summary_by_session_id_in_root(
 }
 
 fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
-    let path = session_dir.join("summary.json");
-    let bytes = std::fs::read(&path).map_err(|error| RelocationError::Io {
-        operation: "read",
-        path: path.clone(),
-        source: error,
-    })?;
-    serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json { path, source })
+    // Multi-component trusted-root walk — never path-follow summary.json.
+    crate::session::storage::model_route::read_summary_contained(session_dir).map_err(|error| {
+        RelocationError::Io {
+            operation: "read",
+            path: session_dir.join("summary.json"),
+            source: error,
+        }
+    })
 }
 
 /// The most recently updated local session summary for `cwd` (by
@@ -712,12 +711,12 @@ fn most_recent_local_summary_for_cwd_in_view(
 ) -> RelocationResult<Option<Summary>> {
     let mut best: Option<Summary> = None;
     for session_dir in view.session_dirs(Some(cwd))? {
+        // Skip unreadable / unsafe entries (ELOOP, corrupt JSON, missing).
+        // Picker must not path-adopt attacker summaries; must not abort the list.
         let summary = match read_summary(&session_dir) {
             Ok(summary) => summary,
             Err(RelocationError::Json { .. }) => continue,
-            Err(RelocationError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-                continue;
-            }
+            Err(RelocationError::Io { .. }) => continue,
             Err(error) => return Err(error),
         };
         if summary.is_hidden() {
@@ -2027,19 +2026,38 @@ impl SessionPersistence {
                     reasoning_effort,
                     execution_backend,
                     external_runtime,
+                    route_provenance,
                 } => {
-                    if let Err(e) = self
-                        .storage
-                        .update_current_model_agent_and_execution(
-                            &self.info,
-                            &model_id,
-                            agent_name.as_deref(),
-                            reasoning_effort,
-                            execution_backend,
-                            external_runtime,
-                        )
-                        .await
-                    {
+                    // `None` → leave-style model write (preserve companion if valid).
+                    // `Some(None)` → clear companion; `Some(Some(p))` → install pair.
+                    let result = match route_provenance {
+                        Some(prov) => {
+                            self.storage
+                                .update_current_model_agent_execution_and_route(
+                                    &self.info,
+                                    &model_id,
+                                    agent_name.as_deref(),
+                                    reasoning_effort,
+                                    execution_backend,
+                                    external_runtime,
+                                    prov.as_ref(),
+                                )
+                                .await
+                        }
+                        None => {
+                            self.storage
+                                .update_current_model_agent_and_execution(
+                                    &self.info,
+                                    &model_id,
+                                    agent_name.as_deref(),
+                                    reasoning_effort,
+                                    execution_backend,
+                                    external_runtime,
+                                )
+                                .await
+                        }
+                    };
+                    if let Err(e) = result {
                         tracing::warn!(?e, "failed to update current model");
                     }
                     if let Some(sync) = &self.remote_sync {

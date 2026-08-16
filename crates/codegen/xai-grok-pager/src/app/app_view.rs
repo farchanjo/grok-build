@@ -1030,6 +1030,8 @@ pub struct AppView {
     pub next_auth_request_seq: u64,
     /// Monotonically increasing sequence for [`crate::app::agent::CredentialRepairToken`].
     pub next_credential_repair_token: u64,
+    /// Optional override for credential-binding re-resolve during repair resume.
+    pub(crate) auth_home_override: Option<PathBuf>,
     /// Abort handle for the in-flight `PollAuthUrl` task (with its request_seq).
     /// Aborted alongside the Authenticate task in single-flight re-login.
     pub auth_url_poll_handle: Option<(u64, tokio::task::AbortHandle)>,
@@ -1209,6 +1211,13 @@ fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout:
 impl AppView {
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
+    }
+
+    /// Auth home used for credential-binding re-resolve at repair resume.
+    pub(crate) fn auth_home(&self) -> PathBuf {
+        self.auth_home_override
+            .clone()
+            .unwrap_or_else(xai_grok_config::grok_home)
     }
     /// User is not gated (no gate from remote settings or subscription fallback).
     pub fn has_access(&self) -> bool {
@@ -1484,6 +1493,7 @@ impl AppView {
             auth_code_input: LineEditor::default(),
             next_auth_request_seq: 1,
             next_credential_repair_token: 1,
+            auth_home_override: None,
             auth_url_poll_handle: None,
             deferred_startup: Default::default(),
             auth_use_oauth: false,
@@ -5560,6 +5570,7 @@ pub(crate) mod tests {
             auth_code_input: LineEditor::default(),
             next_auth_request_seq: 1,
             next_credential_repair_token: 1,
+            auth_home_override: None,
             auth_url_poll_handle: None,
             deferred_startup: Default::default(),
             auth_use_oauth: false,

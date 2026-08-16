@@ -193,12 +193,52 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     let mut plugins_changed_needs_skills_refetch = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
+    let raw_meta = session_notif
+        .meta
+        .as_ref()
+        .and_then(|v| v.as_object());
     let changed = match session_notif.update {
+        XaiSessionUpdate::RetryState(ref retry) => {
+            let binding =
+                xai_grok_shell::extensions::notification::ProviderRouteBindingMeta::from_meta(
+                    raw_meta,
+                );
+            let changed = apply_session_event(
+                &XaiSessionUpdate::RetryState(retry.clone()),
+                &mut agent.session,
+                &mut agent.scrollback,
+                is_api_key_auth,
+            );
+            // Correlate meta to the exact failure; never overwrite a sibling
+            // provider's pending binding, and ignore empty/mismatched meta.
+            if let xai_grok_shell::extensions::notification::RetryState::Failed {
+                provider: Some(provider),
+                ..
+            } = retry
+            {
+                if binding.matches_failure(&provider.provider_id, provider.credential_generation)
+                    && let Some(key) = binding.map_key()
+                {
+                    const MAX_PENDING: usize = 16;
+                    if agent.pending_route_bindings.len() >= MAX_PENDING {
+                        if let Some(old) = agent
+                            .pending_route_bindings
+                            .keys()
+                            .min_by_key(|(_, failure_gen)| *failure_gen)
+                            .cloned()
+                        {
+                            agent.pending_route_bindings.remove(&old);
+                        }
+                    }
+                    agent.pending_route_bindings.insert(key, binding);
+                }
+            }
+            changed
+        }
         ref update @ (XaiSessionUpdate::AutoCompactStarted { .. }
         | XaiSessionUpdate::AutoCompactCompleted { .. }
         | XaiSessionUpdate::AutoCompactFailed { .. }
         | XaiSessionUpdate::AutoCompactCancelled { .. }
-        | XaiSessionUpdate::RetryState(_)
         | XaiSessionUpdate::ImageDropped { .. }
         | XaiSessionUpdate::MemoryFlushCompleted { .. }
         | XaiSessionUpdate::MemoryDreamCompleted { .. }

@@ -494,6 +494,31 @@ impl SessionActor {
                 self.0.current_or_expired().map(|a| a.key)
             }
         }
+        /// Exact-route bearer: only the frozen route's durable source at the
+        /// frozen binding generation. Sibling OAuth/API-key never participates.
+        #[allow(clippy::items_after_statements)]
+        struct RouteBoundBearerResolver {
+            auth: std::sync::Arc<crate::auth::AuthManager>,
+            route: xai_grok_inference::ProviderRouteContext,
+        }
+        impl std::fmt::Debug for RouteBoundBearerResolver {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("RouteBoundBearerResolver")
+                    .field("instance", &self.route.instance_id())
+                    .field("credential_route", &self.route.credential_route().as_str())
+                    .field("binding_generation", &self.route.binding_generation())
+                    .finish()
+            }
+        }
+        impl xai_grok_inference::BearerResolver for RouteBoundBearerResolver {
+            fn current_bearer(&self) -> Option<String> {
+                crate::auth::attribution::current_credential_for_route(
+                    self.auth.as_ref(),
+                    Some(&self.route),
+                )
+                .map(|s| s.key)
+            }
+        }
         let cfg = self
             .chat_state_handle
             .get_inference_settings()
@@ -619,8 +644,72 @@ impl SessionActor {
         });
         let zai_thinking =
             is_zai.then(|| serde_json::json!({"type": "enabled", "clear_thinking": false}));
+
+        // Production route sidecar for exact-source credential resolution.
+        let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
+        let mut inference_for_route = InferenceConfig {
+            api_key: creds.api_key.clone(),
+            base_url: cfg.base_url.clone(),
+            model: cfg.model.clone(),
+            provider_identity,
+            openrouter_pacing: self.openrouter_pacing.get(),
+            ..InferenceConfig::default()
+        };
+        // Preserve media/backend fields needed by legacy_from_config fallback.
+        inference_for_route.api_backend = cfg.api_backend.clone();
+        let selection_model_id = self.selection_model_id.borrow().clone();
+        let production_route =
+            crate::session::route_context::resolve_for_models_manager_with_selection(
+                &inference_for_route,
+                &self.models_manager,
+                selection_model_id.0.as_ref(),
+                grok_home,
+            );
+        *self.route_context.borrow_mut() = Some(production_route.clone());
+
+        // Exact-route credential for non-session routes: generation-gated.
+        let route_credential = self.auth_manager.as_ref().and_then(|am| {
+            crate::auth::attribution::current_credential_for_route(am, Some(&production_route))
+        });
+        let route_api_key = route_credential.as_ref().map(|s| s.key.clone());
+
+        // Attribution callback carrying the live exact route (not only xAI session).
+        let route_attribution = self.auth_manager.as_ref().map(|am| {
+            crate::auth::attribution::ShellAttribution::new_with_route(
+                am.clone(),
+                Some(self.session_info.id.0.to_string()),
+                std::sync::Arc::new(parking_lot::RwLock::new(Some(production_route.clone()))),
+            )
+        });
+
+        let bearer_resolver: Option<xai_grok_inference::SharedBearerResolver> =
+            if use_bearer_resolver {
+                self.auth_manager
+                    .as_ref()
+                    .map(|am| -> xai_grok_inference::SharedBearerResolver {
+                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
+                    })
+            } else if matches!(
+                production_route.credential_route(),
+                xai_grok_inference::RouteCredentialRoute::ApiKey
+                    | xai_grok_inference::RouteCredentialRoute::OpenAiPlatform
+                    | xai_grok_inference::RouteCredentialRoute::ChatGptOauth
+            ) {
+                self.auth_manager
+                    .as_ref()
+                    .map(|am| -> xai_grok_inference::SharedBearerResolver {
+                        std::sync::Arc::new(RouteBoundBearerResolver {
+                            auth: am.clone(),
+                            route: production_route.clone(),
+                        })
+                    })
+            } else {
+                None
+            };
+
         InferenceConfig {
-            api_key: creds.api_key,
+            // Prefer exact-route key when resolved; else chat-state snapshot.
+            api_key: route_api_key.or(creds.api_key),
             base_url: cfg.base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
@@ -655,16 +744,8 @@ impl SessionActor {
                 .filter(|a| a.is_xai_auth())
                 .map(|a| a.user_id),
             origin_client: self.origin_client.clone(),
-            attribution_callback: self.attribution_callback.clone(),
-            bearer_resolver: if use_bearer_resolver {
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| -> xai_grok_inference::SharedBearerResolver {
-                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
-                    })
-            } else {
-                None
-            },
+            attribution_callback: route_attribution.or_else(|| self.attribution_callback.clone()),
+            bearer_resolver,
             supports_backend_search: self.supports_backend_search.get(),
             supports_native_schema: match resolved_entry {
                 Some(e) => e.info().supports_native_schema,
@@ -982,7 +1063,21 @@ impl SessionActor {
             sampler_config.doom_loop_recovery = None;
         }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
-        self.sampler_handle.update_config(sampler_config);
+        // Recompute from the newly selected model + live credential binding so
+        // a model/config switch never copies prior generations blindly.
+        let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
+        let selection_model_id = self.selection_model_id.borrow().clone();
+        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &sampler_config,
+            &self.models_manager,
+            selection_model_id.0.as_ref(),
+            grok_home,
+        );
+        *self.route_context.borrow_mut() = Some(route.clone());
+        self.sampler_handle.update_config_with_route_context(
+            sampler_config,
+            xai_grok_inference::RouteContextUpdate::Replace(route),
+        );
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, _message: &str) {
         self.log_terminal_failure_safe(error_type, status_code, None);
@@ -1048,12 +1143,22 @@ impl SessionActor {
             status_code,
             Some(&provider),
         );
-        self.send_xai_notification(XaiSessionUpdate::RetryState(
-            crate::extensions::notification::RetryState::failed_with_provider(
-                msg.clone(),
-                provider,
+        let binding = self.frozen_route_binding_meta(
+            false,
+            provider.credential_generation,
+            &provider.provider_id,
+        );
+        let extra = binding.to_meta_map();
+        let extra = if extra.is_empty() { None } else { Some(extra) };
+        self.send_xai_notification_with_extra_meta(
+            XaiSessionUpdate::RetryState(
+                crate::extensions::notification::RetryState::failed_with_provider(
+                    msg.clone(),
+                    provider,
+                ),
             ),
-        ))
+            extra,
+        )
         .await;
         Err(
             acp::Error::internal_error().data(crate::inference::error::terminal_error_data(
@@ -1062,6 +1167,56 @@ impl SessionActor {
                 kind,
             )),
         )
+    }
+
+    /// Freeze exact-route repair binding meta from the live session route
+    /// context plus the issued failure generation. Additive private `_meta`
+    /// only — public failure shape is unchanged.
+    pub(crate) fn frozen_route_binding_meta(
+        &self,
+        host_fallback: bool,
+        failure_generation: u64,
+        provider_id: &str,
+    ) -> crate::extensions::notification::ProviderRouteBindingMeta {
+        use xai_grok_inference::RouteAuthority;
+        let frozen = self.route_context.borrow();
+        let authority = if host_fallback {
+            RouteAuthority::HostFallback
+        } else {
+            frozen
+                .as_ref()
+                .map(|r| r.authority())
+                .unwrap_or(RouteAuthority::Unverified)
+        };
+        let binding_complete = frozen.is_some() && authority.is_authoritative();
+        let instance = frozen
+            .as_ref()
+            .map(|r| r.instance_id().to_owned())
+            .unwrap_or_else(|| provider_id.to_owned());
+        let credential_route = frozen
+            .as_ref()
+            .map(|r| r.credential_route().as_str().to_owned())
+            .unwrap_or_default();
+        crate::extensions::notification::ProviderRouteBindingMeta {
+            provider_instance_id: instance,
+            credential_route,
+            route_authority: authority.as_str().to_owned(),
+            incarnation: frozen
+                .as_ref()
+                .and_then(|r| r.incarnation().map(str::to_owned)),
+            registry_generation: frozen
+                .as_ref()
+                .map(|r| r.registry_generation())
+                .unwrap_or(0),
+            host_fallback: authority.is_host_fallback(),
+            binding_generation: frozen.as_ref().map(|r| r.binding_generation()).unwrap_or(0),
+            binding_complete,
+            correlation_token: if failure_generation == 0 {
+                String::new()
+            } else {
+                failure_generation.to_string()
+            },
+        }
     }
 
     /// Issue the next provider-credential failure generation.
