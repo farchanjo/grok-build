@@ -2150,3 +2150,308 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
             .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
     }
 }
+
+/// Clear-and-replace after freeze fails closed until a matching store receipt
+/// carries the real post generation.
+#[test]
+fn store_bound_clear_and_replace_rejects_stale_receipt() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+    use xai_grok_shell::auth::{
+        OPENROUTER_API_KEY_SCOPE, clear_provider_api_key, store_provider_api_key,
+    };
+
+    let dir = tempfile::tempdir().expect("temp auth home");
+    let home = dir.path().to_path_buf();
+    let failed_gen =
+        store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-before-clear-AAA")
+            .expect("seed");
+    assert_eq!(failed_gen, 1);
+
+    let mut app = test_app_with_agent();
+    app.auth_home_override = Some(home.clone());
+    let id = AgentId(0);
+    let scope = CredentialRepairScope {
+        token: CredentialRepairToken(7),
+        provider_id: "openrouter".into(),
+        credential_generation: 2,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: failed_gen,
+        credential_route: "api_key".into(),
+        correlation_token: "2".into(),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-clear-replace"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openrouter".into(),
+            credential_generation: 2,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: failed_gen,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: "2".into(),
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "clear-replace".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(scope.clone());
+    }
+
+    // Clear removes the key (live binding None) — receipt claiming post==2 fails.
+    clear_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE).expect("clear");
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("after clear".into()),
+            },
+            claude_cli_status: None,
+            repair: Some(scope.clone()),
+            credential_write_receipt: Some(scope.write_receipt(2)),
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "clear leaves live None — must not resume"
+    );
+    assert!(!effects
+        .iter()
+        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+
+    // Replace stores a new key (post gen advances). Matching receipt resumes once.
+    let post = store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-after-clear-BBB")
+        .expect("replace");
+    assert!(post > failed_gen);
+    app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenRouter,
+            status: ProviderStatus::Connected {
+                detail: Some("after replace".into()),
+            },
+            claude_cli_status: None,
+            repair: Some(scope.clone()),
+            credential_write_receipt: Some(scope.write_receipt(post)),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }))
+            .count(),
+        1
+    );
+}
+
+/// Dual-store hermetic: OpenAI Platform API-key and ChatGPT OAuth coexist.
+/// An API-key repair receipt must not satisfy an OAuth-scoped failure and
+/// vice versa — live re-resolve is keyed by exact credential_route.
+#[test]
+fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
+    use crate::app::agent::{CredentialRepairScope, CredentialRepairToken};
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+    use xai_grok_shell::auth::{OPENAI_API_KEY_SCOPE, store_provider_api_key};
+
+    // Dual-store under one tempfile home: Platform API-key present; OAuth
+    // absent. Live re-resolve is exact-route keyed so crossover fails closed.
+    let dir = tempfile::tempdir().expect("temp auth home");
+    let home = dir.path().to_path_buf();
+
+    // Platform API-key store for openai instance.
+    let api_failed =
+        store_provider_api_key(&home, OPENAI_API_KEY_SCOPE, "sk-openai-failed-AAAAAAAA")
+            .expect("api key seed");
+    let api_post =
+        store_provider_api_key(&home, OPENAI_API_KEY_SCOPE, "sk-openai-repaired-BBBBBBBB")
+            .expect("api key repair");
+    assert!(api_post > api_failed);
+
+    // OAuth live generation for built-in openai (no tokens → None).
+    // Ensure API-key live re-resolve does not answer chatgpt_oauth.
+    assert!(
+        xai_grok_shell::session::route_context::live_binding_generation_for_route(
+            &home,
+            "openai",
+            "chatgpt_oauth",
+            None,
+        )
+        .is_none(),
+        "OAuth source must be absent when only API-key is stored"
+    );
+    assert_eq!(
+        xai_grok_shell::session::route_context::live_binding_generation_for_route(
+            &home,
+            "openai",
+            "api_key",
+            None,
+        ),
+        Some(api_post)
+    );
+    assert_eq!(
+        xai_grok_shell::session::route_context::live_binding_generation_for_route(
+            &home,
+            "openai",
+            "openai_platform",
+            None,
+        ),
+        Some(api_post)
+    );
+
+    let mut app = test_app_with_agent();
+    app.auth_home_override = Some(home.clone());
+    let id = AgentId(0);
+
+    // OAuth-scoped failure with API-key receipt: exact source live re-resolve
+    // returns None for chatgpt_oauth → resume rejected.
+    let oauth_scope = CredentialRepairScope {
+        token: CredentialRepairToken(11),
+        provider_id: "openai".into(),
+        credential_generation: 5,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "chatgpt_oauth".into(),
+        correlation_token: "5".into(),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess-crossover"));
+        agent.session.state = crate::app::agent::AgentState::Idle;
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openai".into(),
+            credential_generation: 5,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "chatgpt_oauth".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: "5".into(),
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "oauth failure".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(oauth_scope.clone());
+    }
+    // API-key store receipt cannot satisfy OAuth live source.
+    let mut api_key_receipt = oauth_scope.write_receipt(api_post);
+    api_key_receipt.credential_route = "api_key".into();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("api key write".into()),
+            },
+            claude_cli_status: None,
+            repair: Some(oauth_scope.clone()),
+            credential_write_receipt: Some(api_key_receipt),
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_some(),
+        "API-key receipt fields mismatch OAuth scope → no resume"
+    );
+    assert!(!effects
+        .iter()
+        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+
+    // Symmetric: API-key failure, OAuth-spelled receipt rejected.
+    let api_scope = CredentialRepairScope {
+        token: CredentialRepairToken(12),
+        provider_id: "openai".into(),
+        credential_generation: 6,
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: api_failed,
+        credential_route: "api_key".into(),
+        correlation_token: "6".into(),
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "openai".into(),
+            credential_generation: 6,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: api_failed,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: "6".into(),
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "api key failure".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.in_flight_repair = Some(api_scope.clone());
+    }
+    let mut oauth_receipt = api_scope.write_receipt(api_post);
+    oauth_receipt.credential_route = "chatgpt_oauth".into();
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("oauth write".into()),
+            },
+            claude_cli_status: None,
+            repair: Some(api_scope.clone()),
+            credential_write_receipt: Some(oauth_receipt),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+    assert!(!effects
+        .iter()
+        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+
+    // Matching API-key receipt + live re-resolve resumes once.
+    app.agents.get_mut(&id).unwrap().in_flight_repair = Some(api_scope.clone());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ProviderOperationComplete {
+            agent_id: id,
+            provider: ProviderKind::OpenAi,
+            status: ProviderStatus::Connected {
+                detail: Some("api key exact".into()),
+            },
+            claude_cli_status: None,
+            repair: Some(api_scope.clone()),
+            credential_write_receipt: Some(api_scope.write_receipt(api_post)),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }))
+            .count(),
+        1
+    );
+}
