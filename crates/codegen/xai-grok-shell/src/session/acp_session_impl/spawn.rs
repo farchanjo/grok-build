@@ -1580,6 +1580,7 @@ pub(crate) async fn spawn_session_actor(
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
         models_manager,
+        selection_model_id: std::cell::RefCell::new(session_model_id.clone()),
         route_context: std::cell::RefCell::new(Some(initial_route_context)),
         display_cwd: {
             let lock = std::sync::OnceLock::new();
