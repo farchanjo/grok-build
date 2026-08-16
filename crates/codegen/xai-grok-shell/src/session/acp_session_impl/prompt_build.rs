@@ -840,19 +840,12 @@ impl SessionActor {
         let current_query = crate::session::image_describe::strip_template_context_tags(
             &xai_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
-        let active_session_config = self.reconstruct_full_config().await;
         let media = self.media_config.borrow().clone();
         let image_description_model = media.image_model.as_deref().unwrap_or("@session");
-        let resolved_describe = self
-            .resolve_aux_inference_config(image_description_model)
-            .await;
-        let (describe_model, sampler_config) =
-            crate::agent::config::finalize_image_describe_inference_config(
-                resolved_describe,
-                &active_session_config,
-                self.client_identifier.clone(),
-                Some(self.max_retries),
-            );
+        // Exact media route: explicit pins fail closed; @session needs frozen route.
+        let media_route = self.resolve_media_describe(image_description_model).await?;
+        let describe_model = media_route.upstream_model_id.clone();
+        let sampler_config = media_route.inference;
         crate::session::media_pipeline::auxiliary_media_route_allowed(
             sampler_config.provider_identity,
             self.auth_manager.as_ref(),

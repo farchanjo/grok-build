@@ -133,17 +133,16 @@ impl SessionActor {
                     }
                 }
             } else {
-                let active_config = self.reconstruct_full_config().await;
-                match self.resolve_aux_inference_config(requested_model).await {
-                    Some(mut config) => {
-                        crate::agent::config::stamp_session_local_sampler_fields(
-                            &mut config,
-                            &active_config,
-                            self.client_identifier.clone(),
-                            Some(self.max_retries),
-                        );
-                        let model = config.model.clone();
-                        match xai_grok_inference::InferenceClient::new(config) {
+                match self
+                    .resolve_aux_route(
+                        crate::session::auxiliary_route::AuxiliaryPurpose::GoalEvaluator,
+                        requested_model,
+                    )
+                    .await
+                {
+                    Ok(route) => {
+                        let model = route.upstream_model_id.clone();
+                        match route.client() {
                             Ok(client) => (client, model),
                             Err(error) => {
                                 last_error = format!("could not prepare small evaluator: {error}");
@@ -151,9 +150,10 @@ impl SessionActor {
                             }
                         }
                     }
-                    None => {
-                        last_error =
-                            format!("small evaluator model `{requested_model}` unavailable");
+                    Err(error) => {
+                        last_error = format!(
+                            "small evaluator model `{requested_model}` unavailable: {error}"
+                        );
                         continue;
                     }
                 }

@@ -641,16 +641,29 @@ impl SessionActor {
             return None;
         };
 
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Exact aux route: never send the session account to a foreign model.
+        let (sampling_client, wire_model) = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::PromptSuggest,
+                &model,
+            )
+            .await
+        {
+            Ok(route) => match route.client() {
+                Ok(client) => (client, route.upstream_model_id),
+                Err(e) => {
+                    tracing::debug!(error = %e, "prompt suggest: aux client unavailable");
+                    return None;
+                }
+            },
             Err(e) => {
-                tracing::debug!(error = %e, "prompt suggest: sampling client unavailable");
+                tracing::debug!(error = %e, "prompt suggest: aux route unavailable; skipping");
                 return None;
             }
         };
 
         tracing::debug!(
-            model = %model,
+            model = %wire_model,
             transcript_len = transcript.len(),
             "prompt suggest: requesting"
         );
@@ -672,7 +685,7 @@ impl SessionActor {
         let request = ConversationRequest {
             items,
             tools: vec![],
-            model: Some(model),
+            model: Some(wire_model),
             temperature: None,
             x_grok_conv_id: Some(format!("promptsuggest-{}", uuid::Uuid::new_v4())),
             x_grok_req_id: Some(format!("xai-promptsuggest-{}", uuid::Uuid::new_v4())),

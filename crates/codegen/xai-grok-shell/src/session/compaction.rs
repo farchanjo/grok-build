@@ -178,30 +178,30 @@ impl SessionActor {
             && xai_chat_state::compaction_utils::conversation_contains_images(conversation);
 
         let (client, model, provider) = if allow_lazy_backfill {
-            let active_session_config = self.reconstruct_full_config().await;
             let image_description_model = media.image_model.as_deref().unwrap_or("@session");
-            let resolved = self
-                .resolve_aux_inference_config(image_description_model)
-                .await;
-            let (describe_model, sampler_config) =
-                crate::agent::config::finalize_image_describe_inference_config(
-                    resolved,
-                    &active_session_config,
-                    self.client_identifier.clone(),
-                    Some(self.max_retries),
-                );
-            let provider = sampler_config.provider_identity;
-            let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
-                provider,
-                self.auth_manager.as_ref(),
-            )
-            .ok()
-            .and_then(|()| xai_grok_inference::InferenceClient::new(sampler_config).ok());
-            (
-                client,
-                Some(describe_model),
-                Some(provider.label().to_owned()),
-            )
+            // Compaction backfill is best-effort: route miss skips lazy describe.
+            match self.resolve_media_describe(image_description_model).await {
+                Ok(route) => {
+                    let describe_model = route.upstream_model_id.clone();
+                    let sampler_config = route.inference;
+                    let provider = sampler_config.provider_identity;
+                    let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
+                        provider,
+                        self.auth_manager.as_ref(),
+                    )
+                    .ok()
+                    .and_then(|()| xai_grok_inference::InferenceClient::new(sampler_config).ok());
+                    (
+                        client,
+                        Some(describe_model),
+                        Some(provider.label().to_owned()),
+                    )
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "compaction media describe route unavailable");
+                    (None, None, None)
+                }
+            }
         } else {
             (None, None, None)
         };

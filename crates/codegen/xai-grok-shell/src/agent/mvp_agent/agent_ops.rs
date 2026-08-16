@@ -61,8 +61,6 @@ impl MvpAgent {
     ) -> Result<(OaiCompatClient, String), acp::Error> {
         let slug = self.resolve_session_summary_model();
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
-        let models = self.models_manager.models();
-        let endpoints = self.models_manager.endpoints();
         let (disable_api_key_auth, alpha_test_key, client_version) = {
             let cfg = self.cfg.borrow();
             (
@@ -71,31 +69,39 @@ impl MvpAgent {
                 cfg.client_version.clone(),
             )
         };
-        let config = match crate::agent::config::resolve_aux_model_inference_config(
-            &slug,
-            &models,
-            &endpoints,
-            session_key.as_deref(),
-            disable_api_key_auth,
-            alpha_test_key,
-            client_version,
-        ) {
-            Some(mut cfg) => {
-                crate::agent::config::stamp_session_local_sampler_fields(
-                    &mut cfg,
-                    primary,
-                    primary.client_identifier.clone(),
-                    primary.max_retries,
-                );
-                cfg
-            }
-            None => {
+        // Production seam: SessionTitleSamplerPairing keeps route provenance
+        // paired with the sampler so a later soft-fallback cannot drop it.
+        let frozen = xai_grok_inference::ProviderRouteContext::legacy_from_config(primary);
+        let selection_id = self.models_manager.current_model_id().0.to_string();
+        let pair = crate::session::auxiliary_route::SessionTitleSamplerPairing::for_session_new(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::SessionTitle,
+                requested: &slug,
+                models_manager: &self.models_manager,
+                frozen_session_route: Some(&frozen),
+                frozen_session_inference: primary,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home: Some(self.auth_manager.grok_home()),
+                session_key: session_key.as_deref(),
+                disable_api_key_auth,
+                alpha_test_key: alpha_test_key.as_deref(),
+                client_version: client_version.as_deref(),
+                client_identifier: primary.client_identifier.as_deref(),
+                max_retries: primary.max_retries,
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: false,
+            },
+        );
+        let (config, model) = match pair {
+            Ok(pair) => (pair.route.inference, pair.route.upstream_model_id),
+            Err(err) => {
+                tracing::debug!(error = %err, "session title aux route soft-fallback to primary");
                 let mut fallback = primary.clone();
                 fallback.model = slug;
-                fallback
+                let model = fallback.model.clone();
+                (fallback, model)
             }
         };
-        let model = config.model.clone();
         let client = OaiCompatClient::new(config).map_err(map_sampling_err_to_acp)?;
         Ok((client, model))
     }
@@ -1414,25 +1420,46 @@ impl MvpAgent {
     }
     pub(super) fn prepare_web_search_inference_config(&self) -> Option<InferenceConfig> {
         let model_id = self.cfg.borrow().web_search_model.clone();
-        let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
         let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
         let client_version = self.cfg.borrow().client_version.clone();
-        let mut cfg = config::resolve_web_search_inference_config(
-            &model_id,
-            &models,
-            session.as_ref().map(|a| a.key.as_str()),
-            self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
-            alpha_test_key.clone(),
-            client_version,
-            &self.cfg.borrow().endpoints,
-        )?;
+        let primary = self.inference_config.borrow().clone();
+        let frozen = xai_grok_inference::ProviderRouteContext::legacy_from_config(&primary);
+        let selection_id = self.models_manager.current_model_id().0.to_string();
+        let disable_api_key_auth = self.cfg.borrow().grok_com_config.api_key_auth_disabled();
+        let resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::WebSearch,
+                requested: &model_id,
+                models_manager: &self.models_manager,
+                frozen_session_route: Some(&frozen),
+                frozen_session_inference: &primary,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home: Some(self.auth_manager.grok_home()),
+                session_key: session.as_ref().map(|a| a.key.as_str()),
+                disable_api_key_auth,
+                alpha_test_key: alpha_test_key.as_deref(),
+                client_version: client_version.as_deref(),
+                client_identifier: primary.client_identifier.as_deref(),
+                max_retries: primary.max_retries,
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: true,
+            },
+        )
+        .map_err(|err| {
+            tracing::warn!(error = %err, web_search_model = %model_id, "web search route closed");
+        })
+        .ok()?;
+        // Preserve sampling overrides (token/temperature) on the exact route.
+        let mut cfg = crate::tools::config::web_search_inference_config(resolved.inference);
         inject_proxy_headers(
             &mut cfg.extra_headers,
             cfg.client_version.as_deref(),
             alpha_test_key.as_deref(),
             &cfg.base_url,
         );
+        // Route-closed 401 attribution: inherit session callback without secrets.
+        cfg.attribution_callback = primary.attribution_callback.clone();
         Some(cfg)
     }
     /// Returns `Err` with a user-facing message on invalid config; the caller at
