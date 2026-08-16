@@ -240,7 +240,7 @@ pub fn store_provider_secret(grok_home: &Path, scope: &str, secret: &str) -> std
             "secret must not be empty",
         ));
     }
-    store_provider_api_key(grok_home, scope, secret)
+    store_provider_api_key(grok_home, scope, secret).map(|_| ())
 }
 
 pub fn clear_provider_secret(grok_home: &Path, scope: &str) -> std::io::Result<()> {

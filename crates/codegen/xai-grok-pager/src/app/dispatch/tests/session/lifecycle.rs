@@ -1097,6 +1097,7 @@ fn auth_complete_defers_startup_until_trust_resolved() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1162,6 +1163,7 @@ fn trust_answered_first_defers_startup_until_auth_completes() {
             request_seq: 1,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1495,6 +1497,7 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
             request_seq: seq,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1526,6 +1529,14 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
             credential_generation: 0,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
             prompt: crate::app::agent::InFlightPrompt {
                 text: "retry me".into(),
                 images: Vec::new(),
@@ -1542,6 +1553,7 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
             request_seq: seq,
             meta: None,
             repair: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );

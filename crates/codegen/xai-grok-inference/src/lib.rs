@@ -34,6 +34,8 @@ pub mod metrics;
 pub mod openai_platform;
 pub mod openrouter_baseline;
 pub mod retry;
+/// Credential-free provider route context for sampler partitioning and repair.
+pub mod route_context;
 mod shared_http;
 pub mod stream;
 pub mod types;
@@ -75,6 +77,10 @@ pub use openai_platform::{
     OPERATION_BINDINGS, OpenAiAdminClient, OpenAiClient, OpenRouterClient, PlatformClientConfig,
     PlatformError, PlatformResult, PlatformTransport, TOTAL_BINDING_COUNT, TransportPolicy,
     assert_zero_uncovered_operations, coverage_report_json,
+};
+pub use route_context::{
+    ProviderRouteContext, ProviderRouteContextBuilder, RouteApiSurface, RouteAuthority,
+    RouteContextUpdate, RouteCredentialRoute, RoutePacingOverride, RouteProviderKind,
 };
 pub use openrouter_baseline::{
     OpenRouterEndpoint, OpenRouterEndpointInventory, coding_agent_priority_endpoints,

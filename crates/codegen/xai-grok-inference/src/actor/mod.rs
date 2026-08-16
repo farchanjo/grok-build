@@ -134,8 +134,8 @@ impl InferenceActor {
             InferenceCommand::Cancel { request_id } => {
                 self.state.cancel(&request_id);
             }
-            InferenceCommand::UpdateConfig { config } => {
-                self.state.update_config(*config);
+            InferenceCommand::UpdateConfig { config, route } => {
+                self.state.apply_config_update(*config, route);
             }
             InferenceCommand::IsActive { request_id, reply } => {
                 let _ = reply.send(self.state.active_requests.contains_key(&request_id));

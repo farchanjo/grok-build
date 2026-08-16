@@ -307,6 +307,8 @@ pub mod acp_conversion;
 pub mod acp_mcp;
 pub(crate) mod acp_session;
 pub(crate) mod agent_rebuild;
+/// Production sampler route context resolution (credential-free).
+pub mod route_context;
 pub mod chat_persistence;
 pub(crate) mod events;
 pub mod export;

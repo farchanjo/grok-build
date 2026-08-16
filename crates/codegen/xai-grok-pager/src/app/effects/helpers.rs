@@ -772,9 +772,14 @@ pub(super) async fn send_authenticate(
     match acp_send(req, tx).await {
         Ok(resp) => {
             ulog::info("auth completed", None, None);
+            // xAI session authenticate has no durable binding-generation
+            // contract from the store. Do not invent a generation via live
+            // lookup — automatic resume fails closed.
+            let _ = repair.as_ref();
             TaskResult::AuthComplete {
                 request_seq,
                 meta: resp.meta.map(serde_json::Value::Object),
+                credential_write_receipt: None,
                 repair,
             }
         }

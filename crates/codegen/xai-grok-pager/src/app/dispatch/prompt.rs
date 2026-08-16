@@ -1318,6 +1318,14 @@ pub(super) fn handle_prompt_response(
                     Some(crate::app::agent::ProviderScopedStashedPrompt {
                         provider_id,
                         credential_generation: generation,
+            incarnation: None,
+            registry_generation: 0,
+            binding_generation: 0,
+            host_fallback: false,
+            binding_complete: true,
+            credential_route: "api_key".into(),
+            route_authority: "authoritative".into(),
+            correlation_token: String::new(),
                         prompt,
                     });
             }

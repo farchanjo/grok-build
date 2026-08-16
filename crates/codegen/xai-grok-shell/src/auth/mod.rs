@@ -52,8 +52,8 @@ pub(crate) use model::{
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{
     ANTHROPIC_API_KEY_SCOPE, OPENAI_ADMIN_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENAI_OAUTH_SCOPE,
-    OPENROUTER_API_KEY_SCOPE, clear_api_key, clear_provider_api_key, clear_provider_oauth_auth,
-    read_api_key, read_auth_json, read_provider_api_key, read_provider_oauth_auth,
-    read_provider_oauth_binding, read_token_by_scope, store_api_key, store_provider_api_key,
-    store_provider_oauth_auth,
+    OPENROUTER_API_KEY_SCOPE, ProviderApiKeyBinding, clear_api_key, clear_provider_api_key,
+    clear_provider_oauth_auth, read_api_key, read_auth_json, read_provider_api_key,
+    read_provider_api_key_binding, read_provider_oauth_auth, read_provider_oauth_binding,
+    read_token_by_scope, store_api_key, store_provider_api_key, store_provider_oauth_auth,
 };

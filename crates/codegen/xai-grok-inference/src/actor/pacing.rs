@@ -23,9 +23,13 @@ const MAX_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const RECOVERY_BACKOFF_SLICES: u32 = 12;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RouteKey {
+pub(crate) struct RouteKey {
     base_url: String,
     model: String,
+    /// Partition sibling accounts / recreated instances.
+    incarnation: Option<String>,
+    /// Provider instance id when known (route context).
+    instance_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -235,12 +239,29 @@ fn host_is_openrouter(base_url: &str) -> bool {
 }
 
 fn route_key(config: &InferenceConfig) -> Option<RouteKey> {
+    route_key_with_context(config, None)
+}
+
+/// Build a pacing key optionally enriched by an explicit route context
+/// (instance id + incarnation) so recreated accounts do not share slots.
+pub(crate) fn route_key_with_context(
+    config: &InferenceConfig,
+    route: Option<&crate::route_context::ProviderRouteContext>,
+) -> Option<RouteKey> {
     if !openrouter_pacing_applies(config) {
-        return None;
+        // Explicit route pacing override may still enable.
+        let enabled = route
+            .and_then(|r| r.pacing().enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return None;
+        }
     }
     Some(RouteKey {
         base_url: config.base_url.clone(),
         model: config.model.clone(),
+        incarnation: route.and_then(|r| r.incarnation().map(str::to_owned)),
+        instance_id: route.map(|r| r.instance_id().to_owned()),
     })
 }
 

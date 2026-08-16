@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::pacing::InferencePacer;
 use crate::config::{InferenceConfig, RetryPolicy};
+use crate::route_context::{ProviderRouteContext, RouteContextUpdate};
 use crate::types::RequestId;
 
 /// In-flight request bookkeeping.
@@ -27,6 +28,8 @@ pub(crate) struct ActiveRequest {
 pub(crate) struct ActorState {
     pub(crate) active_requests: HashMap<RequestId, ActiveRequest>,
     pub(crate) config: InferenceConfig,
+    /// Explicit route context when known; otherwise derived from config.
+    pub(crate) route_context: Option<ProviderRouteContext>,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) inference_pacer: Arc<InferencePacer>,
 }
@@ -36,6 +39,7 @@ impl ActorState {
         Self {
             active_requests: HashMap::new(),
             config,
+            route_context: None,
             retry_policy,
             inference_pacer: InferencePacer::shared(),
         }
@@ -70,9 +74,37 @@ impl ActorState {
     }
 
     /// Replace the default config. The next request submitted without
-    /// an override will use this.
+    /// an override will use this. Clears any explicit route context so a
+    /// stale account context cannot survive a bare config refresh.
     pub(crate) fn update_config(&mut self, config: InferenceConfig) {
+        self.apply_config_update(config, RouteContextUpdate::DeriveLegacy);
+    }
+
+    /// Atomically replace config and route context together.
+    pub(crate) fn apply_config_update(
+        &mut self,
+        config: InferenceConfig,
+        route: RouteContextUpdate,
+    ) {
         self.config = config;
+        match route {
+            RouteContextUpdate::DeriveLegacy => {
+                self.route_context = None;
+            }
+            RouteContextUpdate::Replace(ctx) => {
+                self.route_context = Some(ctx);
+            }
+            RouteContextUpdate::Clear => {
+                self.route_context = None;
+            }
+        }
+    }
+
+    /// Effective route context for the next request.
+    pub(crate) fn effective_route_context(&self) -> ProviderRouteContext {
+        self.route_context
+            .clone()
+            .unwrap_or_else(|| ProviderRouteContext::legacy_from_config(&self.config))
     }
 }
 
@@ -122,6 +154,9 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
         }
     }
 

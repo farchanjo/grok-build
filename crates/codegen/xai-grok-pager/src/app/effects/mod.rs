@@ -4823,6 +4823,8 @@ async fn run_provider_operation(
 
     let manager = ProviderManager::default();
     let mut claude_cli_status = None;
+    // Store-returned generation only — never a post-hoc live lookup.
+    let mut store_post_generation: Option<u64> = None;
     let (provider, status) = match operation {
         ProviderOperation::Refresh(provider) => {
             if provider == ProviderKind::Anthropic {
@@ -4885,33 +4887,37 @@ async fn run_provider_operation(
         ProviderOperation::SaveAndTest { provider, api_key } => {
             let key = api_key.into_inner();
             let status = if let Some(backend) = backend_id(&provider) {
-                let result = manager.set_api_key(backend, &key);
+                let result = manager.set_api_key_binding_generation(backend, &key);
                 match result {
-                    Ok(()) => match manager.test_connection(backend).await {
-                        Ok(ProviderConnectionTest::Connected { .. }) => {
-                            display_provider_status(manager.status(backend))
+                    Ok(generation) => {
+                        store_post_generation = generation;
+                        match manager.test_connection(backend).await {
+                            Ok(ProviderConnectionTest::Connected { .. }) => {
+                                display_provider_status(manager.status(backend))
+                            }
+                            Ok(test) => connection_test_status(test, true),
+                            Err(error) => ProviderStatus::Error(error.to_string()),
                         }
-                        Ok(test) => connection_test_status(test, true),
-                        Err(error) => ProviderStatus::Error(error.to_string()),
-                    },
+                    }
                     Err(error) => ProviderStatus::Error(error.to_string()),
                 }
             } else if let ProviderKind::Configured(id) = &provider {
                 // Store under openai_compatible::<id>::api_key without logging.
                 use xai_grok_shell::provider_registry::id::ProviderId as CfgId;
-                use xai_grok_shell::provider_registry::secrets::{
-                    application_key_scope, store_provider_secret,
-                };
+                use xai_grok_shell::provider_registry::secrets::application_key_scope;
                 let home = xai_grok_config::grok_home();
                 match CfgId::new(id) {
-                    Ok(pid) => match store_provider_secret(
+                    Ok(pid) => match xai_grok_shell::auth::store_provider_api_key(
                         &home,
                         &application_key_scope(&pid),
                         &key,
                     ) {
-                        Ok(()) => ProviderStatus::Connected {
-                            detail: Some("Connected with API key".into()),
-                        },
+                        Ok(generation) => {
+                            store_post_generation = Some(generation);
+                            ProviderStatus::Connected {
+                                detail: Some("Connected with API key".into()),
+                            }
+                        }
                         Err(e) => ProviderStatus::Error(e.to_string()),
                     },
                     Err(e) => ProviderStatus::Error(e.to_string()),
@@ -4963,8 +4969,11 @@ async fn run_provider_operation(
             (provider, status)
         }
         ProviderOperation::LoginCodex => {
-            let status = match manager.codex_login().await {
-                Ok(()) => display_provider_status(manager.status(ProviderId::OpenAi)),
+            let status = match manager.codex_login_binding_generation().await {
+                Ok(generation) => {
+                    store_post_generation = Some(generation);
+                    display_provider_status(manager.status(ProviderId::OpenAi))
+                }
                 Err(error) => ProviderStatus::Error(error.to_string()),
             };
             (ProviderKind::OpenAi, status)
@@ -4996,12 +5005,18 @@ async fn run_provider_operation(
         tracing::warn!(?agent_id, %error, "provider model catalog reload failed");
     }
 
+    let credential_write_receipt = match (repair.as_ref(), store_post_generation) {
+        (Some(scope), Some(post)) => Some(scope.write_receipt(post)),
+        _ => None,
+    };
+
     TaskResult::ProviderOperationComplete {
         agent_id,
         provider,
         status,
         claude_cli_status,
         repair,
+        credential_write_receipt,
     }
 }
 
