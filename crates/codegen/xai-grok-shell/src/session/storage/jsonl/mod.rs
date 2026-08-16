@@ -764,25 +764,15 @@ impl JsonlStorageAdapter {
         std::fs::create_dir_all(&session_dir)?;
         super::model_route::commit_summary_and_companion(&session_dir, summary, None, true)
     }
-    /// Dirfd-relative summary read when possible; falls back to path for
-    /// mid-create races before the session dir is fully walkable.
+    /// Dirfd-relative summary read via the multi-component trusted-root walk.
+    ///
+    /// Containment failures (ELOOP on intermediate `sessions` symlink, owner
+    /// mismatch, TOCTOU revalidate) fail closed. There is **no** path-follow
+    /// fallback — a walk error must never adopt attacker content via
+    /// `std::fs::read`.
     fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
         let session_dir = self.session_dir(info);
-        match super::model_route::read_summary_contained(&session_dir) {
-            Ok(s) => Ok(s),
-            Err(_) => {
-                let path = self.summary_file(info);
-                let bytes = std::fs::read(&path)?;
-                if bytes.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("summary.json is empty (0 bytes): {}", path.display()),
-                    ));
-                }
-                serde_json::from_slice::<Summary>(&bytes)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            }
-        }
+        super::model_route::read_summary_contained(&session_dir)
     }
     fn read_optional_json_sync<T: serde::de::DeserializeOwned>(
         &self,

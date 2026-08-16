@@ -1310,6 +1310,42 @@ mod tests {
         }
     }
 
+    /// Contained summary read must not path-follow a `sessions` symlink to
+    /// adopt attacker content (final Gate A residual finding).
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_sessions_symlink_read_summary_fails_closed() {
+        let dir = tempdir().unwrap();
+        let evil_sess = dir.path().join("evil").join("sessions").join("sess");
+        fs::create_dir_all(&evil_sess).unwrap();
+        let attacker_bytes =
+            br#"{"current_model_id":"attacker-slug","info":{"id":"sess","cwd":"/tmp"}}"#;
+        fs::write(evil_sess.join(SUMMARY_FILE), attacker_bytes).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("evil").join("sessions"),
+            dir.path().join("sessions"),
+        )
+        .unwrap();
+        let attacked = dir.path().join("sessions").join("sess");
+        // Path follow would see the attacker file; contained walk must refuse.
+        let err = read_summary_contained(&attacked).unwrap_err();
+        assert!(
+            err.raw_os_error() == Some(libc::ELOOP)
+                || err.raw_os_error() == Some(libc::ENOTDIR)
+                || err.kind() == io::ErrorKind::NotADirectory
+                || err.kind() == io::ErrorKind::InvalidData
+                || err.kind() == io::ErrorKind::PermissionDenied
+                || err.kind() == io::ErrorKind::Other
+                || err.kind() == io::ErrorKind::NotFound,
+            "unexpected err: {err:?}"
+        );
+        // Attacker content still only on the evil side — not adopted as Ok(Summary).
+        assert_eq!(
+            fs::read(evil_sess.join(SUMMARY_FILE)).unwrap(),
+            attacker_bytes
+        );
+    }
+
     /// Model switch installs a pair; ordinary Leave rewrite (chat-style)
     /// must keep the companion loadable (Gate A Issue 2).
     #[test]
