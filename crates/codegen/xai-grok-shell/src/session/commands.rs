@@ -187,6 +187,8 @@ pub enum SessionCommand {
         responds_to: oneshot::Sender<()>,
     },
     SetSessionModel {
+        /// Canonical catalog selection id (never the upstream wire slug).
+        selection_model_id: acp::ModelId,
         inference_config: xai_grok_inference::InferenceConfig,
         use_concise: bool,
         /// When `false`, skip the system prompt rewrite (concise/default swap).

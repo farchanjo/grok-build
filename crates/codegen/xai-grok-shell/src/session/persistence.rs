@@ -305,6 +305,7 @@ pub enum PersistenceMsg {
             tokio::sync::oneshot::Sender<Result<(), xai_chat_state::CompactionPersistenceError>>,
     },
     CurrentModel {
+        /// Canonical catalog selection id (never the upstream wire slug).
         model_id: acp::ModelId,
         /// The active agent definition name (e.g. `"grok-build"`).
         /// Persisted in `summary.agent_name` so session resume doesn't depend
@@ -317,6 +318,10 @@ pub enum PersistenceMsg {
         /// When `Some`, overwrite the durable external-runtime envelope
         /// (`Some(None)` clears it for native sessions).
         external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
+        /// Optional secret-free route companion written atomically with the
+        /// summary model fields. `None` leaves an existing pair (Leave path);
+        /// `Some(None)` clears the companion; `Some(Some(_))` installs a new pair.
+        route_provenance: Option<Option<xai_grok_models::ModelRouteProvenance>>,
     },
     PlanState(TodoState),
     /// Plan mode lifecycle state to persist
@@ -2027,19 +2032,38 @@ impl SessionPersistence {
                     reasoning_effort,
                     execution_backend,
                     external_runtime,
+                    route_provenance,
                 } => {
-                    if let Err(e) = self
-                        .storage
-                        .update_current_model_agent_and_execution(
-                            &self.info,
-                            &model_id,
-                            agent_name.as_deref(),
-                            reasoning_effort,
-                            execution_backend,
-                            external_runtime,
-                        )
-                        .await
-                    {
+                    // `None` → leave-style model write (preserve companion if valid).
+                    // `Some(None)` → clear companion; `Some(Some(p))` → install pair.
+                    let result = match route_provenance {
+                        Some(prov) => {
+                            self.storage
+                                .update_current_model_agent_execution_and_route(
+                                    &self.info,
+                                    &model_id,
+                                    agent_name.as_deref(),
+                                    reasoning_effort,
+                                    execution_backend,
+                                    external_runtime,
+                                    prov.as_ref(),
+                                )
+                                .await
+                        }
+                        None => {
+                            self.storage
+                                .update_current_model_agent_and_execution(
+                                    &self.info,
+                                    &model_id,
+                                    agent_name.as_deref(),
+                                    reasoning_effort,
+                                    execution_backend,
+                                    external_runtime,
+                                )
+                                .await
+                        }
+                    };
+                    if let Err(e) = result {
                         tracing::warn!(?e, "failed to update current model");
                     }
                     if let Some(sync) = &self.remote_sync {

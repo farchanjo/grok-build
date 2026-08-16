@@ -824,8 +824,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
+                        SessionCommand::SetSessionModel { selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(selection_model_id, inference_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, execution_backend).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::GetExecutionBackend { responds_to } => {
@@ -888,7 +888,8 @@ pub(super) async fn run_session(
                                         reasoning_effort: None,
                                         execution_backend: Some(execution_backend),
                                         external_runtime: Some(external_runtime),
-                                    })
+                                                                            route_provenance: None,
+})
                                     .map_err(|_| {
                                         "PersistExecutionMode: persistence channel closed"
                                             .to_string()

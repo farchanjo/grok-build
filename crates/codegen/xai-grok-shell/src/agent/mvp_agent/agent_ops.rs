@@ -1109,36 +1109,42 @@ impl MvpAgent {
                 .await;
         }
     }
-    /// Pure id → entry resolver (the `allowed_models` gate lives in `set_session_model`).
+    /// Pure id → (canonical catalog key, entry) resolver.
+    /// Origin-aware: gated additional accounts resolve as Missing when the
+    /// multi-account gate is closed. (`allowed_models` lives in `set_session_model`).
     pub(crate) fn resolve_model_id(
         &self,
         requested: &acp::ModelId,
-    ) -> Result<ModelEntry, acp::Error> {
+    ) -> Result<(acp::ModelId, ModelEntry), acp::Error> {
         let requested_str = requested.0.as_ref();
         let models = self.models_manager.models();
-        let Some(catalog_key) = resolve_catalog_key(&models, requested) else {
+        let origins = self.models_manager.catalog_origins();
+        let Some(catalog_key) =
+            crate::agent::models::resolve_catalog_key_with_origins(&models, &origins, requested)
+        else {
             tracing::debug!(
                 requested = %requested_str,
                 model_count = models.len(),
-                "resolve_model_id: unknown model id (not in models() by key or .model field)"
+                "resolve_model_id: unknown or gated model id"
             );
             return Err(acp::Error::invalid_params().data("unknown model id"));
         };
         let entry = models
             .get(catalog_key.0.as_ref())
-            .expect("resolve_catalog_key returns a key present in models");
+            .expect("resolve_catalog_key_with_origins returns a key present in models");
         let match_kind = if catalog_key.0.as_ref() == requested_str {
-            "map key"
+            "exact canonical"
         } else {
-            "model field scan"
+            "deterministic alias"
         };
         tracing::debug!(
-            "resolve_model_id: matched by {}: requested={} model={}",
+            "resolve_model_id: matched by {}: requested={} catalog_key={} upstream={}",
             match_kind,
             requested_str,
+            catalog_key.0,
             entry.info.model
         );
-        Ok(entry.clone())
+        Ok((catalog_key, entry.clone()))
     }
     pub(crate) fn prepare_inference_config_for_model(
         &self,
@@ -1213,14 +1219,32 @@ impl MvpAgent {
             .current_or_expired()
             .filter(|a| a.is_xai_auth())
             .map(|a| a.user_id);
-        let mut config = crate::agent::config::inference_config_for_model(
+        let mut config = crate::agent::config::try_inference_config_for_model(
             model,
             credentials,
             alpha_test_key,
             client_version,
             deployment_id,
             user_id,
-        );
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "try_inference_config_for_model failed; compatibility fallback");
+            let session = self.auth_manager.current_or_expired();
+            let session_key = session.as_ref().map(|a| a.key.clone());
+            let fallback_user_id = session
+                .as_ref()
+                .filter(|a| a.is_xai_auth())
+                .map(|a| a.user_id.clone());
+            let cfg = self.cfg.borrow();
+            crate::agent::config::inference_config_for_model(
+                model,
+                resolve_credentials(model, session_key.as_deref()),
+                cfg.endpoints.alpha_test_key.clone(),
+                cfg.client_version.clone(),
+                crate::managed_config::resolve_deployment_id(cfg.endpoints.deployment_key.as_deref()),
+                fallback_user_id,
+            )
+        });
         config.origin_client = origin_client;
         config
     }
@@ -1233,7 +1257,7 @@ impl MvpAgent {
         model_id: &acp::ModelId,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> InferenceConfig {
-        if let Ok(model) = self.resolve_model_id(model_id) {
+        if let Ok((_key, model)) = self.resolve_model_id(model_id) {
             self.prepare_inference_config_for_model(&model, origin_client.clone())
         } else {
             let mut c = self.inference_config.borrow().clone();
@@ -1808,7 +1832,7 @@ impl MvpAgent {
         model_id: &acp::ModelId,
     ) -> crate::agent::execution_backend::ExecutionBackend {
         self.resolve_model_id(model_id)
-            .map(|e| e.info.execution_backend)
+            .map(|(_key, e)| e.info.execution_backend)
             .unwrap_or_default()
     }
 
@@ -3325,7 +3349,7 @@ impl MvpAgent {
             xai_grok_agent::config::ModelOverride::Override(id) => {
                 let mid = acp::ModelId::new(Arc::from(id.as_str()));
                 match self.resolve_model_id(&mid) {
-                    Ok(entry) => Some((mid, entry)),
+                    Ok((key, entry)) => Some((key, entry)),
                     Err(_) => {
                         tracing::warn!(
                             agent = %agent_definition.name,
@@ -3623,7 +3647,8 @@ impl MvpAgent {
                     reasoning_effort: initial_reasoning_effort,
                     execution_backend: Some(seed_execution_backend),
                     external_runtime: Some(seed_external_runtime.clone()),
-                });
+                                    route_provenance: None,
+});
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
                 session_meta,
             );

@@ -473,6 +473,7 @@ async fn switching_to_native_shuts_down_external_runtime() {
             cfg.context_window = 128_000;
             let _ = actor
                 .handle_set_session_model(
+                    acp::ModelId::new(cfg.model.clone()),
                     cfg,
                     false,
                     false,

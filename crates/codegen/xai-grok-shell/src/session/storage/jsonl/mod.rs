@@ -1315,9 +1315,39 @@ impl JsonlStorageAdapter {
             execution_backend: source_summary.execution_backend,
             external_runtime: source_summary.external_runtime,
         };
-        let summary_bytes = serde_json::to_vec_pretty(&target_summary)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(self.summary_file(target_info), summary_bytes)?;
+        // Write target summary + optional companion/meta as one identity transaction.
+        // Prefer source companion when present; leave old sessions without companion.
+        let source_dir = self.session_dir(source_info);
+        match super::model_route::copy_route_companion_for_fork(
+            &source_dir,
+            &target_dir,
+            &target_summary,
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                // If source has no pair, just write summary; otherwise fail closed.
+                if source_dir.join(super::model_route::MODEL_ROUTE_FILE).exists()
+                    || source_dir.join(super::model_route::MODEL_IDENTITY_META).exists()
+                {
+                    return Err(e);
+                }
+                super::model_route::commit_summary_and_companion(
+                    &target_dir,
+                    &target_summary,
+                    None,
+                    false,
+                )?;
+            }
+        }
+        // Ensure summary exists even when copy_route wrote nothing (no source pair).
+        if !target_dir.join("summary.json").exists() {
+            super::model_route::commit_summary_and_companion(
+                &target_dir,
+                &target_summary,
+                None,
+                false,
+            )?;
+        }
         let mut chat_content = Vec::new();
         for item in &chat_to_copy {
             let mut line = serde_json::to_vec(item)
@@ -1684,20 +1714,106 @@ impl StorageAdapter for JsonlStorageAdapter {
         execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
         external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
     ) -> io::Result<()> {
-        self.apply_summary_patch(
+        // Leave-style identity transaction: update model fields and preserve
+        // companion when the existing pair is valid.
+        self.update_current_model_agent_execution_and_route(
             info,
-            super::summary_write::SummaryPatch {
+            model_id,
+            agent_name,
+            reasoning_effort,
+            execution_backend,
+            external_runtime,
+            None,
+        )
+        .await
+    }
+
+    async fn update_model_route_provenance(
+        &self,
+        info: &Info,
+        provenance: Option<&xai_grok_models::ModelRouteProvenance>,
+    ) -> io::Result<()> {
+        let session_dir = self.session_dir(info);
+        let summary = self.read_summary_sync(info)?;
+        let session_dir2 = session_dir.clone();
+        let provenance = provenance.cloned();
+        tokio::task::spawn_blocking(move || {
+            super::model_route::commit_summary_and_companion(
+                &session_dir2,
+                &summary,
+                provenance.as_ref(),
+                provenance.is_none(),
+            )
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn update_current_model_agent_execution_and_route(
+        &self,
+        info: &Info,
+        model_id: &acp::ModelId,
+        agent_name: Option<&str>,
+        reasoning_effort: Option<Option<xai_grok_inference_types::ReasoningEffort>>,
+        execution_backend: Option<crate::agent::execution_backend::ExecutionBackend>,
+        external_runtime: Option<Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>>,
+        provenance: Option<&xai_grok_models::ModelRouteProvenance>,
+    ) -> io::Result<()> {
+        let session_dir = self.session_dir(info);
+        let summary_path = self.summary_file(info);
+        let lock_path = self.summary_lock_file(info);
+        let model_id = model_id.clone();
+        let agent_name = agent_name.map(String::from);
+        let provenance = provenance.cloned();
+        tokio::task::spawn_blocking(move || {
+            // Hold the summary lock across read-modify so concurrent patches serialize,
+            // then commit through the identity transaction (summary + companion + meta).
+            let lock = {
+                use std::fs::OpenOptions;
+                use fs2::FileExt;
+                let f = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&lock_path)?;
+                f.lock_exclusive()?;
+                f
+            };
+            let mut summary = {
+                let bytes = std::fs::read(&summary_path).unwrap_or_default();
+                if bytes.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("summary.json missing: {}", summary_path.display()),
+                    ));
+                }
+                serde_json::from_slice::<Summary>(&bytes)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            };
+            let patch = super::summary_write::SummaryPatch {
                 model: Some(super::summary_write::ModelPatch {
-                    model_id: model_id.clone(),
-                    agent_name: agent_name.map(String::from),
+                    model_id,
+                    agent_name,
                     reasoning_effort,
                     execution_backend,
                     external_runtime,
                 }),
                 ..Default::default()
-            },
-        )
+            };
+            let _ = summary.apply_patch(&patch, chrono::Utc::now());
+            let leave = provenance.is_none();
+            let result = super::model_route::commit_summary_and_companion(
+                &session_dir,
+                &summary,
+                provenance.as_ref(),
+                leave,
+            );
+            let _ = lock.unlock();
+            result
+        })
         .await
+        .map_err(io::Error::other)?
     }
     async fn update_collection_id(&self, info: &Info, collection_id: &str) -> io::Result<()> {
         self.apply_summary_patch(
@@ -1862,6 +1978,10 @@ impl StorageAdapter for JsonlStorageAdapter {
     }
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
         let summary = self.read_summary_sync(info)?;
+        // Fail closed on mismatched companion/meta; old sessions without pair OK.
+        // No rewrite-on-read.
+        let session_dir = self.session_dir(info);
+        let _ = super::model_route::load_route_companion(&session_dir, &summary)?;
         let chat_file = self.chat_file(info);
         self.ensure_chat_history(info, summary.chat_format_version)?;
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
@@ -1917,6 +2037,8 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
         let summary = self.read_summary_sync(info)?;
+        let session_dir = self.session_dir(info);
+        let _ = super::model_route::load_route_companion(&session_dir, &summary)?;
         let chat_file = self.chat_file(info);
         self.ensure_chat_history(info, summary.chat_format_version)?;
         let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;

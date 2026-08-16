@@ -319,7 +319,8 @@ impl ModelsManager {
                 .map(|c| c.models)
         });
         let has_prefetched = prefetched_models.is_some();
-        let catalog = resolve_model_catalog(cfg, prefetched_models.clone());
+        let (catalog, origins) =
+            resolve_model_catalog_with_origins(cfg, prefetched_models.clone());
 
         // Validate only against a real catalog; a bundled-only first run defers
         // to the async fetch (`apply_refresh_result`).
@@ -345,6 +346,7 @@ impl ModelsManager {
             auth_manager,
             cfg.clone(),
         );
+        *mgr.inner.catalog_origins.write() = origins;
         if has_prefetched {
             *mgr.inner.has_fetched_real_catalog.write() = true;
         }
@@ -744,7 +746,8 @@ impl ModelsManager {
     /// or a routing slug (see [`resolve_catalog_key`]). Deliberately checks
     /// the full catalog rather than the user-selectable projection: auxiliary
     /// background calls need a *sampleable* model, and hidden or
-    /// non-selectable entries are still sampleable.
+    /// non-selectable entries are still sampleable. Production routing that
+    /// must honor the multi-account gate should use [`Self::model_in_catalog_gated`].
     pub fn model_in_catalog(&self, model_id: &str) -> bool {
         let models = self.inner.models.read();
         resolve_catalog_key(&models, &acp::ModelId::new(model_id)).is_some()
@@ -1137,30 +1140,48 @@ impl ModelsManager {
     }
 
     /// Build a `InferenceConfig` from the current model + auth state.
+    ///
+    /// Fail-closed: never falls back to `values().next()`. Missing current id
+    /// uses the bundled default entry only when the catalog is empty.
     pub fn inference_config(&self) -> InferenceConfig {
         let config = self.inner.cfg.read().clone();
         let auth_manager = self.inner.auth_manager.as_ref();
         let current_model_id = self.current_model_id();
         let all_models = self.models();
+        let origins = self.catalog_origins();
         let fallback;
-        let current_model = match all_models
-            .get(current_model_id.0.as_ref())
-            .or_else(|| all_models.values().next())
-        {
-            Some(m) => m,
-            None => {
-                tracing::warn!("no models available in catalog; defaulting to bundled model");
-                let default_id = crate::models::default_model().to_string();
-                fallback = ModelEntry::fallback(&default_id, &config.endpoints);
-                &fallback
-            }
+        let current_model = if let Some(m) = all_models.get(current_model_id.0.as_ref()) {
+            m
+        } else if let Some(key) = crate::agent::model_identity::resolve_catalog_key_str_with_origins(
+            &all_models,
+            &origins,
+            current_model_id.0.as_ref(),
+        ) {
+            all_models
+                .get(&key)
+                .expect("resolve_catalog_key_str_with_origins returns present key")
+        } else if all_models.is_empty() {
+            tracing::warn!("no models available in catalog; defaulting to bundled model");
+            let default_id = crate::models::default_model().to_string();
+            fallback = ModelEntry::fallback(&default_id, &config.endpoints);
+            &fallback
+        } else {
+            // Current id missing from a non-empty catalog: fail closed to
+            // bundled default rather than an arbitrary first catalog entry.
+            tracing::warn!(
+                current = %current_model_id.0,
+                "current model missing from catalog; defaulting to bundled model"
+            );
+            let default_id = crate::models::default_model().to_string();
+            fallback = ModelEntry::fallback(&default_id, &config.endpoints);
+            &fallback
         };
 
         let session_auth = auth_manager.current_or_expired();
         let credentials =
             resolve_credentials(current_model, session_auth.as_ref().map(|a| a.key.as_str()));
 
-        inference_config_for_model(
+        crate::agent::config::try_inference_config_for_model(
             current_model,
             credentials,
             config.endpoints.alpha_test_key.clone(),
@@ -1170,6 +1191,38 @@ impl ModelsManager {
             ),
             None,
         )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "try_inference_config_for_model failed; using compatibility path");
+            inference_config_for_model(
+                current_model,
+                resolve_credentials(current_model, session_auth.as_ref().map(|a| a.key.as_str())),
+                config.endpoints.alpha_test_key.clone(),
+                config.client_version.clone(),
+                crate::managed_config::resolve_deployment_id(
+                    config.endpoints.deployment_key.as_deref(),
+                ),
+                None,
+            )
+        })
+    }
+
+    /// Origin-aware selection resolve for production spawn/switch/resume.
+    pub fn resolve_selection_key(&self, id: &acp::ModelId) -> Option<acp::ModelId> {
+        let models = self.models();
+        let origins = self.catalog_origins();
+        resolve_catalog_key_with_origins(&models, &origins, id)
+    }
+
+    /// Whether `model_id` resolves under the origin-aware production gate.
+    pub fn model_in_catalog_gated(&self, model_id: &str) -> bool {
+        let models = self.inner.models.read();
+        let origins = self.inner.catalog_origins.read();
+        crate::agent::model_identity::resolve_catalog_key_str_with_origins(
+            &models,
+            &origins,
+            model_id,
+        )
+        .is_some()
     }
 
     /// Disk-cache origin key for this manager's current endpoints/auth shape
@@ -1608,7 +1661,17 @@ fn build_prefetched_map(
 ) -> IndexMap<String, ModelEntry> {
     let mut map: IndexMap<String, ModelEntry> = IndexMap::with_capacity(models.len());
     for m in models {
-        let key = m.id.clone().unwrap_or_else(|| m.model.clone());
+        // Prefer remote `id` (already first-colon discovered form when present).
+        // When only a wire slug is available, keep the slug as the key — callers
+        // that know the provider instance should supply `id` via CanonicalModelId::discovered.
+        let key = if let Some(id) = m.id.as_ref() {
+            // Normalize: if id already validates as canonical, use it; else fall back.
+            xai_grok_models::CanonicalModelId::new(id.as_str())
+                .map(|c| c.into_string())
+                .unwrap_or_else(|_| id.clone())
+        } else {
+            m.model.clone()
+        };
         let info = config::ModelInfo::from_config(&m);
         let entry = ModelEntry {
             info,
@@ -1838,28 +1901,35 @@ fn spawn_prefetch_thread(env: PrefetchEnv) -> EarlyPrefetchHandle {
 
 /// Map a model id (catalog key or routing slug) to its catalog key.
 ///
-/// Sessions persist the routing slug (`[model.X].model`, e.g. `grok-4.5`);
-/// the catalog and `/model` picker use config keys (e.g. `enterprise-grok-build`).
-/// Last slug match wins so user overrides beat defaults (matches `MvpAgent::resolve_model_id`).
+/// Deterministic: exact / permanent reserved / unique legacy alias / ambiguous
+/// / missing. **No** first- or last-slug-wins fallback.
 pub(crate) fn resolve_catalog_key(
     models: &IndexMap<String, ModelEntry>,
     id: &acp::ModelId,
 ) -> Option<acp::ModelId> {
-    let id_str = id.0.as_ref();
-    if models.contains_key(id_str) {
-        return Some(id.clone());
-    }
-    models
-        .iter()
-        .rev()
-        .find(|(_, entry)| entry.info.model == id_str)
-        .map(|(key, _)| acp::ModelId::new(key.clone()))
+    crate::agent::model_identity::resolve_catalog_key_str(models, id.0.as_ref())
+        .map(acp::ModelId::new)
+}
+
+/// Origin-aware production catalog key resolution (gated additional accounts
+/// return `None` / Missing when the multi-account gate is closed).
+pub(crate) fn resolve_catalog_key_with_origins(
+    models: &IndexMap<String, ModelEntry>,
+    origins: &crate::agent::model_identity::CatalogOrigins,
+    id: &acp::ModelId,
+) -> Option<acp::ModelId> {
+    crate::agent::model_identity::resolve_catalog_key_str_with_origins(
+        models,
+        origins,
+        id.0.as_ref(),
+    )
+    .map(acp::ModelId::new)
 }
 
 /// Catalog key for a persisted session model id, restricted to **selectable**
-/// entries. A selectable exact-key match wins (as in [`resolve_catalog_key`]);
-/// otherwise the last selectable entry whose routing slug matches `id`, so a
-/// non-selectable exact-key entry never shadows a selectable slug match.
+/// entries. Exact key wins when selectable; otherwise the deterministic
+/// resolver runs on the selectable subcatalog only (unique/ambiguous/missing).
+/// A non-selectable exact key never steals a unique selectable alias.
 pub(crate) fn selectable_catalog_key_for_persisted(
     models: &IndexMap<String, ModelEntry>,
     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
@@ -1868,13 +1938,12 @@ pub(crate) fn selectable_catalog_key_for_persisted(
     if available.contains_key(id) {
         return Some(id.clone());
     }
-    let id_str = id.0.as_ref();
-    if let Some((key, _)) = models.iter().rev().find(|(key, entry)| {
-        available.contains_key(&acp::ModelId::new((*key).clone())) && entry.info.model == id_str
-    }) {
-        return Some(acp::ModelId::new(key.clone()));
-    }
-    resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
+    let selectable: IndexMap<String, ModelEntry> = models
+        .iter()
+        .filter(|(key, _)| available.contains_key(&acp::ModelId::new((*key).clone())))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    resolve_catalog_key(&selectable, id)
 }
 
 /// A "campaign-only" preferred flip: the default changed and either side's value
@@ -3923,7 +3992,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_catalog_key_last_slug_match_wins() {
+    fn resolve_catalog_key_ambiguous_slug_is_none() {
         let mut models = IndexMap::new();
         models.insert(
             "default-grok-build".to_string(),
@@ -3932,8 +4001,11 @@ mod tests {
         models.insert("user-grok-build".to_string(), make_model_entry("grok-4.5"));
 
         let persisted = acp::ModelId::new("grok-4.5");
-        let key = resolve_catalog_key(&models, &persisted).expect("slug must resolve");
-        assert_eq!(key.0.as_ref(), "user-grok-build");
+        // Two legacy aliases share the slug → Ambiguous → None (no last-wins).
+        assert!(
+            resolve_catalog_key(&models, &persisted).is_none(),
+            "ambiguous slug must not last-wins resolve"
+        );
     }
 
     #[test]

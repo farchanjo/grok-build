@@ -1116,7 +1116,8 @@ pub(crate) async fn handle_subagent_request(
             reasoning_effort: Some(effective_inference_config.reasoning_effort),
             execution_backend: None,
             external_runtime: None,
-        });
+                    route_provenance: None,
+});
     let forked_tool_override = if verbatim_mirror_fork && !request.owner.is_workflow() {
         ctx.parent_tool_snapshot.clone()
     } else {

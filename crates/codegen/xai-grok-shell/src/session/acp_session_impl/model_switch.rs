@@ -4,6 +4,7 @@ use xai_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
     pub(super) async fn handle_set_session_model(
         &self,
+        selection_model_id: acp::ModelId,
         inference_config: xai_grok_inference::InferenceConfig,
         use_concise: bool,
         apply_prompt_override: bool,
@@ -11,7 +12,9 @@ impl SessionActor {
         auto_compact_threshold_percent: u8,
         execution_backend: crate::agent::execution_backend::ExecutionBackend,
     ) -> Result<acp::ModelId, acp::Error> {
-        let model_id = acp::ModelId::new(inference_config.model.clone());
+        // Canonical selection is session-scoped; never take the upstream wire slug
+        // from InferenceConfig.model as the selection id.
+        let model_id = selection_model_id;
         let prev_backend = self.execution_backend.get();
         // When leaving external mode, or switching to a different external kind,
         // shut down the retained runtime (bridge + temp resources + child).
@@ -167,6 +170,11 @@ impl SessionActor {
             Some(home.as_path()),
         );
         *self.route_context.borrow_mut() = Some(route.clone());
+        let provenance = crate::session::storage::model_route::provenance_from_route_context(
+            &route,
+            model_id.0.as_ref(),
+            inference_config.model.as_str(),
+        );
         self.sampler_handle.update_config_with_route_context(
             inference_config,
             xai_grok_inference::route_context::RouteContextUpdate::Replace(route),
@@ -180,6 +188,7 @@ impl SessionActor {
                 reasoning_effort: Some(reasoning_effort),
                 execution_backend: Some(execution_backend),
                 external_runtime: Some(envelope),
+                route_provenance: Some(provenance),
             });
         Ok(model_id)
     }

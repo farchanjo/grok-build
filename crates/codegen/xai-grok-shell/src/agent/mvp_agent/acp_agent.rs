@@ -1037,14 +1037,14 @@ impl acp::Agent for MvpAgent {
             .and_then(|custom_model| match self
                 .resolve_model_id(&acp::ModelId::new(custom_model))
             {
-                Ok(model) if model.info.user_selectable => {
+                Ok((selection_key, model)) if model.info.user_selectable => {
                     model_agent_type = Some(model.info().agent_type.clone());
                     let origin_client = self
                         .origin_client_info_from_meta(arguments.meta.as_ref());
                     session_inference_override = Some(
                         self.prepare_inference_config_for_model(&model, origin_client),
                     );
-                    Some(custom_model)
+                    Some(selection_key.0.to_string())
                 }
                 Ok(_) => {
                     tracing::warn!(
@@ -1064,7 +1064,7 @@ impl acp::Agent for MvpAgent {
                 }
             });
         if model_agent_type.is_none() && custom_model_id.is_none()
-            && let Ok(default_model) = self
+            && let Ok((_key, default_model)) = self
                 .resolve_model_id(&self.models_manager.current_model_id())
         {
             model_agent_type = Some(default_model.info().agent_type.clone());
@@ -1108,11 +1108,10 @@ impl acp::Agent for MvpAgent {
         };
         let model_id = match &session_initial_model {
             Some(chat_model) => acp::ModelId::new(chat_model.clone()),
-            None => {
-                resolved_custom_model
-                    .map(acp::ModelId::new)
-                    .unwrap_or_else(|| self.models_manager.current_model_id())
-            }
+            None => resolved_custom_model
+                .as_ref()
+                .map(|id| acp::ModelId::new(id.clone()))
+                .unwrap_or_else(|| self.models_manager.current_model_id()),
         };
         let session_model_id = model_id.clone();
         let persistence = if is_chat_kind {
@@ -1724,7 +1723,7 @@ impl acp::Agent for MvpAgent {
                     self
                         .resolve_model_id(&summary.current_model_id)
                         .ok()
-                        .map(|m| m.info().agent_type.clone())
+                        .map(|(_k, m)| m.info().agent_type.clone())
                 });
             self.spawn_and_register_session(
                     init,
@@ -3349,7 +3348,7 @@ impl acp::Agent for MvpAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
-        let model = self.resolve_model_id(&args.model_id)?;
+        let (_selection, model) = self.resolve_model_id(&args.model_id)?;
         if !model.info.user_selectable {
             return Err(
                 acp::Error::invalid_params()

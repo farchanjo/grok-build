@@ -264,7 +264,8 @@ impl SessionActor {
                                 reasoning_effort: None,
                                 execution_backend: Some(backend),
                                 external_runtime: Some(Some(validated)),
-                            },
+                                                            route_provenance: None,
+},
                         );
                     }
                 }
@@ -387,7 +388,8 @@ impl SessionActor {
                 reasoning_effort: None,
                 execution_backend: Some(backend),
                 external_runtime: Some(Some(envelope_to_store)),
-            },
+                            route_provenance: None,
+},
         );
 
         let tokens = outcome
