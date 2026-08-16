@@ -4,13 +4,18 @@
 //! secret-free companion next to `summary.json`, bound via private meta
 //! (pair_id + summary digest). Leave never adopts a mismatched companion.
 //!
-//! Identity I/O is **dirfd-relative**: open the session directory as a trusted
-//! root, walk each single-component name with `openat` + `O_NOFOLLOW` +
-//! `O_CLOEXEC`, owner/mode-check dirfds, and stage/rename/unlink only through
-//! those fds. No check-then-path use on production identity artifacts.
+//! Identity I/O is a **multi-component trusted-root walk**: starting from the
+//! filesystem root, each path component of the session directory is opened
+//! with `openat` + `O_NOFOLLOW` + `O_CLOEXEC` + `O_DIRECTORY`, owner/mode
+//! checked, then final basenames (summary/companion/meta) are operated only
+//! through that session dirfd. Intermediate ancestor symlinks (e.g. a planted
+//! `sessions` → `/evil/sessions`) fail closed. No check-then-path use on
+//! production identity artifacts.
 //!
 //! Transaction journal: `model_identity.txn` records staged temp names and
 //! digests. Recovery rolls forward a complete staged set or rolls back temps.
+//! Ordinary summary patches (chat/title/git/activity) use Leave to keep the
+//! companion digest aligned with the rewritten summary.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -91,6 +96,7 @@ mod contain {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::path::Component;
 
     pub struct SessionRoot {
         dir: File,
@@ -98,27 +104,22 @@ mod contain {
     }
 
     impl SessionRoot {
+        /// Multi-component trusted-root walk.
+        ///
+        /// Production layout is `{trusted}/sessions/{cwd}/{id}`. The trusted
+        /// anchor (parent of `sessions`, or parent of the session dir for
+        /// explicit/subagent paths) is path-opened once as policy-trusted, then
+        /// every subsequent component is `openat`+`O_NOFOLLOW`+`O_DIRECTORY`
+        /// with owner/mode checks. An intermediate `sessions` symlink fails
+        /// closed (ELOOP).
         pub fn open(session_dir: &Path) -> io::Result<Self> {
-            let dir = OpenOptions::new()
-                .read(true)
-                .custom_flags(
-                    libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-                )
-                .open(session_dir)
-                .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
-                        format!(
-                            "open session root {}: {e}",
-                            session_dir.display()
-                        ),
-                    )
-                })?;
-            owner_mode_check_dir(&dir)?;
-            Ok(Self {
-                dir,
-                path: session_dir.to_path_buf(),
-            })
+            let path = if session_dir.is_absolute() {
+                session_dir.to_path_buf()
+            } else {
+                std::env::current_dir()?.join(session_dir)
+            };
+            let (trusted, relative) = split_trusted_and_relative(&path)?;
+            open_under(trusted.as_path(), relative.as_path(), path)
         }
 
         pub fn path(&self) -> &Path {
@@ -127,16 +128,8 @@ mod contain {
 
         fn openat(&self, name: &str, flags: i32, mode: u32) -> io::Result<File> {
             validate_single_component(name)?;
-            let c_name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "identity name contains NUL")
-            })?;
-            // SAFETY: session dirfd is live; name is NUL-terminated single component.
-            let fd = unsafe { libc::openat(self.dir.as_raw_fd(), c_name.as_ptr(), flags, mode) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: nonnegative openat result transfers one owned fd.
-            Ok(unsafe { File::from_raw_fd(fd) })
+            let os = std::ffi::OsStr::new(name);
+            openat_component(&self.dir, os, flags, mode)
         }
 
         pub fn exists_nofollow(&self, name: &str) -> io::Result<bool> {
@@ -169,11 +162,7 @@ mod contain {
             // Exclusive create — refuse if a symlink or existing file is present.
             let mut f = self.openat(
                 tmp_name,
-                libc::O_WRONLY
-                    | libc::O_CREAT
-                    | libc::O_EXCL
-                    | libc::O_CLOEXEC
-                    | libc::O_NOFOLLOW,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 0o600,
             )?;
             f.write_all(bytes)?;
@@ -230,10 +219,7 @@ mod contain {
             // Create lock via openat so a swapped parent cannot redirect us.
             let f = match self.openat(
                 MODEL_IDENTITY_LOCK,
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_CLOEXEC
-                    | libc::O_NOFOLLOW,
+                libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 0o600,
             ) {
                 Ok(f) => f,
@@ -271,27 +257,137 @@ mod contain {
         }
     }
 
+    /// Split `{…}/sessions/{cwd}/{id}` into trusted parent of `sessions` and
+    /// relative `sessions/cwd/id`. Otherwise fall back to parent + basename.
+    fn split_trusted_and_relative(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
+        let comps: Vec<Component<'_>> = path.components().collect();
+        let sessions_idx = comps.iter().position(
+            |c| matches!(c, Component::Normal(n) if *n == std::ffi::OsStr::new("sessions")),
+        );
+        if let Some(idx) = sessions_idx {
+            if idx == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "sessions cannot be the path root for identity walk",
+                ));
+            }
+            // Rebuild trusted prefix (includes RootDir) and relative suffix.
+            let trusted = comps[..idx].iter().collect::<PathBuf>();
+            let relative = comps[idx..].iter().collect::<PathBuf>();
+            if relative.as_os_str().is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "empty relative identity path",
+                ));
+            }
+            return Ok((trusted, relative));
+        }
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session path has no trusted parent",
+            )
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "session path has no basename")
+        })?;
+        Ok((parent.to_path_buf(), PathBuf::from(name)))
+    }
+
+    fn open_under(trusted: &Path, relative: &Path, final_path: PathBuf) -> io::Result<SessionRoot> {
+        // Policy-trusted anchor: path open with O_DIRECTORY|O_CLOEXEC. Prefer
+        // O_NOFOLLOW so the anchor itself cannot be a final-component symlink.
+        let mut current = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(trusted)
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("open trusted identity anchor {}: {e}", trusted.display()),
+                )
+            })?;
+        owner_mode_check_dir(&current)?;
+
+        for component in relative.components() {
+            match component {
+                Component::Normal(name) => {
+                    current = openat_component(
+                        &current,
+                        name,
+                        libc::O_RDONLY
+                            | libc::O_DIRECTORY
+                            | libc::O_CLOEXEC
+                            | libc::O_NOFOLLOW
+                            | libc::O_NONBLOCK,
+                        0,
+                    )
+                    .map_err(|e| {
+                        io::Error::new(
+                            e.kind(),
+                            format!(
+                                "openat component {} under {}: {e}",
+                                name.to_string_lossy(),
+                                final_path.display()
+                            ),
+                        )
+                    })?;
+                    owner_mode_check_dir(&current)?;
+                }
+                Component::CurDir => {}
+                Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "identity relative walk refuses non-normal components",
+                    ));
+                }
+            }
+        }
+        Ok(SessionRoot {
+            dir: current,
+            path: final_path,
+        })
+    }
+
+    fn openat_component(
+        directory: &File,
+        name: &std::ffi::OsStr,
+        flags: i32,
+        mode: u32,
+    ) -> io::Result<File> {
+        let c_name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "identity name contains NUL")
+        })?;
+        // SAFETY: directory fd is live; name is NUL-terminated single component.
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), c_name.as_ptr(), flags, mode) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: nonnegative openat result transfers one owned fd.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
     fn owner_mode_check_dir(dir: &File) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
         let meta = dir.metadata()?;
         if !meta.file_type().is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "session root is not a directory",
+                "identity walk component is not a directory",
             ));
         }
         let uid = unsafe { libc::getuid() };
         if meta.uid() != uid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "session root not owned by current user",
+                "identity walk component not owned by current user",
             ));
         }
-        // Refuse world-writable session dirs (symlink-plant surface).
+        // Refuse world-writable dirs (symlink-plant surface).
         if meta.mode() & 0o002 != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "session root is world-writable",
+                "identity walk component is world-writable",
             ));
         }
         Ok(())
@@ -361,10 +457,7 @@ mod contain {
         pub fn write_staged(&self, tmp_name: &str, bytes: &[u8]) -> io::Result<()> {
             validate_single_component(tmp_name)?;
             let p = self.path.join(tmp_name);
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&p)?;
+            let mut f = OpenOptions::new().write(true).create_new(true).open(&p)?;
             f.write_all(bytes)?;
             f.sync_all()?;
             Ok(())
@@ -597,82 +690,155 @@ pub fn load_route_companion(
     Ok(Some(companion))
 }
 
+/// Read `summary.json` via the multi-component dirfd walk (no path follow).
+pub fn read_summary_contained(session_dir: &Path) -> io::Result<Summary> {
+    let root = SessionRoot::open(session_dir)?;
+    recover_identity_txn(&root)?;
+    let bytes = root.read_regular(SUMMARY_FILE)?;
+    if bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "summary.json is empty (0 bytes)",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Whether companion/meta pair files exist under the session dirfd.
+pub fn identity_pair_present(session_dir: &Path) -> io::Result<bool> {
+    let root = SessionRoot::open(session_dir)?;
+    recover_identity_txn(&root)?;
+    Ok(root.exists_nofollow(MODEL_ROUTE_FILE)? || root.exists_nofollow(MODEL_IDENTITY_META)?)
+}
+
 /// Commit summary + optional companion as one identity transaction.
 /// `leave_on_mismatch` / Leave with mismatch fails closed.
+///
+/// Leave holds the identity lock across validate + digest rewrite so a
+/// concurrent writer cannot observe a half-validated pair.
 pub fn commit_summary_and_companion(
     session_dir: &Path,
     summary: &Summary,
     companion: Option<&ModelRouteProvenance>,
     leave_on_mismatch: bool,
 ) -> io::Result<()> {
+    let root = SessionRoot::open(session_dir)?;
+    let _lock = root.lock_exclusive()?;
+    recover_identity_txn(&root)?;
+
+    let previous_summary_bytes = if root.exists_nofollow(SUMMARY_FILE)? {
+        Some(root.read_regular(SUMMARY_FILE)?)
+    } else {
+        None
+    };
+
     if leave_on_mismatch && companion.is_none() {
-        // Leave path: validate existing pair (if any), then journal summary+meta.
-        {
-            let root = SessionRoot::open(session_dir)?;
-            let _lock = root.lock_exclusive()?;
-            recover_identity_txn(&root)?;
-            let has_pair = root.exists_nofollow(MODEL_ROUTE_FILE)?
-                || root.exists_nofollow(MODEL_IDENTITY_META)?;
-            if has_pair {
-                let previous_summary_bytes = if root.exists_nofollow(SUMMARY_FILE)? {
-                    Some(root.read_regular(SUMMARY_FILE)?)
-                } else {
-                    None
-                };
-                if let Some(prev) = &previous_summary_bytes {
-                    let prev_summary: Summary = serde_json::from_slice(prev).map_err(|e| {
-                        io::Error::new(io::ErrorKind::InvalidData, format!("summary: {e}"))
-                    })?;
-                    // Fail closed if existing pair is invalid vs previous summary.
-                    // Drop lock before nested load (load acquires its own root).
-                    drop(_lock);
-                    let _ = load_route_companion(session_dir, &prev_summary)?;
-                }
+        // Leave: validate existing pair against previous summary under the same
+        // lock, then journal summary + meta digest update.
+        let has_pair =
+            root.exists_nofollow(MODEL_ROUTE_FILE)? || root.exists_nofollow(MODEL_IDENTITY_META)?;
+        if has_pair {
+            if let Some(prev) = &previous_summary_bytes {
+                let prev_summary: Summary = serde_json::from_slice(prev).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("summary: {e}"))
+                })?;
+                // Inline validate (same root/lock) — no nested re-open.
+                validate_pair_against_summary(&root, &prev_summary)?;
             }
         }
-        return commit_leave_digest_only(session_dir, summary);
+        return commit_leave_digest_only_locked(&root, summary, previous_summary_bytes.as_deref());
     }
 
-    let root = SessionRoot::open(session_dir)?;
-    let _lock = root.lock_exclusive()?;
-    recover_identity_txn(&root)?;
-
-    let previous_summary_bytes = if root.exists_nofollow(SUMMARY_FILE)? {
-        Some(root.read_regular(SUMMARY_FILE)?)
-    } else {
-        None
-    };
-
-    commit_artifacts(
-        &root,
-        summary,
-        companion,
-        previous_summary_bytes.as_deref(),
-    )
+    commit_artifacts(&root, summary, companion, previous_summary_bytes.as_deref())
 }
 
-fn commit_leave_digest_only(session_dir: &Path, summary: &Summary) -> io::Result<()> {
-    let root = SessionRoot::open(session_dir)?;
-    let _lock = root.lock_exclusive()?;
-    recover_identity_txn(&root)?;
+/// Validate companion/meta against `summary` using an already-open session root.
+fn validate_pair_against_summary(root: &SessionRoot, summary: &Summary) -> io::Result<()> {
+    let companion_exists = root.exists_nofollow(MODEL_ROUTE_FILE)?;
+    let meta_exists = root.exists_nofollow(MODEL_IDENTITY_META)?;
+    if !companion_exists && !meta_exists {
+        return Ok(());
+    }
+    if companion_exists != meta_exists {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "incomplete model identity pair (companion/meta mismatch)",
+        ));
+    }
+    let companion_bytes = root.read_regular(MODEL_ROUTE_FILE)?;
+    let meta_bytes = root.read_regular(MODEL_IDENTITY_META)?;
+    if meta_bytes.len() > MAX_META_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model_identity.meta too large",
+        ));
+    }
+    let meta: IdentityMeta = serde_json::from_slice(&meta_bytes).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed model_identity.meta: {e}"),
+        )
+    })?;
+    if meta.version != META_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported model_identity.meta version",
+        ));
+    }
+    if meta.canonical_model != summary.current_model_id.0.as_ref() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model_route.json does not match summary current_model_id",
+        ));
+    }
+    if root.exists_nofollow(SUMMARY_FILE)? {
+        let summary_bytes = root.read_regular(SUMMARY_FILE)?;
+        if meta.summary_sha256 != sha256_hex(&summary_bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model identity summary digest mismatch",
+            ));
+        }
+    }
+    let companion: ModelRouteProvenance =
+        serde_json::from_slice(&companion_bytes).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed model_route.json: {e}"),
+            )
+        })?;
+    if companion.pair_id.as_deref() != Some(meta.pair_id.as_str()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model route pair_id mismatch",
+        ));
+    }
+    if let Some(expected) = &meta.companion_sha256 {
+        if sha256_hex(&companion_bytes) != *expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model_route companion digest mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
 
-    let previous_summary_bytes = if root.exists_nofollow(SUMMARY_FILE)? {
-        Some(root.read_regular(SUMMARY_FILE)?)
-    } else {
-        None
-    };
-
+fn commit_leave_digest_only_locked(
+    root: &SessionRoot,
+    summary: &Summary,
+    previous_summary_bytes: Option<&[u8]>,
+) -> io::Result<()> {
     let summary_bytes = serde_json::to_vec_pretty(summary).map_err(io::Error::other)?;
     let summary_sha = sha256_hex(&summary_bytes);
 
     if !root.exists_nofollow(MODEL_IDENTITY_META)? {
-        // No meta: just write summary through journal.
         return stage_and_commit(
-            &root,
+            root,
             Some((SUMMARY_TMP, SUMMARY_FILE, &summary_bytes, &summary_sha)),
             None,
             None,
-            previous_summary_bytes.as_ref().map(|b| sha256_hex(b)),
+            previous_summary_bytes.map(sha256_hex),
         );
     }
 
@@ -684,11 +850,11 @@ fn commit_leave_digest_only(session_dir: &Path, summary: &Summary) -> io::Result
     let meta_sha = sha256_hex(&new_meta_bytes);
 
     stage_and_commit(
-        &root,
+        root,
         Some((SUMMARY_TMP, SUMMARY_FILE, &summary_bytes, &summary_sha)),
         None,
         Some((META_TMP, MODEL_IDENTITY_META, &new_meta_bytes, &meta_sha)),
-        previous_summary_bytes.as_ref().map(|b| sha256_hex(b)),
+        previous_summary_bytes.map(sha256_hex),
     )
 }
 
@@ -1101,8 +1267,7 @@ mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&real, &link).unwrap();
-            // Opening a symlink as O_DIRECTORY|O_NOFOLLOW must fail
-            // (ELOOP or ENOTDIR depending on platform openat semantics).
+            // Final component is a symlink → multi-component walk fails.
             match SessionRoot::open(&link) {
                 Ok(_) => panic!("symlink session root must be refused"),
                 Err(err) => assert!(
@@ -1116,6 +1281,56 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Intermediate `sessions` component is a symlink to an attacker dir —
+    /// multi-component walk must fail closed (Gate A Issue 1).
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_sessions_symlink_refused() {
+        let dir = tempdir().unwrap();
+        let evil = dir.path().join("evil").join("sessions").join("sess");
+        fs::create_dir_all(&evil).unwrap();
+        let sessions_link = dir.path().join("sessions");
+        std::os::unix::fs::symlink(dir.path().join("evil").join("sessions"), &sessions_link)
+            .unwrap();
+        // Real layout under the link target: sessions/sess, but `sessions` is a symlink.
+        let attacked = dir.path().join("sessions").join("sess");
+        match SessionRoot::open(&attacked) {
+            Ok(_) => panic!("intermediate sessions symlink must be refused"),
+            Err(err) => assert!(
+                err.raw_os_error() == Some(libc::ELOOP)
+                    || err.raw_os_error() == Some(libc::ENOTDIR)
+                    || err.kind() == io::ErrorKind::NotADirectory
+                    || err.kind() == io::ErrorKind::InvalidData
+                    || err.kind() == io::ErrorKind::PermissionDenied
+                    || err.kind() == io::ErrorKind::Other,
+                "unexpected err: {err:?}"
+            ),
+        }
+    }
+
+    /// Model switch installs a pair; ordinary Leave rewrite (chat-style)
+    /// must keep the companion loadable (Gate A Issue 2).
+    #[test]
+    fn ordinary_summary_leave_preserves_companion_digest() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("sess");
+        fs::create_dir_all(&session).unwrap();
+        let summary = sample_summary("openai-gpt-4o");
+        let prov = provenance("openai-gpt-4o");
+        commit_summary_and_companion(&session, &summary, Some(&prov), false).unwrap();
+        // Simulate chat append: bump counters via Leave.
+        let mut next = summary.clone();
+        next.num_messages = 1;
+        next.num_chat_messages = 1;
+        commit_summary_and_companion(&session, &next, None, true).unwrap();
+        let loaded = load_route_companion(&session, &next).unwrap().unwrap();
+        assert_eq!(
+            loaded.pair_id.as_deref(),
+            Some("pair-token-aaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(loaded.canonical_model.as_deref(), Some("openai-gpt-4o"));
     }
 
     #[test]

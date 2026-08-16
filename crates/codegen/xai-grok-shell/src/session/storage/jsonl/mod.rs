@@ -757,27 +757,32 @@ impl JsonlStorageAdapter {
         }
         Ok(updates)
     }
-    /// Write summary to disk atomically (sync version for `spawn_blocking`).
-    ///
-    /// A plain `std::fs::write` truncates before writing, so a concurrent reader
-    /// may see an empty file. Temp-file + rename avoids this.
+    /// Write summary via the identity journal (Leave when a pair exists so
+    /// digests stay aligned; plain summary stage otherwise).
     fn write_summary_sync(&self, info: &Info, summary: &Summary) -> io::Result<()> {
-        let summary_path = self.summary_file(info);
-        let bytes = serde_json::to_vec_pretty(summary)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        super::write_bytes_atomic(&summary_path, &bytes)
+        let session_dir = self.session_dir(info);
+        std::fs::create_dir_all(&session_dir)?;
+        super::model_route::commit_summary_and_companion(&session_dir, summary, None, true)
     }
+    /// Dirfd-relative summary read when possible; falls back to path for
+    /// mid-create races before the session dir is fully walkable.
     fn read_summary_sync(&self, info: &Info) -> io::Result<Summary> {
-        let path = self.summary_file(info);
-        let bytes = std::fs::read(&path)?;
-        if bytes.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("summary.json is empty (0 bytes): {}", path.display()),
-            ));
+        let session_dir = self.session_dir(info);
+        match super::model_route::read_summary_contained(&session_dir) {
+            Ok(s) => Ok(s),
+            Err(_) => {
+                let path = self.summary_file(info);
+                let bytes = std::fs::read(&path)?;
+                if bytes.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("summary.json is empty (0 bytes): {}", path.display()),
+                    ));
+                }
+                serde_json::from_slice::<Summary>(&bytes)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            }
         }
-        serde_json::from_slice::<Summary>(&bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
     fn read_optional_json_sync<T: serde::de::DeserializeOwned>(
         &self,
@@ -1326,8 +1331,12 @@ impl JsonlStorageAdapter {
             Ok(()) => {}
             Err(e) => {
                 // If source has no pair, just write summary; otherwise fail closed.
-                if source_dir.join(super::model_route::MODEL_ROUTE_FILE).exists()
-                    || source_dir.join(super::model_route::MODEL_IDENTITY_META).exists()
+                if source_dir
+                    .join(super::model_route::MODEL_ROUTE_FILE)
+                    .exists()
+                    || source_dir
+                        .join(super::model_route::MODEL_IDENTITY_META)
+                        .exists()
                 {
                     return Err(e);
                 }
@@ -1734,10 +1743,10 @@ impl StorageAdapter for JsonlStorageAdapter {
         provenance: Option<&xai_grok_models::ModelRouteProvenance>,
     ) -> io::Result<()> {
         let session_dir = self.session_dir(info);
-        let summary = self.read_summary_sync(info)?;
         let session_dir2 = session_dir.clone();
         let provenance = provenance.cloned();
         tokio::task::spawn_blocking(move || {
+            let summary = super::model_route::read_summary_contained(&session_dir2)?;
             super::model_route::commit_summary_and_companion(
                 &session_dir2,
                 &summary,
@@ -1760,7 +1769,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         provenance: Option<&xai_grok_models::ModelRouteProvenance>,
     ) -> io::Result<()> {
         let session_dir = self.session_dir(info);
-        let summary_path = self.summary_file(info);
         let lock_path = self.summary_lock_file(info);
         let model_id = model_id.clone();
         let agent_name = agent_name.map(String::from);
@@ -1768,9 +1776,10 @@ impl StorageAdapter for JsonlStorageAdapter {
         tokio::task::spawn_blocking(move || {
             // Hold the summary lock across read-modify so concurrent patches serialize,
             // then commit through the identity transaction (summary + companion + meta).
+            // Summary bytes are read dirfd-relative — never path-follow.
             let lock = {
-                use std::fs::OpenOptions;
                 use fs2::FileExt;
+                use std::fs::OpenOptions;
                 let f = OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -1780,17 +1789,7 @@ impl StorageAdapter for JsonlStorageAdapter {
                 f.lock_exclusive()?;
                 f
             };
-            let mut summary = {
-                let bytes = std::fs::read(&summary_path).unwrap_or_default();
-                if bytes.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("summary.json missing: {}", summary_path.display()),
-                    ));
-                }
-                serde_json::from_slice::<Summary>(&bytes)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            };
+            let mut summary = super::model_route::read_summary_contained(&session_dir)?;
             let patch = super::summary_write::SummaryPatch {
                 model: Some(super::summary_write::ModelPatch {
                     model_id,

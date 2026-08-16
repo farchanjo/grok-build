@@ -204,6 +204,10 @@ impl Summary {
 /// write so concurrent writers cannot lose each other's updates. Synchronous:
 /// callers run it on `spawn_blocking` because the lock acquisition blocks.
 ///
+/// When a model-identity companion pair is present, the rewritten summary is
+/// committed through the identity **Leave** journal so `model_identity.meta`
+/// digests stay aligned (chat/title/git/activity must not invalidate the pair).
+///
 /// Returns whether a `generated_title_if_absent` was applied (see
 /// [`Summary::apply_patch`]). Because the read-modify-write happens under the
 /// lock, this "set the title only if absent" check is atomic against a
@@ -221,9 +225,30 @@ pub(crate) fn apply_patch_locked(
 }
 
 fn read_modify_write(summary_path: &Path, patch: &SummaryPatch) -> io::Result<bool> {
-    let mut summary = read_summary(summary_path)?;
+    let session_dir = summary_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "summary path has no session parent",
+        )
+    })?;
+    // Prefer dirfd-relative read when the multi-component walk succeeds.
+    let mut summary =
+        match crate::session::storage::model_route::read_summary_contained(session_dir) {
+            Ok(s) => s,
+            Err(_) => {
+                // Fallback for brand-new sessions mid-create before dir is fully ready.
+                read_summary(summary_path)?
+            }
+        };
     let absent_title_applied = summary.apply_patch(patch, Utc::now());
-    write_summary_atomic(summary_path, &summary)?;
+    // Always Leave-commit: updates meta digest when a pair exists; otherwise
+    // journals summary alone. Keeps companion valid across ordinary patches.
+    crate::session::storage::model_route::commit_summary_and_companion(
+        session_dir,
+        &summary,
+        None,
+        true,
+    )?;
     Ok(absent_title_applied)
 }
 

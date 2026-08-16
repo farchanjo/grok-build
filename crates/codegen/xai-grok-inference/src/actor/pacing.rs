@@ -468,7 +468,9 @@ mod tests {
         assert!(pacer.wait_for_slot(&config, None, &cancel).await);
         // backoff=60s (jitter guess) but server_reset=12s wins.
         pacer
-            .note_rate_limit(&config, None,
+            .note_rate_limit(
+                &config,
+                None,
                 Duration::from_secs(60),
                 Some(Duration::from_secs(12)),
             )

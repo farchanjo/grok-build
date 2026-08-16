@@ -169,7 +169,15 @@ impl SessionActor {
         }
 
         let cwd = self.tool_context.cwd.as_str().to_owned();
-        let selected_model = self.current_model_id().await;
+        // Wire slug for the external CLI (provider expects upstream id).
+        // Session-private canonical selection is used only for persistence.
+        let selected_model = self
+            .chat_state_handle
+            .get_inference_settings()
+            .await
+            .map(|c| c.model)
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| self.selection_model_id.borrow().0.to_string());
         let effort = self
             .chat_state_handle
             .get_inference_settings()
@@ -255,7 +263,8 @@ impl SessionActor {
                 if let Some(partial) = e.partial_envelope.clone() {
                     if let Ok(validated) = partial.clone().validated() {
                         *self.external_runtime.borrow_mut() = Some(validated.clone());
-                        let model_id = acp::ModelId::new(selected_model.clone());
+                        // Canonical selection — not the upstream wire slug.
+                        let model_id = self.selection_model_id.borrow().clone();
                         let agent_name = self.agent.borrow().definition().name.clone();
                         let _ = self.notifications.persistence_tx.send(
                             crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -264,8 +273,8 @@ impl SessionActor {
                                 reasoning_effort: None,
                                 execution_backend: Some(backend),
                                 external_runtime: Some(Some(validated)),
-                                                            route_provenance: None,
-},
+                                route_provenance: None,
+                            },
                         );
                     }
                 }
@@ -379,7 +388,8 @@ impl SessionActor {
             }
         };
         *self.external_runtime.borrow_mut() = Some(envelope_to_store.clone());
-        let model_id = acp::ModelId::new(selected_model.clone());
+        // Canonical selection — not the upstream wire slug in selected_model.
+        let model_id = self.selection_model_id.borrow().clone();
         let agent_name = self.agent.borrow().definition().name.clone();
         let _ = self.notifications.persistence_tx.send(
             crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -388,8 +398,8 @@ impl SessionActor {
                 reasoning_effort: None,
                 execution_backend: Some(backend),
                 external_runtime: Some(Some(envelope_to_store)),
-                            route_provenance: None,
-},
+                route_provenance: None,
+            },
         );
 
         let tokens = outcome

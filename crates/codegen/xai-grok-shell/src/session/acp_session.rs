@@ -1154,16 +1154,17 @@ impl SessionActor {
     ) {
         self.events.emit_turn_ended(outcome, category, context);
     }
-    /// Current model ID for OTLP span attributes. Reads from chat_state_handle
-    /// so it always reflects the latest model override — no stale cached field.
-    /// Returns "unknown" if no sampling config is set.
+    /// Session-private **canonical** selection id for OTLP span attributes and
+    /// session-scoped routing. Never the upstream wire slug in
+    /// `InferenceConfig.model` (which may be shared by duplicate-slug accounts).
+    /// Returns `"unknown"` only when the selection cell is empty.
     async fn current_model_id(&self) -> String {
-        self.chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| "unknown".to_string())
+        let selection = self.selection_model_id.borrow().0.to_string();
+        if selection.is_empty() {
+            "unknown".to_string()
+        } else {
+            selection
+        }
     }
     /// Build a hook run context for dispatching hook events.
     fn session_id_string(&self) -> String {

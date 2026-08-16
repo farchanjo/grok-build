@@ -160,8 +160,13 @@ pub(crate) mod hydrate {
             external_runtime: None,
         };
 
-        let json = serde_json::to_string_pretty(&summary)?;
-        write_file(&dir.join(SUMMARY_FILE), json.as_bytes())
+        // Backend does not ship companion/meta. Commit summary alone via the
+        // identity journal so a later local pair install cannot race a path write.
+        // Old-session-without-companion load remains valid (no rewrite-on-read).
+        crate::session::storage::model_route::commit_summary_and_companion(
+            dir, &summary, None, false,
+        )
+        .map_err(|e| io_err(dir, e))
     }
 
     /// Convert backend JSON-RPC messages to local updates.jsonl (replayable methods only).

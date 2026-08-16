@@ -319,8 +319,7 @@ impl ModelsManager {
                 .map(|c| c.models)
         });
         let has_prefetched = prefetched_models.is_some();
-        let (catalog, origins) =
-            resolve_model_catalog_with_origins(cfg, prefetched_models.clone());
+        let (catalog, origins) = resolve_model_catalog_with_origins(cfg, prefetched_models.clone());
 
         // Validate only against a real catalog; a bundled-only first run defers
         // to the async fetch (`apply_refresh_result`).
@@ -1218,9 +1217,7 @@ impl ModelsManager {
         let models = self.inner.models.read();
         let origins = self.inner.catalog_origins.read();
         crate::agent::model_identity::resolve_catalog_key_str_with_origins(
-            &models,
-            &origins,
-            model_id,
+            &models, &origins, model_id,
         )
         .is_some()
     }
