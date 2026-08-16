@@ -61,8 +61,6 @@ impl MvpAgent {
     ) -> Result<(OaiCompatClient, String), acp::Error> {
         let slug = self.resolve_session_summary_model();
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
-        let models = self.models_manager.models();
-        let endpoints = self.models_manager.endpoints();
         let (disable_api_key_auth, alpha_test_key, client_version) = {
             let cfg = self.cfg.borrow();
             (
@@ -71,32 +69,64 @@ impl MvpAgent {
                 cfg.client_version.clone(),
             )
         };
-        let config = match crate::agent::config::resolve_aux_model_inference_config(
-            &slug,
-            &models,
-            &endpoints,
-            session_key.as_deref(),
-            disable_api_key_auth,
-            alpha_test_key,
-            client_version,
-        ) {
-            Some(mut cfg) => {
-                crate::agent::config::stamp_session_local_sampler_fields(
-                    &mut cfg,
-                    primary,
-                    primary.client_identifier.clone(),
-                    primary.max_retries,
-                );
-                cfg
+        // Production seam: exact session route freeze (not legacy_from_config)
+        // + SessionTitleSamplerPairing; soft-fallback keeps primary route+purpose.
+        let selection_id = self.models_manager.current_model_id().0.to_string();
+        let frozen = crate::session::route_context::resolve_for_models_manager_with_selection(
+            primary,
+            &self.models_manager,
+            selection_id.as_str(),
+            Some(self.auth_manager.grok_home()),
+        );
+        let pair = crate::session::auxiliary_route::SessionTitleSamplerPairing::for_session_new(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::SessionTitle,
+                requested: &slug,
+                models_manager: &self.models_manager,
+                frozen_session_route: Some(&frozen),
+                frozen_session_inference: primary,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home: Some(self.auth_manager.grok_home()),
+                session_key: session_key.as_deref(),
+                disable_api_key_auth,
+                alpha_test_key: alpha_test_key.as_deref(),
+                client_version: client_version.as_deref(),
+                client_identifier: primary.client_identifier.as_deref(),
+                max_retries: primary.max_retries,
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: false,
+            },
+        );
+        let (config, model, route_ctx) = match pair {
+            Ok(mut pair) => {
+                pair.route
+                    .bind_attribution(Some(&self.auth_manager), None);
+                (
+                    pair.route.inference.clone(),
+                    pair.route.upstream_model_id.clone(),
+                    Some(pair.route.route.clone()),
+                )
             }
-            None => {
-                let mut fallback = primary.clone();
-                fallback.model = slug;
-                fallback
+            Err(err) => {
+                // Soft-fallback: true primary upstream + exact primary route
+                // with SessionTitle purpose (never drop route context).
+                tracing::debug!(error = %err, "session title aux route soft-fallback to primary");
+                let mut fallback =
+                    crate::session::auxiliary_route::session_title_soft_fallback_route(
+                        &frozen,
+                        primary,
+                        selection_id.as_str(),
+                    );
+                fallback.bind_attribution(Some(&self.auth_manager), None);
+                (
+                    fallback.inference.clone(),
+                    fallback.upstream_model_id.clone(),
+                    Some(fallback.route.clone()),
+                )
             }
         };
-        let model = config.model.clone();
-        let client = OaiCompatClient::new(config).map_err(map_sampling_err_to_acp)?;
+        let client = OaiCompatClient::new_with_route_context(config, route_ctx)
+            .map_err(map_sampling_err_to_acp)?;
         Ok((client, model))
     }
     fn has_proxy_credentials(&self) -> bool {
@@ -1412,28 +1442,59 @@ impl MvpAgent {
             tier_restricted,
         }
     }
-    pub(super) fn prepare_web_search_inference_config(&self) -> Option<InferenceConfig> {
+    pub(super) fn prepare_web_search_inference_config(
+        &self,
+    ) -> Option<(InferenceConfig, xai_grok_inference::ProviderRouteContext)> {
         let model_id = self.cfg.borrow().web_search_model.clone();
-        let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
         let alpha_test_key = self.cfg.borrow().endpoints.alpha_test_key.clone();
         let client_version = self.cfg.borrow().client_version.clone();
-        let mut cfg = config::resolve_web_search_inference_config(
-            &model_id,
-            &models,
-            session.as_ref().map(|a| a.key.as_str()),
-            self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
-            alpha_test_key.clone(),
-            client_version,
-            &self.cfg.borrow().endpoints,
-        )?;
+        let primary = self.inference_config.borrow().clone();
+        let selection_id = self.models_manager.current_model_id().0.to_string();
+        // Exact production freeze (instance/incarnation/generations), not
+        // legacy_from_config host-fallback identity.
+        let frozen = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &primary,
+            &self.models_manager,
+            selection_id.as_str(),
+            Some(self.auth_manager.grok_home()),
+        );
+        let disable_api_key_auth = self.cfg.borrow().grok_com_config.api_key_auth_disabled();
+        let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::WebSearch,
+                requested: &model_id,
+                models_manager: &self.models_manager,
+                frozen_session_route: Some(&frozen),
+                frozen_session_inference: &primary,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home: Some(self.auth_manager.grok_home()),
+                session_key: session.as_ref().map(|a| a.key.as_str()),
+                disable_api_key_auth,
+                alpha_test_key: alpha_test_key.as_deref(),
+                client_version: client_version.as_deref(),
+                client_identifier: primary.client_identifier.as_deref(),
+                max_retries: primary.max_retries,
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: true,
+            },
+        )
+        .map_err(|err| {
+            tracing::warn!(error = %err, web_search_model = %model_id, "web search route closed");
+        })
+        .ok()?;
+        // Exact aux route attribution — never the primary session sibling.
+        resolved.bind_attribution(Some(&self.auth_manager), None);
+        // Preserve sampling overrides (token/temperature) on the exact route.
+        let mut cfg = crate::tools::config::web_search_inference_config(resolved.inference.clone());
         inject_proxy_headers(
             &mut cfg.extra_headers,
             cfg.client_version.as_deref(),
             alpha_test_key.as_deref(),
             &cfg.base_url,
         );
-        Some(cfg)
+        cfg.attribution_callback = resolved.inference.attribution_callback.clone();
+        Some((cfg, resolved.route))
     }
     /// Returns `Err` with a user-facing message on invalid config; the caller at
     /// the process boundary prints it and exits.
@@ -3485,7 +3546,23 @@ impl MvpAgent {
             .find(|entry| entry.info.model == inference_config.model)
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
-        let web_search_inference_config = self.prepare_web_search_inference_config();
+        let (web_search_inference_config, web_search_attribution_callback) =
+            match self.prepare_web_search_inference_config() {
+                Some((cfg, route)) => {
+                    // Exact-route tool attribution when the route supports
+                    // route-bound identity (incl. Unverified BYOK). Truly
+                    // non-authoritative HostFallback/legacy → None (no
+                    // sibling session fallback at tool registration).
+                    let cb = crate::session::auxiliary_route::web_search_tool_attribution_for_route(
+                        &self.auth_manager,
+                        None,
+                        &route,
+                        crate::session::auxiliary_route::AuxiliaryRouteKind::Explicit,
+                    );
+                    (Some(cfg), cb)
+                }
+                None => (None, None),
+            };
         let image_gen_config = self.prepare_image_gen_config();
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
@@ -3735,6 +3812,7 @@ impl MvpAgent {
                     inference_idle_timeout_secs,
                     model_max_retries,
                     web_search_inference_config,
+                    web_search_attribution_callback,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

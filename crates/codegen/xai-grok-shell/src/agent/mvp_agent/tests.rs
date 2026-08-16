@@ -1087,6 +1087,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         api_key_provider: None,
         auth_provider: None,
         attribution_callback: None,
+        web_search_attribution_callback: None,
         system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
     };
     let toolset = builder

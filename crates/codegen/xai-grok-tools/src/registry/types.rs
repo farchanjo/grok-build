@@ -210,6 +210,18 @@ pub struct ToolServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior_preset: Option<String>,
 }
+/// Production seam: attribution callback applied to [`WebSearchClient`].
+///
+/// Returns only the dedicated web-search route callback. **Never** falls
+/// back to a session-primary tool attribution callback — an absent
+/// route-specific value means no web-search 401 attribution (fail soft),
+/// not sibling/session mis-attribution.
+pub fn select_web_search_attribution_callback(
+    web_search_attribution_callback: Option<&crate::SharedAttributionCallback>,
+) -> Option<crate::SharedAttributionCallback> {
+    web_search_attribution_callback.cloned()
+}
+
 /// Everything a session provides at finalization time.
 ///
 /// This is the **public API boundary** — callers pass concrete, strongly-typed
@@ -293,6 +305,13 @@ pub struct SessionContext {
     /// wire this to the same attribution sink used for inference-side
     /// 401s so tool and chat auth failures share one telemetry path.
     pub attribution_callback: Option<crate::SharedAttributionCallback>,
+    /// Exact-route 401 attribution for the web_search tool only.
+    ///
+    /// When absent, `WebSearchClient` receives **no** 401 attribution
+    /// callback — it never falls back to [`Self::attribution_callback`]
+    /// (session-primary), which would mis-attribute a pinned web-search
+    /// account against a sibling session credential.
+    pub web_search_attribution_callback: Option<crate::SharedAttributionCallback>,
     /// Tag name for `<system-reminder>` wrappers in tool result text.
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
     /// Hosts that expect a different tag name may override this.
@@ -1001,7 +1020,12 @@ impl ToolRegistryBuilder {
             &ctx.web_search_config,
             ctx.api_key_provider.clone(),
         ) {
-            let client = client.with_attribution_callback(ctx.attribution_callback.clone());
+            // Never fall back to session-primary `attribution_callback`.
+            // Absent route-specific callback ⇒ no web-search 401 attribution.
+            let ws_cb = select_web_search_attribution_callback(
+                ctx.web_search_attribution_callback.as_ref(),
+            );
+            let client = client.with_attribution_callback(ws_cb);
             resources.insert(client);
         }
         if let Some(lsp) = ctx.lsp {
@@ -2055,8 +2079,100 @@ mod tests {
             api_key_provider: None,
             auth_provider: None,
             attribution_callback: None,
+            web_search_attribution_callback: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
+    }
+
+    /// Minimal tool-side 401 callback for registry selection tests.
+    #[derive(Debug, Default)]
+    struct MarkerCallback {
+        label: &'static str,
+    }
+    impl crate::attribution::Auth401AttributionCallback for MarkerCallback {
+        fn record_401(
+            &self,
+            _consumer: crate::attribution::ToolConsumer,
+            _sent_bearer_prefix: Option<&str>,
+        ) {
+        }
+    }
+
+    /// Production seam: route-specific callback is selected when present.
+    #[test]
+    fn web_search_attribution_selects_route_specific_when_present() {
+        let dedicated: crate::SharedAttributionCallback = Arc::new(MarkerCallback {
+            label: "web-search-route",
+        });
+        let selected = select_web_search_attribution_callback(Some(&dedicated));
+        assert!(selected.is_some());
+        // Same Arc identity (not a session-primary substitute).
+        assert!(Arc::ptr_eq(selected.as_ref().unwrap(), &dedicated));
+    }
+
+    /// Production seam: absence stays absent even when a session primary exists.
+    #[test]
+    fn web_search_attribution_absence_never_inherits_session_primary() {
+        let session_primary: crate::SharedAttributionCallback = Arc::new(MarkerCallback {
+            label: "session-primary",
+        });
+        // The production selector ignores session primary entirely.
+        let selected = select_web_search_attribution_callback(None);
+        assert!(
+            selected.is_none(),
+            "absent route-specific callback must stay None"
+        );
+        // Live client wiring must match the selector (no or_else to primary).
+        let config = crate::implementations::web_search::WebSearchConfig::Enabled {
+            api_key: "ws-key".into(),
+            base_url: "https://ws.example/v1".into(),
+            model: "ws-model".into(),
+            extra_headers: Default::default(),
+            alpha_test_key: None,
+        };
+        let client =
+            crate::implementations::web_search::client::WebSearchClient::new(&config, None)
+                .expect("client")
+                .with_attribution_callback(select_web_search_attribution_callback(None));
+        assert!(
+            !client.has_attribution_callback(),
+            "WebSearchClient must not receive session sibling when route cb is None"
+        );
+        // Session primary is intentionally unused — document the anti-pattern.
+        let _ = session_primary;
+    }
+
+    /// Live registration shape: dedicated present ⇒ client has callback;
+    /// dedicated absent + session present ⇒ client still has none.
+    #[test]
+    fn web_search_client_registration_uses_only_route_specific_callback() {
+        let dedicated: crate::SharedAttributionCallback =
+            Arc::new(MarkerCallback { label: "dedicated" });
+        let session: crate::SharedAttributionCallback =
+            Arc::new(MarkerCallback { label: "session" });
+        let config = crate::implementations::web_search::WebSearchConfig::Enabled {
+            api_key: "ws-key".into(),
+            base_url: "https://ws.example/v1".into(),
+            model: "ws-model".into(),
+            extra_headers: Default::default(),
+            alpha_test_key: None,
+        };
+
+        let with_route =
+            crate::implementations::web_search::client::WebSearchClient::new(&config, None)
+                .unwrap()
+                .with_attribution_callback(select_web_search_attribution_callback(Some(
+                    &dedicated,
+                )));
+        assert!(with_route.has_attribution_callback());
+
+        let without_route =
+            crate::implementations::web_search::client::WebSearchClient::new(&config, None)
+                .unwrap()
+                .with_attribution_callback(select_web_search_attribution_callback(None));
+        assert!(!without_route.has_attribution_callback());
+        // Session primary must not be consulted by the selector.
+        let _ = session;
     }
     /// Regression test: `kind_params` must merge input params from ALL tools
     /// that share a `ToolKind`, not just the first one.

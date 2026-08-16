@@ -90,6 +90,11 @@ impl WebSearchClient {
         self.attribution_callback = callback;
         self
     }
+
+    /// Whether a 401-attribution callback is installed (production-boundary tests).
+    pub fn has_attribution_callback(&self) -> bool {
+        self.attribution_callback.is_some()
+    }
     async fn current_bearer(&self) -> Option<String> {
         crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
     }

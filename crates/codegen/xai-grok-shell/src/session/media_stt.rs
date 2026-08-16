@@ -78,12 +78,42 @@ pub fn stt_allowed_for_source(
 ///
 /// `None` / empty / explicit xAI STT aliases are accepted. Any other catalog
 /// model id fails closed with a clear message (no silent fake inference).
+///
+/// Production also requires [`crate::session::auxiliary_route::resolve_media_stt_route`]
+/// so the frozen session route is exact xAI before any AuthManager bearer is used.
 pub fn validate_audio_stt_route(audio_model: Option<&str>) -> Result<(), AudioSttError> {
     match audio_model.map(str::trim).filter(|s| !s.is_empty()) {
-        None | Some("@session") | Some("xai") | Some("xai-stt") | Some(XAI_STREAMING_STT_ROUTE) => {
+        None => Ok(()),
+        Some(p)
+            if crate::session::auxiliary_route::MEDIA_STT_ROUTE_ALIASES
+                .iter()
+                .any(|a| *a == p)
+                || p == XAI_STREAMING_STT_ROUTE =>
+        {
             Ok(())
         }
         Some(other) => Err(AudioSttError::UnsupportedRoute(other.to_owned())),
+    }
+}
+
+/// Map a MediaStt aux-route failure to an [`AudioSttError`] (fail closed).
+pub fn audio_stt_error_from_aux(
+    err: crate::session::auxiliary_route::AuxiliaryRouteError,
+) -> AudioSttError {
+    use crate::session::auxiliary_route::AuxiliaryRouteError;
+    match err {
+        AuxiliaryRouteError::ExplicitPinFailed { selection }
+        | AuxiliaryRouteError::Missing { input: selection }
+        | AuxiliaryRouteError::NamespacedHijackRejected { input: selection }
+        | AuxiliaryRouteError::Ambiguous { input: selection } => {
+            AudioSttError::UnsupportedRoute(selection)
+        }
+        AuxiliaryRouteError::CredentialUnavailable { .. }
+        | AuxiliaryRouteError::SessionRouteRequired => AudioSttError::AuthUnavailable,
+        AuxiliaryRouteError::ConstructionFailed { detail, .. } => {
+            // Non-xAI session pin: refuse sibling/current bearer use.
+            AudioSttError::Transport(detail)
+        }
     }
 }
 

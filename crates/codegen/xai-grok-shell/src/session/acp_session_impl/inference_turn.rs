@@ -899,50 +899,189 @@ impl SessionActor {
             "Wired live LLM permission auto-mode classifier (session sampling channel)"
         );
     }
-    /// Resolve a standalone aux-model `InferenceConfig` for `slug` via the shared
-    /// catalog routing (Tier-1 catalog creds / Tier-2 xAI-proxy via session token
-    /// / `XAI_API_KEY` / deployment key), gathering the session-local auth context
-    /// once. Shared by image-describe and the classifier so the gather can't
-    /// drift. `None` ⇒ caller falls back to the session model.
-    pub(super) async fn resolve_aux_inference_config(
+    /// Resolve an exact auxiliary route for `slug` (or `@session`).
+    ///
+    /// Preferred over loose model/base URL/key propagation. Soft-returns
+    /// `None` only for non-pin purposes that historically fell back to the
+    /// session model; explicit pins and compaction fail closed at call sites.
+    pub(super) async fn resolve_aux_route(
         &self,
+        purpose: crate::session::auxiliary_route::AuxiliaryPurpose,
         slug: &str,
-    ) -> Option<xai_grok_inference::InferenceConfig> {
+    ) -> Result<
+        crate::session::auxiliary_route::ResolvedAuxiliaryRoute,
+        crate::session::auxiliary_route::AuxiliaryRouteError,
+    > {
+        let active = self.reconstruct_full_config().await;
         let creds = self.chat_state_handle.get_credentials().await;
         let session_key = self
             .auth_manager
             .as_ref()
             .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
-        let models = self.models_manager.models();
-        let endpoints = self.models_manager.endpoints();
         let disable_api_key_auth = self
             .auth_manager
             .as_ref()
             .map(|am| am.grok_com_config().api_key_auth_disabled())
             .unwrap_or(false);
-        crate::agent::config::resolve_aux_model_inference_config(
-            slug,
-            &models,
-            &endpoints,
-            session_key.as_deref(),
-            disable_api_key_auth,
-            creds.alpha_test_key.clone(),
-            creds.client_version.clone(),
-        )
+        let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
+        let selection_id = self.selection_model_id.borrow().0.to_string();
+        let frozen = self.route_context.borrow().clone();
+        let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose,
+                requested: slug,
+                models_manager: &self.models_manager,
+                frozen_session_route: frozen.as_ref(),
+                frozen_session_inference: &active,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home,
+                session_key: session_key.as_deref(),
+                disable_api_key_auth,
+                alpha_test_key: creds.alpha_test_key.as_deref(),
+                client_version: creds.client_version.as_deref(),
+                client_identifier: self.client_identifier.as_deref(),
+                max_retries: Some(self.max_retries),
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: matches!(
+                    purpose,
+                    crate::session::auxiliary_route::AuxiliaryPurpose::MediaDescribe
+                        | crate::session::auxiliary_route::AuxiliaryPurpose::MediaVideo
+                        | crate::session::auxiliary_route::AuxiliaryPurpose::MediaPdf
+                        | crate::session::auxiliary_route::AuxiliaryPurpose::WebSearch
+                        | crate::session::auxiliary_route::AuxiliaryPurpose::Compaction
+                        | crate::session::auxiliary_route::AuxiliaryPurpose::ShellSuggest
+                ),
+            },
+        )?;
+        // Exact-route 401 attribution for this aux pin — never the session sibling.
+        resolved.bind_attribution(
+            self.auth_manager.as_ref(),
+            Some(self.session_info.id.to_string()),
+        );
+        Ok(resolved)
     }
-    /// Resolve the ordered primary/fallback compaction routes.
-    ///
-    /// Every route is catalog-backed except `@session`, which clones the active
-    /// session route. Hidden OpenRouter wire fallbacks are always cleared so the
-    /// configured two-route order is the complete failover graph. Compaction is
-    /// text-only and portable, so provider-specific reasoning and backend-search
-    /// settings are removed from these auxiliary requests.
+
+    /// Resolve a standalone aux-model `InferenceConfig` for `slug` via the
+    /// exact auxiliary route resolver. `None` ⇒ caller falls back to the
+    /// session model (soft path for non-pin purposes).
+    pub(super) async fn resolve_aux_inference_config(
+        &self,
+        slug: &str,
+    ) -> Option<xai_grok_inference::InferenceConfig> {
+        match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::MediaDescribe,
+                slug,
+            )
+            .await
+        {
+            Ok(route) => Some(route.inference),
+            Err(err) => {
+                tracing::debug!(error = %err, slug = %slug, "aux route soft-miss");
+                None
+            }
+        }
+    }
+
+    /// Resolve the media-describe route. Explicit pins fail closed (no silent
+    /// session fallback). `@session` requires a frozen route.
+    pub(super) async fn resolve_media_describe(
+        &self,
+        pin: &str,
+    ) -> Result<crate::session::auxiliary_route::ResolvedAuxiliaryRoute, acp::Error> {
+        self.resolve_media_purpose(
+            crate::session::auxiliary_route::AuxiliaryPurpose::MediaDescribe,
+            pin,
+        )
+        .await
+    }
+
+    /// Resolve media with an explicit purpose (image / video / PDF).
+    pub(super) async fn resolve_media_purpose(
+        &self,
+        purpose: crate::session::auxiliary_route::AuxiliaryPurpose,
+        pin: &str,
+    ) -> Result<crate::session::auxiliary_route::ResolvedAuxiliaryRoute, acp::Error> {
+        self.resolve_aux_route(purpose, pin)
+            .await
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))
+    }
+
+    /// Resolve MediaStt exact route and build an xAI streaming STT handle only
+    /// when the frozen session is first-party xAI. Fail closed otherwise so a
+    /// non-xAI session never silently uses a sibling/current AuthManager bearer.
+    pub(super) async fn resolve_media_stt_transcriber(
+        &self,
+        audio_model_pin: Option<&str>,
+    ) -> Result<
+        (
+            crate::session::auxiliary_route::ResolvedAuxiliaryRoute,
+            std::sync::Arc<dyn crate::session::media_stt::AsyncAudioTranscriber>,
+        ),
+        crate::session::media_stt::AudioSttError,
+    > {
+        crate::session::media_stt::validate_audio_stt_route(audio_model_pin).map_err(|e| e)?;
+        let active = self.reconstruct_full_config().await;
+        let creds = self.chat_state_handle.get_credentials().await;
+        let session_key = self
+            .auth_manager
+            .as_ref()
+            .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
+        let disable_api_key_auth = self
+            .auth_manager
+            .as_ref()
+            .map(|am| am.grok_com_config().api_key_auth_disabled())
+            .unwrap_or(false);
+        let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
+        let selection_id = self.selection_model_id.borrow().0.to_string();
+        let frozen = self.route_context.borrow().clone();
+        let mut resolved = crate::session::auxiliary_route::resolve_media_stt_route(
+            crate::session::auxiliary_route::AuxiliaryRouteInputs {
+                purpose: crate::session::auxiliary_route::AuxiliaryPurpose::MediaStt,
+                requested: crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL,
+                models_manager: &self.models_manager,
+                frozen_session_route: frozen.as_ref(),
+                frozen_session_inference: &active,
+                frozen_session_selection_id: selection_id.as_str(),
+                grok_home,
+                session_key: session_key.as_deref(),
+                disable_api_key_auth,
+                alpha_test_key: creds.alpha_test_key.as_deref(),
+                client_version: creds.client_version.as_deref(),
+                client_identifier: self.client_identifier.as_deref(),
+                max_retries: Some(self.max_retries),
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: true,
+            },
+            audio_model_pin,
+        )
+        .map_err(crate::session::media_stt::audio_stt_error_from_aux)?;
+        resolved.bind_attribution(
+            self.auth_manager.as_ref(),
+            Some(self.session_info.id.to_string()),
+        );
+        // Transport is typed xAI streaming STT; only after exact route validates.
+        let stt_config = self.models_manager.config_snapshot().voice;
+        let transcriber = crate::session::media_stt::maybe_xai_stt_transcriber(
+            self.auth_manager.as_ref(),
+            self.rebuild_spec.api_key_provider.as_ref(),
+            stt_config,
+        )
+        .ok_or(crate::session::media_stt::AudioSttError::AuthUnavailable)?;
+        debug_assert_eq!(
+            resolved.route.operation_partition(),
+            crate::session::auxiliary_route::AuxiliaryPurpose::MediaStt.operation_partition()
+        );
+        Ok((resolved, transcriber))
+    }
+
+    /// Resolve the ordered primary/fallback compaction routes through exact
+    /// auxiliary route handles. `@session` copies the frozen session route.
     pub(super) async fn prepare_compaction_routes(
         &self,
     ) -> Result<Vec<crate::session::helpers::full_replace_compaction::CompactionRoute>, acp::Error>
     {
         self.refresh_token_if_expired().await;
-        let active = self.reconstruct_full_config().await;
         let configured = self
             .agent
             .borrow()
@@ -952,45 +1091,34 @@ impl SessionActor {
         let mut routes = Vec::with_capacity(configured.len());
 
         for model_ref in configured {
-            let mut config = if model_ref == "@session" {
-                active.clone()
-            } else {
-                let mut resolved = self
-                    .resolve_aux_inference_config(&model_ref)
-                    .await
-                    .ok_or_else(|| {
-                        acp::Error::invalid_params().data(format!(
-                            "configured compaction model '{model_ref}' is unavailable or has no credentials"
-                        ))
-                    })?;
-                crate::agent::config::stamp_session_local_sampler_fields(
-                    &mut resolved,
-                    &active,
-                    self.client_identifier.clone(),
-                    Some(self.max_retries),
-                );
-                resolved
-            };
-
-            config.openrouter_fallback_models.clear();
-            config.openrouter_provider_preferences = None;
-            config.openrouter_plugins.clear();
-            config.openrouter_pacing = false;
-            config.reasoning_effort = None;
-            config.supports_backend_search = false;
-            config.compactions_remaining = None;
-            config.compaction_at_tokens = None;
-            config.doom_loop_recovery = None;
-            let client = xai_grok_inference::InferenceClient::new(config.clone())
+            let resolved = self
+                .resolve_aux_route(
+                    crate::session::auxiliary_route::AuxiliaryPurpose::Compaction,
+                    &model_ref,
+                )
+                .await
                 .map_err(|error| {
                     acp::Error::invalid_params().data(format!(
-                        "configured compaction model '{model_ref}' could not be initialized: {error}"
+                        "configured compaction model '{model_ref}' is unavailable: {error}"
                     ))
                 })?;
+            let mut config = resolved.inference.clone();
+            crate::session::auxiliary_route::sanitize_compaction_inference(&mut config);
+            // Rebuild with sanitized config while retaining exact route.
+            let client = xai_grok_inference::InferenceClient::new_with_route_context(
+                config.clone(),
+                Some(resolved.route.clone()),
+            )
+            .map_err(|error| {
+                acp::Error::invalid_params().data(format!(
+                    "configured compaction model '{model_ref}' could not be initialized: {error}"
+                ))
+            })?;
             routes.push(
                 crate::session::helpers::full_replace_compaction::CompactionRoute {
                     client,
                     inference_config: config,
+                    route: resolved.route,
                 },
             );
         }
@@ -1002,25 +1130,25 @@ impl SessionActor {
         Ok(routes)
     }
 
-    /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`,
-    /// stamping session-local auth/attribution like image-describe (which relies
-    /// on the resolver, not a config override, for `base_url`/`api_backend` so
-    /// credentials stay consistent). `None` ⇒ caller falls back to the session
-    /// client + model.
+    /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`.
+    /// `None` ⇒ caller falls back to the session client + model.
     async fn resolve_auto_classifier_sampler(
         &self,
         slug: &str,
     ) -> Option<(xai_grok_inference::InferenceClient, String)> {
-        let active_session_config = self.reconstruct_full_config().await;
-        let mut cfg = self.resolve_aux_inference_config(slug).await?;
-        crate::agent::config::stamp_session_local_sampler_fields(
-            &mut cfg,
-            &active_session_config,
-            self.client_identifier.clone(),
-            Some(self.max_retries),
-        );
-        let model = cfg.model.clone();
-        let client = xai_grok_inference::InferenceClient::new(cfg)
+        let resolved = self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::AutoClassifier,
+                slug,
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "auto classifier aux route failed; using session model")
+            })
+            .ok()?;
+        let model = resolved.upstream_model_id.clone();
+        let client = resolved
+            .client()
             .map_err(|e| {
                 tracing::warn!(error = %e, "auto classifier aux sampler build failed; using session model")
             })

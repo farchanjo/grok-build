@@ -275,6 +275,10 @@ struct RawProviderRouteContext {
     origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_partition: Option<String>,
+    /// Operation partition for multi-op pacing (e.g. "compaction", "web_search").
+    /// Absent/`None` means the default `"inference"` surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_partition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pacing: Option<RoutePacingOverride>,
 }
@@ -293,6 +297,8 @@ pub struct ProviderRouteContext {
     authority: RouteAuthority,
     origin: Option<String>,
     model_partition: Option<String>,
+    /// Operation partition for multi-op pacing (default `"inference"` when unset).
+    operation_partition: Option<String>,
     pacing: RoutePacingOverride,
 }
 
@@ -340,6 +346,7 @@ impl ProviderRouteContext {
                     authority: RouteAuthority::HostFallback,
                     origin: origin_from_url(config.base_url.as_str()),
                     model_partition: Some(config.model.clone()),
+                    operation_partition: None,
                     pacing: RoutePacingOverride::default(),
                 }
             })
@@ -378,8 +385,27 @@ impl ProviderRouteContext {
     pub fn model_partition(&self) -> Option<&str> {
         self.model_partition.as_deref()
     }
+    /// Operation partition label; defaults to `"inference"` when unset.
+    pub fn operation_partition(&self) -> &str {
+        self.operation_partition.as_deref().unwrap_or("inference")
+    }
     pub fn pacing(&self) -> &RoutePacingOverride {
         &self.pacing
+    }
+
+    /// Return a copy with a different operation partition (auxiliary surfaces).
+    ///
+    /// Does not alter credential/instance identity; only the pacing and
+    /// attribution operation axis changes.
+    pub fn with_operation_partition(&self, operation: impl Into<String>) -> Self {
+        let mut next = self.clone();
+        let op = operation.into();
+        next.operation_partition = if op.is_empty() || op == "inference" {
+            None
+        } else {
+            Some(op)
+        };
+        next
     }
 
     /// Stable pacing partition key fragment: instance + route + incarnation.
@@ -401,17 +427,12 @@ impl ProviderRouteContext {
         &self,
         model: &str,
     ) -> (String, String, Option<String>, String, String, String) {
-        let origin = self
-            .origin
-            .clone()
-            .unwrap_or_default();
+        let origin = self.origin.clone().unwrap_or_default();
         let model = self
             .model_partition
             .clone()
             .unwrap_or_else(|| model.to_owned());
-        // Operation partition reserved for future multi-op surfaces; default
-        // "inference" keeps keys stable across the current request path.
-        let operation = "inference".to_owned();
+        let operation = self.operation_partition().to_owned();
         (
             self.instance_id.clone(),
             self.credential_route.as_str().to_owned(),
@@ -444,6 +465,7 @@ impl Serialize for ProviderRouteContext {
             authority: Some(self.authority.as_str().to_owned()),
             origin: self.origin.clone(),
             model_partition: self.model_partition.clone(),
+            operation_partition: self.operation_partition.clone(),
             pacing: if self.pacing == RoutePacingOverride::default() {
                 None
             } else {
@@ -502,6 +524,9 @@ impl<'de> Deserialize<'de> for ProviderRouteContext {
         if let Some(m) = raw.model_partition {
             b = b.model_partition(m);
         }
+        if let Some(op) = raw.operation_partition.filter(|s| !s.is_empty()) {
+            b = b.operation_partition(op);
+        }
         if let Some(p) = raw.pacing {
             b = b.pacing(p);
         }
@@ -522,6 +547,7 @@ pub struct ProviderRouteContextBuilder {
     authority: Option<RouteAuthority>,
     origin: Option<String>,
     model_partition: Option<String>,
+    operation_partition: Option<String>,
     pacing: RoutePacingOverride,
 }
 
@@ -579,6 +605,15 @@ impl ProviderRouteContextBuilder {
         self.model_partition = Some(m.into());
         self
     }
+    pub fn operation_partition(mut self, op: impl Into<String>) -> Self {
+        let s = op.into();
+        self.operation_partition = if s.is_empty() || s == "inference" {
+            None
+        } else {
+            Some(s)
+        };
+        self
+    }
     pub fn pacing(mut self, p: RoutePacingOverride) -> Self {
         self.pacing = p;
         self
@@ -613,6 +648,7 @@ impl ProviderRouteContextBuilder {
             authority,
             origin: self.origin,
             model_partition: self.model_partition,
+            operation_partition: self.operation_partition,
             pacing: self.pacing,
         })
     }
@@ -731,6 +767,27 @@ mod tests {
             .build()
             .unwrap();
         assert_ne!(a.pacing_partition_key(), b.pacing_partition_key());
+    }
+
+    #[test]
+    fn with_operation_partition_changes_only_operation_axis() {
+        let base = ProviderRouteContext::builder()
+            .instance_id("openai")
+            .provider_kind(RouteProviderKind::OpenAi)
+            .api_surface(RouteApiSurface::OpenAiPlatform)
+            .credential_route(RouteCredentialRoute::ApiKey)
+            .binding_generation(3)
+            .authority(RouteAuthority::Authoritative)
+            .model_partition("gpt-4")
+            .build()
+            .unwrap();
+        assert_eq!(base.operation_partition(), "inference");
+        let aux = base.with_operation_partition("web_search");
+        assert_eq!(aux.operation_partition(), "web_search");
+        assert_eq!(aux.instance_id(), base.instance_id());
+        assert_eq!(aux.binding_generation(), base.binding_generation());
+        assert_eq!(aux.pacing_partition("gpt-4").5, "web_search");
+        assert_eq!(base.pacing_partition("gpt-4").5, "inference");
     }
 
     #[test]

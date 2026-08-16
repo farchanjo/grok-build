@@ -5439,7 +5439,7 @@ pub fn enforce_disable_api_key_auth(
 /// Resolve credentials for an auxiliary sampling path (web search, image
 /// description) with the first-party API-key kill switch applied, so these
 /// paths honor `disable_api_key_auth` exactly like the main chat path.
-fn resolve_credentials_enforced(
+pub(crate) fn resolve_credentials_enforced(
     entry: &ModelEntry,
     session_key: Option<&str>,
     disable_api_key_auth: bool,

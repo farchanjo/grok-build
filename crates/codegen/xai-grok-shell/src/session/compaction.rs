@@ -178,30 +178,37 @@ impl SessionActor {
             && xai_chat_state::compaction_utils::conversation_contains_images(conversation);
 
         let (client, model, provider) = if allow_lazy_backfill {
-            let active_session_config = self.reconstruct_full_config().await;
             let image_description_model = media.image_model.as_deref().unwrap_or("@session");
-            let resolved = self
-                .resolve_aux_inference_config(image_description_model)
-                .await;
-            let (describe_model, sampler_config) =
-                crate::agent::config::finalize_image_describe_inference_config(
-                    resolved,
-                    &active_session_config,
-                    self.client_identifier.clone(),
-                    Some(self.max_retries),
-                );
-            let provider = sampler_config.provider_identity;
-            let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
-                provider,
-                self.auth_manager.as_ref(),
-            )
-            .ok()
-            .and_then(|()| xai_grok_inference::InferenceClient::new(sampler_config).ok());
-            (
-                client,
-                Some(describe_model),
-                Some(provider.label().to_owned()),
-            )
+            // Compaction backfill is best-effort: route miss skips lazy describe.
+            match self.resolve_media_describe(image_description_model).await {
+                Ok(route) => {
+                    let describe_model = route.upstream_model_id.clone();
+                    let sampler_config = route.inference;
+                    let route_ctx = route.route.clone();
+                    let provider = sampler_config.provider_identity;
+                    let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
+                        provider,
+                        self.auth_manager.as_ref(),
+                    )
+                    .ok()
+                    .and_then(|()| {
+                        xai_grok_inference::InferenceClient::new_with_route_context(
+                            sampler_config,
+                            Some(route_ctx),
+                        )
+                        .ok()
+                    });
+                    (
+                        client,
+                        Some(describe_model),
+                        Some(provider.label().to_owned()),
+                    )
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "compaction media describe route unavailable");
+                    (None, None, None)
+                }
+            }
         } else {
             (None, None, None)
         };
@@ -235,14 +242,22 @@ impl SessionActor {
         media_descriptors: &CompactionMediaDescriptors,
     ) -> Option<CompactOutput> {
         let history = sanitize_compaction_images_with_descriptors(history, media_descriptors);
-        let inference_config = self.reconstruct_full_config().await;
-        let client = match self.prepare_chat_completion(false).await {
-            Ok(c) => c,
+        // Gate B: two-pass prefire uses exact compaction route handles (same
+        // as full-replace/rolling), not a route-less primary client.
+        let routes = match self.prepare_compaction_routes().await {
+            Ok(r) if !r.is_empty() => r,
+            Ok(_) => {
+                tracing::warn!("two_pass: no compaction routes configured");
+                return None;
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "two_pass: failed to prepare sampling client");
+                tracing::warn!(error = %e, "two_pass: failed to prepare compaction routes");
                 return None;
             }
         };
+        let first = &routes[0];
+        let client = first.client.clone();
+        let inference_config = first.inference_config.clone();
         let tool_defs = self.prepare_tool_definitions().await;
         let tools = self.turn_base_tool_specs(&tool_defs);
         let wall_clock_budget_secs = self

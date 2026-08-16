@@ -124,38 +124,33 @@ impl SessionActor {
             } else {
                 active_model.as_str()
             };
-            let (client, model) = if requested_model == active_model {
-                match self.prepare_chat_completion(false).await {
-                    Ok(client) => (client, active_model.clone()),
-                    Err(error) => {
-                        last_error = format!("could not prepare evaluator client: {error}");
-                        continue;
-                    }
-                }
+            // Always resolve through GoalEvaluator: active session model uses
+            // exact @session inherit; small model is an explicit pin.
+            let eval_slug = if requested_model == active_model {
+                crate::session::auxiliary_route::SESSION_ROUTE_SENTINEL
             } else {
-                let active_config = self.reconstruct_full_config().await;
-                match self.resolve_aux_inference_config(requested_model).await {
-                    Some(mut config) => {
-                        crate::agent::config::stamp_session_local_sampler_fields(
-                            &mut config,
-                            &active_config,
-                            self.client_identifier.clone(),
-                            Some(self.max_retries),
-                        );
-                        let model = config.model.clone();
-                        match xai_grok_inference::InferenceClient::new(config) {
-                            Ok(client) => (client, model),
-                            Err(error) => {
-                                last_error = format!("could not prepare small evaluator: {error}");
-                                continue;
-                            }
+                requested_model
+            };
+            let (client, model) = match self
+                .resolve_aux_route(
+                    crate::session::auxiliary_route::AuxiliaryPurpose::GoalEvaluator,
+                    eval_slug,
+                )
+                .await
+            {
+                Ok(route) => {
+                    let model = route.upstream_model_id.clone();
+                    match route.client() {
+                        Ok(client) => (client, model),
+                        Err(error) => {
+                            last_error = format!("could not prepare evaluator client: {error}");
+                            continue;
                         }
                     }
-                    None => {
-                        last_error =
-                            format!("small evaluator model `{requested_model}` unavailable");
-                        continue;
-                    }
+                }
+                Err(error) => {
+                    last_error = format!("goal evaluator route `{eval_slug}` unavailable: {error}");
+                    continue;
                 }
             };
             let request = build_goal_evaluator_request(
