@@ -2,6 +2,10 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::provider_registry::id::ProviderId;
+use crate::provider_registry::instance::ProviderIncarnation;
+use crate::provider_registry::secrets::ProviderOAuthBinding;
+
 use super::model::{API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, lookup_auth};
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
@@ -343,10 +347,26 @@ fn restore_prior_bytes(auth_file: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// True for the private OAuth metadata sidecar grammar and practical
+/// lookalikes (`…::oauth::meta`). These are binding records, never tokens.
+fn is_oauth_meta_scope_or_lookalike(scope: &str) -> bool {
+    scope.ends_with("::oauth::meta")
+}
+
 /// Read a single auth token from `auth.json` by scope key.
 /// Falls back to the legacy `https://accounts.x.ai/sign-in` scope key
 /// when the requested scope is not found (devbox auth.json migration).
+///
+/// Rejects private OAuth metadata sidecars (`provider::<id>::oauth::meta`
+/// and lookalikes) with `InvalidInput` so a raw key walk cannot surface the
+/// marker as if it were a credential.
 pub fn read_token_by_scope(grok_home: &Path, scope: &str) -> anyhow::Result<String> {
+    if is_oauth_meta_scope_or_lookalike(scope) {
+        return Err(anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private OAuth metadata scope is not a credential",
+        )));
+    }
     let path = grok_home.join("auth.json");
     let store = read_auth_json(&path).map_err(|_| {
         anyhow::anyhow!(
@@ -491,6 +511,234 @@ pub fn clear_provider_api_key(grok_home: &Path, scope: &str) -> std::io::Result<
     }
     // Keep an empty auth.json rather than deleting it: deletion can race a
     // sibling reader/writer and is not needed to remove the credential.
+    write_auth_json(&path, &store)
+}
+
+/// Validate a configured-provider OAuth scope (`provider::<id>::oauth`).
+///
+/// The built-in `openai::oauth` scope and the private `...::oauth::meta`
+/// sidecar are never accepted here: configured OAuth must not fall back to
+/// (or be written to) the built-in ChatGPT route.
+fn validate_provider_oauth_scope(scope: &str) -> std::io::Result<()> {
+    if crate::provider_registry::secrets::is_allowed_oauth_scope(scope) {
+        return Ok(());
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+}
+
+/// Marker stored in the `key` field of a binding-record entry so the entry can
+/// never be mistaken for token material (`refresh_token` is also absent).
+const PROVIDER_OAUTH_META_MARKER: &str = "meta";
+
+/// Encode a secret-free binding record as a plain `GrokAuth` entry under the
+/// private `provider::<id>::oauth::meta` scope. Uses only existing `GrokAuth`
+/// fields so older readers parse and preserve it as an opaque sibling entry.
+fn encode_provider_oauth_meta(binding: &ProviderOAuthBinding) -> GrokAuth {
+    GrokAuth {
+        key: PROVIDER_OAUTH_META_MARKER.to_owned(),
+        auth_mode: AuthMode::ApiKey,
+        create_time: chrono::Utc::now(),
+        user_id: binding.generation.to_string(),
+        organization_id: binding.incarnation.as_ref().map(|i| i.as_str().to_owned()),
+        ..Default::default()
+    }
+}
+
+/// Decode a binding record, failing closed on any malformed or token-bearing
+/// payload so a corrupted sidecar can never expose token material.
+fn decode_provider_oauth_meta(
+    provider_id: &ProviderId,
+    entry: &GrokAuth,
+) -> std::io::Result<ProviderOAuthBinding> {
+    if entry.key != PROVIDER_OAUTH_META_MARKER || entry.refresh_token.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "malformed provider OAuth binding record",
+        ));
+    }
+    let generation = entry
+        .user_id
+        .parse::<u64>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let incarnation = entry
+        .organization_id
+        .as_deref()
+        .map(ProviderIncarnation::new)
+        .transpose()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(ProviderOAuthBinding {
+        provider_id: provider_id.clone(),
+        incarnation,
+        generation,
+    })
+}
+
+/// Read the persisted secret-free binding record for a configured provider's
+/// OAuth account. Survives token deletion so generation stays monotonic across
+/// logout/login.
+pub fn read_provider_oauth_binding(
+    grok_home: &Path,
+    provider_id: &ProviderId,
+) -> std::io::Result<Option<ProviderOAuthBinding>> {
+    let meta_scope = crate::provider_registry::secrets::oauth_meta_scope_string(provider_id);
+    let path = grok_home.join("auth.json");
+    let store = match read_auth_json(&path) {
+        Ok(store) => store,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match store.get(&meta_scope) {
+        Some(meta) => decode_provider_oauth_meta(provider_id, meta).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Read the stored configured-provider OAuth credential for an exact provider
+/// instance and incarnation.
+///
+/// `None` means an explicitly incarnation-less route and never matches a
+/// stored `Some(incarnation)`. Returns `None` (never the built-in
+/// `openai::oauth` credential) when the scope is absent or the stored binding
+/// does not match exactly, so a stale or mis-bound entry is never reused.
+pub fn read_provider_oauth_auth(
+    grok_home: &Path,
+    provider_id: &ProviderId,
+    incarnation: Option<&ProviderIncarnation>,
+) -> std::io::Result<Option<GrokAuth>> {
+    let scope = crate::provider_registry::secrets::oauth_scope_string(provider_id);
+    validate_provider_oauth_scope(&scope)?;
+    let path = grok_home.join("auth.json");
+    let store = match read_auth_json(&path) {
+        Ok(store) => store,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(token) = store.get(&scope) else {
+        return Ok(None);
+    };
+    // A token written before binding records existed is incarnation-less.
+    let stored_incarnation = match store.get(
+        &crate::provider_registry::secrets::oauth_meta_scope_string(provider_id),
+    ) {
+        Some(meta) => decode_provider_oauth_meta(provider_id, meta)?.incarnation,
+        None => None,
+    };
+    if stored_incarnation.as_ref() != incarnation {
+        return Ok(None);
+    }
+    Ok(Some(token.clone()))
+}
+
+/// Atomically store a configured-provider OAuth credential, bumping the
+/// account's generation.
+///
+/// Returns the new binding. A store whose incarnation differs from the stored
+/// binding is rejected while token material exists, so a stale login/refresh
+/// completion can never clobber a live credential for a different incarnation;
+/// a new incarnation takes ownership only after the old credential is cleared.
+pub fn store_provider_oauth_auth(
+    grok_home: &Path,
+    provider_id: &ProviderId,
+    incarnation: Option<&ProviderIncarnation>,
+    auth: &GrokAuth,
+) -> std::io::Result<ProviderOAuthBinding> {
+    let scope = crate::provider_registry::secrets::oauth_scope_string(provider_id);
+    validate_provider_oauth_scope(&scope)?;
+    let meta_scope = crate::provider_registry::secrets::oauth_meta_scope_string(provider_id);
+    let path = grok_home.join("auth.json");
+    let lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::WouldBlock))?;
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
+    let mut store = read_auth_json_or_empty(&path)?;
+    let existing_meta = match store.get(&meta_scope) {
+        Some(meta) => Some(decode_provider_oauth_meta(provider_id, meta)?),
+        None => None,
+    };
+    // A present token with no meta is incarnation-less (`None`), matching
+    // read/clear. Reject any store with a different incarnation until the
+    // exact credential is cleared.
+    let stored_incarnation = existing_meta.as_ref().and_then(|m| m.incarnation.as_ref());
+    if store.contains_key(&scope) && stored_incarnation != incarnation {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "credential belongs to a different provider incarnation",
+        ));
+    }
+    let generation = existing_meta
+        .as_ref()
+        .map(|m| m.generation.saturating_add(1))
+        .unwrap_or(0);
+    let binding = ProviderOAuthBinding {
+        provider_id: provider_id.clone(),
+        incarnation: incarnation.cloned(),
+        generation,
+    };
+    store.insert(scope, auth.clone());
+    store.insert(meta_scope, encode_provider_oauth_meta(&binding));
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
+    write_auth_json(&path, &store)?;
+    Ok(binding)
+}
+
+/// Remove the configured-provider OAuth credential for an exact provider
+/// instance and incarnation.
+///
+/// Only removes when the stored binding matches exactly, so logout never
+/// removes a sibling account or a stale incarnation's credential. Rotates the
+/// generation and keeps the binding record so the next store increments rather
+/// than resets.
+pub fn clear_provider_oauth_auth(
+    grok_home: &Path,
+    provider_id: &ProviderId,
+    incarnation: Option<&ProviderIncarnation>,
+) -> std::io::Result<()> {
+    let scope = crate::provider_registry::secrets::oauth_scope_string(provider_id);
+    validate_provider_oauth_scope(&scope)?;
+    let meta_scope = crate::provider_registry::secrets::oauth_meta_scope_string(provider_id);
+    let path = grok_home.join("auth.json");
+    let lock = crate::auth::manager::lock::try_lock_auth_file_nonblocking(&path)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::WouldBlock))?;
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
+    let mut store = match read_auth_json(&path) {
+        Ok(store) => store,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let existing_meta = match store.get(&meta_scope) {
+        Some(meta) => Some(decode_provider_oauth_meta(provider_id, meta)?),
+        None => None,
+    };
+    let has_token = store.contains_key(&scope);
+    // Only remove when the stored binding matches the requested incarnation
+    // exactly; otherwise the credential belongs to another incarnation.
+    let matches = match &existing_meta {
+        Some(meta) => meta.incarnation.as_ref() == incarnation,
+        // A legacy token with no binding record is incarnation-less.
+        None => incarnation.is_none(),
+    };
+    if !has_token || !matches {
+        return Ok(());
+    }
+    store.remove(&scope);
+    let generation = existing_meta
+        .as_ref()
+        .map(|m| m.generation.saturating_add(1))
+        .unwrap_or(0);
+    let binding = ProviderOAuthBinding {
+        provider_id: provider_id.clone(),
+        incarnation: incarnation.cloned(),
+        generation,
+    };
+    store.insert(meta_scope, encode_provider_oauth_meta(&binding));
+    if !lock.still_live(&path) {
+        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+    }
     write_auth_json(&path, &store)
 }
 
@@ -702,5 +950,464 @@ mod write_fallback_tests {
         let _ = write_auth_json_in_place_with(&path, &sample_store(), fake_truncate_then_fail);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "restored file must stay 0o600");
+    }
+
+    // ── Configured OAuth storage ──────────────────────────────────────────
+
+    fn oauth_auth(key: &str) -> GrokAuth {
+        GrokAuth {
+            key: key.to_owned(),
+            auth_mode: AuthMode::Oidc,
+            user_id: "chatgpt".to_owned(),
+            refresh_token: Some(format!("rt-{key}")),
+            ..Default::default()
+        }
+    }
+
+    fn pid(id: &str) -> ProviderId {
+        ProviderId::new(id).unwrap()
+    }
+
+    fn incarnation(suffix: u32) -> ProviderIncarnation {
+        ProviderIncarnation::new(format!("123e4567-e89b-12d3-a456-42661417{suffix:04}")).unwrap()
+    }
+
+    #[test]
+    fn oauth_scope_validation_rejects_builtin_and_malformed() {
+        assert!(
+            validate_provider_oauth_scope(&crate::provider_registry::secrets::oauth_scope_string(
+                &pid("foo")
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_provider_oauth_scope(OPENAI_OAUTH_SCOPE).is_err(),
+            "built-in openai::oauth must never validate as a configured route"
+        );
+        assert!(validate_provider_oauth_scope(OPENAI_API_KEY_SCOPE).is_err());
+        assert!(validate_provider_oauth_scope("provider::BAD::oauth").is_err());
+        assert!(validate_provider_oauth_scope("provider::foo::api_key").is_err());
+        assert!(
+            validate_provider_oauth_scope(
+                &crate::provider_registry::secrets::oauth_meta_scope_string(&pid("foo"))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn configured_oauth_siblings_isolated_with_no_builtin_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        store_provider_oauth_auth(home, &pid("alpha"), None, &oauth_auth("a1")).unwrap();
+        store_provider_oauth_auth(home, &pid("beta"), None, &oauth_auth("b1")).unwrap();
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .unwrap()
+                .key,
+            "a1"
+        );
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("beta"), None)
+                .unwrap()
+                .unwrap()
+                .key,
+            "b1"
+        );
+        // Built-in scope is never returned from configured helpers.
+        let store = read_auth_json(&home.join("auth.json")).unwrap();
+        assert!(!store.contains_key(OPENAI_OAUTH_SCOPE));
+        clear_provider_oauth_auth(home, &pid("alpha"), None).unwrap();
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("beta"), None)
+                .unwrap()
+                .unwrap()
+                .key,
+            "b1"
+        );
+    }
+
+    #[test]
+    fn oauth_generation_rotation_affects_only_selected_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc_a = incarnation(1);
+        let b0 = store_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a), &oauth_auth("a1"))
+            .unwrap();
+        assert_eq!(b0.generation, 0);
+        let b1 = store_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a), &oauth_auth("a2"))
+            .unwrap();
+        assert_eq!(b1.generation, 1);
+        assert!(b1.incarnation.is_some());
+        let b_beta =
+            store_provider_oauth_auth(home, &pid("beta"), None, &oauth_auth("b1")).unwrap();
+        assert_eq!(b_beta.generation, 0);
+        assert_eq!(
+            read_provider_oauth_binding(home, &pid("alpha"))
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+    }
+
+    #[test]
+    fn oauth_binding_mismatch_fails_closed_on_read_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc_a = incarnation(2);
+        let inc_b = incarnation(3);
+        store_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a), &oauth_auth("a1")).unwrap();
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc_b))
+                .unwrap()
+                .is_none(),
+            "incarnation mismatch must fail closed on read"
+        );
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .is_none(),
+            "None must not match a stored Some(incarnation)"
+        );
+        clear_provider_oauth_auth(home, &pid("alpha"), Some(&inc_b)).unwrap();
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a))
+                .unwrap()
+                .unwrap()
+                .key,
+            "a1"
+        );
+        clear_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a)).unwrap();
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn oauth_stale_incarnation_store_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc_a = incarnation(6);
+        let inc_b = incarnation(7);
+        store_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a), &oauth_auth("a1")).unwrap();
+        let err = store_provider_oauth_auth(home, &pid("alpha"), Some(&inc_b), &oauth_auth("b1"))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a))
+                .unwrap()
+                .unwrap()
+                .key,
+            "a1",
+            "stale store must not replace the fresh credential"
+        );
+        assert!(store_provider_oauth_auth(home, &pid("alpha"), None, &oauth_auth("n1")).is_err());
+        clear_provider_oauth_auth(home, &pid("alpha"), Some(&inc_a)).unwrap();
+        let b = store_provider_oauth_auth(home, &pid("alpha"), Some(&inc_b), &oauth_auth("b1"))
+            .unwrap();
+        assert_eq!(b.generation, 2);
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc_b))
+                .unwrap()
+                .unwrap()
+                .key,
+            "b1"
+        );
+    }
+
+    #[test]
+    fn oauth_generation_survives_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(8);
+        let b0 =
+            store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("a1")).unwrap();
+        assert_eq!(b0.generation, 0);
+        clear_provider_oauth_auth(home, &pid("alpha"), Some(&inc)).unwrap();
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc))
+                .unwrap()
+                .is_none(),
+            "reading after clear returns absent"
+        );
+        assert_eq!(
+            read_provider_oauth_binding(home, &pid("alpha"))
+                .unwrap()
+                .unwrap()
+                .generation,
+            1,
+            "binding record survives clear"
+        );
+        let b1 =
+            store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("a2")).unwrap();
+        assert_eq!(b1.generation, 2, "next store increments, never resets");
+    }
+
+    #[test]
+    fn oauth_meta_round_trip_is_secret_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(9);
+        store_provider_oauth_auth(
+            home,
+            &pid("alpha"),
+            Some(&inc),
+            &oauth_auth("access-token-value"),
+        )
+        .unwrap();
+        let store = read_auth_json(&home.join("auth.json")).unwrap();
+        let meta = store
+            .get(&crate::provider_registry::secrets::oauth_meta_scope_string(
+                &pid("alpha"),
+            ))
+            .unwrap();
+        assert_eq!(meta.key, "meta");
+        assert!(meta.refresh_token.is_none());
+        let json = serde_json::to_string(meta).unwrap();
+        assert!(!json.contains("access-token-value"));
+        assert!(!json.contains("rt-"));
+    }
+
+    #[test]
+    fn oauth_meta_malformed_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(10);
+        store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("a1")).unwrap();
+        let path = home.join("auth.json");
+        let mut store = read_auth_json(&path).unwrap();
+        let mut meta = store
+            .get(&crate::provider_registry::secrets::oauth_meta_scope_string(
+                &pid("alpha"),
+            ))
+            .unwrap()
+            .clone();
+        meta.user_id = "not-a-number".into();
+        store.insert(
+            crate::provider_registry::secrets::oauth_meta_scope_string(&pid("alpha")),
+            meta,
+        );
+        write_auth_json(&path, &store).unwrap();
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc)).is_err(),
+            "malformed metadata must fail closed on read"
+        );
+        assert!(
+            store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("a2")).is_err(),
+            "malformed metadata must fail closed on store"
+        );
+    }
+
+    #[test]
+    fn legacy_token_without_meta_is_incarnation_less() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(11);
+        let path = home.join("auth.json");
+        let mut store = read_auth_json_or_empty(&path).unwrap();
+        store.insert(
+            crate::provider_registry::secrets::oauth_scope_string(&pid("alpha")),
+            oauth_auth("legacy"),
+        );
+        write_auth_json(&path, &store).unwrap();
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .unwrap()
+                .key,
+            "legacy"
+        );
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc))
+                .unwrap()
+                .is_none()
+        );
+        clear_provider_oauth_auth(home, &pid("alpha"), Some(&inc)).unwrap();
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .unwrap()
+                .key,
+            "legacy"
+        );
+        clear_provider_oauth_auth(home, &pid("alpha"), None).unwrap();
+        assert!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn meta_less_token_rejects_some_incarnation_store_until_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(13);
+        let path = home.join("auth.json");
+        let mut store = read_auth_json_or_empty(&path).unwrap();
+        store.insert(
+            crate::provider_registry::secrets::oauth_scope_string(&pid("alpha")),
+            oauth_auth("legacy-live"),
+        );
+        write_auth_json(&path, &store).unwrap();
+        let err =
+            store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("clobber"))
+                .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .unwrap()
+                .key,
+            "legacy-live",
+            "stale Some(incarnation) must not clobber a meta-less token"
+        );
+        assert!(
+            read_provider_oauth_binding(home, &pid("alpha"))
+                .unwrap()
+                .is_none()
+        );
+        clear_provider_oauth_auth(home, &pid("alpha"), None).unwrap();
+        let b = store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("owned"))
+            .unwrap();
+        assert_eq!(b.incarnation.as_ref(), Some(&inc));
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), Some(&inc))
+                .unwrap()
+                .unwrap()
+                .key,
+            "owned"
+        );
+    }
+
+    #[test]
+    fn clear_twice_does_not_rotate_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(14);
+        store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("a1")).unwrap();
+        clear_provider_oauth_auth(home, &pid("alpha"), Some(&inc)).unwrap();
+        let gen_after_logout = read_provider_oauth_binding(home, &pid("alpha"))
+            .unwrap()
+            .unwrap()
+            .generation;
+        assert_eq!(gen_after_logout, 1);
+        clear_provider_oauth_auth(home, &pid("alpha"), Some(&inc)).unwrap();
+        assert_eq!(
+            read_provider_oauth_binding(home, &pid("alpha"))
+                .unwrap()
+                .unwrap()
+                .generation,
+            gen_after_logout,
+            "repeated clear must not bump generation"
+        );
+    }
+
+    #[test]
+    fn clear_missing_file_does_not_create_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let path = home.join("auth.json");
+        assert!(!path.exists());
+        clear_provider_oauth_auth(home, &pid("alpha"), None).unwrap();
+        assert!(
+            !path.exists(),
+            "clear of a missing store must not create auth.json"
+        );
+        assert!(
+            read_provider_oauth_binding(home, &pid("alpha"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_token_by_scope_rejects_oauth_meta_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(15);
+        store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("token")).unwrap();
+        let meta = crate::provider_registry::secrets::oauth_meta_scope_string(&pid("alpha"));
+        let err = read_token_by_scope(home, &meta).unwrap_err();
+        let io = err
+            .downcast_ref::<std::io::Error>()
+            .expect("meta reject is InvalidInput io error");
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
+        for lookalike in [
+            "provider::not valid::oauth::meta",
+            "anything::oauth::meta",
+            "provider::alpha::oauth::meta",
+        ] {
+            let err = read_token_by_scope(home, lookalike).unwrap_err();
+            let io = err.downcast_ref::<std::io::Error>().unwrap();
+            assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput, "{lookalike}");
+        }
+        store_api_key(home, "xai-secret").unwrap();
+        assert_eq!(
+            read_token_by_scope(home, API_KEY_SCOPE).unwrap(),
+            "xai-secret"
+        );
+    }
+
+    #[test]
+    fn oauth_storage_is_non_destructive_to_sibling_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        store_api_key(home, "xai-key").unwrap();
+        store_provider_api_key(home, OPENAI_API_KEY_SCOPE, "openai-key").unwrap();
+        store_provider_oauth_auth(home, &pid("alpha"), None, &oauth_auth("a1")).unwrap();
+        let path = home.join("auth.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(validate_provider_oauth_scope("provider::BAD::oauth").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "validation failure must not touch auth.json"
+        );
+        assert!(read_api_key(home).as_deref() == Some("xai-key"));
+        assert_eq!(
+            read_provider_api_key(home, OPENAI_API_KEY_SCOPE)
+                .unwrap()
+                .as_deref(),
+            Some("openai-key")
+        );
+    }
+
+    #[test]
+    fn older_reader_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let inc = incarnation(12);
+        store_provider_oauth_auth(home, &pid("alpha"), Some(&inc), &oauth_auth("a1")).unwrap();
+        let store = read_auth_json(&home.join("auth.json")).unwrap();
+        let meta = store
+            .get(&crate::provider_registry::secrets::oauth_meta_scope_string(
+                &pid("alpha"),
+            ))
+            .unwrap();
+        assert_eq!(meta.key, "meta");
+        assert!(meta.refresh_token.is_none());
+        let path = home.join("auth.json");
+        let mut store = read_auth_json(&path).unwrap();
+        store.remove(&crate::provider_registry::secrets::oauth_meta_scope_string(
+            &pid("alpha"),
+        ));
+        write_auth_json(&path, &store).unwrap();
+        assert_eq!(
+            read_provider_oauth_auth(home, &pid("alpha"), None)
+                .unwrap()
+                .unwrap()
+                .key,
+            "a1"
+        );
     }
 }

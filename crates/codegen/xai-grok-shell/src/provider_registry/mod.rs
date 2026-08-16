@@ -33,8 +33,9 @@ pub use lifecycle::{
     parse_namespaced_model_id, resolve_legacy_model_alias,
 };
 pub use secrets::{
-    ProviderCredentialKind, ProviderSecretScope, admin_key_scope, application_key_scope,
-    clear_provider_secret, parse_secret_scope, read_provider_secret, store_provider_secret,
+    ProviderCredentialKind, ProviderOAuthBinding, ProviderSecretScope, admin_key_scope,
+    application_key_scope, clear_provider_secret, is_allowed_oauth_scope, oauth_scope_string,
+    parse_secret_scope, read_provider_secret, store_provider_secret,
 };
 pub use service::{ProviderService, ProviderServiceError};
 pub use toml_edit::{
