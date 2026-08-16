@@ -157,6 +157,10 @@ pub struct ToolContext {
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
         >,
     >,
+    /// Shell-private capability for workflow and goal child assignments. It
+    /// never changes the public task-event wire payload.
+    pub(crate) assigned_spawn_sender:
+        Option<crate::agent::subagent::assigned_spawn::AssignedSpawnSender>,
     /// Shared LSP runtime — cloned cheaply (Arc) from parent to child.
     /// Same pattern as `fs` and `terminal`.
     pub lsp: Option<Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
@@ -258,6 +262,7 @@ impl ToolContext {
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
             subagent_depth: 0,
             subagent_event_tx: None,
+            assigned_spawn_sender: None,
             lsp: None,
             lsp_server_names: Vec::new(),
             is_turn_active: None,
@@ -298,6 +303,7 @@ impl ToolContext {
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
             subagent_depth: 0,
             subagent_event_tx: None,
+            assigned_spawn_sender: None,
             lsp: None,
             lsp_server_names: Vec::new(),
             is_turn_active: None,

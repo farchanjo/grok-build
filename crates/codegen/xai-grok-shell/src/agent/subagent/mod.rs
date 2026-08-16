@@ -38,8 +38,11 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
+pub(crate) mod assigned_spawn;
+mod assignment;
 mod coordinator_lifecycle;
 mod coordinator_query;
+mod exact_route;
 mod handle_request;
 pub(crate) use handle_request::handle_subagent_request;
 /// How the child session's initial context was bootstrapped.
@@ -170,6 +173,8 @@ pub(crate) struct SubagentSpawnContext {
     pub inherited_tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
     pub yolo_mode: bool,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
+    /// Capability minted by MvpAgent for private exact-route assignments.
+    pub assigned_spawn_sender: crate::agent::subagent::assigned_spawn::AssignedSpawnSender,
     pub parent_depth: u32,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,

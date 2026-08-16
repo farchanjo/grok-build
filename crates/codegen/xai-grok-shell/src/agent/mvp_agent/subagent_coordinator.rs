@@ -572,6 +572,7 @@ impl MvpAgent {
             inherited_tool_overrides,
             yolo_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
+            assigned_spawn_sender: self.assigned_spawn_tx.clone(),
             parent_depth,
             inference_idle_timeout_secs,
             auto_compact_threshold_tiers:

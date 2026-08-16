@@ -1552,6 +1552,7 @@ impl MvpAgent {
             );
         }
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (assigned_spawn_tx, assigned_spawn_rx) = crate::agent::subagent::assigned_spawn::channel();
         let activity = crate::agent::activity::AgentActivity::default();
         let mut subagent_coordinator = crate::agent::subagent::SubagentCoordinator::new();
         subagent_coordinator.set_running_gauge(activity.subagent_gauge());
@@ -1622,6 +1623,8 @@ impl MvpAgent {
             ),
             model_unavailable_sessions: RefCell::new(std::collections::HashMap::new()),
             subagent_event_tx,
+            assigned_spawn_tx,
+            assigned_spawn_rx: RefCell::new(Some(assigned_spawn_rx)),
             subagent_event_rx: RefCell::new(Some(subagent_event_rx)),
             subagent_coordinator: RefCell::new(subagent_coordinator),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer::default(),
