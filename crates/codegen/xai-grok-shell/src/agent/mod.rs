@@ -15,6 +15,7 @@ pub mod model_providers;
 pub mod model_search;
 pub mod models;
 pub mod mvp_agent;
+pub mod provider_catalog;
 pub mod provider_discovery;
 pub mod providers;
 pub(crate) mod proxy;

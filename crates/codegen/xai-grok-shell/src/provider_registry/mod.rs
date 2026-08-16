@@ -24,6 +24,9 @@ pub use cache::{
 pub use gate::{
     MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED, MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_enabled,
 };
+
+#[cfg(test)]
+pub(crate) use gate::{multi_account_rollout_env_lock, with_multi_account_rollout_env};
 pub use id::{
     BuiltInProviderId, ProviderId, ProviderIdError, ProviderRef, validate_provider_id_str,
 };
