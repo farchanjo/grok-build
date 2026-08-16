@@ -928,6 +928,9 @@ impl CredentialRepairScope {
                 self.registry_generation,
                 self.failed_binding_generation,
             )
+            // Exact credential route — OAuth vs API-key must not crossover.
+            && (self.credential_route.is_empty()
+                || stashed.credential_route == self.credential_route)
     }
 
     /// Accept only an operation-bound write receipt whose frozen fields match
@@ -1055,6 +1058,133 @@ mod provider_scoped_stash_tests {
         // Zero is reserved and never issued.
         let mut zero = 0u64;
         assert!(mint_credential_repair_token(&mut zero).is_none());
+    }
+
+    #[test]
+    fn host_fallback_stash_is_not_repair_eligible() {
+        let mut stash = sample("openrouter_work", 3);
+        stash.host_fallback = true;
+        stash.binding_complete = true;
+        stash.route_authority = "host_fallback".into();
+        assert!(!stash.repair_eligible());
+        assert!(!stash.matches_repair("openrouter_work", 3));
+    }
+
+    #[test]
+    fn configured_route_without_complete_meta_fails_closed() {
+        let mut stash = sample("openrouter_work", 3);
+        stash.binding_complete = false;
+        stash.binding_generation = 0;
+        stash.route_authority = "authoritative".into();
+        assert!(
+            !stash.repair_eligible(),
+            "configured id without complete meta must fail closed"
+        );
+    }
+
+    #[test]
+    fn built_in_legacy_incomplete_meta_remains_eligible() {
+        let mut stash = sample("openrouter", 3);
+        stash.binding_complete = false;
+        stash.binding_generation = 0;
+        stash.incarnation = None;
+        stash.registry_generation = 0;
+        assert!(stash.repair_eligible());
+    }
+
+    #[test]
+    fn stale_incarnation_or_registry_cannot_resume() {
+        let mut stash = sample("openrouter_work", 5);
+        stash.incarnation = Some("11111111-1111-1111-1111-111111111111".into());
+        stash.registry_generation = 2;
+        stash.binding_generation = 7;
+        stash.binding_complete = true;
+        assert!(stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("11111111-1111-1111-1111-111111111111"),
+            2,
+            7
+        ));
+        assert!(!stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("22222222-2222-2222-2222-222222222222"),
+            2,
+            7
+        ));
+        assert!(!stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("11111111-1111-1111-1111-111111111111"),
+            3,
+            7
+        ));
+        assert!(!stash.matches_repair_binding(
+            "openrouter_work",
+            5,
+            Some("11111111-1111-1111-1111-111111111111"),
+            2,
+            8
+        ));
+    }
+
+    #[test]
+    fn write_receipt_rejects_field_mismatch() {
+        let scope = CredentialRepairScope {
+            token: CredentialRepairToken(1),
+            provider_id: "openrouter".into(),
+            credential_generation: 3,
+            incarnation: None,
+            registry_generation: 0,
+            failed_binding_generation: 5,
+            credential_route: "api_key".into(),
+            correlation_token: "3".into(),
+        };
+        let ok = scope.write_receipt(6);
+        // Wrong route spelling.
+        let mut wrong_route = ok.clone();
+        wrong_route.credential_route = "chatgpt_oauth".into();
+        assert!(!scope.validate_write_receipt(Some(&wrong_route), Some(6)));
+        // Wrong provider.
+        let mut wrong_provider = ok.clone();
+        wrong_provider.provider_id = "openai".into();
+        assert!(!scope.validate_write_receipt(Some(&wrong_provider), Some(6)));
+        // Wrong token.
+        let mut wrong_token = ok.clone();
+        wrong_token.operation_token = CredentialRepairToken(99);
+        assert!(!scope.validate_write_receipt(Some(&wrong_token), Some(6)));
+    }
+
+    #[test]
+    fn oauth_and_api_key_routes_do_not_crossover_on_resume() {
+        let api_key_stash = {
+            let mut s = sample("openai", 4);
+            s.credential_route = "api_key".into();
+            s.binding_generation = 2;
+            s.binding_complete = true;
+            s
+        };
+        let oauth_scope = CredentialRepairScope {
+            token: CredentialRepairToken(7),
+            provider_id: "openai".into(),
+            credential_generation: 4,
+            incarnation: None,
+            registry_generation: 0,
+            failed_binding_generation: 2,
+            credential_route: "chatgpt_oauth".into(),
+            correlation_token: "4".into(),
+        };
+        // Same provider + generation but different credential route must not resume.
+        assert!(!oauth_scope.allows_resume(Some(&oauth_scope), &api_key_stash));
+        let oauth_stash = {
+            let mut s = sample("openai", 4);
+            s.credential_route = "chatgpt_oauth".into();
+            s.binding_generation = 2;
+            s.binding_complete = true;
+            s
+        };
+        assert!(oauth_scope.allows_resume(Some(&oauth_scope), &oauth_stash));
     }
 }
 /// Snapshot of a textarea chip element for rewind restore.

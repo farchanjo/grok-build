@@ -1138,10 +1138,19 @@ pub(crate) async fn spawn_session_actor(
     };
     let (sampler_event_tx, sampler_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_grok_inference::InferenceEvent>();
-    let sampler_handle = xai_grok_inference::InferenceActor::spawn(
+    let initial_route_context = {
+        let grok_home = auth_manager.as_ref().map(|am| am.grok_home());
+        crate::session::route_context::resolve_for_models_manager(
+            &inference_config_initial,
+            &models_manager,
+            grok_home,
+        )
+    };
+    let sampler_handle = xai_grok_inference::InferenceActor::spawn_with_route_context(
         inference_config_initial,
         sampler_retry_policy,
         sampler_event_tx,
+        Some(initial_route_context.clone()),
     );
     let attribution_callback_for_handle = attribution_callback.clone();
     let agent_name_for_handle = initial_agent_type
@@ -1571,6 +1580,7 @@ pub(crate) async fn spawn_session_actor(
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
         models_manager,
+        route_context: std::cell::RefCell::new(Some(initial_route_context)),
         display_cwd: {
             let lock = std::sync::OnceLock::new();
             if let Some(ref cwd) = prompt_display_cwd {

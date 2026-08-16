@@ -103,8 +103,10 @@ pub fn resolve_for_models_manager(
         .as_deref()
         .and_then(|id| service.as_ref().and_then(|s| s.get(id)));
     let descriptor_incarnation = descriptor.and_then(|d| d.incarnation.as_ref().map(|i| i.as_str()));
-    let (descriptor_api_surface, descriptor_credential_route) = descriptor
-        .and_then(|d| d.primary_route())
+    // Surface-aware selection: Codex vs Platform API by live base URL, not
+    // primary-first (which would mis-attribute concurrent OAuth + API-key routes).
+    let selected_route = descriptor.and_then(|d| select_descriptor_route(d, &inference.base_url));
+    let (descriptor_api_surface, descriptor_credential_route) = selected_route
         .map(|r| (Some(r.api_surface), Some(r.credential_route)))
         .unwrap_or((None, None));
 
@@ -122,6 +124,36 @@ pub fn resolve_for_models_manager(
         descriptor_credential_route,
         grok_home,
     })
+}
+
+/// Pick the descriptor route that matches the live API surface / base URL.
+///
+/// Codex hosts prefer ChatGPT OAuth; `api.openai.com` prefers Platform API-key;
+/// otherwise the first descriptor route is used.
+fn select_descriptor_route<'a>(
+    desc: &'a crate::provider_registry::instance::ProviderInstanceDescriptor,
+    base_url: &str,
+) -> Option<&'a crate::provider_registry::instance::ProviderRouteDescriptor> {
+    if crate::auth::chatgpt_oauth::is_codex_base_url(base_url)
+        && let Some(r) = desc.routes.iter().find(|r| {
+            matches!(r.credential_route, CredentialRoute::ChatGptOauth)
+                || matches!(r.api_surface, ApiSurface::ChatGptInference)
+        })
+    {
+        return Some(r);
+    }
+    if base_url.contains("api.openai.com")
+        && let Some(r) = desc.routes.iter().find(|r| {
+            matches!(r.api_surface, ApiSurface::OpenAiPlatform)
+                || matches!(
+                    r.credential_route,
+                    CredentialRoute::ApiKey | CredentialRoute::OpenAiPlatform
+                )
+        })
+    {
+        return Some(r);
+    }
+    desc.routes.first()
 }
 
 fn map_kind(kind: ModelProviderKind) -> RouteProviderKind {

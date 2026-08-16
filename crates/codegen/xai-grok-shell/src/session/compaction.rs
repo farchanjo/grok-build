@@ -889,12 +889,17 @@ impl SessionActor {
             )
             .await;
 
-        let (retry_state, message, acp_err) = if let Some(provider) = provider {
+        let (retry_state, message, acp_err, binding_meta) = if let Some(provider) = provider {
             let mut msg = provider_credential_repair_message(&provider.provider_name);
             msg.push_str(" Compaction could not complete until the key is repaired.");
             if let Some(model) = provider.failed_model_id.as_deref() {
                 msg.push_str(&format!(" Failed model: {model}."));
             }
+            let binding = self.frozen_route_binding_meta(
+                false,
+                provider.credential_generation,
+                &provider.provider_id,
+            );
             let state = crate::extensions::notification::RetryState::failed_with_provider(
                 msg.clone(),
                 provider,
@@ -907,7 +912,7 @@ impl SessionActor {
                     Some(401),
                     xai_grok_inference::InferenceErrorKind::Auth,
                 ));
-            (state, msg, err)
+            (state, msg, err, Some(binding))
         } else {
             let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
                 detailed
@@ -925,7 +930,7 @@ impl SessionActor {
                     Some(401),
                     xai_grok_inference::InferenceErrorKind::Auth,
                 ));
-            (state, message, err)
+            (state, message, err, None)
         };
 
         tracing::warn!(
@@ -960,8 +965,17 @@ impl SessionActor {
             })),
         );
         let _ = message;
-        self.send_xai_notification(XaiSessionUpdate::RetryState(retry_state))
-            .await;
+        // Exact-route repair binding must travel with the failure notification;
+        // never drop it (old/no-meta consumers fail closed for configured routes).
+        let extra = binding_meta
+            .as_ref()
+            .map(|b| b.to_meta_map())
+            .filter(|m| !m.is_empty());
+        self.send_xai_notification_with_extra_meta(
+            XaiSessionUpdate::RetryState(retry_state),
+            extra,
+        )
+        .await;
         acp_err
     }
     /// Clear [`SUPPRESS_AUTH`] on login/token refresh (credit suppress waits for a 200).
@@ -2645,6 +2659,7 @@ mod inline_auto_compact_flow_tests {
             last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             git_head_enabled: false,
             models_manager: Default::default(),
+            route_context: std::cell::RefCell::new(None),
             display_cwd: std::sync::OnceLock::new(),
             active_agent_type: parking_lot::Mutex::new(None),
             queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(

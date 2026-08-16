@@ -79,8 +79,9 @@ pub use openai_platform::{
     assert_zero_uncovered_operations, coverage_report_json,
 };
 pub use route_context::{
-    ProviderRouteContext, ProviderRouteContextBuilder, RouteApiSurface, RouteAuthority,
-    RouteContextUpdate, RouteCredentialRoute, RoutePacingOverride, RouteProviderKind,
+    NormalizedOrigin, ProviderRouteContext, ProviderRouteContextBuilder, RouteApiSurface,
+    RouteAuthority, RouteContextUpdate, RouteCredentialRoute, RoutePacingOverride,
+    RouteProviderKind,
 };
 pub use openrouter_baseline::{
     OpenRouterEndpoint, OpenRouterEndpointInventory, coding_agent_priority_endpoints,

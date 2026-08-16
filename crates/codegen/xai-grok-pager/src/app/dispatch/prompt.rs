@@ -1311,6 +1311,34 @@ pub(super) fn handle_prompt_response(
                 let (provider_id, generation) =
                     scrollback_recent_credential_scope(&agent.scrollback)
                         .unwrap_or(("xai".to_string(), 0));
+                // Prefer correlated notification meta; missing/old meta fails
+                // closed for configured routes (binding_complete=false).
+                let binding = agent
+                    .pending_route_bindings
+                    .get(&(provider_id.clone(), generation))
+                    .cloned();
+                let (
+                    incarnation,
+                    registry_generation,
+                    binding_generation,
+                    host_fallback,
+                    binding_complete,
+                    credential_route,
+                    route_authority,
+                    correlation_token,
+                ) = match binding {
+                    Some(b) => (
+                        b.incarnation,
+                        b.registry_generation,
+                        b.binding_generation,
+                        b.host_fallback,
+                        b.binding_complete,
+                        b.credential_route,
+                        b.route_authority,
+                        b.correlation_token,
+                    ),
+                    None => (None, 0, 0, false, false, String::new(), String::new(), String::new()),
+                };
                 // New failure supersedes any prior in-flight repair binding;
                 // delayed completion of the old op will not match the new stash.
                 agent.in_flight_repair = None;
@@ -1318,14 +1346,14 @@ pub(super) fn handle_prompt_response(
                     Some(crate::app::agent::ProviderScopedStashedPrompt {
                         provider_id,
                         credential_generation: generation,
-            incarnation: None,
-            registry_generation: 0,
-            binding_generation: 0,
-            host_fallback: false,
-            binding_complete: true,
-            credential_route: "api_key".into(),
-            route_authority: "authoritative".into(),
-            correlation_token: String::new(),
+                        incarnation,
+                        registry_generation,
+                        binding_generation,
+                        host_fallback,
+                        binding_complete,
+                        credential_route,
+                        route_authority,
+                        correlation_token,
                         prompt,
                     });
             }

@@ -111,6 +111,7 @@ impl AgentView {
             credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
             in_flight_repair: None,
+            pending_route_bindings: std::collections::HashMap::new(),
             active_modal: None,
             modal_buttons: Vec::new(),
             modal_hovered_key: None,

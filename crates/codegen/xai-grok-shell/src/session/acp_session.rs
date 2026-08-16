@@ -758,6 +758,11 @@ pub(crate) struct SessionActor {
     git_head_enabled: bool,
     /// Shared models manager for etag-triggered refresh from response headers.
     pub(crate) models_manager: crate::agent::models::ModelsManager,
+    /// Frozen production route context for the active model, recomputed at
+    /// spawn and every `prepare_sampler_for_turn`. Credential-free sidecar
+    /// used for 401 binding meta and exact-route repair correlation.
+    pub(crate) route_context:
+        std::cell::RefCell<Option<xai_grok_inference::ProviderRouteContext>>,
     /// Stable display path for forked sessions (original project path).
     ///
     /// Used by `build_user_message_prefix` (user-message `Workspace Path`),

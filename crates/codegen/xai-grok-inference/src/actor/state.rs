@@ -35,11 +35,15 @@ pub(crate) struct ActorState {
 }
 
 impl ActorState {
-    pub(crate) fn new(config: InferenceConfig, retry_policy: RetryPolicy) -> Self {
+    pub(crate) fn new_with_route(
+        config: InferenceConfig,
+        retry_policy: RetryPolicy,
+        route_context: Option<ProviderRouteContext>,
+    ) -> Self {
         Self {
             active_requests: HashMap::new(),
             config,
-            route_context: None,
+            route_context,
             retry_policy,
             inference_pacer: InferencePacer::shared(),
         }
@@ -71,13 +75,6 @@ impl ActorState {
         } else {
             false
         }
-    }
-
-    /// Replace the default config. The next request submitted without
-    /// an override will use this. Clears any explicit route context so a
-    /// stale account context cannot survive a bare config refresh.
-    pub(crate) fn update_config(&mut self, config: InferenceConfig) {
-        self.apply_config_update(config, RouteContextUpdate::DeriveLegacy);
     }
 
     /// Atomically replace config and route context together.
@@ -162,13 +159,13 @@ mod tests {
 
     #[test]
     fn cancel_unknown_request_returns_false() {
-        let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut state = ActorState::new_with_route(cfg(), RetryPolicy::default(), None);
         assert!(!state.cancel(&RequestId::from("unknown")));
     }
 
     #[test]
     fn register_then_cancel_removes() {
-        let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut state = ActorState::new_with_route(cfg(), RetryPolicy::default(), None);
         let id = RequestId::from("req-1");
         state.register(
             id.clone(),
@@ -183,7 +180,7 @@ mod tests {
 
     #[test]
     fn register_returns_previous_when_same_id() {
-        let mut state = ActorState::new(cfg(), RetryPolicy::default());
+        let mut state = ActorState::new_with_route(cfg(), RetryPolicy::default(), None);
         let id = RequestId::from("req-1");
         let first = ActiveRequest {
             cancel_token: CancellationToken::new(),

@@ -2017,47 +2017,136 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
         .iter()
         .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
 
-    // Exact store-bound receipt + live re-resolve resumes once.
-    app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ProviderOperationComplete {
-            agent_id: id,
-            provider: ProviderKind::OpenRouter,
-            status: ProviderStatus::Connected {
-                detail: Some("connected".into()),
-            },
-            claude_cli_status: None,
-            repair: Some(scope.clone()),
-            credential_write_receipt: Some(scope.write_receipt(post_gen)),
-        }),
-        &mut app,
-    );
-    assert!(
-        app.agents[&id].reauth_stashed_prompt.is_none(),
-        "store-bound receipt must consume stash once"
-    );
-    assert!(
-        effects
+    // Sibling provider receipt cannot resume.
+    {
+        let mut sibling = scope.clone();
+        sibling.provider_id = "openai".into();
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenAi,
+                status: ProviderStatus::Connected {
+                    detail: Some("sibling".into()),
+                },
+                claude_cli_status: None,
+                repair: Some(sibling.clone()),
+                credential_write_receipt: Some(sibling.write_receipt(post_gen)),
+            }),
+            &mut app,
+        );
+        assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+        assert!(!effects
             .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })),
-        "store-bound repair must send prompt: {effects:?}"
-    );
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    }
 
-    // Duplicate is a no-op.
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::ProviderOperationComplete {
-            agent_id: id,
-            provider: ProviderKind::OpenRouter,
-            status: ProviderStatus::Connected {
-                detail: Some("dup".into()),
-            },
-            claude_cli_status: None,
-            repair: Some(scope.clone()),
-            credential_write_receipt: Some(scope.write_receipt(post_gen)),
-        }),
-        &mut app,
-    );
-    assert!(!effects
-        .iter()
-        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    // Stale incarnation / registry cannot resume.
+    {
+        let mut stale = scope.clone();
+        stale.incarnation = Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into());
+        stale.registry_generation = 99;
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("stale".into()),
+                },
+                claude_cli_status: None,
+                repair: Some(stale.clone()),
+                credential_write_receipt: Some(stale.write_receipt(post_gen)),
+            }),
+            &mut app,
+        );
+        assert!(app.agents[&id].reauth_stashed_prompt.is_some());
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    }
+
+    // External rotation below the store-bound post fails closed (live != post).
+    {
+        let _ = store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-external-CCCCCCCC")
+            .expect("external rotate");
+        // post_gen was 2; live is now 3 — receipt claiming post=2 is rejected.
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("stale live".into()),
+                },
+                claude_cli_status: None,
+                repair: Some(scope.clone()),
+                credential_write_receipt: Some(scope.write_receipt(post_gen)),
+            }),
+            &mut app,
+        );
+        assert!(
+            app.agents[&id].reauth_stashed_prompt.is_some(),
+            "external rotation must fail closed when live != post"
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+        // Restore exact post generation for the success path.
+        let restored =
+            store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-repaired-BBBBBBBB")
+                .expect("restore");
+        // Generations are monotonic — capture the live post for a fresh receipt.
+        let live_post = restored;
+        assert!(live_post > failed_gen);
+
+        // Exact store-bound receipt + live re-resolve resumes once.
+        app.agents.get_mut(&id).unwrap().in_flight_repair = Some(scope.clone());
+        let mut receipt = scope.write_receipt(live_post);
+        // The receipt must carry the actual store-returned post generation.
+        receipt.post_generation = live_post;
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("connected".into()),
+                },
+                claude_cli_status: None,
+                repair: Some(scope.clone()),
+                credential_write_receipt: Some(receipt),
+            }),
+            &mut app,
+        );
+        assert!(
+            app.agents[&id].reauth_stashed_prompt.is_none(),
+            "store-bound receipt must consume stash once"
+        );
+        let send_count = effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }))
+            .count();
+        assert_eq!(
+            send_count, 1,
+            "store-bound repair must send prompt exactly once: {effects:?}"
+        );
+
+        // Duplicate is a no-op.
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::ProviderOperationComplete {
+                agent_id: id,
+                provider: ProviderKind::OpenRouter,
+                status: ProviderStatus::Connected {
+                    detail: Some("dup".into()),
+                },
+                claude_cli_status: None,
+                repair: Some(scope.clone()),
+                credential_write_receipt: Some(scope.write_receipt(live_post)),
+            }),
+            &mut app,
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    }
 }

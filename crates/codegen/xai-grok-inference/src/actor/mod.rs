@@ -17,6 +17,7 @@ use crate::commands::InferenceCommand;
 use crate::config::{InferenceConfig, RetryPolicy};
 use crate::events::InferenceEvent;
 use crate::handle::InferenceHandle;
+use crate::route_context::ProviderRouteContext;
 use state::{ActiveRequest, ActorState};
 
 use crate::types::RequestId;
@@ -45,11 +46,21 @@ impl InferenceActor {
         retry_policy: RetryPolicy,
         event_tx: mpsc::UnboundedSender<InferenceEvent>,
     ) -> InferenceHandle {
+        Self::spawn_with_route_context(config, retry_policy, event_tx, None)
+    }
+
+    /// Spawn with an explicit production route context installed at start.
+    pub fn spawn_with_route_context(
+        config: InferenceConfig,
+        retry_policy: RetryPolicy,
+        event_tx: mpsc::UnboundedSender<InferenceEvent>,
+        route_context: Option<ProviderRouteContext>,
+    ) -> InferenceHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let actor = Self {
             cmd_rx,
             event_tx,
-            state: ActorState::new(config, retry_policy),
+            state: ActorState::new_with_route(config, retry_policy, route_context),
             tasks: JoinSet::new(),
         };
         tokio::spawn(actor.run());
@@ -116,6 +127,7 @@ impl InferenceActor {
                 let effective_config = config
                     .map(|b| *b)
                     .unwrap_or_else(|| self.state.config.clone());
+                let route_context = Some(self.state.effective_route_context());
                 let event_tx = self.event_tx.clone();
                 let retry_policy = self.state.retry_policy.clone();
                 let inference_pacer = self.state.inference_pacer.clone();
@@ -124,6 +136,7 @@ impl InferenceActor {
                     request_id,
                     request_inner,
                     effective_config,
+                    route_context,
                     retry_policy,
                     event_tx,
                     cancel_token,

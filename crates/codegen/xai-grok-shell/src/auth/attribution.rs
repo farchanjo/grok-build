@@ -443,6 +443,129 @@ fn compute_attribution_payload(
     })
 }
 
+/// Snapshot of the credential a route would send — secret-bearing, never
+/// logged raw. Used only for exact-route attribution equality checks.
+#[derive(Debug, Clone)]
+pub(crate) struct RouteCredentialSnapshot {
+    pub key: String,
+    pub create_time: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Resolve the credential for an **exact** provider route. Fail closed on
+/// incarnation / binding mismatch; never falls back to a sibling account or
+/// a different credential route (OAuth vs API-key).
+pub(crate) fn lookup_route_credential(
+    grok_home: &std::path::Path,
+    route: &xai_grok_inference::ProviderRouteContext,
+) -> Option<RouteCredentialSnapshot> {
+    use crate::auth::{
+        ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENAI_OAUTH_SCOPE, OPENROUTER_API_KEY_SCOPE,
+        lookup_auth, read_auth_json, read_provider_api_key, read_provider_oauth_auth,
+        read_provider_oauth_binding,
+    };
+    use crate::provider_registry::id::ProviderId;
+    use crate::provider_registry::instance::ProviderIncarnation;
+    use crate::provider_registry::secrets::application_key_scope;
+    use xai_grok_inference::{RouteCredentialRoute, RouteProviderKind};
+
+    let instance = route.instance_id();
+    let incarnation = route.incarnation();
+
+    match route.credential_route() {
+        RouteCredentialRoute::ChatGptOauth => {
+            if instance == "openai" && incarnation.is_none() {
+                let path = grok_home.join("auth.json");
+                let store = read_auth_json(&path).ok()?;
+                return lookup_auth(&store, OPENAI_OAUTH_SCOPE).map(snapshot_from_auth);
+            }
+            let id = ProviderId::new(instance).ok()?;
+            let inc = incarnation.and_then(|raw| ProviderIncarnation::new(raw).ok());
+            let binding = read_provider_oauth_binding(grok_home, &id).ok().flatten();
+            if let Some(binding) = binding {
+                if binding.incarnation.as_ref() != inc.as_ref() {
+                    return None;
+                }
+            } else if inc.is_some() {
+                return None;
+            }
+            read_provider_oauth_auth(grok_home, &id, inc.as_ref())
+                .ok()
+                .flatten()
+                .map(snapshot_from_auth)
+        }
+        RouteCredentialRoute::ApiKey | RouteCredentialRoute::OpenAiPlatform => {
+            // API-key routes do not carry incarnation on the durable store;
+            // any incarnation requirement fails closed.
+            if incarnation.is_some() {
+                return None;
+            }
+            let scope = match (instance, route.provider_kind()) {
+                ("openai", _) => OPENAI_API_KEY_SCOPE.to_owned(),
+                ("openrouter", _) | (_, RouteProviderKind::OpenRouter)
+                    if instance == "openrouter" =>
+                {
+                    OPENROUTER_API_KEY_SCOPE.to_owned()
+                }
+                ("anthropic", _) | (_, RouteProviderKind::Anthropic) if instance == "anthropic" => {
+                    ANTHROPIC_API_KEY_SCOPE.to_owned()
+                }
+                _ => {
+                    let id = ProviderId::new(instance).ok()?;
+                    application_key_scope(&id)
+                }
+            };
+            read_provider_api_key(grok_home, &scope)
+                .ok()
+                .flatten()
+                .map(|key| RouteCredentialSnapshot {
+                    key,
+                    create_time: chrono::Utc::now(),
+                    expires_at: None,
+                })
+        }
+        RouteCredentialRoute::AuthHelper | RouteCredentialRoute::None => None,
+        RouteCredentialRoute::XaiSession => None,
+    }
+}
+
+fn snapshot_from_auth(auth: crate::auth::GrokAuth) -> RouteCredentialSnapshot {
+    RouteCredentialSnapshot {
+        key: auth.key,
+        create_time: auth.create_time,
+        expires_at: auth.expires_at,
+    }
+}
+
+/// Current credential for a route: xAI session uses the live manager; every
+/// other route uses exact-source lookup only (no sibling fallback).
+pub(crate) fn current_credential_for_route(
+    auth_manager: &AuthManager,
+    route: Option<&xai_grok_inference::ProviderRouteContext>,
+) -> Option<RouteCredentialSnapshot> {
+    use xai_grok_inference::RouteCredentialRoute;
+    if let Some(route) = route
+        && matches!(
+            route.credential_route(),
+            RouteCredentialRoute::XaiSession | RouteCredentialRoute::None
+        )
+    {
+        return auth_manager.current().map(|auth| RouteCredentialSnapshot {
+            key: auth.key,
+            create_time: auth.create_time,
+            expires_at: auth.expires_at,
+        });
+    }
+    if let Some(route) = route {
+        return lookup_route_credential(auth_manager.grok_home(), route);
+    }
+    auth_manager.current().map(|auth| RouteCredentialSnapshot {
+        key: auth.key,
+        create_time: auth.create_time,
+        expires_at: auth.expires_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

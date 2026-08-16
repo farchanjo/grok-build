@@ -982,7 +982,19 @@ impl SessionActor {
             sampler_config.doom_loop_recovery = None;
         }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
-        self.sampler_handle.update_config(sampler_config);
+        // Recompute from the newly selected model + live credential binding so
+        // a model/config switch never copies prior generations blindly.
+        let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
+        let route = crate::session::route_context::resolve_for_models_manager(
+            &sampler_config,
+            &self.models_manager,
+            grok_home,
+        );
+        *self.route_context.borrow_mut() = Some(route.clone());
+        self.sampler_handle.update_config_with_route_context(
+            sampler_config,
+            xai_grok_inference::RouteContextUpdate::Replace(route),
+        );
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, _message: &str) {
         self.log_terminal_failure_safe(error_type, status_code, None);
@@ -1048,12 +1060,22 @@ impl SessionActor {
             status_code,
             Some(&provider),
         );
-        self.send_xai_notification(XaiSessionUpdate::RetryState(
-            crate::extensions::notification::RetryState::failed_with_provider(
-                msg.clone(),
-                provider,
+        let binding = self.frozen_route_binding_meta(
+            false,
+            provider.credential_generation,
+            &provider.provider_id,
+        );
+        let extra = binding.to_meta_map();
+        let extra = if extra.is_empty() { None } else { Some(extra) };
+        self.send_xai_notification_with_extra_meta(
+            XaiSessionUpdate::RetryState(
+                crate::extensions::notification::RetryState::failed_with_provider(
+                    msg.clone(),
+                    provider,
+                ),
             ),
-        ))
+            extra,
+        )
         .await;
         Err(
             acp::Error::internal_error().data(crate::inference::error::terminal_error_data(
@@ -1062,6 +1084,56 @@ impl SessionActor {
                 kind,
             )),
         )
+    }
+
+    /// Freeze exact-route repair binding meta from the live session route
+    /// context plus the issued failure generation. Additive private `_meta`
+    /// only — public failure shape is unchanged.
+    pub(crate) fn frozen_route_binding_meta(
+        &self,
+        host_fallback: bool,
+        failure_generation: u64,
+        provider_id: &str,
+    ) -> crate::extensions::notification::ProviderRouteBindingMeta {
+        use xai_grok_inference::RouteAuthority;
+        let frozen = self.route_context.borrow();
+        let authority = if host_fallback {
+            RouteAuthority::HostFallback
+        } else {
+            frozen
+                .as_ref()
+                .map(|r| r.authority())
+                .unwrap_or(RouteAuthority::Unverified)
+        };
+        let binding_complete = frozen.is_some() && authority.is_authoritative();
+        let instance = frozen
+            .as_ref()
+            .map(|r| r.instance_id().to_owned())
+            .unwrap_or_else(|| provider_id.to_owned());
+        let credential_route = frozen
+            .as_ref()
+            .map(|r| r.credential_route().as_str().to_owned())
+            .unwrap_or_default();
+        crate::extensions::notification::ProviderRouteBindingMeta {
+            provider_instance_id: instance,
+            credential_route,
+            route_authority: authority.as_str().to_owned(),
+            incarnation: frozen
+                .as_ref()
+                .and_then(|r| r.incarnation().map(str::to_owned)),
+            registry_generation: frozen
+                .as_ref()
+                .map(|r| r.registry_generation())
+                .unwrap_or(0),
+            host_fallback: authority.is_host_fallback(),
+            binding_generation: frozen.as_ref().map(|r| r.binding_generation()).unwrap_or(0),
+            binding_complete,
+            correlation_token: if failure_generation == 0 {
+                String::new()
+            } else {
+                failure_generation.to_string()
+            },
+        }
     }
 
     /// Issue the next provider-credential failure generation.

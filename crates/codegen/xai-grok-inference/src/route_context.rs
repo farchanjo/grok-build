@@ -170,6 +170,75 @@ impl RouteAuthority {
     pub const fn is_non_authoritative(self) -> bool {
         !self.is_authoritative()
     }
+
+    pub const fn is_host_fallback(self) -> bool {
+        matches!(self, Self::HostFallback)
+    }
+}
+
+/// Maximum accepted origin string length (scheme://host[:port]).
+const MAX_ORIGIN_LEN: usize = 256;
+
+/// Normalized origin (`scheme://host[:port]`) with userinfo, path, and query
+/// stripped. Rejects credential-bearing authority and non-http schemes.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NormalizedOrigin(String);
+
+impl NormalizedOrigin {
+    /// Parse a base URL into a bounded origin. Path, query, and fragment are
+    /// stripped. Non-http schemes, empty hosts, and credential-bearing
+    /// userinfo are rejected fail-closed (never retained).
+    pub fn from_base_url(base_url: &str) -> Result<Self, String> {
+        let parsed = reqwest::Url::parse(base_url).map_err(|_| "invalid origin url".to_owned())?;
+        match parsed.scheme() {
+            "http" | "https" => {}
+            _ => return Err("origin scheme must be http or https".to_owned()),
+        }
+        // Reject credential material in the authority (user:pass@host).
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err("origin must not carry userinfo".to_owned());
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "origin host required".to_owned())?
+            .to_ascii_lowercase();
+        if host.is_empty() {
+            return Err("origin host required".to_owned());
+        }
+        // Origin is scheme://host[:port] only — path/query/fragment never retained.
+        let origin = match parsed.port() {
+            Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+            None => format!("{}://{host}", parsed.scheme()),
+        };
+        if origin.len() > MAX_ORIGIN_LEN {
+            return Err("origin too long".to_owned());
+        }
+        Ok(Self(origin))
+    }
+
+    /// Best-effort host extract that never retains userinfo. Returns `None`
+    /// when the URL is invalid or carries credentials.
+    pub fn try_from_base_url(base_url: &str) -> Option<Self> {
+        Self::from_base_url(base_url).ok()
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn host(&self) -> &str {
+        self.0
+            .split_once("://")
+            .map(|(_, rest)| rest.split_once(':').map(|(h, _)| h).unwrap_or(rest))
+            .unwrap_or(self.0.as_str())
+    }
+}
+
+impl fmt::Display for NormalizedOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Optional pacing override attached to a route context.
@@ -322,6 +391,40 @@ impl ProviderRouteContext {
             self.incarnation.as_deref().unwrap_or("-")
         )
     }
+
+    /// Full account-aware pacing partition:
+    /// `(instance_id, credential_route, incarnation, origin, model, operation)`.
+    ///
+    /// Two accounts that share a host/model never collide. Missing origin falls
+    /// back to the empty string (still distinct from other instances).
+    pub fn pacing_partition(
+        &self,
+        model: &str,
+    ) -> (String, String, Option<String>, String, String, String) {
+        let origin = self
+            .origin
+            .clone()
+            .unwrap_or_default();
+        let model = self
+            .model_partition
+            .clone()
+            .unwrap_or_else(|| model.to_owned());
+        // Operation partition reserved for future multi-op surfaces; default
+        // "inference" keeps keys stable across the current request path.
+        let operation = "inference".to_owned();
+        (
+            self.instance_id.clone(),
+            self.credential_route.as_str().to_owned(),
+            self.incarnation.clone(),
+            origin,
+            model,
+            operation,
+        )
+    }
+
+    pub fn is_authoritative(&self) -> bool {
+        self.authority.is_authoritative()
+    }
 }
 
 impl Serialize for ProviderRouteContext {
@@ -467,7 +570,9 @@ impl ProviderRouteContextBuilder {
         self
     }
     pub fn origin_from_base_url(mut self, base_url: &str) -> Self {
-        self.origin = origin_from_url(base_url);
+        // Validated normalization only — credential-bearing or malformed URLs
+        // leave origin unset rather than retaining userinfo/path/query.
+        self.origin = NormalizedOrigin::try_from_base_url(base_url).map(|o| o.0);
         self
     }
     pub fn model_partition(mut self, m: impl Into<String>) -> Self {
@@ -514,13 +619,7 @@ impl ProviderRouteContextBuilder {
 }
 
 fn origin_from_url(base_url: &str) -> Option<String> {
-    // Lightweight host extract without the `url` crate dependency.
-    let rest = base_url
-        .strip_prefix("https://")
-        .or_else(|| base_url.strip_prefix("http://"))
-        .unwrap_or(base_url);
-    let hostport = rest.split('/').next().filter(|s| !s.is_empty())?;
-    Some(hostport.to_owned())
+    NormalizedOrigin::try_from_base_url(base_url).map(|o| o.0)
 }
 
 fn default_surface_and_route(kind: RouteProviderKind) -> (RouteApiSurface, RouteCredentialRoute) {
@@ -676,5 +775,47 @@ mod tests {
     fn serde_unknown_authority_fails() {
         let bad = r#"{"instance_id":"x","kind_label":"xai","credential_route":"xai_session","authority":"trusted"}"#;
         assert!(serde_json::from_str::<ProviderRouteContext>(bad).is_err());
+    }
+
+    #[test]
+    fn normalized_origin_rejects_userinfo_strips_path_query() {
+        let ok = NormalizedOrigin::from_base_url("https://openrouter.ai/api/v1").unwrap();
+        assert_eq!(ok.as_str(), "https://openrouter.ai");
+        assert!(
+            NormalizedOrigin::from_base_url("https://user:pass@openrouter.ai/api/v1").is_err(),
+            "userinfo must fail closed"
+        );
+        // Path/query are stripped, not retained as credential material.
+        let stripped = NormalizedOrigin::from_base_url("https://openrouter.ai/api/v1?x=1").unwrap();
+        assert_eq!(stripped.as_str(), "https://openrouter.ai");
+        assert!(NormalizedOrigin::from_base_url("ftp://openrouter.ai").is_err());
+        // Explicit non-default port is retained; default 443 is omitted by URL parsers.
+        let ported = NormalizedOrigin::from_base_url("https://OpenRouter.AI:8443/api/v1").unwrap();
+        assert_eq!(ported.as_str(), "https://openrouter.ai:8443");
+    }
+
+    #[test]
+    fn pacing_partition_includes_route_and_incarnation() {
+        let a = ProviderRouteContext::builder()
+            .instance_id("openai")
+            .provider_kind(RouteProviderKind::OpenAi)
+            .api_surface(RouteApiSurface::OpenAiPlatform)
+            .credential_route(RouteCredentialRoute::ApiKey)
+            .authority(RouteAuthority::Authoritative)
+            .origin_from_base_url("https://api.openai.com/v1")
+            .model_partition("gpt-4")
+            .build()
+            .unwrap();
+        let b = ProviderRouteContext::builder()
+            .instance_id("openai")
+            .provider_kind(RouteProviderKind::OpenAi)
+            .api_surface(RouteApiSurface::ChatGptInference)
+            .credential_route(RouteCredentialRoute::ChatGptOauth)
+            .authority(RouteAuthority::Authoritative)
+            .origin_from_base_url("https://api.openai.com/v1")
+            .model_partition("gpt-4")
+            .build()
+            .unwrap();
+        assert_ne!(a.pacing_partition("gpt-4"), b.pacing_partition("gpt-4"));
     }
 }
