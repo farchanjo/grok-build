@@ -103,8 +103,65 @@ pub fn resolve_for_models_manager(
 /// Production route resolution from an explicit **canonical selection** id.
 ///
 /// Catalog lookup is exact canonical first — never by upstream wire id in
-/// `InferenceConfig.model`.
+/// `InferenceConfig.model`. When the selection is present in the catalog, the
+/// selection's upstream wire model and provider origin are projected onto the
+/// inference inputs so a parent session's wire model / base URL cannot skew
+/// `model_partition`, origin, or surface selection for an explicit override.
 pub fn resolve_for_models_manager_with_selection(
+    inference: &xai_grok_inference::InferenceConfig,
+    models_manager: &crate::agent::models::ModelsManager,
+    canonical_selection_id: &str,
+    grok_home: Option<&Path>,
+) -> ProviderRouteContext {
+    let projected = project_inference_for_canonical_selection(
+        inference,
+        models_manager,
+        canonical_selection_id,
+    );
+    resolve_for_models_manager_with_selection_projected(
+        &projected,
+        models_manager,
+        canonical_selection_id,
+        grok_home,
+    )
+}
+
+/// Project the catalog selection's upstream wire model and provider origin onto
+/// a copy of the parent inference config. Parent session model/base_url are
+/// retained only when the selection is absent from the catalog.
+pub(crate) fn project_inference_for_canonical_selection(
+    inference: &xai_grok_inference::InferenceConfig,
+    models_manager: &crate::agent::models::ModelsManager,
+    canonical_selection_id: &str,
+) -> xai_grok_inference::InferenceConfig {
+    let models = models_manager.models();
+    let Some(entry) = models
+        .get(canonical_selection_id)
+        .or_else(|| crate::agent::config::find_model_by_id(&models, canonical_selection_id))
+    else {
+        return inference.clone();
+    };
+
+    let mut projected = inference.clone();
+    match entry.upstream_wire_id() {
+        Ok(upstream) => projected.model = upstream.into_string(),
+        Err(_) if !entry.info().model.is_empty() => {
+            projected.model = entry.info().model.clone();
+        }
+        Err(_) => {}
+    }
+    // Prefer live credential-resolved base (ChatGPT OAuth Codex vs Platform)
+    // over a bare catalog URL so surface selection matches final resolve.
+    let credentials = crate::agent::config::resolve_credentials(entry, None);
+    if !credentials.base_url.is_empty() {
+        projected.base_url = credentials.base_url;
+    } else if !entry.info().base_url.is_empty() {
+        projected.base_url = entry.info().base_url.clone();
+    }
+    projected
+}
+
+fn resolve_for_models_manager_with_selection_projected(
     inference: &xai_grok_inference::InferenceConfig,
     models_manager: &crate::agent::models::ModelsManager,
     canonical_selection_id: &str,
@@ -687,6 +744,276 @@ mod tests {
                 None,
             ),
             (0, RouteAuthority::Authoritative)
+        );
+    }
+
+    fn entry_on_provider(
+        wire_model: &str,
+        provider_id: &str,
+        kind: ModelProviderKind,
+        base_url: &str,
+    ) -> crate::agent::config::ModelEntry {
+        let mut entry = catalog_entry(wire_model, provider_id);
+        entry.info.base_url = base_url.to_owned();
+        entry.model_provider = Some(resolved(provider_id, kind));
+        entry
+    }
+
+    /// F-PR5-2: parent session wire model/base_url must not skew mint-time
+    /// partition/origin for an explicit child selection.
+    #[test]
+    fn selection_projects_child_upstream_and_origin_not_parent_wire_model() {
+        let dir = tempdir().unwrap();
+        let mut config = crate::agent::config::Config::default();
+        config.model_providers.insert(
+            "openrouter".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenRouter,
+                base_url: Some("https://openrouter.ai/api/v1".into()),
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "openrouter:gpt-4o".to_owned(),
+            entry_on_provider(
+                "gpt-4o",
+                "openrouter",
+                ModelProviderKind::OpenRouter,
+                "https://openrouter.ai/api/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("openrouter:gpt-4o"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        // Parent is an xAI session route; child override is OpenRouter.
+        let parent = InferenceConfig {
+            base_url: "https://api.x.ai/v1".into(),
+            model: "grok-3".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
+            ..InferenceConfig::default()
+        };
+        let projected =
+            project_inference_for_canonical_selection(&parent, &manager, "openrouter:gpt-4o");
+        assert_eq!(projected.model, "gpt-4o");
+        assert_eq!(projected.base_url, "https://openrouter.ai/api/v1");
+        assert_ne!(projected.model, parent.model);
+        assert_ne!(projected.base_url, parent.base_url);
+
+        let ctx = resolve_for_models_manager_with_selection(
+            &parent,
+            &manager,
+            "openrouter:gpt-4o",
+            Some(dir.path()),
+        );
+        assert_eq!(ctx.instance_id(), "openrouter");
+        assert_eq!(ctx.model_partition(), Some("gpt-4o"));
+        assert_eq!(ctx.provider_kind(), RouteProviderKind::OpenRouter);
+        // ExactRoute construction requires partition == upstream.
+        let canonical = xai_grok_models::CanonicalModelId::new("openrouter:gpt-4o").unwrap();
+        let upstream = xai_grok_models::UpstreamModelId::new("gpt-4o").unwrap();
+        assert!(
+            crate::agent::subagent::exact_route::ExactRoute::new(canonical, upstream, ctx)
+                .is_some(),
+            "mint must accept an override whose upstream differs from the parent wire model"
+        );
+    }
+
+    /// F-PR5-1: omitting grok_home zeros binding generation / Unverified;
+    /// isolated auth home preserves non-zero generation through re-resolve.
+    #[test]
+    fn goal_byok_binding_generation_requires_grok_home_and_matches_final() {
+        let dir = tempdir().unwrap();
+        let generation =
+            store_provider_api_key(dir.path(), OPENROUTER_API_KEY_SCOPE, "or-goal-key-AAAAAAAA")
+                .unwrap();
+        assert!(generation >= 1);
+
+        let mut config = crate::agent::config::Config::default();
+        config.model_providers.insert(
+            "openrouter".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenRouter,
+                base_url: Some("https://openrouter.ai/api/v1".into()),
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "openrouter:gpt-4o".to_owned(),
+            entry_on_provider(
+                "gpt-4o",
+                "openrouter",
+                ModelProviderKind::OpenRouter,
+                "https://openrouter.ai/api/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("openrouter:gpt-4o"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let parent = InferenceConfig {
+            base_url: "https://api.x.ai/v1".into(),
+            model: "grok-3".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::Xai,
+            ..InferenceConfig::default()
+        };
+
+        let without_home =
+            resolve_for_models_manager_with_selection(&parent, &manager, "openrouter:gpt-4o", None);
+        assert_eq!(without_home.binding_generation(), 0);
+        assert_eq!(
+            without_home.authority(),
+            RouteAuthority::Unverified,
+            "missing grok_home cannot prove BYOK binding (got credential {:?})",
+            without_home.credential_route()
+        );
+
+        let mint = resolve_for_models_manager_with_selection(
+            &parent,
+            &manager,
+            "openrouter:gpt-4o",
+            Some(dir.path()),
+        );
+        assert_eq!(mint.credential_route(), RouteCredentialRoute::ApiKey);
+        assert_eq!(mint.binding_generation(), generation);
+        assert_eq!(mint.authority(), RouteAuthority::Authoritative);
+
+        // Final handle_request re-resolve uses the same isolated home + selection.
+        let final_live = resolve_for_models_manager_with_selection(
+            &project_inference_for_canonical_selection(&parent, &manager, "openrouter:gpt-4o"),
+            &manager,
+            "openrouter:gpt-4o",
+            Some(dir.path()),
+        );
+        assert_eq!(mint, final_live);
+
+        let canonical = xai_grok_models::CanonicalModelId::new("openrouter:gpt-4o").unwrap();
+        let upstream = xai_grok_models::UpstreamModelId::new("gpt-4o").unwrap();
+        let mint_route = crate::agent::subagent::exact_route::ExactRoute::new(
+            canonical.clone(),
+            upstream.clone(),
+            mint,
+        )
+        .expect("mint route");
+        let final_route =
+            crate::agent::subagent::exact_route::ExactRoute::new(canonical, upstream, final_live)
+                .expect("final route");
+        assert!(
+            mint_route.matches_live(&final_route),
+            "goal mint with grok_home must survive final matches_live"
+        );
+        assert!(
+            !crate::agent::subagent::exact_route::ExactRoute::new(
+                xai_grok_models::CanonicalModelId::new("openrouter:gpt-4o").unwrap(),
+                xai_grok_models::UpstreamModelId::new("gpt-4o").unwrap(),
+                without_home,
+            )
+            .unwrap()
+            .matches_live(&final_route),
+            "omitting grok_home must not silently match an authoritative final route"
+        );
+    }
+
+    /// Explicit multi-account override must not borrow a sibling instance or
+    /// its base origin when minting durable exact routes.
+    #[test]
+    fn explicit_override_rejects_sibling_account_borrow_at_mint() {
+        let dir = tempdir().unwrap();
+        let mut config = crate::agent::config::Config::default();
+        for (id, host) in [
+            ("work-openai", "https://work.openai.example/v1"),
+            ("home-openai", "https://home.openai.example/v1"),
+        ] {
+            config.model_providers.insert(
+                id.to_owned(),
+                ModelProviderConfig {
+                    kind: ModelProviderKind::OpenAi,
+                    base_url: Some(host.into()),
+                    ..ModelProviderConfig::default()
+                },
+            );
+        }
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "work-openai:gpt-4o".to_owned(),
+            entry_on_provider(
+                "gpt-4o",
+                "work-openai",
+                ModelProviderKind::OpenAi,
+                "https://work.openai.example/v1",
+            ),
+        );
+        models.insert(
+            "home-openai:gpt-4o".to_owned(),
+            entry_on_provider(
+                "gpt-4o",
+                "home-openai",
+                ModelProviderKind::OpenAi,
+                "https://home.openai.example/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("work-openai:gpt-4o"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        // Parent session is parked on home; workflow/goal override selects work.
+        let parent_home = InferenceConfig {
+            base_url: "https://home.openai.example/v1".into(),
+            model: "gpt-4o".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::OpenAi,
+            ..InferenceConfig::default()
+        };
+        let work = resolve_for_models_manager_with_selection(
+            &parent_home,
+            &manager,
+            "work-openai:gpt-4o",
+            Some(dir.path()),
+        );
+        let home = resolve_for_models_manager_with_selection(
+            &parent_home,
+            &manager,
+            "home-openai:gpt-4o",
+            Some(dir.path()),
+        );
+        assert_eq!(work.instance_id(), "work-openai");
+        assert_eq!(home.instance_id(), "home-openai");
+        assert_ne!(work.instance_id(), home.instance_id());
+
+        let work_route = crate::agent::subagent::exact_route::ExactRoute::new(
+            xai_grok_models::CanonicalModelId::new("work-openai:gpt-4o").unwrap(),
+            xai_grok_models::UpstreamModelId::new("gpt-4o").unwrap(),
+            work,
+        )
+        .unwrap();
+        let home_route = crate::agent::subagent::exact_route::ExactRoute::new(
+            xai_grok_models::CanonicalModelId::new("home-openai:gpt-4o").unwrap(),
+            xai_grok_models::UpstreamModelId::new("gpt-4o").unwrap(),
+            home,
+        )
+        .unwrap();
+        assert!(
+            !work_route.matches_live(&home_route),
+            "sibling account routes must not match_live each other"
         );
     }
 }

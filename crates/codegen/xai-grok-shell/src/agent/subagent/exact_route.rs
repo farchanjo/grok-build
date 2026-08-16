@@ -27,21 +27,21 @@ impl ExactRoute {
         })
     }
 
-    pub(super) fn canonical(&self) -> &CanonicalModelId {
+    pub(crate) fn canonical(&self) -> &CanonicalModelId {
         &self.canonical
     }
 
-    pub(super) fn upstream(&self) -> &UpstreamModelId {
+    pub(crate) fn upstream(&self) -> &UpstreamModelId {
         &self.upstream
     }
 
-    pub(super) fn context(&self) -> &ProviderRouteContext {
+    pub(crate) fn context(&self) -> &ProviderRouteContext {
         &self.context
     }
 
     /// Exact routes never silently bind a sibling account, a recreated
     /// provider, or a rotated durable credential binding.
-    pub(super) fn matches_live(&self, live: &Self) -> bool {
+    pub(crate) fn matches_live(&self, live: &Self) -> bool {
         self.canonical == live.canonical
             && self.upstream == live.upstream
             && self.context.instance_id() == live.context.instance_id()

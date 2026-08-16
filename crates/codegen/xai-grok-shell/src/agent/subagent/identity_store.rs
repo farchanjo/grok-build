@@ -507,6 +507,63 @@ mod tests {
         )));
     }
 
+    /// Durable resume must retain non-zero binding generation from mint; a
+    /// zero-generation Unverified mint must not resume against an authoritative
+    /// live route (F-PR5-1 failure mode).
+    #[test]
+    fn durable_resume_preserves_nonzero_binding_generation_and_rejects_zero_gen_mint() {
+        let authoritative = route("openrouter", "11111111-1111-1111-1111-111111111111", 7);
+        let owner = {
+            let root = tempfile::tempdir().unwrap();
+            let parent = root.path().join("parent");
+            std::fs::create_dir(&parent).unwrap();
+            let meta = meta("goal-child", authoritative.canonical().as_str());
+            commit_initial(
+                &parent,
+                "goal-child",
+                &meta,
+                &AssignmentKey::goal("goal-1", "planner", None).unwrap(),
+                &authoritative,
+            )
+            .unwrap()
+        };
+        assert!(owner.identity().matches_live(&authoritative));
+        assert!(
+            owner.identity().matches_live(&route(
+                "openrouter",
+                "11111111-1111-1111-1111-111111111111",
+                7,
+            )),
+            "resume must accept the same non-zero binding generation"
+        );
+
+        let zero_gen = ExactRoute::new(
+            CanonicalModelId::new("openrouter:gpt-4o").unwrap(),
+            UpstreamModelId::new("gpt-4o").unwrap(),
+            ProviderRouteContext::builder()
+                .instance_id("openrouter")
+                .incarnation("11111111-1111-1111-1111-111111111111")
+                .provider_kind(RouteProviderKind::OpenAi)
+                .api_surface(RouteApiSurface::OpenAiPlatform)
+                .credential_route(RouteCredentialRoute::ApiKey)
+                .registry_generation(9)
+                .binding_generation(0)
+                .authority(RouteAuthority::Unverified)
+                .model_partition("gpt-4o")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !owner.identity().matches_live(&zero_gen),
+            "durable assigned identity must reject a zero-generation live route"
+        );
+        assert!(
+            !zero_gen.matches_live(&authoritative),
+            "in-memory exact route must also reject binding/authority drift"
+        );
+    }
+
     #[test]
     fn legacy_standalone_meta_remains_compatible_and_partial_or_mismatch_fails() {
         let root = tempfile::tempdir().unwrap();

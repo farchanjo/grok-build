@@ -1041,11 +1041,17 @@ impl SessionActor {
             .assigned_spawn_sender
             .as_ref()
             .map(|sender| {
+                // Pass the real isolated auth profile so BYOK/OAuth binding
+                // generations and authority match final handle_request resolve.
+                let grok_home = self
+                    .auth_manager
+                    .as_ref()
+                    .map(|manager| manager.grok_home().to_path_buf());
                 crate::agent::subagent::assigned_spawn::GoalAssignedSpawnSender::new(
                     sender,
                     self.models_manager.clone(),
                     inference_config,
-                    None,
+                    grok_home,
                     goal_id,
                 )
             })
