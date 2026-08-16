@@ -263,16 +263,12 @@ impl JsonlStorageAdapter {
         let session_dirs = self.scan_session_dirs(cwd)?;
         let mut summaries = Vec::new();
         for session_dir in session_dirs {
-            let summary_path = session_dir.join(super::SUMMARY_FILE);
-            match std::fs::read(&summary_path) {
-                Ok(bytes) => {
-                    if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
-                        && !summary.is_hidden()
-                    {
-                        summaries.push(summary);
-                    }
-                }
-                Err(_) => continue,
+            // Contained read only. Intermediate `sessions` symlink / owner /
+            // mode failures are skipped (picker must not path-adopt attacker
+            // summaries). Corrupt JSON is also skipped.
+            match super::model_route::read_summary_contained(&session_dir) {
+                Ok(summary) if !summary.is_hidden() => summaries.push(summary),
+                _ => continue,
             }
         }
         summaries.sort_by_cached_key(|s| {
@@ -283,39 +279,20 @@ impl JsonlStorageAdapter {
         });
         Ok(summaries)
     }
-    /// List the N most recently modified session summaries across all
-    /// workspaces.
+    /// List the N most recently active session summaries across all workspaces.
     ///
-    /// Instead of reading every `summary.json` (expensive at scale — ~12K
-    /// files), this stats each file to get its mtime, sorts by mtime, and
-    /// only reads the top `limit` files. On a machine with ~12K sessions
-    /// this reduces cold-boot `workspace_list` from ~3s to ~200ms.
-    /// Final order among candidates uses `last_active_at` else `updated_at`.
+    /// Each candidate is loaded via the multi-component trusted-root walk.
+    /// Entries whose walk fails (ELOOP on intermediate `sessions`, owner
+    /// mismatch, missing summary) are **skipped** — never path-read.
+    /// Order uses `last_active_at` else `updated_at` (not path mtime, which
+    /// would follow a planted `sessions` symlink).
     pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
         let session_dirs = self.scan_session_dirs(None)?;
-        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> =
-            Vec::with_capacity(session_dirs.len());
+        let mut summaries = Vec::new();
         for session_dir in session_dirs {
-            let summary_path = session_dir.join(super::SUMMARY_FILE);
-            if let Ok(meta) = std::fs::metadata(&summary_path)
-                && let Ok(mtime) = meta.modified()
-            {
-                candidates.push((summary_path, mtime));
-            }
-        }
-        candidates.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.1));
-        candidates.truncate(limit);
-        let mut summaries = Vec::with_capacity(candidates.len());
-        for (summary_path, _) in candidates {
-            match std::fs::read(&summary_path) {
-                Ok(bytes) => {
-                    if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
-                        && !summary.is_hidden()
-                    {
-                        summaries.push(summary);
-                    }
-                }
-                Err(_) => continue,
+            match super::model_route::read_summary_contained(&session_dir) {
+                Ok(summary) if !summary.is_hidden() => summaries.push(summary),
+                _ => continue,
             }
         }
         summaries.sort_by_cached_key(|s| {
@@ -324,6 +301,9 @@ impl JsonlStorageAdapter {
                 s.info.id.0.to_string(),
             )
         });
+        if summaries.len() > limit {
+            summaries.truncate(limit);
+        }
         Ok(summaries)
     }
     async fn append_jsonl<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> io::Result<()> {
@@ -1339,7 +1319,8 @@ impl JsonlStorageAdapter {
             }
         }
         // Ensure summary exists even when copy_route wrote nothing (no source pair).
-        if !target_dir.join("summary.json").exists() {
+        // Contained probe — do not Path::exists (follows intermediate symlinks).
+        if super::model_route::read_summary_contained(&target_dir).is_err() {
             super::model_route::commit_summary_and_companion(
                 &target_dir,
                 &target_summary,
@@ -1624,19 +1605,24 @@ async fn next_compaction_segment_index(compaction_dir: &std::path::Path) -> u64 
 impl StorageAdapter for JsonlStorageAdapter {
     async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary> {
         let dir = self.session_dir(info);
-        std::fs::create_dir_all(&dir)?;
-        let summary_path = self.summary_file(info);
-        if Path::new(&summary_path).exists() {
-            tracing::info!("Loading existing session from JSONL");
-            let bytes = tokio::fs::read(&summary_path).await?;
-            serde_json::from_slice::<Summary>(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        } else {
-            tracing::info!("Creating new session in JSONL");
-            let mut summary = Summary::new(info, model_id)?;
-            summary.sandbox_profile = xai_grok_sandbox::configured_profile_name().map(String::from);
-            self.write_summary_sync(info, &summary)?;
-            Ok(summary)
+        // Contained existence/load: never Path::exists / tokio::fs::read (those
+        // follow a planted intermediate `sessions` symlink).
+        match super::model_route::read_summary_contained(&dir) {
+            Ok(summary) => {
+                tracing::info!("Loading existing session from JSONL");
+                Ok(summary)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                tracing::info!("Creating new session in JSONL");
+                std::fs::create_dir_all(&dir)?;
+                let mut summary = Summary::new(info, model_id)?;
+                summary.sandbox_profile =
+                    xai_grok_sandbox::configured_profile_name().map(String::from);
+                self.write_summary_sync(info, &summary)?;
+                Ok(summary)
+            }
+            // ELOOP / owner / mode / TOCTOU / invalid data: fail closed.
+            Err(e) => Err(e),
         }
     }
     async fn update_session_title(&self, info: &Info, session_title: String) -> io::Result<()> {
