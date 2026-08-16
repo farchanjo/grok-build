@@ -757,12 +757,12 @@ pub(crate) struct SessionActor {
     /// `maybe_notify_git_branch` no-ops — no git subprocess.
     git_head_enabled: bool,
     /// Shared models manager for etag-triggered refresh from response headers.
+    /// Picker/default UI only — session route uses [`Self::selection_model_id`].
     pub(crate) models_manager: crate::agent::models::ModelsManager,
-    /// Frozen production route context for the active model, recomputed at
-    /// spawn and every `prepare_sampler_for_turn`. Credential-free sidecar
-    /// used for 401 binding meta and exact-route repair correlation.
-    pub(crate) route_context:
-        std::cell::RefCell<Option<xai_grok_inference::ProviderRouteContext>>,
+    /// Session-private canonical selection for route context (not manager global).
+    pub(crate) selection_model_id: std::cell::RefCell<acp::ModelId>,
+    /// Frozen credential-free route sidecar for the selected provider.
+    pub(crate) route_context: std::cell::RefCell<Option<xai_grok_inference::ProviderRouteContext>>,
     /// Stable display path for forked sessions (original project path).
     ///
     /// Used by `build_user_message_prefix` (user-message `Workspace Path`),
