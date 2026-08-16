@@ -28,6 +28,14 @@ pub struct ProviderTomlPatch {
     pub extra_headers: Option<IndexMap<String, String>>,
     /// When set, replaces the entire `[model_providers.<id>.capabilities]` table.
     pub capabilities: Option<IndexMap<String, bool>>,
+    /// OpenRouter fallback model slugs (`openrouter_fallback_models = [...]`).
+    pub openrouter_fallback_models: Option<Vec<String>>,
+    /// Explicit OpenRouter request-pacing opt-in.
+    pub openrouter_pacing: Option<bool>,
+    /// Optional additive sidecar `api_surface`.
+    pub api_surface: Option<String>,
+    /// Optional additive sidecar `credential_route`.
+    pub credential_route: Option<String>,
 }
 
 fn read_document(path: &Path) -> Result<toml_edit::DocumentMut, ProviderLifecycleError> {
@@ -45,21 +53,58 @@ fn read_document(path: &Path) -> Result<toml_edit::DocumentMut, ProviderLifecycl
 }
 
 fn atomic_write_document(path: &Path, doc: &toml_edit::DocumentMut) -> io::Result<()> {
+    // Refuse to write through a symlink final path (no-follow target safety).
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to write config.toml through a symlink",
+            ));
+        }
+        Ok(_) | Err(_) => {}
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("toml.tmp");
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
     {
-        let mut f = fs::File::create(&tmp)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options.open(&tmp)?;
         f.write_all(doc.to_string().as_bytes())?;
+        f.flush()?;
         f.sync_all()?;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        let meta = fs::metadata(&tmp)?;
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o777 != 0o600 {
+            perms.set_mode(0o600);
+            fs::set_permissions(&tmp, perms)?;
+        }
     }
-    fs::rename(&tmp, path)?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let mut perms = meta.permissions();
+            if perms.mode() & 0o777 != 0o600 {
+                perms.set_mode(0o600);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -131,6 +176,22 @@ fn apply_patch_to_table(table: &mut toml_edit::Table, patch: &ProviderTomlPatch)
             c[k.as_str()] = toml_edit::value(*val);
         }
         table["capabilities"] = toml_edit::Item::Table(c);
+    }
+    if let Some(models) = &patch.openrouter_fallback_models {
+        let mut arr = toml_edit::Array::new();
+        for m in models {
+            arr.push(m.as_str());
+        }
+        table["openrouter_fallback_models"] = toml_edit::Item::Value(toml_edit::Value::Array(arr));
+    }
+    if let Some(v) = patch.openrouter_pacing {
+        table["openrouter_pacing"] = toml_edit::value(v);
+    }
+    if let Some(v) = &patch.api_surface {
+        table["api_surface"] = toml_edit::value(v.as_str());
+    }
+    if let Some(v) = &patch.credential_route {
+        table["credential_route"] = toml_edit::value(v.as_str());
     }
 }
 
@@ -319,4 +380,162 @@ x = 1
         .unwrap_err();
         assert!(matches!(err, ProviderLifecycleError::ReservedId(_)));
     }
+
+    #[test]
+    fn openrouter_preferences_preserve_sibling_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[model_providers.openrouter_work]
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+# keep
+enabled = true
+"#,
+        )
+        .unwrap();
+        let id = ProviderId::new("openrouter_work").unwrap();
+        apply_openrouter_preferences(
+            &path,
+            &id,
+            &OpenRouterPrefsPatch {
+                data_collection: Some(Some("deny".into())),
+                require_parameters: Some(Some(true)),
+                allow_fallbacks: Some(Some(false)),
+                zdr: Some(Some(true)),
+                order: Some(vec!["openai".into(), "anthropic".into()]),
+                only: None,
+                ignore: Some(vec!["deepinfra".into()]),
+                quantizations: Some(vec!["int8".into()]),
+                sort: Some(Some("latency".into())),
+            },
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep"));
+        assert!(text.contains("data_collection"));
+        assert!(text.contains("deny"));
+        assert!(text.contains("require_parameters"));
+        assert!(text.contains("latency"));
+    }
+}
+
+/// Nested OpenRouter `provider_preferences` field patch.
+#[derive(Debug, Clone, Default)]
+pub struct OpenRouterPrefsPatch {
+    pub data_collection: Option<Option<String>>,
+    pub require_parameters: Option<Option<bool>>,
+    pub allow_fallbacks: Option<Option<bool>>,
+    pub zdr: Option<Option<bool>>,
+    pub order: Option<Vec<String>>,
+    pub only: Option<Vec<String>>,
+    pub ignore: Option<Vec<String>>,
+    pub quantizations: Option<Vec<String>>,
+    pub sort: Option<Option<String>>,
+}
+
+/// Nested OpenRouter `provider_preferences` patch applied under
+/// `[model_providers.<id>.provider_preferences]`.
+pub fn apply_openrouter_preferences(
+    config_path: &Path,
+    provider_id: &ProviderId,
+    patch: &OpenRouterPrefsPatch,
+) -> Result<(), ProviderLifecycleError> {
+    let mut doc = read_document(config_path)?;
+    let providers = ensure_model_providers(&mut doc);
+    if !providers.contains_key(provider_id.as_str()) {
+        return Err(ProviderLifecycleError::NotFound(
+            provider_id.as_str().to_owned(),
+        ));
+    }
+    let table = providers
+        .get_mut(provider_id.as_str())
+        .and_then(|i| i.as_table_mut())
+        .ok_or_else(|| {
+            ProviderLifecycleError::Validation(format!(
+                "model_providers.{} is not a table",
+                provider_id.as_str()
+            ))
+        })?;
+    if !table.contains_key("provider_preferences") {
+        table["provider_preferences"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let prefs = table
+        .get_mut("provider_preferences")
+        .and_then(|i| i.as_table_mut())
+        .ok_or_else(|| {
+            ProviderLifecycleError::Validation("provider_preferences is not a table".into())
+        })?;
+    if let Some(opt) = &patch.data_collection {
+        match opt {
+            Some(v) => prefs["data_collection"] = toml_edit::value(v.as_str()),
+            None => {
+                let _ = prefs.remove("data_collection");
+            }
+        }
+    }
+    if let Some(opt) = patch.require_parameters {
+        match opt {
+            Some(v) => prefs["require_parameters"] = toml_edit::value(v),
+            None => {
+                let _ = prefs.remove("require_parameters");
+            }
+        }
+    }
+    if let Some(opt) = patch.allow_fallbacks {
+        match opt {
+            Some(v) => prefs["allow_fallbacks"] = toml_edit::value(v),
+            None => {
+                let _ = prefs.remove("allow_fallbacks");
+            }
+        }
+    }
+    if let Some(opt) = patch.zdr {
+        match opt {
+            Some(v) => prefs["zdr"] = toml_edit::value(v),
+            None => {
+                let _ = prefs.remove("zdr");
+            }
+        }
+    }
+    if let Some(opt) = &patch.sort {
+        match opt {
+            Some(v) => prefs["sort"] = toml_edit::value(v.as_str()),
+            None => {
+                let _ = prefs.remove("sort");
+            }
+        }
+    }
+    if let Some(order) = &patch.order {
+        let mut arr = toml_edit::Array::new();
+        for o in order {
+            arr.push(o.as_str());
+        }
+        prefs["order"] = toml_edit::Item::Value(toml_edit::Value::Array(arr));
+    }
+    if let Some(only) = &patch.only {
+        let mut arr = toml_edit::Array::new();
+        for o in only {
+            arr.push(o.as_str());
+        }
+        prefs["only"] = toml_edit::Item::Value(toml_edit::Value::Array(arr));
+    }
+    if let Some(ignore) = &patch.ignore {
+        let mut arr = toml_edit::Array::new();
+        for o in ignore {
+            arr.push(o.as_str());
+        }
+        prefs["ignore"] = toml_edit::Item::Value(toml_edit::Value::Array(arr));
+    }
+    if let Some(q) = &patch.quantizations {
+        let mut arr = toml_edit::Array::new();
+        for o in q {
+            arr.push(o.as_str());
+        }
+        prefs["quantizations"] = toml_edit::Item::Value(toml_edit::Value::Array(arr));
+    }
+    atomic_write_document(config_path, &doc)
+        .map_err(|e| ProviderLifecycleError::Validation(e.to_string()))
 }

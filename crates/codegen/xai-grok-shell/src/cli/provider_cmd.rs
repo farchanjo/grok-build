@@ -2,14 +2,11 @@
 
 use crate::agent::providers::{ProviderId as BuiltInProviderId, ProviderManager};
 use crate::provider_registry::id::{ProviderId, ProviderRef};
-use crate::provider_registry::lifecycle::validate_http_base_url;
 use crate::provider_registry::secrets::{
     ProviderCredentialKind, admin_key_scope, application_key_scope, clear_provider_secret,
     store_provider_secret,
 };
-use crate::provider_registry::toml_edit::{
-    ProviderTomlPatch, disable_provider, enable_provider, remove_provider, upsert_provider,
-};
+use crate::provider_registry::toml_edit::remove_provider;
 use crate::provider_registry::{CatalogCacheStore, remove_all_provider_caches};
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -156,52 +153,54 @@ pub async fn run_provider_lifecycle_cli(args: ProviderLifecycleArgs) -> i32 {
 }
 
 async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
+    use crate::provider_registry::ProviderManagementService;
+    use crate::provider_registry::management::dto::{
+        ProviderAddRequest, ProviderSavePatch, ProviderSaveRequest,
+    };
     use ProviderLifecycleCommand::*;
     match args.command {
         List => {
-            let manager = ProviderManager::default();
-            let mut rows = Vec::new();
-            for id in BuiltInProviderId::ALL {
-                let status = manager.status(id);
-                rows.push(json!({
-                    "id": match id {
-                        BuiltInProviderId::Xai => "xai",
-                        BuiltInProviderId::OpenAi => "openai",
-                        BuiltInProviderId::OpenRouter => "openrouter",
-                        BuiltInProviderId::Anthropic => "anthropic",
-                    },
-                    "kind": "built_in",
-                    "display_name": status.display_name,
-                    "state": format!("{:?}", status.state),
-                }));
-            }
-            // Configured providers from config.toml
-            if let Ok(raw) = std::fs::read_to_string(config_path(None))
-                && let Ok(val) = raw.parse::<toml::Value>()
-            {
-                if let Some(table) = val.get("model_providers").and_then(|v| v.as_table()) {
-                    for (id, entry) in table {
-                        rows.push(json!({
-                            "id": id,
-                            "kind": entry.get("kind").and_then(|v| v.as_str()).unwrap_or("openai_compatible"),
-                            "display_name": entry.get("display_name").and_then(|v| v.as_str()),
-                            "enabled": entry.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-                            "base_url": entry.get("base_url").and_then(|v| v.as_str()),
-                        }));
-                    }
-                }
-            }
-            crate::cli::output::write_json(&rows).map_err(|e| e.to_string())?;
+            let home = if let Some(cfg) = None::<PathBuf> {
+                let _ = cfg;
+                grok_home()
+            } else {
+                grok_home()
+            };
+            let svc = ProviderManagementService::new(home);
+            let snap = svc.list_snapshot()?;
+            let rows: Vec<_> = snap
+                .rows
+                .iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "kind": r.kind,
+                        "display_name": r.display_name,
+                        "enabled": r.enabled,
+                        "is_built_in": r.is_built_in,
+                        "base_url": r.base_url,
+                        "status": r.status_label,
+                        "generation": snap.generation.get(),
+                        "credentials": {
+                            "has_application_key": r.credentials.has_application_key,
+                            "has_admin_key": r.credentials.has_admin_key,
+                            "has_oauth": r.credentials.has_oauth,
+                        },
+                    })
+                })
+                .collect();
+            crate::cli::output::write_json(&json!({
+                "generation": snap.generation.get(),
+                "providers": rows,
+                "warnings": snap.warnings,
+            }))
+            .map_err(|e| e.to_string())?;
             Ok(0)
         }
         Show { id } => {
-            let pref = ProviderRef::parse(&id).map_err(|e| e.to_string())?;
-            crate::cli::output::write_json(&json!({
-                "id": pref.id_str(),
-                "display_name": pref.display_name(),
-                "is_built_in": pref.is_built_in(),
-            }))
-            .map_err(|e| e.to_string())?;
+            let svc = ProviderManagementService::from_grok_home();
+            let detail = svc.detail(&id)?;
+            crate::cli::output::write_json(&detail).map_err(|e| e.to_string())?;
             Ok(0)
         }
         Add {
@@ -214,27 +213,44 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             admin_env_key,
             config,
         } => {
-            let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            validate_http_base_url(&base_url).map_err(|e| e.to_string())?;
-            let path = config_path(config);
-            upsert_provider(
-                &path,
-                &pid,
-                &ProviderTomlPatch {
-                    base_url: Some(base_url),
-                    display_name,
-                    kind: Some(kind),
-                    admin_base_url,
-                    env_key,
-                    admin_env_key,
-                    enabled: Some(true),
-                    ..Default::default()
-                },
-                false,
-            )
+            let home = config
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(grok_home);
+            let svc = ProviderManagementService::new(home);
+            // Optional env key names are applied as a follow-up metadata patch.
+            let result = svc.add(ProviderAddRequest {
+                id: id.clone(),
+                kind,
+                base_url,
+                display_name,
+                admin_base_url,
+                enabled: true,
+                expected_generation: svc.current_generation(),
+            });
+            if !result.ok {
+                return Err(result.error.unwrap_or_else(|| "add failed".into()));
+            }
+            if env_key.is_some() || admin_env_key.is_some() {
+                let save = svc.save(ProviderSaveRequest {
+                    id: id.clone(),
+                    expected_generation: result.generation,
+                    patch: ProviderSavePatch {
+                        env_key,
+                        admin_env_key,
+                        ..Default::default()
+                    },
+                });
+                if !save.ok {
+                    return Err(save.error.unwrap_or_else(|| "env key patch failed".into()));
+                }
+            }
+            crate::cli::output::write_json(&json!({
+                "ok": true,
+                "id": id,
+                "generation": result.generation.get(),
+            }))
             .map_err(|e| e.to_string())?;
-            crate::cli::output::write_json(&json!({"ok": true, "id": pid.as_str()}))
-                .map_err(|e| e.to_string())?;
             Ok(0)
         }
         Edit {
@@ -246,14 +262,15 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             admin_env_key,
             config,
         } => {
-            let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            if let Some(ref u) = base_url {
-                validate_http_base_url(u).map_err(|e| e.to_string())?;
-            }
-            upsert_provider(
-                &config_path(config),
-                &pid,
-                &ProviderTomlPatch {
+            let home = config
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(grok_home);
+            let svc = ProviderManagementService::new(home);
+            let result = svc.save(ProviderSaveRequest {
+                id: id.clone(),
+                expected_generation: svc.current_generation(),
+                patch: ProviderSavePatch {
                     base_url,
                     display_name,
                     admin_base_url,
@@ -261,21 +278,40 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
                     admin_env_key,
                     ..Default::default()
                 },
-                true,
-            )
+            });
+            if !result.ok {
+                return Err(result.error.unwrap_or_else(|| "edit failed".into()));
+            }
+            crate::cli::output::write_json(&json!({
+                "ok": true,
+                "id": id,
+                "generation": result.generation.get(),
+            }))
             .map_err(|e| e.to_string())?;
-            crate::cli::output::write_json(&json!({"ok": true, "id": pid.as_str()}))
-                .map_err(|e| e.to_string())?;
             Ok(0)
         }
         Enable { id, config } => {
-            let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            enable_provider(&config_path(config), &pid).map_err(|e| e.to_string())?;
+            let home = config
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(grok_home);
+            let svc = ProviderManagementService::new(home);
+            let result = svc.set_enabled(&id, true, svc.current_generation());
+            if !result.ok {
+                return Err(result.error.unwrap_or_else(|| "enable failed".into()));
+            }
             Ok(0)
         }
         Disable { id, config } => {
-            let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            disable_provider(&config_path(config), &pid).map_err(|e| e.to_string())?;
+            let home = config
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(grok_home);
+            let svc = ProviderManagementService::new(home);
+            let result = svc.set_enabled(&id, false, svc.current_generation());
+            if !result.ok {
+                return Err(result.error.unwrap_or_else(|| "disable failed".into()));
+            }
             Ok(0)
         }
         Remove {
@@ -427,41 +463,18 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             Ok(0)
         }
         Test { id } => {
-            use crate::agent::providers::{
-                ProviderConnectionTest, ProviderId as BuiltInId, ProviderManager,
-            };
-            use crate::provider_registry::id::BuiltInProviderId;
-            if let Some(built_in) = BuiltInProviderId::parse(&id) {
-                let manager = ProviderManager::new(grok_home());
-                let backend = match built_in {
-                    BuiltInProviderId::Xai => BuiltInId::Xai,
-                    BuiltInProviderId::OpenAi => BuiltInId::OpenAi,
-                    BuiltInProviderId::OpenRouter => BuiltInId::OpenRouter,
-                    BuiltInProviderId::Anthropic => BuiltInId::Anthropic,
-                };
-                let result = manager.test_connection(backend).await;
-                let (ok, state) = match result {
-                    Ok(ProviderConnectionTest::Connected { .. }) => (true, "connected"),
-                    Ok(ProviderConnectionTest::NotConfigured) => (false, "not_configured"),
-                    Ok(ProviderConnectionTest::Rejected) => (false, "rejected"),
-                    Ok(ProviderConnectionTest::Unavailable) => (false, "unavailable"),
-                    Err(_) => (false, "error"),
-                };
-                crate::cli::output::write_json(&json!({
-                    "ok": ok,
-                    "id": built_in.as_str(),
-                    "state": state,
-                }))
-                .map_err(|e| e.to_string())?;
-                return Ok(if ok { 0 } else { 1 });
-            }
+            let svc = ProviderManagementService::from_grok_home();
+            let snap = svc.test_connection(&id).await;
             crate::cli::output::write_json(&json!({
-                "ok": true,
-                "id": id,
-                "note": "use `grok openai --provider <id> models list` for a live non-mutating probe"
+                "ok": snap.connected,
+                "id": snap.provider_id,
+                "label": snap.label,
+                "detail": snap.detail,
+                "error": snap.error,
+                "generation": snap.generation.get(),
             }))
             .map_err(|e| e.to_string())?;
-            Ok(0)
+            Ok(if snap.connected { 0 } else { 1 })
         }
     }
 }

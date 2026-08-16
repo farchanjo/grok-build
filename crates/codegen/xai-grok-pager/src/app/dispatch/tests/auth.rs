@@ -909,6 +909,7 @@ fn provider_operation_complete_token_race_safety() {
             claude_cli_status: None,
             repair: Some(scope(10, "openrouter", 1)),
             credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -939,6 +940,7 @@ fn provider_operation_complete_token_race_safety() {
             claude_cli_status: None,
             repair: Some(sibling),
             credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -957,6 +959,7 @@ fn provider_operation_complete_token_race_safety() {
             claude_cli_status: None,
             repair: None,
             credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -980,6 +983,7 @@ fn provider_operation_complete_token_race_safety() {
             claude_cli_status: None,
             repair: Some(b.clone()),
             credential_write_receipt: Some(b.write_receipt(1)),
+            management: None,
         }),
         &mut app,
     );
@@ -1004,6 +1008,7 @@ fn provider_operation_complete_token_race_safety() {
             claude_cli_status: None,
             repair: Some(b),
             credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -1069,6 +1074,7 @@ fn openai_repair_token_does_not_resume_other_providers() {
             claude_cli_status: None,
             repair: Some(openai_scope.clone()),
             credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -1115,6 +1121,7 @@ fn openai_repair_token_does_not_resume_other_providers() {
             claude_cli_status: None,
             repair: Some(openai_scope),
             credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -2009,6 +2016,7 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
             claude_cli_status: None,
             repair: Some(scope.clone()),
             credential_write_receipt: None,
+            management: None,
         }),
         &mut app,
     );
@@ -2032,7 +2040,8 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(sibling.clone()),
                 credential_write_receipt: Some(sibling.write_receipt(post_gen)),
-            }),
+            management: None,
+        }),
             &mut app,
         );
         assert!(app.agents[&id].reauth_stashed_prompt.is_some());
@@ -2057,7 +2066,8 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(stale.clone()),
                 credential_write_receipt: Some(stale.write_receipt(post_gen)),
-            }),
+            management: None,
+        }),
             &mut app,
         );
         assert!(app.agents[&id].reauth_stashed_prompt.is_some());
@@ -2082,7 +2092,8 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(scope.clone()),
                 credential_write_receipt: Some(scope.write_receipt(post_gen)),
-            }),
+            management: None,
+        }),
             &mut app,
         );
         assert!(
@@ -2115,7 +2126,8 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(scope.clone()),
                 credential_write_receipt: Some(receipt),
-            }),
+            management: None,
+        }),
             &mut app,
         );
         assert!(
@@ -2142,7 +2154,8 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(scope.clone()),
                 credential_write_receipt: Some(scope.write_receipt(live_post)),
-            }),
+            management: None,
+        }),
             &mut app,
         );
         assert!(!effects
@@ -2219,6 +2232,7 @@ fn store_bound_clear_and_replace_rejects_stale_receipt() {
             claude_cli_status: None,
             repair: Some(scope.clone()),
             credential_write_receipt: Some(scope.write_receipt(2)),
+            management: None,
         }),
         &mut app,
     );
@@ -2245,6 +2259,7 @@ fn store_bound_clear_and_replace_rejects_stale_receipt() {
             claude_cli_status: None,
             repair: Some(scope.clone()),
             credential_write_receipt: Some(scope.write_receipt(post)),
+            management: None,
         }),
         &mut app,
     );
@@ -2366,6 +2381,7 @@ fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
             claude_cli_status: None,
             repair: Some(oauth_scope.clone()),
             credential_write_receipt: Some(api_key_receipt),
+            management: None,
         }),
         &mut app,
     );
@@ -2423,6 +2439,7 @@ fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
             claude_cli_status: None,
             repair: Some(api_scope.clone()),
             credential_write_receipt: Some(oauth_receipt),
+            management: None,
         }),
         &mut app,
     );
@@ -2443,6 +2460,7 @@ fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
             claude_cli_status: None,
             repair: Some(api_scope.clone()),
             credential_write_receipt: Some(api_scope.write_receipt(api_post)),
+            management: None,
         }),
         &mut app,
     );
