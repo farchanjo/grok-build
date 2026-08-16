@@ -3884,6 +3884,23 @@ pub fn resolve_model_list(
     }
     resolved
 }
+
+/// Internal catalog build returning the private origin side map.
+pub(crate) fn resolve_model_list_with_origins(
+    cfg: &Config,
+    prefetched: Option<IndexMap<String, ModelEntry>>,
+) -> (
+    IndexMap<String, ModelEntry>,
+    crate::agent::model_identity::CatalogOrigins,
+) {
+    let user_authored_keys: std::collections::HashSet<String> =
+        cfg.config_models.keys().cloned().collect();
+    let catalog = resolve_model_list(cfg, prefetched);
+    let origins =
+        crate::agent::model_identity::build_catalog_origins(&catalog, &user_authored_keys);
+    (catalog, origins)
+}
+
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers`
 /// into every model as a base. The presence check is case-insensitive because
 /// the sampler lowers these into an `http::HeaderMap`, so a global `X-Foo` must
@@ -3949,14 +3966,22 @@ pub fn default_model_entries(endpoints: &EndpointsConfig) -> IndexMap<String, Mo
         .collect()
 }
 /// Resolve a model against the available model map.
-/// Checks the map key (id) first, then falls back to a slug scan.
+///
+/// Fail-closed account-aware resolve: exact key, permanent reserved alias,
+/// unique legacy alias, else None (ambiguous never binds first/last).
 pub fn find_model_by_id<'a>(
     models: &'a IndexMap<String, ModelEntry>,
     model_id: &str,
 ) -> Option<&'a ModelEntry> {
-    models
-        .get(model_id)
-        .or_else(|| models.values().find(|m| m.model == model_id))
+    crate::agent::model_identity::find_resolved_model(models, model_id)
+}
+
+/// Catalog key for a selection request (exact / permanent / unique alias).
+pub fn resolve_catalog_key(
+    models: &IndexMap<String, ModelEntry>,
+    model_id: &str,
+) -> Option<String> {
+    crate::agent::model_identity::resolve_catalog_key_str(models, model_id)
 }
 
 /// Resolve a model by (model_id, base_url) tuple.
@@ -4860,6 +4885,19 @@ impl ModelEntry {
             api_base_url: entry.api_base_url.clone(),
         }
     }
+    /// Canonical selection id adapter for a known catalog key.
+    pub fn canonical_selection_id(
+        &self,
+        catalog_key: &str,
+    ) -> Result<xai_grok_models::CanonicalModelId, xai_grok_models::ModelIdError> {
+        crate::agent::model_identity::canonical_id_for_key(catalog_key)
+    }
+    /// Exact provider-wire model adapter.
+    pub fn upstream_wire_id(
+        &self,
+    ) -> Result<xai_grok_models::UpstreamModelId, xai_grok_models::ModelIdError> {
+        crate::agent::model_identity::upstream_id_for_entry(self)
+    }
     /// Non-empty `api_key`, else first non-empty resolved `env_key`.
     /// `None` → fall through to session / global key. Static only: never
     /// consults auth-provider tokens.
@@ -5712,6 +5750,8 @@ pub fn provider_identity_for_model(model: &ModelEntry) -> ProviderIdentity {
     }
 }
 
+/// Compatibility-only: preserves pre-PR4 signature. Prefer
+/// [`try_inference_config_for_model`] at routing boundaries.
 pub fn inference_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -5720,8 +5760,52 @@ pub fn inference_config_for_model(
     deployment_id: Option<String>,
     user_id: Option<String>,
 ) -> InferenceConfig {
+    let model_name = model
+        .upstream_wire_id()
+        .map(|id| id.into_string())
+        .unwrap_or_else(|_| model.info().model.clone());
+    build_inference_config_for_model(
+        model,
+        credentials,
+        alpha_test_key,
+        client_version,
+        deployment_id,
+        user_id,
+        model_name,
+    )
+}
+
+/// Checked routing constructor — invalid upstream never reaches the wire.
+pub fn try_inference_config_for_model(
+    model: &ModelEntry,
+    credentials: ResolvedCredentials,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    deployment_id: Option<String>,
+    user_id: Option<String>,
+) -> Result<InferenceConfig, xai_grok_models::ModelIdError> {
+    let model_name = model.upstream_wire_id()?.into_string();
+    Ok(build_inference_config_for_model(
+        model,
+        credentials,
+        alpha_test_key,
+        client_version,
+        deployment_id,
+        user_id,
+        model_name,
+    ))
+}
+
+fn build_inference_config_for_model(
+    model: &ModelEntry,
+    credentials: ResolvedCredentials,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    deployment_id: Option<String>,
+    user_id: Option<String>,
+    model_name: String,
+) -> InferenceConfig {
     let info = model.info();
-    let model_name = info.model.clone();
     let max_completion_tokens = info.max_completion_tokens;
     let temperature = info.temperature;
     let top_p = info.top_p;

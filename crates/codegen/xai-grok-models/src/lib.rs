@@ -3,6 +3,16 @@
 //!
 //! At runtime each model is resolved via:
 //!   CLI flag > ENV var > config.toml > remote settings > these defaults
+//!
+//! Credential-free selection/wire identity types live in [`identity`].
+
+pub mod identity;
+
+pub use identity::{
+    BUILTIN_PROVIDER_PREFIXES, CanonicalModelId, MAX_MODEL_ID_LEN, ModelIdError,
+    ModelRouteProvenance, PROVENANCE_SCHEMA_EXACT, PROVENANCE_SCHEMA_LEGACY, UpstreamModelId,
+    is_builtin_provider_prefix, split_first_colon,
+};
 
 use std::sync::LazyLock;
 

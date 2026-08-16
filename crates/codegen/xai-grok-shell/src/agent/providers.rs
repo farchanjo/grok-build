@@ -973,7 +973,9 @@ impl ProviderManager {
     /// display (true headless). macOS/Windows never have `DISPLAY`, so the old
     /// "no DISPLAY" heuristic incorrectly forced device auth and hid the code.
     pub async fn chatgpt_oauth_login(&self) -> Result<(), ProviderError> {
-        self.chatgpt_oauth_login_binding_generation().await.map(|_| ())
+        self.chatgpt_oauth_login_binding_generation()
+            .await
+            .map(|_| ())
     }
 
     /// Like [`Self::chatgpt_oauth_login`], but returns the exact durable

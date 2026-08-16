@@ -156,13 +156,28 @@ impl SessionActor {
         {
             return Err(acp::Error::invalid_params().data(e.to_string()));
         }
+        // Atomic session canonical + route with sampler config.
+        let reasoning_effort = inference_config.reasoning_effort;
+        *self.selection_model_id.borrow_mut() = model_id.clone();
+        let home = crate::util::grok_home::grok_home();
+        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &inference_config,
+            &self.models_manager,
+            model_id.0.as_ref(),
+            Some(home.as_path()),
+        );
+        *self.route_context.borrow_mut() = Some(route.clone());
+        self.sampler_handle.update_config_with_route_context(
+            inference_config,
+            xai_grok_inference::route_context::RouteContextUpdate::Replace(route),
+        );
         let _ = self
             .notifications
             .persistence_tx
             .send(PersistenceMsg::CurrentModel {
                 model_id: model_id.clone(),
                 agent_name: Some(agent_name),
-                reasoning_effort: Some(inference_config.reasoning_effort),
+                reasoning_effort: Some(reasoning_effort),
                 execution_backend: Some(execution_backend),
                 external_runtime: Some(envelope),
             });

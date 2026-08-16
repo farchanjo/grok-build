@@ -183,6 +183,8 @@ pub struct ModelsManager {
 struct Inner {
     prefetched: RwLock<Option<IndexMap<String, ModelEntry>>>,
     models: RwLock<IndexMap<String, ModelEntry>>,
+    /// Private multi-account publication origins (not on public ModelEntry).
+    catalog_origins: RwLock<crate::agent::model_identity::CatalogOrigins>,
     current_model_id: RwLock<acp::ModelId>,
     current_reasoning_effort: RwLock<Option<ReasoningEffort>>,
     etag: RwLock<Option<String>>,
@@ -254,6 +256,7 @@ impl ModelsManager {
             inner: Arc::new(Inner {
                 prefetched: RwLock::new(prefetched),
                 models: RwLock::new(models),
+                catalog_origins: RwLock::new(crate::agent::model_identity::CatalogOrigins::new()),
                 current_model_id: RwLock::new(current_model_id),
                 current_reasoning_effort: RwLock::new(current_reasoning_effort),
                 etag: RwLock::new(None),
@@ -268,6 +271,10 @@ impl ModelsManager {
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
             }),
         }
+    }
+
+    pub(crate) fn catalog_origins(&self) -> crate::agent::model_identity::CatalogOrigins {
+        self.inner.catalog_origins.read().clone()
     }
 
     /// Subscribe to model-switch events. Returns a `watch::Receiver`
@@ -360,7 +367,8 @@ impl ModelsManager {
             return;
         }
         let prefetched = self.inner.prefetched.read().clone();
-        let new_catalog = resolve_model_catalog(&new_config, prefetched);
+        let (new_catalog, new_origins) =
+            resolve_model_catalog_with_origins(&new_config, prefetched);
         let has_real_catalog = *self.inner.has_fetched_real_catalog.read();
         if has_real_catalog && let Err(e) = validate_selectable(&new_config, &new_catalog) {
             tracing::error!(error = %e, "ignoring config reload: allowed_models excludes all models");
@@ -387,6 +395,7 @@ impl ModelsManager {
                 .store(excludes_all, Ordering::Relaxed);
         }
         *self.inner.models.write() = new_catalog;
+        *self.inner.catalog_origins.write() = new_origins;
 
         // A preferred-model flip caused only by a campaign overlay appearing or
         // disappearing must not yank an in-flight session whose current model is
@@ -754,7 +763,9 @@ impl ModelsManager {
     // ── Mutations ───────────────────────────────────────────────────
 
     fn rebuild(&self, cfg: &config::Config, prefetched: Option<IndexMap<String, ModelEntry>>) {
-        *self.inner.models.write() = resolve_model_catalog(cfg, prefetched);
+        let (catalog, origins) = resolve_model_catalog_with_origins(cfg, prefetched);
+        *self.inner.models.write() = catalog;
+        *self.inner.catalog_origins.write() = origins;
     }
 
     /// Refresh models when the etag changes.
@@ -1117,6 +1128,7 @@ impl ModelsManager {
     fn clear(&self) {
         *self.inner.prefetched.write() = None;
         *self.inner.models.write() = IndexMap::new();
+        *self.inner.catalog_origins.write() = crate::agent::model_identity::CatalogOrigins::new();
         *self.inner.etag.write() = None;
         *self.inner.has_fetched_real_catalog.write() = false;
         self.inner
@@ -2055,11 +2067,23 @@ pub fn resolve_model_catalog(
     cfg: &config::Config,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
-    let mut catalog: IndexMap<String, ModelEntry> = config::resolve_model_list(cfg, prefetched);
+    resolve_model_catalog_with_origins(cfg, prefetched).0
+}
+
+/// Production publication path with private origin side map.
+pub(crate) fn resolve_model_catalog_with_origins(
+    cfg: &config::Config,
+    prefetched: Option<IndexMap<String, ModelEntry>>,
+) -> (
+    IndexMap<String, ModelEntry>,
+    crate::agent::model_identity::CatalogOrigins,
+) {
+    let (mut catalog, mut origins) = config::resolve_model_list_with_origins(cfg, prefetched);
 
     if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
         let before = catalog.len();
         catalog.retain(|key, entry| !disabled.matches(key, &entry.model));
+        origins.retain(|key, _| catalog.contains_key(key));
         let removed = before - catalog.len();
         if removed > 0 {
             tracing::info!(count = removed, "disabled_models: removed from catalog");
@@ -2099,6 +2123,7 @@ pub fn resolve_model_catalog(
     // config/remote/catalog entries that set execution_backend=external still
     // resolve for internal/resume use but stay hidden + non-selectable.
     crate::agent::external_runtime::capability_matrix::apply_catalog_visibility(&mut catalog);
+    crate::agent::model_identity::apply_multi_account_publication_gate(&mut catalog, &origins);
 
     // Persisted default first; CLI override below wins when set.
     // Only apply if the model supports reasoning effort.
@@ -2121,7 +2146,7 @@ pub fn resolve_model_catalog(
         }
     }
 
-    catalog
+    (catalog, origins)
 }
 
 /// Whether `effort` is a value this model will accept on the wire.
