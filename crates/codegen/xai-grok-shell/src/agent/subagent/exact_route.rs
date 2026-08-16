@@ -60,7 +60,9 @@ impl ExactRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xai_grok_inference::{RouteApiSurface, RouteCredentialRoute, RouteProviderKind};
+    use xai_grok_inference::{
+        RouteApiSurface, RouteAuthority, RouteCredentialRoute, RouteProviderKind,
+    };
 
     fn route(instance: &str, binding: u64) -> ExactRoute {
         let upstream = UpstreamModelId::new("gpt-4o").unwrap();
@@ -75,6 +77,7 @@ mod tests {
                 .credential_route(RouteCredentialRoute::ApiKey)
                 .registry_generation(9)
                 .binding_generation(binding)
+                .authority(RouteAuthority::Authoritative)
                 .model_partition("gpt-4o")
                 .build()
                 .unwrap(),

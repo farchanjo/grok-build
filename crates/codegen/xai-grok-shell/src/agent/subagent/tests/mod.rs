@@ -380,6 +380,7 @@ fn lookup_returns_initializing_for_pending_subagent() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     let lookup = coordinator.lookup("sub-pending");
     assert!(
@@ -392,6 +393,44 @@ fn lookup_returns_initializing_for_pending_subagent() {
             "pending subagent should return Ready(Initializing)"
         );
 }
+#[test]
+fn raw_pending_spawn_cannot_claim_or_replace_assigned_identity() {
+    let mut coordinator = SubagentCoordinator::new();
+    let owner = identity_store::owner_for_test("b");
+    assert!(coordinator.insert_pending(PendingSubagent {
+        subagent_id: "assigned-id".into(),
+        subagent_type: "general-purpose".into(),
+        description: "assigned".into(),
+        persona: None,
+        parent_prompt_id: None,
+        parent_session_id: "parent".into(),
+        owner: SubagentOwner::Task,
+        started_at: std::time::Instant::now(),
+        run_in_background: false,
+        surface_completion: true,
+        color: None,
+        cancel_token: CancellationToken::new(),
+        assigned_meta_owner: Some(owner.clone()),
+    }));
+    assert!(!coordinator.insert_pending(PendingSubagent {
+        subagent_id: "assigned-id".into(),
+        subagent_type: "general-purpose".into(),
+        description: "raw replacement".into(),
+        persona: None,
+        parent_prompt_id: None,
+        parent_session_id: "parent".into(),
+        owner: SubagentOwner::Task,
+        started_at: std::time::Instant::now(),
+        run_in_background: false,
+        surface_completion: true,
+        color: None,
+        cancel_token: CancellationToken::new(),
+        assigned_meta_owner: None,
+    }));
+    coordinator.move_pending_to_failed("assigned-id", "raw delayed failure");
+    assert_eq!(coordinator.registry_snapshot(), (1, 0, 0));
+}
+
 #[test]
 fn external_provider_completion_moves_pending_to_queryable_result() {
     let mut coordinator = SubagentCoordinator::new();
@@ -409,6 +448,7 @@ fn external_provider_completion_moves_pending_to_queryable_result() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator.complete_pending_external(
         "sub-codex",
@@ -467,6 +507,7 @@ async fn running_gauge_tracks_pending_and_active() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     assert_eq!(
             gauge.load(Ordering::Relaxed),
@@ -501,6 +542,7 @@ async fn running_gauge_tracks_pending_and_active() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     assert_eq!(gauge.load(Ordering::Relaxed), 1);
     coordinator.move_pending_to_failed("sub-gauge-2", "worktree setup failed");
@@ -520,6 +562,7 @@ async fn running_gauge_tracks_pending_and_active() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator.set_running_gauge(late_gauge.clone());
     assert_eq!(late_gauge.load(Ordering::Relaxed), 1);
@@ -871,6 +914,7 @@ fn fail_pending(coordinator: &mut SubagentCoordinator, id: &str, surface: bool) 
             surface_completion: surface,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator.move_pending_to_failed(id, "boom");
 }
@@ -920,6 +964,7 @@ fn remove_pending_clears_entry() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     assert!(coordinator.lookup("sub-1").is_some());
     coordinator.remove_pending("sub-1");
@@ -945,6 +990,7 @@ fn move_pending_to_failed_creates_completed_entry() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator.move_pending_to_failed("sub-fail", "Sampling client error: bad config");
     assert!(!coordinator.pending.contains_key("sub-fail"));
@@ -984,6 +1030,7 @@ fn move_pending_to_failed_fires_completion_notify() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator.move_pending_to_failed("sub-notify", "test error");
     let summaries = coordinator.drain_pending_completions_for("");
@@ -1014,6 +1061,7 @@ fn move_pending_to_cancelled_creates_cancelled_entry() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator.move_pending_to_cancelled("sub-killed", "Subagent was cancelled");
     assert!(!coordinator.pending.contains_key("sub-killed"));
@@ -1039,6 +1087,7 @@ fn completed_with_output(
         subagent_id: id.into(),
         parent_session_id: String::new(),
         owner: SubagentOwner::Task,
+        assigned_meta_owner: None,
         parent_prompt_id: None,
         child_session_id: String::new(),
         description: "task".into(),
@@ -1223,6 +1272,7 @@ fn cancel_with_outcome_fires_pending_token() {
             surface_completion: true,
             color: None,
             cancel_token: token.clone(),
+            assigned_meta_owner: None,
         });
     let outcome = coordinator.cancel_with_outcome("sub-cancel");
     assert!(
@@ -1286,6 +1336,7 @@ fn cancel_by_parent_prompt_id_fires_matching_pending_token() {
             surface_completion: true,
             color: None,
             cancel_token: token_a.clone(),
+            assigned_meta_owner: None,
         });
     coordinator
         .insert_pending(PendingSubagent {
@@ -1301,6 +1352,7 @@ fn cancel_by_parent_prompt_id_fires_matching_pending_token() {
             surface_completion: true,
             color: None,
             cancel_token: token_b.clone(),
+            assigned_meta_owner: None,
         });
     coordinator.cancel_by_parent_prompt_id("prompt-A");
     assert!(token_a.is_cancelled(), "prompt-A token must fire");
@@ -1328,6 +1380,7 @@ fn completed_takes_precedence_over_pending_in_lookup() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     coordinator
         .move_to_completed(
@@ -1467,6 +1520,7 @@ fn dummy_tracker(
         color: None,
         block_waited: false,
         explicitly_killed: false,
+        assigned_meta_owner: None,
     }
 }
 #[tokio::test]
@@ -3286,6 +3340,7 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     let child_handle = dummy_tracker(&subagent_id, "test-parent", "explore", "task")
         .child_handle;
@@ -3306,9 +3361,11 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
     };
     cancel_pending_subagent_at_promote(
             request,
+            None,
             &child_handle,
             &subagent_id,
             &child_session_id,
+            &meta_dir,
             &meta_dir,
             &coordinator,
             &gateway,
@@ -3389,6 +3446,7 @@ async fn run_promote_cancel_with_worktree(
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     let child_handle = dummy_tracker(&subagent_id, "test-parent", "explore", "task")
         .child_handle;
@@ -3408,9 +3466,11 @@ async fn run_promote_cancel_with_worktree(
     };
     cancel_pending_subagent_at_promote(
             request,
+            None,
             &child_handle,
             &subagent_id,
             &child_session_id,
+            &meta_dir,
             &meta_dir,
             &coordinator,
             &gateway,
@@ -3599,6 +3659,7 @@ fn record_pre_spawn_failure_clears_stale_pending_entry() {
             surface_completion: true,
             color: None,
             cancel_token: CancellationToken::new(),
+            assigned_meta_owner: None,
         });
     assert!(coordinator.pending.contains_key("sub-z"));
     coordinator

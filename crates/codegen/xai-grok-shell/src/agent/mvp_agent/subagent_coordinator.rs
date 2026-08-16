@@ -30,7 +30,10 @@ impl MvpAgent {
                         Some(event) = rx.recv() => (event, None),
                         Some(assigned) = assigned_rx.recv() => (
                             SubagentEvent::Spawn(assigned.request),
-                            Some(assigned.route),
+                            Some(crate::agent::subagent::AssignedRoute::new(
+                                assigned.key,
+                                assigned.route,
+                            )),
                         ),
                         else => break,
                     };

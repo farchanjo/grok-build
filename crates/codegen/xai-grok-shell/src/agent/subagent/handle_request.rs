@@ -25,6 +25,7 @@ use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
 use super::*;
+use super::exact_route::ExactRoute;
 /// Remove the task tool (and orphaned background-task actions) from a child
 /// toolset at or beyond `MAX_SUBAGENT_DEPTH`. Returns whether the task tool
 /// was removed.
@@ -97,12 +98,37 @@ pub(crate) async fn handle_subagent_request(
 
 pub(crate) async fn handle_assigned_subagent_request(
     mut request: SubagentRequest,
-    assigned_route: Option<crate::agent::subagent::exact_route::ExactRoute>,
+    assigned_route: Option<crate::agent::subagent::AssignedRoute>,
     mut ctx: SubagentSpawnContext,
     coordinator: &std::cell::RefCell<SubagentCoordinator>,
     gateway: &GatewaySender,
 ) {
     let start = std::time::Instant::now();
+    let parent_session_dir = session::persistence::session_dir(&SessionInfo {
+        id: acp::SessionId::new(ctx.parent_session_id.clone()),
+        cwd: ctx.parent_cwd.to_string_lossy().to_string(),
+    });
+    if assigned_route.is_none() {
+        if coordinator.borrow().has_assigned_identity(&request.id) {
+            send_failure(request, "Public subagent spawn cannot replace an assigned identity.");
+            return;
+        }
+        match identity_store::lookup(&parent_session_dir, &request.id) {
+            Ok(identity_store::Lookup::Missing)
+            | Ok(identity_store::Lookup::LegacyUnassigned { .. }) => {}
+            Ok(identity_store::Lookup::Assigned { .. }) => {
+                send_failure(request, "Public subagent spawn cannot replace an assigned identity.");
+                return;
+            }
+            Err(error) => {
+                send_failure(
+                    request,
+                    &format!("Subagent metadata identity is invalid: {error}"),
+                );
+                return;
+            }
+        }
+    }
     let mut parent_wait_guard = subagent_blocks_parent_turn(&request)
         .then(|| crate::tools::tool_context::BlockingWaitGuard::enter(
             ctx.parent_blocking_wait_depth.clone(),
@@ -141,7 +167,7 @@ pub(crate) async fn handle_assigned_subagent_request(
     let run_in_background = request.run_in_background
         || definition.background.unwrap_or(false);
     let cancel_token = request.cancel_token.clone();
-    coordinator
+    let inserted_pending = coordinator
         .borrow_mut()
         .insert_pending(PendingSubagent {
             subagent_id: request.id.clone(),
@@ -156,12 +182,18 @@ pub(crate) async fn handle_assigned_subagent_request(
             surface_completion: request.surface_completion,
             color: definition.color,
             cancel_token: cancel_token.clone(),
+            assigned_meta_owner: None,
         });
+    if !inserted_pending {
+        send_failure(request, "Subagent identity is already owned by an assigned child.");
+        return;
+    }
     let mut pending_guard = PendingGuard {
         coordinator,
         id: request.id.clone(),
         defused: false,
         error: None,
+        assigned_meta_owner: None,
     };
     resolve_subagent_toolset(
         &request.subagent_type,
@@ -244,16 +276,24 @@ pub(crate) async fn handle_assigned_subagent_request(
             return;
         }
         match coord
-            .resumable_source_for(resume_id, &ctx.parent_session_id, &ctx.parent_cwd)
+            .resumable_source_with_identity(resume_id, &ctx.parent_session_id, &ctx.parent_cwd)
         {
-            Some(info) => {
+            Ok(Some(info)) => {
                 drop(coord);
                 Some(info)
             }
-            None => {
+            Ok(None) => {
                 let msg = format!(
                     "Cannot resume from subagent '{resume_id}': not found. \
                      The subagent may have been evicted or the ID is invalid."
+                );
+                drop(coord);
+                send_failure(request, &msg);
+                return;
+            }
+            Err(error) => {
+                let msg = format!(
+                    "Cannot resume from subagent '{resume_id}': durable identity is invalid ({error})."
                 );
                 drop(coord);
                 send_failure(request, &msg);
@@ -274,7 +314,7 @@ pub(crate) async fn handle_assigned_subagent_request(
         if let Err(e) = xai_grok_subagent_resolution::validate_resume_identity(
             &request.subagent_type,
             request.runtime_overrides.persona.as_deref(),
-            source,
+            &source.source,
         ) {
             send_failure(request, &e.to_string());
             return;
@@ -558,11 +598,30 @@ pub(crate) async fn handle_assigned_subagent_request(
             &ctx,
         )
         .await;
-    if let Some(route) = assigned_route.as_ref() {
-        if effective_model_id.0.as_ref() != route.canonical().as_str()
-            || effective_inference_config.model != route.upstream().as_str()
+    if let Some(assigned) = assigned_route.as_ref() {
+        let live_context = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &effective_inference_config,
+            &ctx.models_manager,
+            effective_model_id.0.as_ref(),
+            Some(ctx.auth_manager.grok_home()),
+        );
+        let live_route = xai_grok_models::CanonicalModelId::new(
+            effective_model_id.0.to_string(),
+        )
+        .ok()
+        .and_then(|canonical| {
+            xai_grok_models::UpstreamModelId::new(effective_inference_config.model.clone())
+                .ok()
+                .and_then(|upstream| ExactRoute::new(canonical, upstream, live_context))
+        });
+        if !live_route
+            .as_ref()
+            .is_some_and(|live| assigned.route.matches_live(live))
         {
-            send_failure(request, "Assigned exact model route does not match child configuration.");
+            send_failure(
+                request,
+                "Assigned exact model route does not match the live child configuration.",
+            );
             return;
         }
     }
@@ -611,6 +670,36 @@ pub(crate) async fn handle_assigned_subagent_request(
             return;
         }
     }
+    if let Some(source) = resume_source.as_ref()
+        && let Some(owner) = source.assigned_owner.as_ref()
+    {
+        let live_context = crate::session::route_context::resolve_for_models_manager_with_selection(
+            &effective_inference_config,
+            &ctx.models_manager,
+            effective_model_id.0.as_ref(),
+            Some(ctx.auth_manager.grok_home()),
+        );
+        let live_route = xai_grok_models::CanonicalModelId::new(
+            effective_model_id.0.to_string(),
+        )
+        .ok()
+        .and_then(|canonical| {
+            xai_grok_models::UpstreamModelId::new(effective_inference_config.model.clone())
+                .ok()
+                .and_then(|upstream| ExactRoute::new(canonical, upstream, live_context))
+        });
+        if !live_route
+            .as_ref()
+            .is_some_and(|live| owner.identity().matches_live(live))
+        {
+            let message = format!(
+                "Cannot resume from subagent '{}': assigned model route is no longer exact.",
+                source.subagent_id,
+            );
+            send_failure(request, &message);
+            return;
+        }
+    }
     if let Some(raw) = effective_runtime.reasoning_effort.as_deref() {
         match ctx
             .models_manager
@@ -630,7 +719,7 @@ pub(crate) async fn handle_assigned_subagent_request(
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
     let override_cwd = select_override_cwd(
-        resume_source.as_ref(),
+        resume_source.as_ref().map(|source| &source.source),
         request.cwd.as_deref(),
     );
     let effective_cwd = resolve_child_cwd(
@@ -650,12 +739,6 @@ pub(crate) async fn handle_assigned_subagent_request(
         cwd: effective_cwd,
     };
     let child_session_dir = session::persistence::session_dir(&child_session_info);
-    let parent_session_dir = session::persistence::session_dir(
-        &SessionInfo {
-            id: acp::SessionId::new(ctx.parent_session_id.clone()),
-            cwd: ctx.parent_cwd.to_string_lossy().to_string(),
-        },
-    );
     let subagent_meta_dir = parent_session_dir.join("subagents").join(&subagent_id);
     let InitialContext {
         source: context_source,
@@ -665,7 +748,7 @@ pub(crate) async fn handle_assigned_subagent_request(
         verbatim_fork: context_verbatim_fork,
     } = match bootstrap_initial_context(
             &request,
-            resume_source.as_ref(),
+            resume_source.as_ref().map(|source| &source.source),
             &ctx,
             &child_session_info,
             &child_session_dir,
@@ -739,7 +822,63 @@ pub(crate) async fn handle_assigned_subagent_request(
         external_runtime_kind: None,
         external_session_pointer: None,
     };
-    write_subagent_meta(&subagent_meta_dir, &subagent_meta);
+    let assigned_meta_owner = if let Some(assigned) = assigned_route.as_ref() {
+        match identity_store::commit_initial(
+            &parent_session_dir,
+            &subagent_id,
+            &subagent_meta,
+            &assigned.key,
+            &assigned.route,
+        ) {
+            Ok(owner) => {
+                if !coordinator
+                    .borrow_mut()
+                    .install_pending_assigned_owner(&subagent_id, owner.clone())
+                {
+                    pending_guard.set_error(
+                        "Assigned subagent ownership was replaced during initialization".into(),
+                    );
+                    send_failure(
+                        request,
+                        "Assigned subagent ownership was replaced during initialization.",
+                    );
+                    return;
+                }
+                pending_guard.assigned_meta_owner = Some(owner.clone());
+                Some(owner)
+            }
+            Err(error) => {
+                let message = format!("Failed to commit assigned subagent identity: {error}");
+                pending_guard.set_error(message.clone());
+                send_failure(request, &message);
+                return;
+            }
+        }
+    } else {
+        match identity_store::lookup(&parent_session_dir, &subagent_id) {
+            Ok(identity_store::Lookup::Missing)
+            | Ok(identity_store::Lookup::LegacyUnassigned { .. }) => {
+                write_subagent_meta(&subagent_meta_dir, &subagent_meta);
+            }
+            Ok(identity_store::Lookup::Assigned { .. }) => {
+                pending_guard.set_error(
+                    "Public subagent spawn cannot replace assigned identity".into(),
+                );
+                send_failure(
+                    request,
+                    "Public subagent spawn cannot replace an assigned identity.",
+                );
+                return;
+            }
+            Err(error) => {
+                let message = format!("Subagent metadata identity is invalid: {error}");
+                pending_guard.set_error(message.clone());
+                send_failure(request, &message);
+                return;
+            }
+        }
+        None
+    };
     if let (Some(bucket_url), Some(upload_method)) = (
         &ctx.gcs_bucket_url,
         &ctx.gcs_upload_method,
@@ -831,7 +970,9 @@ pub(crate) async fn handle_assigned_subagent_request(
                 &msg,
                 &subagent_id,
                 &child_session_id,
+                &parent_session_dir,
                 &subagent_meta_dir,
+                assigned_meta_owner.as_ref(),
                 gateway,
                 &ctx.parent_session_id,
                 ctx.parent_cmd_tx.as_ref(),
@@ -859,7 +1000,9 @@ pub(crate) async fn handle_assigned_subagent_request(
                 &msg,
                 &subagent_id,
                 &child_session_id,
+                &parent_session_dir,
                 &subagent_meta_dir,
+                assigned_meta_owner.as_ref(),
                 gateway,
                 &ctx.parent_session_id,
                 ctx.parent_cmd_tx.as_ref(),
@@ -1299,7 +1442,9 @@ pub(crate) async fn handle_assigned_subagent_request(
                 &msg,
                 &subagent_id,
                 &child_session_id,
+                &parent_session_dir,
                 &subagent_meta_dir,
+                assigned_meta_owner.as_ref(),
                 gateway,
                 &ctx.parent_session_id,
                 ctx.parent_cmd_tx.as_ref(),
@@ -1314,9 +1459,11 @@ pub(crate) async fn handle_assigned_subagent_request(
         ctx.workspace_ops.end_local_session(child_session_id.0.as_ref());
         cancel_pending_subagent_at_promote(
                 request,
+                assigned_meta_owner.as_ref(),
                 &child_handle,
                 &subagent_id,
                 &child_session_id,
+                &parent_session_dir,
                 &subagent_meta_dir,
                 coordinator,
                 gateway,
@@ -1333,7 +1480,7 @@ pub(crate) async fn handle_assigned_subagent_request(
     pending_guard.defuse();
     coordinator
         .borrow_mut()
-        .insert(SubagentTracker {
+        .insert_owned(SubagentTracker {
             subagent_id: request.id.clone(),
             parent_session_id: ctx.parent_session_id.clone(),
             parent_prompt_id: request.parent_prompt_id.clone(),
@@ -1356,7 +1503,8 @@ pub(crate) async fn handle_assigned_subagent_request(
             color: tracker_color,
             block_waited: false,
             explicitly_killed: false,
-        });
+            assigned_meta_owner: assigned_meta_owner.clone(),
+        }, assigned_meta_owner.as_ref());
     spawn_progress_publisher(
         child_handle.signals_handle.clone(),
         gateway.clone(),
@@ -1944,7 +2092,14 @@ pub(crate) async fn handle_assigned_subagent_request(
         }
     }
     let persisted_output_dir = persist_subagent_output(&subagent_meta_dir, &result);
-    persist_subagent_completion(&subagent_meta_dir, &result, &gcs_upload_ctx);
+    persist_subagent_completion(
+        &parent_session_dir,
+        &subagent_meta_dir,
+        &subagent_id,
+        assigned_meta_owner.as_ref(),
+        &result,
+        &gcs_upload_ctx,
+    );
     let final_status = result.status().to_string();
     let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
     let telemetry_tokens = if result.tool_calls > 0 || result.success {
@@ -2112,7 +2267,10 @@ pub(crate) async fn handle_assigned_subagent_request(
             {
                 Ok(snapshot_ref) => {
                     let persisted = update_subagent_meta_snapshot_ref(
+                        &parent_session_dir,
                         &subagent_meta_dir,
+                        &subagent_id,
+                        assigned_meta_owner.as_ref(),
                         &snapshot_ref,
                         &final_status,
                     );
@@ -2201,15 +2359,20 @@ pub(crate) async fn handle_assigned_subagent_request(
     );
     coordinator
         .borrow_mut()
-        .move_to_completed(
+        .move_to_completed_owned(
             &request.id,
+            assigned_meta_owner.as_ref(),
             request.description.clone(),
             request.subagent_type.clone(),
             result.clone(),
             persisted_output_dir,
         );
     if let Some(snapshot_ref) = disposed_snapshot_ref {
-        coordinator.borrow_mut().set_completed_snapshot_ref(&request.id, snapshot_ref);
+        coordinator.borrow_mut().set_completed_snapshot_ref_owned(
+            &request.id,
+            assigned_meta_owner.as_ref(),
+            snapshot_ref,
+        );
     }
     if will_wake {
         inject_subagent_completed_prompt(

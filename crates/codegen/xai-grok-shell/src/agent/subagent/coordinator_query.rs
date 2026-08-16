@@ -248,48 +248,80 @@ impl SubagentCoordinator {
         parent_session_id: &str,
         parent_cwd: &Path,
     ) -> Option<ResumeSourceData> {
+        self.resumable_source_with_identity(id, parent_session_id, parent_cwd)
+            .ok()
+            .flatten()
+            .map(|resolved| resolved.source)
+    }
+    pub(crate) fn resumable_source_with_identity(
+        &self,
+        id: &str,
+        parent_session_id: &str,
+        parent_cwd: &Path,
+    ) -> Result<Option<ResolvedResumeSource>, String> {
         if let Some(completed) = self.completed.get(id) {
             if completed.parent_session_id != parent_session_id {
-                return None;
+                return Ok(None);
             }
-            return Some(ResumeSourceData {
-                subagent_id: completed.subagent_id.clone(),
-                child_session_id: completed.child_session_id.clone(),
-                child_cwd: completed.child_cwd.clone(),
-                worktree_path: completed.worktree_path.clone(),
-                snapshot_ref: completed.snapshot_ref.clone(),
-                subagent_type: completed.subagent_type.clone(),
-                persona: completed.persona.clone(),
-                model_id: Some(completed.effective_model_id.clone()),
-            });
+            return Ok(Some(ResolvedResumeSource {
+                source: ResumeSourceData {
+                    subagent_id: completed.subagent_id.clone(),
+                    child_session_id: completed.child_session_id.clone(),
+                    child_cwd: completed.child_cwd.clone(),
+                    worktree_path: completed.worktree_path.clone(),
+                    snapshot_ref: completed.snapshot_ref.clone(),
+                    subagent_type: completed.subagent_type.clone(),
+                    persona: completed.persona.clone(),
+                    model_id: Some(completed.effective_model_id.clone()),
+                },
+                assigned_owner: completed.assigned_meta_owner.clone(),
+            }));
         }
         let parent_info = SessionInfo {
             id: acp::SessionId::new(parent_session_id),
             cwd: parent_cwd.to_string_lossy().to_string(),
         };
-        let meta_path = session::persistence::session_dir(&parent_info)
-            .join("subagents")
-            .join(id)
-            .join("meta.json");
-        let data = std::fs::read_to_string(&meta_path).ok()?;
-        let meta: SubagentMeta = serde_json::from_str(&data).ok()?;
+        let parent_session_dir = session::persistence::session_dir(&parent_info);
+        let lookup = identity_store::lookup(&parent_session_dir, id)
+            .map_err(|error| format!("assigned metadata lookup failed: {error}"))?;
+        let (meta, assigned_owner) = match lookup {
+            identity_store::Lookup::Missing => return Ok(None),
+            identity_store::Lookup::LegacyUnassigned { meta } => (meta, None),
+            identity_store::Lookup::Assigned { meta, owner } => (meta, Some(owner)),
+        };
         if meta.parent_session_id != parent_session_id {
-            return None;
+            return Ok(None);
         }
         match meta.status.as_str() {
             "completed" | "failed" | "cancelled" => {}
-            _ => return None,
+            _ => return Ok(None),
         }
-        Some(ResumeSourceData {
-            subagent_id: meta.subagent_id,
-            child_session_id: meta.child_session_id,
-            child_cwd: meta.child_cwd.unwrap_or_default(),
-            worktree_path: meta.worktree_path.map(PathBuf::from),
-            snapshot_ref: meta.snapshot_ref,
-            subagent_type: meta.subagent_type,
-            persona: meta.persona,
-            model_id: meta.effective_model_id,
-        })
+        Ok(Some(ResolvedResumeSource {
+            source: ResumeSourceData {
+                subagent_id: meta.subagent_id,
+                child_session_id: meta.child_session_id,
+                child_cwd: meta.child_cwd.unwrap_or_default(),
+                worktree_path: meta.worktree_path.map(PathBuf::from),
+                snapshot_ref: meta.snapshot_ref,
+                subagent_type: meta.subagent_type,
+                persona: meta.persona,
+                model_id: meta.effective_model_id,
+            },
+            assigned_owner,
+        }))
+    }
+    pub(crate) fn has_assigned_identity(&self, id: &str) -> bool {
+        self.pending
+            .get(id)
+            .is_some_and(|entry| entry.assigned_meta_owner.is_some())
+            || self
+                .active
+                .get(id)
+                .is_some_and(|entry| entry.assigned_meta_owner.is_some())
+            || self
+                .completed
+                .get(id)
+                .is_some_and(|entry| entry.assigned_meta_owner.is_some())
     }
     /// Check whether an ID refers to a currently-active (running) subagent.
     pub(crate) fn is_active(&self, id: &str) -> bool {

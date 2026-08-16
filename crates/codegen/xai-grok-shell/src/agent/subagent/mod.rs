@@ -46,6 +46,18 @@ pub(crate) mod exact_route;
 mod handle_request;
 mod identity_store;
 pub(crate) use handle_request::{handle_assigned_subagent_request, handle_subagent_request};
+
+#[derive(Debug)]
+pub(crate) struct AssignedRoute {
+    key: assignment::AssignmentKey,
+    route: exact_route::ExactRoute,
+}
+
+impl AssignedRoute {
+    pub(crate) fn new(key: assignment::AssignmentKey, route: exact_route::ExactRoute) -> Self {
+        Self { key, route }
+    }
+}
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InitialContextSource {
@@ -99,6 +111,7 @@ pub(crate) struct SubagentTracker {
         reason = "unused in production; remove expect when wired or delete the item"
     )]
     pub color: Option<xai_grok_agent::config::AgentColor>,
+    pub assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
 }
 /// Captured parent-side tier inputs for resolving
 /// `auto_compact_threshold_percent` once the subagent's actual model id is
@@ -491,6 +504,7 @@ pub(crate) struct CompletedSubagent {
     pub parent_session_id: String,
     pub parent_prompt_id: Option<String>,
     pub owner: SubagentOwner,
+    pub assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
     pub child_session_id: String,
     pub description: String,
     pub subagent_type: String,
@@ -565,6 +579,7 @@ pub(crate) struct PendingSubagent {
     /// Spawn-future cancel token; firing it aborts the spawn at the promote
     /// checkpoint and emits a cancelled `SubagentFinished`.
     pub cancel_token: CancellationToken,
+    pub assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
 }
 /// Parameter bag for `SubagentCoordinator::record_failure_completion`.
 struct FailureCompletion<'a> {
@@ -574,6 +589,7 @@ struct FailureCompletion<'a> {
     parent_prompt_id: Option<String>,
     parent_session_id: String,
     owner: SubagentOwner,
+    assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
     persona: Option<String>,
     started_at: std::time::Instant,
     error: &'a str,
@@ -777,6 +793,20 @@ pub(crate) async fn resolve_running_list(
     futures::future::join_all(futs).await
 }
 use xai_grok_subagent_resolution::ResumeSourceData;
+
+pub(crate) struct ResolvedResumeSource {
+    pub(crate) source: ResumeSourceData,
+    pub(crate) assigned_owner: Option<identity_store::AssignedMetaOwner>,
+}
+
+impl std::ops::Deref for ResolvedResumeSource {
+    type Target = ResumeSourceData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
+}
+
 /// Resume provenance metadata for a subagent.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SubagentProvenance {
@@ -1659,6 +1689,7 @@ struct PendingGuard<'a> {
     /// Specific error message set by fail_subagent before returning.
     /// Falls back to a generic message if unset.
     error: Option<String>,
+    assigned_meta_owner: Option<identity_store::AssignedMetaOwner>,
 }
 impl PendingGuard<'_> {
     fn defuse(mut self) {
@@ -1675,9 +1706,11 @@ impl Drop for PendingGuard<'_> {
                 .error
                 .take()
                 .unwrap_or_else(|| "Subagent failed during initialization".to_string());
-            self.coordinator
-                .borrow_mut()
-                .move_pending_to_failed(&self.id, &error);
+            self.coordinator.borrow_mut().move_pending_to_failed_owned(
+                &self.id,
+                &error,
+                self.assigned_meta_owner.as_ref(),
+            );
         }
     }
 }
@@ -2354,7 +2387,9 @@ fn fail_subagent(
     error: &str,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
+    parent_session_dir: &Path,
     subagent_meta_dir: &Path,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
     gateway: &GatewaySender,
     parent_session_id: &str,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
@@ -2369,7 +2404,14 @@ fn fail_subagent(
         duration_ms,
         ..Default::default()
     };
-    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(
+        parent_session_dir,
+        subagent_meta_dir,
+        subagent_id,
+        assigned_meta_owner,
+        &result,
+        gcs_ctx,
+    );
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2396,9 +2438,11 @@ fn fail_subagent(
 /// queryable), and deliver the result. Defuse the `PendingGuard` before calling.
 async fn cancel_pending_subagent_at_promote(
     request: SubagentRequest,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
     child_handle: &SessionHandle,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
+    parent_session_dir: &Path,
     subagent_meta_dir: &Path,
     coordinator: &std::cell::RefCell<SubagentCoordinator>,
     gateway: &GatewaySender,
@@ -2430,7 +2474,14 @@ async fn cancel_pending_subagent_at_promote(
         duration_ms,
         ..Default::default()
     };
-    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(
+        parent_session_dir,
+        subagent_meta_dir,
+        subagent_id,
+        assigned_meta_owner,
+        &result,
+        gcs_ctx,
+    );
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2448,9 +2499,11 @@ async fn cancel_pending_subagent_at_promote(
         },
         parent_cmd_tx,
     );
-    coordinator
-        .borrow_mut()
-        .move_pending_to_cancelled(subagent_id, "Subagent was cancelled");
+    coordinator.borrow_mut().move_pending_to_cancelled_owned(
+        subagent_id,
+        "Subagent was cancelled",
+        assigned_meta_owner,
+    );
     let _ = request.result_tx.send(result);
 }
 fn emit_subagent_notification(
@@ -2938,42 +2991,103 @@ struct GcsUploadContext {
 /// recoverable ref. Also re-asserts the terminal `status` so a failed
 /// `persist_subagent_completion` write can't leave a non-terminal record that
 /// `resumable_source_for` rejects after the worktree is removed.
-fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &str) -> bool {
-    let meta_path = dir.join("meta.json");
-    let mut meta = match std::fs::read_to_string(&meta_path) {
-        Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
-            Ok(meta) => meta,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
+fn update_subagent_meta_snapshot_ref(
+    parent_session_dir: &Path,
+    dir: &Path,
+    subagent_id: &str,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
+    snapshot_ref: &str,
+    status: &str,
+) -> bool {
+    let mut meta = if let Some(owner) = assigned_meta_owner {
+        match identity_store::lookup(parent_session_dir, subagent_id) {
+            Ok(identity_store::Lookup::Assigned {
+                meta,
+                owner: current,
+            }) if current.matches(owner) => meta,
+            Ok(_) => return false,
+            Err(error) => {
+                tracing::warn!(%error, subagent_id, "assigned snapshot metadata lookup failed");
                 return false;
             }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)");
-            return false;
+        }
+    } else {
+        let meta_path = dir.join("meta.json");
+        match std::fs::read_to_string(&meta_path) {
+            Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
+                    return false;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)");
+                return false;
+            }
         }
     };
     meta.snapshot_ref = Some(snapshot_ref.to_string());
     meta.status = status.to_string();
-    write_subagent_meta(dir, &meta)
+    match assigned_meta_owner {
+        Some(owner) => {
+            identity_store::update_expected(parent_session_dir, subagent_id, &meta, owner).is_ok()
+        }
+        None => write_subagent_meta(dir, &meta),
+    }
 }
 #[must_use]
 fn persist_subagent_output(dir: &Path, result: &SubagentResult) -> Option<PathBuf> {
     (result.success && !result.output.is_empty() && write_subagent_output(dir, &result.output))
         .then(|| dir.to_path_buf())
 }
-fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
-    let meta_path = dir.join("meta.json");
-    if let Ok(data) = std::fs::read_to_string(&meta_path)
-        && let Ok(mut meta) = serde_json::from_str::<SubagentMeta>(&data)
-    {
+fn persist_subagent_completion(
+    parent_session_dir: &Path,
+    dir: &Path,
+    subagent_id: &str,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
+    result: &SubagentResult,
+    gcs_ctx: &GcsUploadContext,
+) {
+    let lookup = if let Some(owner) = assigned_meta_owner {
+        match identity_store::lookup(parent_session_dir, subagent_id) {
+            Ok(identity_store::Lookup::Assigned {
+                meta,
+                owner: current,
+            }) if current.matches(owner) => Some((meta, true)),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(%error, subagent_id, "assigned completion metadata lookup failed");
+                None
+            }
+        }
+    } else {
+        std::fs::read_to_string(dir.join("meta.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<SubagentMeta>(&data).ok())
+            .map(|meta| (meta, false))
+    };
+    if let Some((mut meta, assigned)) = lookup {
         meta.status = result.status().to_string();
         meta.completed_at = Some(chrono::Utc::now());
         meta.duration_ms = Some(result.duration_ms);
         meta.tool_calls = Some(result.tool_calls);
         meta.turns = Some(result.turns);
         meta.error = result.error.clone();
-        write_subagent_meta(dir, &meta);
+        let persisted = if assigned {
+            identity_store::update_expected(
+                parent_session_dir,
+                subagent_id,
+                &meta,
+                assigned_meta_owner.expect("assigned owner exists"),
+            )
+            .is_ok()
+        } else {
+            write_subagent_meta(dir, &meta)
+        };
+        if !persisted {
+            return;
+        }
         if let (Some(bucket), Some(method)) = (&gcs_ctx.bucket_url, &gcs_ctx.upload_method) {
             let gcs_meta = SubagentSessionMetadata::from_meta(
                 &meta,
@@ -3019,8 +3133,10 @@ fn cancelled_orphan_finish(
 /// Flip a stale `running` meta to `cancelled` and emit the missing finish.
 /// On meta-write failure returns `false` and skips the notify, so a reload re-heals.
 fn finalize_orphaned_subagent(
+    parent_session_dir: &Path,
     subagent_meta_dir: &Path,
     mut meta: SubagentMeta,
+    assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) -> bool {
@@ -3032,7 +3148,14 @@ fn finalize_orphaned_subagent(
     meta.tool_calls = Some(0);
     meta.turns = Some(0);
     meta.error = Some(ORPHAN_RECONCILE_REASON.to_string());
-    if !write_subagent_meta(subagent_meta_dir, &meta) {
+    let persisted = match assigned_meta_owner {
+        Some(owner) => {
+            identity_store::update_expected(parent_session_dir, &meta.subagent_id, &meta, owner)
+                .is_ok()
+        }
+        None => write_subagent_meta(subagent_meta_dir, &meta),
+    };
+    if !persisted {
         return false;
     }
     emit_subagent_notification(
@@ -3046,12 +3169,16 @@ fn finalize_orphaned_subagent(
 /// Parse `meta_path` and return it only when it is a stale `running` orphan
 /// owned by `parent_session_id` and not tracked live. Malformed metas → `None`.
 fn running_orphan_meta(
-    meta_path: &Path,
+    session_dir: &Path,
+    subagent_id: &str,
     coordinator: &SubagentCoordinator,
     parent_session_id: &str,
 ) -> Option<SubagentMeta> {
-    let data = std::fs::read_to_string(meta_path).ok()?;
-    let meta: SubagentMeta = serde_json::from_str(&data).ok()?;
+    let meta = match identity_store::lookup(session_dir, subagent_id).ok()? {
+        identity_store::Lookup::Missing => return None,
+        identity_store::Lookup::LegacyUnassigned { meta }
+        | identity_store::Lookup::Assigned { meta, .. } => meta,
+    };
     if meta.status != "running" || meta.parent_session_id != parent_session_id {
         return None;
     }
@@ -3086,7 +3213,8 @@ pub(crate) fn reconcile_orphaned_subagents(
         for entry in entries.flatten() {
             let name = entry.file_name();
             if running_orphan_meta(
-                &entry.path().join("meta.json"),
+                session_dir,
+                name.to_str().unwrap_or_default(),
                 coordinator,
                 parent_session_id,
             )
@@ -3102,9 +3230,20 @@ pub(crate) fn reconcile_orphaned_subagents(
             continue;
         }
         let subagent_dir = subagents_dir.join(&subagent_id);
-        let meta = std::fs::read_to_string(subagent_dir.join("meta.json"))
-            .ok()
-            .and_then(|data| serde_json::from_str::<SubagentMeta>(&data).ok());
+        let lookup = identity_store::lookup(session_dir, &subagent_id);
+        let (meta, assigned_meta_owner) = match lookup {
+            Ok(identity_store::Lookup::Missing) => (None, None),
+            Ok(identity_store::Lookup::LegacyUnassigned { meta }) => (Some(meta), None),
+            Ok(identity_store::Lookup::Assigned { meta, owner }) => (Some(meta), Some(owner)),
+            Err(error) => {
+                tracing::warn!(
+                    subagent_id,
+                    %error,
+                    "refusing to reconcile invalid assigned subagent metadata"
+                );
+                continue;
+            }
+        };
         match meta {
             Some(m) if m.parent_session_id != parent_session_id => {}
             Some(m) if m.status == "running" => {
@@ -3121,7 +3260,14 @@ pub(crate) fn reconcile_orphaned_subagents(
                         parent_session_id,
                         "Reconciling orphaned subagent left running by a previous process"
                     );
-                    finalize_orphaned_subagent(&subagent_dir, m, gateway, parent_cmd_tx);
+                    finalize_orphaned_subagent(
+                        session_dir,
+                        &subagent_dir,
+                        m,
+                        assigned_meta_owner.as_ref(),
+                        gateway,
+                        parent_cmd_tx,
+                    );
                 }
             }
             Some(m) => {

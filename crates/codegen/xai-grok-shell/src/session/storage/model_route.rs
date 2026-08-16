@@ -166,6 +166,44 @@ mod contain {
             &self.path
         }
 
+        pub fn open_or_create_private_dir(
+            &self,
+            name: &str,
+            create: bool,
+        ) -> io::Result<Option<Self>> {
+            validate_single_component(name)?;
+            let os = std::ffi::OsStr::new(name);
+            let flags = libc::O_RDONLY
+                | libc::O_DIRECTORY
+                | libc::O_CLOEXEC
+                | libc::O_NOFOLLOW
+                | libc::O_NONBLOCK;
+            let dir = match openat_component(&self.dir, os, flags, 0) {
+                Ok(dir) => dir,
+                Err(error) if error.kind() == io::ErrorKind::NotFound && create => {
+                    let c_name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "identity name contains NUL")
+                    })?;
+                    // SAFETY: the live parent dirfd and validated component confine creation.
+                    let rc = unsafe { libc::mkdirat(self.dir.as_raw_fd(), c_name.as_ptr(), 0o700) };
+                    if rc != 0 {
+                        let mkdir_error = io::Error::last_os_error();
+                        if mkdir_error.kind() != io::ErrorKind::AlreadyExists {
+                            return Err(mkdir_error);
+                        }
+                    }
+                    openat_component(&self.dir, os, flags, 0)?
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            owner_mode_check_private_dir(&dir)?;
+            Ok(Some(Self {
+                dir,
+                path: self.path.join(name),
+            }))
+        }
+
         fn openat(&self, name: &str, flags: i32, mode: u32) -> io::Result<File> {
             validate_single_component(name)?;
             let os = std::ffi::OsStr::new(name);
@@ -475,6 +513,37 @@ mod contain {
         Ok(())
     }
 
+    fn owner_mode_check_private_dir(dir: &File) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = dir.metadata()?;
+        if !meta.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private identity target is not a directory",
+            ));
+        }
+        let uid = unsafe { libc::getuid() };
+        if meta.uid() != uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private identity target not owned by current user",
+            ));
+        }
+        if meta.nlink() < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private identity target has an invalid link count",
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private identity target permissions are not owner-only",
+            ));
+        }
+        Ok(())
+    }
+
     fn owner_mode_check_file(file: &File) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
         let meta = file.metadata()?;
@@ -536,6 +605,33 @@ mod contain {
 
         pub fn path(&self) -> &Path {
             &self.path
+        }
+
+        pub fn open_or_create_private_dir(
+            &self,
+            name: &str,
+            create: bool,
+        ) -> io::Result<Option<Self>> {
+            validate_single_component(name)?;
+            let path = self.path.join(name);
+            if create {
+                match fs::create_dir(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            if !path.exists() {
+                return Ok(None);
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "private identity target is not a directory",
+                ));
+            }
+            Ok(Some(Self { path }))
         }
 
         pub fn exists_nofollow(&self, name: &str) -> io::Result<bool> {
@@ -2086,6 +2182,62 @@ fn read_private_identity_state_locked(
     })
 }
 
+fn open_private_identity_target(
+    parent_session_dir: &Path,
+    subagent_id: &str,
+    create: bool,
+) -> io::Result<Option<SessionRoot>> {
+    if subagent_id.is_empty()
+        || subagent_id.len() > 128
+        || !subagent_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid subagent identity target id",
+        ));
+    }
+    let parent = SessionRoot::open(parent_session_dir)?;
+    let Some(subagents) = parent.open_or_create_private_dir("subagents", create)? else {
+        return Ok(None);
+    };
+    subagents.open_or_create_private_dir(subagent_id, create)
+}
+
+fn commit_private_identity_pair_rooted(
+    root: SessionRoot,
+    primary: &[u8],
+    companion: &[u8],
+) -> io::Result<String> {
+    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
+    recover_private_identity_txn(&root)?;
+    match read_private_identity_state_locked(
+        &root,
+        PRIVATE_IDENTITY_MAX_BYTES,
+        PRIVATE_IDENTITY_MAX_BYTES,
+    )? {
+        PrivateIdentityState::Missing => {}
+        PrivateIdentityState::LegacyPrimary(_) | PrivateIdentityState::ValidPair { .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "private identity artifacts already exist",
+            ));
+        }
+    }
+    let owner_generation = uuid::Uuid::new_v4().to_string();
+    commit_private_artifacts_locked(
+        &root,
+        None,
+        None,
+        None,
+        primary,
+        companion,
+        &owner_generation,
+    )?;
+    Ok(owner_generation)
+}
+
 fn commit_private_artifacts_locked(
     root: &SessionRoot,
     previous_primary: Option<&[u8]>,
@@ -2140,39 +2292,59 @@ pub(crate) fn commit_private_identity_pair(
 ) -> io::Result<String> {
     validate_private_bytes(primary, "primary")?;
     validate_private_bytes(companion, "companion")?;
-    let root = SessionRoot::open(target_dir)?;
-    let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
-    recover_private_identity_txn(&root)?;
-    match read_private_identity_state_locked(
-        &root,
-        PRIVATE_IDENTITY_MAX_BYTES,
-        PRIVATE_IDENTITY_MAX_BYTES,
-    )? {
-        PrivateIdentityState::Missing => {}
-        PrivateIdentityState::LegacyPrimary(_) | PrivateIdentityState::ValidPair { .. } => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "private identity artifacts already exist",
-            ));
-        }
-    }
-    let owner_generation = uuid::Uuid::new_v4().to_string();
-    commit_private_artifacts_locked(
-        &root,
-        None,
-        None,
-        None,
-        primary,
-        companion,
-        &owner_generation,
-    )?;
-    Ok(owner_generation)
+    commit_private_identity_pair_rooted(SessionRoot::open(target_dir)?, primary, companion)
+}
+
+/// Commit a private identity pair below the fixed parent-owned
+/// `subagents/{id}` target. The caller supplies no pre-joined target path and
+/// this API never creates or opens the child session root.
+pub(crate) fn commit_private_identity_pair_for_subagent(
+    parent_session_dir: &Path,
+    subagent_id: &str,
+    primary: &[u8],
+    companion: &[u8],
+) -> io::Result<String> {
+    validate_private_bytes(primary, "primary")?;
+    validate_private_bytes(companion, "companion")?;
+    let root =
+        open_private_identity_target(parent_session_dir, subagent_id, true)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "subagent identity target missing")
+        })?;
+    commit_private_identity_pair_rooted(root, primary, companion)
 }
 
 /// Update either public final under the existing owner generation. The expected
 /// generation is checked under the transaction lock before any files are staged.
 pub(crate) fn update_private_identity_pair(
     target_dir: &Path,
+    expected_owner_generation: &str,
+    primary: Option<&[u8]>,
+    companion: Option<&[u8]>,
+) -> io::Result<()> {
+    update_private_identity_pair_rooted(
+        SessionRoot::open(target_dir)?,
+        expected_owner_generation,
+        primary,
+        companion,
+    )
+}
+
+pub(crate) fn update_private_identity_pair_for_subagent(
+    parent_session_dir: &Path,
+    subagent_id: &str,
+    expected_owner_generation: &str,
+    primary: Option<&[u8]>,
+    companion: Option<&[u8]>,
+) -> io::Result<()> {
+    let root =
+        open_private_identity_target(parent_session_dir, subagent_id, false)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "subagent identity target missing")
+        })?;
+    update_private_identity_pair_rooted(root, expected_owner_generation, primary, companion)
+}
+
+fn update_private_identity_pair_rooted(
+    root: SessionRoot,
     expected_owner_generation: &str,
     primary: Option<&[u8]>,
     companion: Option<&[u8]>,
@@ -2189,7 +2361,6 @@ pub(crate) fn update_private_identity_pair(
     if let Some(companion) = companion {
         validate_private_bytes(companion, "companion")?;
     }
-    let root = SessionRoot::open(target_dir)?;
     let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
     recover_private_identity_txn(&root)?;
     let PrivateIdentityState::ValidPair {
@@ -2234,9 +2405,29 @@ pub(crate) fn replace_private_identity_pair(
     primary: &[u8],
     companion: &[u8],
 ) -> io::Result<String> {
+    replace_private_identity_pair_rooted(SessionRoot::open(target_dir)?, primary, companion)
+}
+
+pub(crate) fn replace_private_identity_pair_for_subagent(
+    parent_session_dir: &Path,
+    subagent_id: &str,
+    primary: &[u8],
+    companion: &[u8],
+) -> io::Result<String> {
+    let root =
+        open_private_identity_target(parent_session_dir, subagent_id, true)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "subagent identity target missing")
+        })?;
+    replace_private_identity_pair_rooted(root, primary, companion)
+}
+
+fn replace_private_identity_pair_rooted(
+    root: SessionRoot,
+    primary: &[u8],
+    companion: &[u8],
+) -> io::Result<String> {
     validate_private_bytes(primary, "primary")?;
     validate_private_bytes(companion, "companion")?;
-    let root = SessionRoot::open(target_dir)?;
     let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
     recover_private_identity_txn(&root)?;
     let state = read_private_identity_state_locked(
@@ -2288,8 +2479,32 @@ pub(crate) fn load_private_identity_pair(
     max_primary_bytes: usize,
     max_companion_bytes: usize,
 ) -> io::Result<PrivateIdentityPair> {
+    load_private_identity_pair_rooted(
+        SessionRoot::open(target_dir)?,
+        max_primary_bytes,
+        max_companion_bytes,
+    )
+}
+
+pub(crate) fn load_private_identity_pair_for_subagent(
+    parent_session_dir: &Path,
+    subagent_id: &str,
+    max_primary_bytes: usize,
+    max_companion_bytes: usize,
+) -> io::Result<PrivateIdentityPair> {
     validate_private_read_bounds(max_primary_bytes, max_companion_bytes)?;
-    let root = SessionRoot::open(target_dir)?;
+    let Some(root) = open_private_identity_target(parent_session_dir, subagent_id, false)? else {
+        return Ok(PrivateIdentityPair::Missing);
+    };
+    load_private_identity_pair_rooted(root, max_primary_bytes, max_companion_bytes)
+}
+
+fn load_private_identity_pair_rooted(
+    root: SessionRoot,
+    max_primary_bytes: usize,
+    max_companion_bytes: usize,
+) -> io::Result<PrivateIdentityPair> {
+    validate_private_read_bounds(max_primary_bytes, max_companion_bytes)?;
     let _lock = root.lock_named_exclusive(PRIVATE_LOCK_FILE)?;
     recover_private_identity_txn(&root)?;
     match read_private_identity_state_locked(&root, max_primary_bytes, max_companion_bytes)? {
