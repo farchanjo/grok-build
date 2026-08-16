@@ -296,10 +296,18 @@ async fn run_inner(args: OpenAiCliArgs) -> Result<ExitCode, String> {
         },
         OpenAiCliCommand::Responses { command } => match command {
             ResponsesCommand::Create { input } => {
+                // Prefer streaming companion when --stream and binding exists.
+                let op = if args.stream
+                    && find_cli_operation("openai", "createResponse_stream").is_some()
+                {
+                    "createResponse_stream"
+                } else {
+                    "createResponse"
+                };
                 call(
                     &args.provider,
                     "openai",
-                    "createResponse",
+                    op,
                     &[],
                     &[],
                     Some(&input),
@@ -373,6 +381,11 @@ fn is_mutating(namespace: &str, operation_id: &str) -> bool {
 }
 
 fn parse_files(files: &[String]) -> Result<Vec<(String, PathBuf)>, String> {
+    parse_files_public(files)
+}
+
+/// Parse repeatable `--file field=path` bindings (shared with OpenRouter CLI).
+pub fn parse_files_public(files: &[String]) -> Result<Vec<(String, PathBuf)>, String> {
     let mut out = Vec::new();
     for f in files {
         let (field, path) = f
@@ -469,7 +482,7 @@ async fn call(
     .await
 }
 
-/// Shared entry for OpenRouter namespace.
+/// Shared entry for OpenRouter (and other) namespaces with full transport flags.
 pub async fn call_namespace(
     provider: &str,
     namespace: &str,
@@ -479,6 +492,9 @@ pub async fn call_namespace(
     input: Option<&str>,
     dry_run: bool,
     yes: bool,
+    stream: bool,
+    output: Option<&std::path::Path>,
+    files: &[(String, PathBuf)],
 ) -> Result<ExitCode, String> {
     call(
         provider,
@@ -489,9 +505,9 @@ pub async fn call_namespace(
         input,
         dry_run,
         yes,
-        false,
-        None,
-        &[],
+        stream,
+        output,
+        files,
     )
     .await
 }
@@ -641,9 +657,7 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let op = find_cli_operation("openai", "listModels").expect("listModels");
-        // Poison env with sentinel secrets that must never be resolved on dry-run.
-        // (Resolution would not panic, but LIVE_CREDENTIAL_PHASE_COUNT proves the
-        // credential phase was never entered.)
+        // LIVE_CREDENTIAL_PHASE_COUNT proves the credential phase was never entered.
         let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
         let code = dispatch_runtime(
             "openai",
@@ -673,5 +687,91 @@ mod tests {
         std::fs::write(&p, "").unwrap();
         let err = read_typed_input::<Value>(p.to_str().unwrap()).unwrap_err();
         assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn create_response_stream_companion_is_bound() {
+        let stream = find_cli_operation("openai", "createResponse_stream")
+            .expect("createResponse_stream must exist for subset allowlist");
+        assert!(stream.is_sse || stream.operation_id.ends_with("_stream"));
+        assert!(
+            super::super::instance_dispatch::OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS
+                .contains(&"createResponse_stream")
+        );
+    }
+
+    #[test]
+    fn responses_create_prefers_stream_companion_when_flag_set() {
+        // Structural: with --stream the shorthand selects createResponse_stream.
+        let args = OpenAiCliArgs::try_parse_from([
+            "openai",
+            "--provider",
+            "openai",
+            "--stream",
+            "responses",
+            "create",
+            "--input",
+            "{}",
+        ])
+        .unwrap();
+        assert!(args.stream);
+        assert!(matches!(
+            args.command,
+            OpenAiCliCommand::Responses {
+                command: ResponsesCommand::Create { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn mutation_required_before_dispatch_for_delete_model() {
+        // call() requires --yes before credentials/network for mutations.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(call(
+                "openai",
+                "openai",
+                "deleteModel",
+                &["model=x".into()],
+                &[],
+                None,
+                false,
+                false, // no --yes
+                false,
+                None,
+                &[],
+            ))
+            .unwrap_err();
+        assert!(
+            err.contains("--yes") || err.contains("confirmation"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn dry_run_skips_mutation_confirmation() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let code = rt
+            .block_on(call(
+                "openai",
+                "openai",
+                "deleteModel",
+                &["model=x".into()],
+                &[],
+                None,
+                true, // dry_run
+                false,
+                false,
+                None,
+                &[],
+            ))
+            .expect("dry-run mutation");
+        assert_eq!(code, ExitCode::Success);
     }
 }

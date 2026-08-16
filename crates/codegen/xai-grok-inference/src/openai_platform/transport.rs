@@ -525,8 +525,9 @@ impl PlatformTransport {
             }
         };
         if let Some(path) = sink {
-            tokio::fs::write(path, &bytes)
-                .await
+            // Same owner-only durable primitive as CLI write_binary (sync IO on
+            // the worker; sink writes are local filesystem only).
+            super::durable_write::write_owner_only_atomic(path, &bytes)
                 .map_err(|e| PlatformError::Transport(format!("write binary sink: {e}")))?;
         }
         Ok((bytes, content_type))

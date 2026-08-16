@@ -1,12 +1,14 @@
 //! Typed CLI dispatch runtime. DO NOT EDIT BY HAND.
 //! Source: baselines/scripts/generate_operation_metadata.py
+//!
+//! Instance resolution, ApiSurface gates, and credential slots live in
+//! `instance_dispatch` (hand-written). This file only owns typed match arms.
 use super::generated_ops::CliOperation;
-use super::output::{ExitCode, write_binary, write_json, write_ndjson_line};
-use crate::provider_registry::id::ProviderId;
-use crate::provider_registry::secrets::{
-    admin_key_scope, application_key_scope, read_provider_secret,
+use super::instance_dispatch::{
+    assert_surface_allows_operation, build_platform_client_config, dry_run_document,
+    load_provider_service, resolve_instance_credentials, resolve_selected_instance,
 };
-use indexmap::IndexMap;
+use super::output::{ExitCode, write_binary, write_json, write_ndjson_line};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -15,9 +17,7 @@ use xai_grok_inference::openai_platform::MultipartFiles;
 use xai_grok_inference::openai_platform::generated::{
     openai_admin_types, openai_types, openrouter_types,
 };
-use xai_grok_inference::{
-    OpenAiAdminClient, OpenAiClient, OpenRouterClient, PlatformClientConfig, TransportPolicy,
-};
+use xai_grok_inference::{OpenAiAdminClient, OpenAiClient, OpenRouterClient};
 
 fn merge_params(
     input_json: Option<&str>,
@@ -80,59 +80,23 @@ pub async fn dispatch_runtime(
     ) {
         return Err(format!("unsupported HTTP method {}", op.method));
     }
-    // Merge typed params first. Dry-run must return before any credential
-    // resolver, env/vault/auth-file access, token construction, or network setup.
+    // 1) Merge typed params (no secrets).
     let merged = merge_params(input_json, path_params, query)?;
+    // 2) Resolve one explicit ProviderService instance + ApiSurface gate.
+    //    ProviderService is credential-free, so dry-run may use it.
+    let home = xai_grok_config::grok_home();
+    let service = load_provider_service(&home)?;
+    let instance = resolve_selected_instance(&service, provider, op)?;
+    assert_surface_allows_operation(&instance, op)?;
+    // 3) Dry-run returns before any credential phase / network.
     if dry_run {
-        write_json(&json!({
-            "provider": provider,
-            "operation_id": op.operation_id,
-            "request_type": op.request_type,
-            "response_type": op.response_type,
-            "client_method": op.client_method,
-            "transports": op.transports,
-            "credential_class": op.credential_class,
-            "requires_confirmation": op.requires_confirmation,
-            "typed_request": merged,
-            "dry_run": true,
-        }))
-        .map_err(|e| e.to_string())?;
+        write_json(&dry_run_document(&instance, op, &merged)).map_err(|e| e.to_string())?;
         return Ok(ExitCode::Success);
     }
+    // 4) Live credential phase (never reached by dry-run).
     note_live_dispatch_credential_phase();
-    let home = xai_grok_config::grok_home();
-    let meta = resolve_provider_from_registry(provider, &home)?;
-    let pid = ProviderId::new(provider).map_err(|e| e.to_string())?;
-    // Credential selection is provider-native and metadata-driven: admin slots
-    // never fall back to the application key when admin is missing.
-    let want_admin = op.is_admin || op.credential_class == "admin";
-    let app_token = if want_admin {
-        None
-    } else {
-        resolve_app_token(provider, &home, &pid, meta.env_key.as_deref())
-    };
-    let admin_token = resolve_admin_token(provider, &home, &pid, meta.admin_env_key.as_deref());
-    if want_admin
-        && admin_token
-            .as_ref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-    {
-        return Err(format!(
-            "admin credential required for {}::{} (never borrowing application key)",
-            op.provider_namespace, op.operation_id
-        ));
-    }
-    let cfg = PlatformClientConfig {
-        provider_id: provider.to_owned(),
-        display_name: meta.display_name,
-        base_url: meta.base_url,
-        admin_base_url: meta.admin_base_url,
-        application_token: if want_admin { None } else { app_token },
-        admin_token,
-        extra_headers: meta.extra_headers.into_iter().collect(),
-        policy: TransportPolicy::default(),
-    };
+    let (app_token, admin_token) = resolve_instance_credentials(&instance, op, &home)?;
+    let cfg = build_platform_client_config(&instance, op, app_token, admin_token);
     match op.provider_namespace {
         "openai" => {
             let client = OpenAiClient::from_config(cfg, CancellationToken::new())
@@ -163,6 +127,86 @@ pub(crate) static LIVE_CREDENTIAL_PHASE_COUNT: std::sync::atomic::AtomicUsize =
 fn note_live_dispatch_credential_phase() {
     #[cfg(test)]
     LIVE_CREDENTIAL_PHASE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::model_providers::{ModelProviderConfig, ModelProviderKind};
+    use crate::cli::generated_ops::find_cli_operation;
+    use crate::cli::instance_dispatch::{
+        OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS, override_provider_service,
+    };
+    use crate::provider_registry::ProviderService;
+    use indexmap::IndexMap;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn dry_run_never_enters_live_credential_phase_and_shows_instance() {
+        let op = find_cli_operation("openai", "listModels").expect("listModels");
+        let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
+        let code = dispatch_runtime("openai", op, &[], &[], None, true, false, None, &[])
+            .await
+            .expect("dry_run");
+        assert_eq!(code, ExitCode::Success);
+        assert_eq!(
+            LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst),
+            before,
+            "dry-run must not enter live credential phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn surface_gate_rejects_non_allowlisted_on_custom_before_credentials() {
+        let mut m = IndexMap::new();
+        m.insert(
+            "proxy".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenAiCompatible,
+                base_url: Some("https://proxy.example/v1".into()),
+                display_name: Some("Proxy".into()),
+                ..Default::default()
+            },
+        );
+        let svc = ProviderService::from_model_providers(&m).unwrap();
+        let _guard = override_provider_service(svc);
+        let op = find_cli_operation("openai", "deleteModel").expect("deleteModel");
+        let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
+        let err = dispatch_runtime("proxy", op, &[], &[], None, false, false, None, &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("allowlist") || err.contains("subset"), "{err}");
+        assert_eq!(
+            LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst),
+            before,
+            "surface gate must run before credential phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_instance_fails_without_builtin_fallback() {
+        let op = find_cli_operation("openai", "listModels").expect("listModels");
+        let err = dispatch_runtime(
+            "not-a-real-provider-id",
+            op,
+            &[],
+            &[],
+            None,
+            true,
+            false,
+            None,
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
+    }
+
+    #[test]
+    fn subset_allowlist_constant_is_non_empty() {
+        assert!(OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS.len() >= 6);
+        assert!(OPENAI_COMPATIBLE_SUBSET_OPERATION_IDS.contains(&"createResponse_stream"));
+    }
 }
 
 async fn dispatch_openai(
@@ -5533,201 +5577,4 @@ async fn dispatch_openrouter(
 
         other => Err(format!("no typed dispatch arm for {other}")),
     }
-}
-
-struct ProviderMeta {
-    base_url: String,
-    display_name: String,
-    admin_base_url: Option<String>,
-    extra_headers: IndexMap<String, String>,
-    env_key: Option<String>,
-    admin_env_key: Option<String>,
-}
-
-fn resolve_provider_from_registry(provider: &str, home: &Path) -> Result<ProviderMeta, String> {
-    match provider {
-        "openai" => {
-            return Ok(ProviderMeta {
-                base_url: "https://api.openai.com/v1".into(),
-                display_name: "OpenAI".into(),
-                admin_base_url: None,
-                extra_headers: IndexMap::new(),
-                env_key: Some("OPENAI_API_KEY".into()),
-                admin_env_key: Some("OPENAI_ADMIN_KEY".into()),
-            });
-        }
-        "openrouter" => {
-            return Ok(ProviderMeta {
-                base_url: "https://openrouter.ai/api/v1".into(),
-                display_name: "OpenRouter".into(),
-                admin_base_url: None,
-                extra_headers: IndexMap::new(),
-                env_key: Some("OPENROUTER_API_KEY".into()),
-                // Prefer OPENROUTER_ADMIN_API_KEY; OPENROUTER_MANAGEMENT_API_KEY is alias.
-                admin_env_key: Some("OPENROUTER_ADMIN_API_KEY".into()),
-            });
-        }
-        "zai" | "zai-model-api" => {
-            return Ok(ProviderMeta {
-                base_url: crate::agent::zai::ZAI_DEFAULT_BASE_URL.into(),
-                display_name: "Z.ai".into(),
-                admin_base_url: None,
-                extra_headers: IndexMap::new(),
-                env_key: Some(crate::agent::zai::ZAI_ENV_KEY.into()),
-                admin_env_key: None,
-            });
-        }
-        _ => {}
-    }
-    let cfg_path = home.join("config.toml");
-    let raw = std::fs::read_to_string(&cfg_path).map_err(|e| format!("read config.toml: {e}"))?;
-    let val: toml::Value = raw.parse().map_err(|e| format!("parse config: {e}"))?;
-    let entry = val
-        .get("model_providers")
-        .and_then(|t| t.get(provider))
-        .ok_or_else(|| format!("provider `{provider}` not found in config.toml"))?;
-    let _ = ProviderId::new(provider).map_err(|e| e.to_string())?;
-    let base = entry
-        .get("base_url")
-        .or_else(|| entry.get("api_base_url"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("provider `{provider}` missing base_url"))?
-        .to_owned();
-    crate::provider_registry::lifecycle::validate_http_base_url(&base)
-        .map_err(|e| e.to_string())?;
-    let admin_base = entry
-        .get("admin_base_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
-    if let Some(ref a) = admin_base {
-        crate::provider_registry::lifecycle::validate_http_base_url(a)
-            .map_err(|e| e.to_string())?;
-    }
-    let display_name = entry
-        .get("display_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(provider)
-        .to_owned();
-    let mut extra_headers = IndexMap::new();
-    if let Some(h) = entry.get("extra_headers").and_then(|v| v.as_table()) {
-        for (k, v) in h {
-            if let Some(s) = v.as_str() {
-                extra_headers.insert(k.clone(), s.to_owned());
-            }
-        }
-    }
-    crate::provider_registry::lifecycle::validate_extra_headers(&extra_headers)
-        .map_err(|e| e.to_string())?;
-    let env_key = entry.get("env_key").and_then(|v| {
-        v.as_str().map(|s| s.to_owned()).or_else(|| {
-            v.as_array()
-                .and_then(|a| a.first())
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_owned())
-        })
-    });
-    let admin_env_key = entry
-        .get("admin_env_key")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
-    Ok(ProviderMeta {
-        base_url: base,
-        display_name,
-        admin_base_url: admin_base,
-        extra_headers,
-        env_key,
-        admin_env_key,
-    })
-}
-
-fn resolve_app_token(
-    provider: &str,
-    home: &Path,
-    pid: &ProviderId,
-    env_key: Option<&str>,
-) -> Option<String> {
-    if let Some(name) = env_key {
-        if let Ok(v) = std::env::var(name) {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    match provider {
-        "openai" => crate::auth::read_provider_api_key(home, crate::auth::OPENAI_API_KEY_SCOPE)
-            .ok()
-            .flatten()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok()),
-        "openrouter" => {
-            crate::auth::read_provider_api_key(home, crate::auth::OPENROUTER_API_KEY_SCOPE)
-                .ok()
-                .flatten()
-                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-        }
-        "zai" | "zai-model-api" => read_provider_secret(home, &application_key_scope(pid))
-            .ok()
-            .flatten()
-            .or_else(|| std::env::var(crate::agent::zai::ZAI_ENV_KEY).ok()),
-        _ => read_provider_secret(home, &application_key_scope(pid))
-            .ok()
-            .flatten(),
-    }
-}
-
-fn resolve_admin_token(
-    provider: &str,
-    home: &Path,
-    pid: &ProviderId,
-    admin_env_key: Option<&str>,
-) -> Option<String> {
-    // Never fall back to the application key when admin is missing.
-    if let Some(name) = admin_env_key {
-        if let Ok(v) = std::env::var(name) {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    // Built-in OpenRouter management alias.
-    if provider == "openrouter" {
-        if let Ok(v) = std::env::var("OPENROUTER_MANAGEMENT_API_KEY") {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-        if let Ok(v) = std::env::var("OPENROUTER_ADMIN_API_KEY") {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-        if let Ok(Some(v)) =
-            crate::auth::read_provider_api_key(home, crate::auth::OPENROUTER_ADMIN_KEY_SCOPE)
-        {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-        if let Ok(Some(v)) =
-            crate::auth::read_provider_api_key(home, crate::auth::OPENROUTER_MANAGEMENT_KEY_SCOPE)
-        {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    if provider == "openai" {
-        if let Ok(v) = std::env::var("OPENAI_ADMIN_KEY") {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-        if let Ok(Some(v)) =
-            crate::auth::read_provider_api_key(home, crate::auth::OPENAI_ADMIN_KEY_SCOPE)
-        {
-            return Some(v);
-        }
-    }
-    read_provider_secret(home, &admin_key_scope(pid))
-        .ok()
-        .flatten()
 }

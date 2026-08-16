@@ -8,6 +8,7 @@
 //! OpenRouter baseline inventories (see `generated/bindings.rs`).
 
 pub mod client;
+pub mod durable_write;
 pub mod error;
 pub mod generated;
 pub mod inventory_coverage;
@@ -20,6 +21,7 @@ pub mod url_policy;
 mod transport_tests;
 
 pub use client::{OpenAiAdminClient, OpenAiClient, OpenRouterClient, PlatformClientConfig};
+pub use durable_write::write_owner_only_atomic;
 pub use error::{PlatformError, PlatformResult};
 pub use generated::{
     BINARY_PRIMARY_COUNT, OPENAI_ADMIN_BINDING_COUNT, OPENAI_APP_BINDING_COUNT,
