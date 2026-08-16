@@ -611,6 +611,9 @@ pub struct InferenceClient {
     /// copy (502/520-class, 402) when the diagnostics `provider_name` (the
     /// selected OpenRouter upstream) is unavailable at the call site.
     provider_label: String,
+    /// Exact provider route retained for auxiliary sampling (operation
+    /// partition, exact-route 401 attribution). Absent on legacy constructors.
+    route_context: Option<crate::route_context::ProviderRouteContext>,
 }
 
 impl std::fmt::Debug for InferenceClient {
@@ -628,6 +631,14 @@ impl std::fmt::Debug for InferenceClient {
                 &self.openrouter_metadata_requested,
             )
             .field("provider_label", &self.provider_label)
+            .field(
+                "route_instance",
+                &self.route_context.as_ref().map(|r| r.instance_id()),
+            )
+            .field(
+                "route_operation",
+                &self.route_context.as_ref().map(|r| r.operation_partition()),
+            )
             .finish()
     }
 }
@@ -731,6 +742,20 @@ impl InferenceClient {
     /// pre-computes the default request headers. This does not perform
     /// any network I/O.
     pub fn new(config: InferenceConfig) -> Result<Self> {
+        Self::new_with_route_context(config, None)
+    }
+
+    /// Construct a sampling client that retains an exact
+    /// [`ProviderRouteContext`] for auxiliary pacing/attribution.
+    ///
+    /// Primary session turns should prefer the actor path
+    /// (`spawn_with_route_context`); this constructor is the
+    /// production seam for one-shot auxiliary clients (compaction,
+    /// media, title, suggest, goal evaluator).
+    pub fn new_with_route_context(
+        config: InferenceConfig,
+        route_context: Option<crate::route_context::ProviderRouteContext>,
+    ) -> Result<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(ref api_key) = config.api_key {
@@ -887,7 +912,13 @@ impl InferenceClient {
             first_party: config.provider_identity.is_first_party(),
             openrouter_metadata_requested: config.provider_identity.is_openrouter(),
             provider_label: config.provider_identity.label().to_string(),
+            route_context,
         })
+    }
+
+    /// Exact route retained at construction (auxiliary sampling).
+    pub fn route_context(&self) -> Option<&crate::route_context::ProviderRouteContext> {
+        self.route_context.as_ref()
     }
 
     /// The configured API backend for this client.

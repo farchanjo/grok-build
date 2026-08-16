@@ -926,7 +926,7 @@ impl SessionActor {
         let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
         let selection_id = self.selection_model_id.borrow().0.to_string();
         let frozen = self.route_context.borrow().clone();
-        crate::session::auxiliary_route::resolve_auxiliary_route(
+        let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {
                 purpose,
                 requested: slug,
@@ -949,9 +949,16 @@ impl SessionActor {
                         | crate::session::auxiliary_route::AuxiliaryPurpose::MediaPdf
                         | crate::session::auxiliary_route::AuxiliaryPurpose::WebSearch
                         | crate::session::auxiliary_route::AuxiliaryPurpose::Compaction
+                        | crate::session::auxiliary_route::AuxiliaryPurpose::ShellSuggest
                 ),
             },
-        )
+        )?;
+        // Exact-route 401 attribution for this aux pin — never the session sibling.
+        resolved.bind_attribution(
+            self.auth_manager.as_ref(),
+            Some(self.session_info.id.to_string()),
+        );
+        Ok(resolved)
     }
 
     /// Resolve a standalone aux-model `InferenceConfig` for `slug` via the
@@ -982,12 +989,22 @@ impl SessionActor {
         &self,
         pin: &str,
     ) -> Result<crate::session::auxiliary_route::ResolvedAuxiliaryRoute, acp::Error> {
-        self.resolve_aux_route(
+        self.resolve_media_purpose(
             crate::session::auxiliary_route::AuxiliaryPurpose::MediaDescribe,
             pin,
         )
         .await
-        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))
+    }
+
+    /// Resolve media with an explicit purpose (image / video / PDF).
+    pub(super) async fn resolve_media_purpose(
+        &self,
+        purpose: crate::session::auxiliary_route::AuxiliaryPurpose,
+        pin: &str,
+    ) -> Result<crate::session::auxiliary_route::ResolvedAuxiliaryRoute, acp::Error> {
+        self.resolve_aux_route(purpose, pin)
+            .await
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))
     }
 
     /// Resolve the ordered primary/fallback compaction routes through exact
@@ -1017,19 +1034,23 @@ impl SessionActor {
                         "configured compaction model '{model_ref}' is unavailable: {error}"
                     ))
                 })?;
-            let mut config = resolved.inference;
+            let mut config = resolved.inference.clone();
             crate::session::auxiliary_route::sanitize_compaction_inference(&mut config);
-            let client = xai_grok_inference::InferenceClient::new(config.clone()).map_err(
-                |error| {
-                    acp::Error::invalid_params().data(format!(
-                        "configured compaction model '{model_ref}' could not be initialized: {error}"
-                    ))
-                },
-            )?;
+            // Rebuild with sanitized config while retaining exact route.
+            let client = xai_grok_inference::InferenceClient::new_with_route_context(
+                config.clone(),
+                Some(resolved.route.clone()),
+            )
+            .map_err(|error| {
+                acp::Error::invalid_params().data(format!(
+                    "configured compaction model '{model_ref}' could not be initialized: {error}"
+                ))
+            })?;
             routes.push(
                 crate::session::helpers::full_replace_compaction::CompactionRoute {
                     client,
                     inference_config: config,
+                    route: resolved.route,
                 },
             );
         }

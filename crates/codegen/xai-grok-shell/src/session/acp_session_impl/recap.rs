@@ -507,7 +507,31 @@ impl SessionActor {
         cwd: &str,
         model_override: Option<&str>,
     ) -> Option<String> {
-        let sampling_client = self.prepare_chat_completion(false).await.ok()?;
+        // Exact ShellSuggest route: never sample a foreign model on the
+        // session endpoint/credentials. Miss → skip (fail closed soft).
+        let requested = model_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::models::default_model());
+        let (sampling_client, wire_model) = match self
+            .resolve_aux_route(
+                crate::session::auxiliary_route::AuxiliaryPurpose::ShellSuggest,
+                requested,
+            )
+            .await
+        {
+            Ok(route) => match route.client() {
+                Ok(client) => (client, route.upstream_model_id),
+                Err(e) => {
+                    tracing::debug!(error = %e, "shell suggest: aux client unavailable");
+                    return None;
+                }
+            },
+            Err(e) => {
+                tracing::debug!(error = %e, "shell suggest: aux route unavailable; skipping");
+                return None;
+            }
+        };
 
         let system = "You are a shell command autocomplete engine. \
             Given a partial command, output ONLY the completed command. \
@@ -520,15 +544,10 @@ impl SessionActor {
             ConversationItem::user(user_msg),
         ];
 
-        let model = match model_override {
-            Some(m) => m.to_owned(),
-            None => "grok-build".to_owned(),
-        };
-
         let request = ConversationRequest {
             items,
             tools: vec![],
-            model: Some(model),
+            model: Some(wire_model),
             temperature: Some(0.1),
             max_output_tokens: Some(50),
             ..Default::default()

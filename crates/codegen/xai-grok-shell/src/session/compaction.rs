@@ -184,13 +184,20 @@ impl SessionActor {
                 Ok(route) => {
                     let describe_model = route.upstream_model_id.clone();
                     let sampler_config = route.inference;
+                    let route_ctx = route.route.clone();
                     let provider = sampler_config.provider_identity;
                     let client = crate::session::media_pipeline::auxiliary_media_route_allowed(
                         provider,
                         self.auth_manager.as_ref(),
                     )
                     .ok()
-                    .and_then(|()| xai_grok_inference::InferenceClient::new(sampler_config).ok());
+                    .and_then(|()| {
+                        xai_grok_inference::InferenceClient::new_with_route_context(
+                            sampler_config,
+                            Some(route_ctx),
+                        )
+                        .ok()
+                    });
                     (
                         client,
                         Some(describe_model),

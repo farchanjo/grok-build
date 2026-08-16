@@ -61,6 +61,8 @@ use crate::session::helpers::session_compact::{
 pub(crate) struct CompactionRoute {
     pub(crate) client: OaiCompatClient,
     pub(crate) inference_config: InferenceConfig,
+    /// Exact provider route retained for pacing/attribution provenance.
+    pub(crate) route: xai_grok_inference::ProviderRouteContext,
 }
 
 pub(crate) struct ShellCompactionSampler {
@@ -695,10 +697,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -782,10 +790,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -879,10 +893,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -973,10 +993,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -1067,10 +1093,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -1162,10 +1194,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -1264,10 +1302,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -1373,10 +1417,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -1479,10 +1529,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&fallback_base_url, ProviderIdentity::Xai),
                 inference_config: make_test_config(&fallback_base_url, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&fallback_base_url, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -1908,10 +1964,16 @@ mod compaction_route_tests {
             CompactionRoute {
                 client: create_client(&base_url1, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url1, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url1, ProviderIdentity::Xai),
+                ),
             },
             CompactionRoute {
                 client: create_client(&base_url2, ProviderIdentity::Xai),
                 inference_config: make_test_config(&base_url2, ProviderIdentity::Xai),
+                route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                    &make_test_config(&base_url2, ProviderIdentity::Xai),
+                ),
             },
         ];
 
@@ -2040,10 +2102,16 @@ mod compaction_route_tests {
                 CompactionRoute {
                     client: create_client(&base_url, ProviderIdentity::Xai),
                     inference_config: make_test_config(&base_url, ProviderIdentity::Xai),
+                    route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                        &make_test_config(&base_url, ProviderIdentity::Xai),
+                    ),
                 },
                 CompactionRoute {
                     client: create_client(&fallback_url, ProviderIdentity::Xai),
                     inference_config: make_test_config(&fallback_url, ProviderIdentity::Xai),
+                    route: xai_grok_inference::ProviderRouteContext::legacy_from_config(
+                        &make_test_config(&fallback_url, ProviderIdentity::Xai),
+                    ),
                 },
             ],
             acp::SessionId::new("test-session"),

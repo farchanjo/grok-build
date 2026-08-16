@@ -118,7 +118,11 @@ impl ShellAttribution {
         auth_manager: Arc<AuthManager>,
         session_id: Option<String>,
     ) -> Arc<dyn Auth401AttributionCallback> {
-        Self::new_with_route(auth_manager, session_id, Arc::new(parking_lot::RwLock::new(None)))
+        Self::new_with_route(
+            auth_manager,
+            session_id,
+            Arc::new(parking_lot::RwLock::new(None)),
+        )
     }
 
     /// Same as [`Self::new`] but shares a live route-context cell with the
@@ -151,6 +155,19 @@ impl ShellAttribution {
             auth_manager,
             session_id,
             route_context: Arc::new(parking_lot::RwLock::new(None)),
+        })
+    }
+
+    /// Tool-side callback bound to a frozen exact aux route (web search pin).
+    pub fn new_tool_callback_with_route(
+        auth_manager: Arc<AuthManager>,
+        session_id: Option<String>,
+        route: xai_grok_inference::ProviderRouteContext,
+    ) -> Arc<dyn ToolAuth401AttributionCallback> {
+        Arc::new(Self {
+            auth_manager,
+            session_id,
+            route_context: Arc::new(parking_lot::RwLock::new(Some(route))),
         })
     }
 }
@@ -186,13 +203,26 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
             ToolConsumer::VideoGenPoll => (ConsumerKind::VideoGen, "poll"),
             ToolConsumer::WebSearch => (ConsumerKind::WebSearch, ""),
         };
-        record_consumer_401(
-            self.auth_manager.as_ref(),
-            self.session_id.as_deref(),
-            kind,
-            op,
-            sent_bearer_prefix,
-        );
+        // Prefer exact-route credential when a production route sidecar is
+        // installed (e.g. web-search aux pin); never fall through to a sibling.
+        let route = self.route_context.read().clone();
+        if route.is_some() {
+            record_auth_401_for_route(
+                self.auth_manager.as_ref(),
+                self.session_id.as_deref(),
+                &format_consumer(kind, op),
+                sent_bearer_prefix,
+                route.as_ref(),
+            );
+        } else {
+            record_consumer_401(
+                self.auth_manager.as_ref(),
+                self.session_id.as_deref(),
+                kind,
+                op,
+                sent_bearer_prefix,
+            );
+        }
     }
 }
 
@@ -385,9 +415,7 @@ fn compute_attribution_payload(
         if let Some(snap) = route_snap {
             let prefix = token_suffix(&snap.key).to_string();
             let mint_age = now.signed_duration_since(snap.create_time).num_seconds();
-            let expiry = snap
-                .expires_at
-                .unwrap_or(snap.create_time + TOKEN_TTL);
+            let expiry = snap.expires_at.unwrap_or(snap.create_time + TOKEN_TTL);
             (
                 Some(prefix),
                 mint_age,
@@ -450,9 +478,9 @@ pub(crate) fn lookup_route_credential(
     route: &xai_grok_inference::ProviderRouteContext,
 ) -> Option<RouteCredentialSnapshot> {
     use crate::auth::{
-        ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENAI_OAUTH_SCOPE, OPENROUTER_API_KEY_SCOPE,
-        lookup_auth, read_auth_json, read_provider_api_key, read_provider_api_key_binding,
-        read_provider_oauth_auth, read_provider_oauth_binding,
+        ANTHROPIC_API_KEY_SCOPE, OPENAI_API_KEY_SCOPE, OPENAI_OAUTH_SCOPE,
+        OPENROUTER_API_KEY_SCOPE, lookup_auth, read_auth_json, read_provider_api_key,
+        read_provider_api_key_binding, read_provider_oauth_auth, read_provider_oauth_binding,
     };
     use crate::provider_registry::id::ProviderId;
     use crate::provider_registry::instance::ProviderIncarnation;
@@ -469,12 +497,11 @@ pub(crate) fn lookup_route_credential(
                 let path = grok_home.join("auth.json");
                 let store = read_auth_json(&path).ok()?;
                 let auth = lookup_auth(&store, OPENAI_OAUTH_SCOPE)?;
-                let live_gen = crate::auth::chatgpt_oauth::read_builtin_oauth_binding_generation(
-                    grok_home,
-                )
-                .ok()
-                .flatten()
-                .unwrap_or(0);
+                let live_gen =
+                    crate::auth::chatgpt_oauth::read_builtin_oauth_binding_generation(grok_home)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
                 if live_gen != expected_generation {
                     return None;
                 }

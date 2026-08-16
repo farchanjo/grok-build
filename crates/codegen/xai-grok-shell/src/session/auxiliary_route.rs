@@ -5,9 +5,10 @@
 //! module. Explicit overrides are **canonical selection IDs** resolved once via
 //! the origin-aware PR4 resolver; only [`UpstreamModelId`] reaches wire
 //! requests. `@session` copies the frozen session route (never a live global
-//! picker). Missing, ambiguous, gated, disabled, removed, stale-incarnation,
-//! wrong-authority, or unavailable-credential routes fail closed and never
-//! borrow a sibling account.
+//! picker). Missing, ambiguous, namespaced-hijack, or unavailable-credential
+//! routes fail closed and never borrow a sibling account. Catalog entries that
+//! identity-resolution gates out surface as [`AuxiliaryRouteError::Missing`]
+//! (not a distinct gated variant).
 //!
 //! Compatibility (`legacy_compat`) activates only for catalog-absent,
 //! non-namespaced, validated historical first-party wire slugs. The sidecar
@@ -103,7 +104,6 @@ pub enum AuxiliaryRouteError {
     ConstructionFailed { selection: String, detail: String },
     ExplicitPinFailed { selection: String },
     NamespacedHijackRejected { input: String },
-    GatedOrDisabled { selection: String },
 }
 
 impl std::fmt::Display for AuxiliaryRouteError {
@@ -144,9 +144,6 @@ impl std::fmt::Display for AuxiliaryRouteError {
                     "namespaced auxiliary id `{input}` failed authoritative resolution"
                 )
             }
-            Self::GatedOrDisabled { selection } => {
-                write!(f, "auxiliary model `{selection}` is gated or disabled")
-            }
         }
     }
 }
@@ -167,10 +164,47 @@ pub struct ResolvedAuxiliaryRoute {
 }
 
 impl ResolvedAuxiliaryRoute {
-    /// Build a sampling client from the resolved inference config.
+    /// Bind exact-route 401 attribution for this aux sample.
+    ///
+    /// Replaces any session-primary attribution callback so a 401 cannot
+    /// attribute to a sibling account. Non-authoritative legacy_compat routes
+    /// clear the callback (no exact-account repair identity).
+    pub fn bind_attribution(
+        &mut self,
+        auth_manager: Option<&std::sync::Arc<crate::auth::AuthManager>>,
+        session_id: Option<String>,
+    ) {
+        use xai_grok_inference::{RouteAuthority, RouteCredentialRoute};
+        // Legacy / host-fallback / none-credential routes must not claim
+        // exact-account repair identity.
+        if self.kind == AuxiliaryRouteKind::LegacyCompat
+            || self.route.authority() == RouteAuthority::HostFallback
+            || self.route.credential_route() == RouteCredentialRoute::None
+            || !self.route.is_authoritative()
+        {
+            self.inference.attribution_callback = None;
+            return;
+        }
+        let Some(am) = auth_manager else {
+            self.inference.attribution_callback = None;
+            return;
+        };
+        let cell = std::sync::Arc::new(parking_lot::RwLock::new(Some(self.route.clone())));
+        self.inference.attribution_callback =
+            Some(crate::auth::attribution::ShellAttribution::new_with_route(
+                am.clone(),
+                session_id,
+                cell,
+            ));
+    }
+
+    /// Build a sampling client that retains the exact resolved route.
     pub fn client(&self) -> Result<xai_grok_inference::InferenceClient, String> {
-        xai_grok_inference::InferenceClient::new(self.inference.clone())
-            .map_err(|e| format!("client construction failed: {e}"))
+        xai_grok_inference::InferenceClient::new_with_route_context(
+            self.inference.clone(),
+            Some(self.route.clone()),
+        )
+        .map_err(|e| format!("client construction failed: {e}"))
     }
 
     /// Secret-free purpose/kind snapshot for bounded metadata.
@@ -527,12 +561,13 @@ fn is_historical_first_party_wire_slug(id: &str) -> bool {
 /// Production seam: resolve media describe from an explicit pin or `@session`.
 ///
 /// Explicit pins fail closed (no silent session fallback). `@session` requires
-/// a frozen route.
+/// a frozen route. `purpose` must be a media purpose (`MediaDescribe`,
+/// `MediaVideo`, or `MediaPdf`).
 pub fn resolve_media_describe_route(
-    inputs: AuxiliaryRouteInputs<'_>,
+    mut inputs: AuxiliaryRouteInputs<'_>,
+    purpose: AuxiliaryPurpose,
 ) -> Result<ResolvedAuxiliaryRoute, AuxiliaryRouteError> {
-    let mut inputs = inputs;
-    inputs.purpose = AuxiliaryPurpose::MediaDescribe;
+    inputs.purpose = purpose;
     inputs.explicit_pin_fail_closed = true;
     resolve_auxiliary_route(inputs)
 }
@@ -963,7 +998,7 @@ mod tests {
         // when auth scheme requires a key. For OpenAiCompatible with no key,
         // resolution may still produce a config; the important property is
         // kind != LegacyCompat for a catalog hit.
-        let result = resolve_auxiliary_route(AuxiliaryRouteInputs {
+        let err = resolve_auxiliary_route(AuxiliaryRouteInputs {
             purpose: AuxiliaryPurpose::Compaction,
             requested: "no-creds-model",
             models_manager: &mgr,
@@ -979,10 +1014,14 @@ mod tests {
             max_retries: None,
             allow_cross_account_fallback: false,
             explicit_pin_fail_closed: true,
-        });
-        if let Ok(resolved) = result {
-            assert_ne!(resolved.kind, AuxiliaryRouteKind::LegacyCompat);
-            assert_ne!(resolved.route.instance_id(), AUX_LEGACY_COMPAT_INSTANCE);
+        })
+        .expect_err("catalog hit without credentials must fail closed");
+        match &err {
+            AuxiliaryRouteError::CredentialUnavailable { selection }
+                if selection == "no-creds-model" => {}
+            other => panic!(
+                "expected CredentialUnavailable for catalog key without credentials, got {other:?}"
+            ),
         }
     }
 
@@ -1103,23 +1142,26 @@ mod tests {
         let mgr = manager_with(IndexMap::new(), IndexMap::new(), "default", dir.path());
         let frozen = frozen_route();
         let session = session_inference();
-        let err = resolve_media_describe_route(AuxiliaryRouteInputs {
-            purpose: AuxiliaryPurpose::MediaDescribe,
-            requested: "missing-vision-pin",
-            models_manager: &mgr,
-            frozen_session_route: Some(&frozen),
-            frozen_session_inference: &session,
-            frozen_session_selection_id: "default",
-            grok_home: Some(dir.path()),
-            session_key: Some("session-jwt"),
-            disable_api_key_auth: false,
-            alpha_test_key: None,
-            client_version: None,
-            client_identifier: None,
-            max_retries: None,
-            allow_cross_account_fallback: false,
-            explicit_pin_fail_closed: true,
-        })
+        let err = resolve_media_describe_route(
+            AuxiliaryRouteInputs {
+                purpose: AuxiliaryPurpose::MediaDescribe,
+                requested: "missing-vision-pin",
+                models_manager: &mgr,
+                frozen_session_route: Some(&frozen),
+                frozen_session_inference: &session,
+                frozen_session_selection_id: "default",
+                grok_home: Some(dir.path()),
+                session_key: Some("session-jwt"),
+                disable_api_key_auth: false,
+                alpha_test_key: None,
+                client_version: None,
+                client_identifier: None,
+                max_retries: None,
+                allow_cross_account_fallback: false,
+                explicit_pin_fail_closed: true,
+            },
+            AuxiliaryPurpose::MediaDescribe,
+        )
         .unwrap_err();
         assert!(matches!(
             err,

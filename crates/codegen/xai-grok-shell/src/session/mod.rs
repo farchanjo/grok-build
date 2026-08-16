@@ -308,7 +308,7 @@ pub mod acp_mcp;
 pub(crate) mod acp_session;
 pub(crate) mod agent_rebuild;
 /// Exact auxiliary inference route resolution (compaction/media/web/title/…).
-pub mod auxiliary_route;
+pub(crate) mod auxiliary_route;
 pub mod chat_persistence;
 pub(crate) mod events;
 pub mod export;

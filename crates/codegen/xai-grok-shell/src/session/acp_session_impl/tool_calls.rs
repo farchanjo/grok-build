@@ -2337,6 +2337,7 @@ impl SessionActor {
                         Ok(media_route) => {
                             let describe_model = media_route.upstream_model_id.clone();
                             let sampler_config = media_route.inference;
+                            let route_ctx = media_route.route.clone();
                             if let Err(error) =
                                 crate::session::media_pipeline::auxiliary_media_route_allowed(
                                     sampler_config.provider_identity,
@@ -2348,12 +2349,15 @@ impl SessionActor {
                             } else {
                                 let provider_label = sampler_config.provider_identity.label();
                                 let client =
-                                    xai_grok_inference::InferenceClient::new(sampler_config)
-                                        .map_err(|error| {
-                                            acp::Error::internal_error().data(format!(
+                                    xai_grok_inference::InferenceClient::new_with_route_context(
+                                        sampler_config,
+                                        Some(route_ctx),
+                                    )
+                                    .map_err(|error| {
+                                        acp::Error::internal_error().data(format!(
                                         "failed to build image-describe sampling client: {error}"
                                     ))
-                                        })?;
+                                    })?;
                                 match crate::session::media_pipeline::describe_image(
                                     &self.image_describe_cache,
                                     &self.media_descriptor_store,
@@ -2411,7 +2415,15 @@ impl SessionActor {
                     "[PDF {path} was rendered as images but could not be understood: configure an image-capable media route]"
                 );
             } else {
-                match self.resolve_media_describe(image_description_model).await {
+                // PDF pages share the image pin but use MediaPdf operation partition.
+                let pdf_pin = media.image_model.as_deref().unwrap_or("@session");
+                match self
+                    .resolve_media_purpose(
+                        crate::session::auxiliary_route::AuxiliaryPurpose::MediaPdf,
+                        pdf_pin,
+                    )
+                    .await
+                {
                     Err(error) => {
                         prompt_text = format!(
                             "[PDF {path} was rendered as images but was not understood: {error}]"
@@ -2420,6 +2432,7 @@ impl SessionActor {
                     Ok(media_route) => {
                         let describe_model = media_route.upstream_model_id.clone();
                         let sampler_config = media_route.inference;
+                        let route_ctx = media_route.route.clone();
                         if let Err(error) =
                             crate::session::media_pipeline::auxiliary_media_route_allowed(
                                 sampler_config.provider_identity,
@@ -2431,12 +2444,16 @@ impl SessionActor {
                             );
                         } else {
                             let provider_label = sampler_config.provider_identity.label();
-                            let client = xai_grok_inference::InferenceClient::new(sampler_config)
+                            let client =
+                                xai_grok_inference::InferenceClient::new_with_route_context(
+                                    sampler_config,
+                                    Some(route_ctx),
+                                )
                                 .map_err(|error| {
-                                acp::Error::internal_error().data(format!(
-                                    "failed to build PDF describe sampling client: {error}"
-                                ))
-                            })?;
+                                    acp::Error::internal_error().data(format!(
+                                        "failed to build PDF describe sampling client: {error}"
+                                    ))
+                                })?;
                             let mut descriptions = Vec::new();
                             for page in pdf.pages.iter().take(media.image_limit) {
                                 let raw_bytes = match base64::Engine::decode(
@@ -2519,8 +2536,8 @@ impl SessionActor {
                 self.rebuild_spec.api_key_provider.as_ref(),
                 stt_config,
             );
-            // Frame descriptions reuse the image-describe route (tools hold no
-            // inference client; shell owns the conversion).
+            // Frame descriptions use MediaVideo purpose so pacing/attribution
+            // operation partition is distinct from image describe.
             let route = media
                 .video_model
                 .as_deref()
@@ -2530,10 +2547,17 @@ impl SessionActor {
             let frame_route_usable = !(route == "@session" && active_supports_images != Some(true));
             let (client, describe_model, provider_label, frame_route_policy) = if frame_route_usable
             {
-                match self.resolve_media_describe(&route).await {
+                match self
+                    .resolve_media_purpose(
+                        crate::session::auxiliary_route::AuxiliaryPurpose::MediaVideo,
+                        &route,
+                    )
+                    .await
+                {
                     Ok(media_route) => {
                         let describe_model = media_route.upstream_model_id;
                         let sampler_config = media_route.inference;
+                        let route_ctx = media_route.route.clone();
                         let provider = sampler_config.provider_identity;
                         let frame_route_policy =
                             crate::session::media_pipeline::auxiliary_media_route_allowed(
@@ -2541,7 +2565,11 @@ impl SessionActor {
                                 self.auth_manager.as_ref(),
                             );
                         let client = if frame_route_policy.is_ok() {
-                            xai_grok_inference::InferenceClient::new(sampler_config).ok()
+                            xai_grok_inference::InferenceClient::new_with_route_context(
+                                sampler_config,
+                                Some(route_ctx),
+                            )
+                            .ok()
                         } else {
                             None
                         };

@@ -846,13 +846,18 @@ impl SessionActor {
         let media_route = self.resolve_media_describe(image_description_model).await?;
         let describe_model = media_route.upstream_model_id.clone();
         let sampler_config = media_route.inference;
+        let media_route_ctx = media_route.route.clone();
         crate::session::media_pipeline::auxiliary_media_route_allowed(
             sampler_config.provider_identity,
             self.auth_manager.as_ref(),
         )
         .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
         let provider_label = sampler_config.provider_identity.label();
-        let client = xai_grok_inference::InferenceClient::new(sampler_config).map_err(|e| {
+        let client = xai_grok_inference::InferenceClient::new_with_route_context(
+            sampler_config,
+            Some(media_route_ctx),
+        )
+        .map_err(|e| {
             acp::Error::internal_error().data(format!(
                 "failed to build image-describe sampling client: {e}"
             ))

@@ -1226,6 +1226,7 @@ pub(crate) async fn handle_subagent_request(
             ctx.inference_idle_timeout_secs,
             None,
             ctx.web_search_inference_config.clone(),
+            ctx.web_search_attribution_callback.clone(),
             ctx.web_fetch_config.clone(),
             ctx.image_gen_config.clone(),
             ctx.video_gen_config.clone(),

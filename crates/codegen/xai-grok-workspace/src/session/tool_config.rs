@@ -480,6 +480,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             api_key_provider: None,
             auth_provider: self.auth.clone(),
             attribution_callback: None,
+            web_search_attribution_callback: None,
             system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
         }
     }
@@ -603,6 +604,7 @@ pub mod test_support {
                 api_key_provider: None,
                 auth_provider: None,
                 attribution_callback: None,
+                web_search_attribution_callback: None,
                 system_reminder_tag: xai_grok_tools::reminders::DEFAULT_REMINDER_TAG,
             }
         }

@@ -550,6 +550,28 @@ impl MvpAgent {
                 .get(&parent_sid)
                 .and_then(|ps| ps.resolved_tool_overrides.load_full().map(|o| (*o).clone()))
         };
+        let (web_search_inference_config, web_search_attribution_callback) = match self
+            .prepare_web_search_inference_config()
+        {
+            Some((cfg, route)) => {
+                let cb = if route.is_authoritative()
+                    && route.credential_route() != xai_grok_inference::RouteCredentialRoute::None
+                    && route.authority() != xai_grok_inference::RouteAuthority::HostFallback
+                {
+                    Some(
+                        crate::auth::attribution::ShellAttribution::new_tool_callback_with_route(
+                            self.auth_manager.clone(),
+                            None,
+                            route,
+                        ),
+                    )
+                } else {
+                    None
+                };
+                (Some(cfg), cb)
+            }
+            None => (None, None),
+        };
         Some(crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
             gateway: self.gateway.clone(),
@@ -582,7 +604,8 @@ impl MvpAgent {
             terminal,
             session_env,
             memory_config: self.memory_config.clone(),
-            web_search_inference_config: self.prepare_web_search_inference_config(),
+            web_search_inference_config,
+            web_search_attribution_callback,
             web_fetch_config: self.prepare_web_fetch_config(),
             image_gen_config: self.prepare_image_gen_config(),
             video_gen_config: self.prepare_video_gen_config(),
