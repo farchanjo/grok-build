@@ -14,6 +14,9 @@ impl MvpAgent {
         let Some(mut rx) = self.subagent_event_rx.borrow_mut().take() else {
             return;
         };
+        let Some(mut assigned_rx) = self.assigned_spawn_rx.borrow_mut().take() else {
+            return;
+        };
         let agent_ref = LocalRef::new(self);
         use crate::agent::subagent::{BlockWaitSlot, is_running, resolve_snapshot};
         use xai_grok_tools::implementations::grok_build::task::types::{
@@ -22,7 +25,15 @@ impl MvpAgent {
         tokio::task::spawn_local({
             let agent_ref = agent_ref.clone();
             async move {
-                while let Some(event) = rx.recv().await {
+                loop {
+                    let (event, assigned_route) = tokio::select! {
+                        Some(event) = rx.recv() => (event, None),
+                        Some(assigned) = assigned_rx.recv() => (
+                            SubagentEvent::Spawn(assigned.request),
+                            Some(assigned.route),
+                        ),
+                        else => break,
+                    };
                     match event {
                         SubagentEvent::Spawn(boxed) => {
                             let mut request = *boxed;
@@ -95,6 +106,7 @@ impl MvpAgent {
                                 }
                                 crate::agent::subagent::handle_subagent_request(
                                     request,
+                                    assigned_route,
                                     ctx,
                                     &this.subagent_coordinator,
                                     &this.gateway,

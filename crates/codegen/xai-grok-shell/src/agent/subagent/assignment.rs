@@ -9,10 +9,10 @@ pub(super) const MAX_ASSIGNMENT_BYTES: usize = 4 * 1024 * 1024;
 const _: [(); MAX_ASSIGNMENT_ENTRIES] = [(); xai_workflow::MAX_AGENT_BUDGET as usize];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct AssignmentKey(String);
+pub(crate) struct AssignmentKey(String);
 
 impl AssignmentKey {
-    pub(super) fn new(raw: impl Into<String>) -> Option<Self> {
+    pub(crate) fn new(raw: impl Into<String>) -> Option<Self> {
         let raw = raw.into();
         (!raw.is_empty()
             && raw.len() <= 512

@@ -8,14 +8,14 @@ use xai_grok_inference::ProviderRouteContext;
 use xai_grok_models::{CanonicalModelId, UpstreamModelId};
 
 #[derive(Clone, Debug)]
-pub(super) struct ExactRoute {
+pub(crate) struct ExactRoute {
     canonical: CanonicalModelId,
     upstream: UpstreamModelId,
     context: ProviderRouteContext,
 }
 
 impl ExactRoute {
-    pub(super) fn new(
+    pub(crate) fn new(
         canonical: CanonicalModelId,
         upstream: UpstreamModelId,
         context: ProviderRouteContext,

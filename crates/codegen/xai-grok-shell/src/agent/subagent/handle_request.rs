@@ -88,6 +88,7 @@ pub(super) fn task_model_override_error(
 )]
 pub(crate) async fn handle_subagent_request(
     mut request: SubagentRequest,
+    assigned_route: Option<crate::agent::subagent::exact_route::ExactRoute>,
     mut ctx: SubagentSpawnContext,
     coordinator: &std::cell::RefCell<SubagentCoordinator>,
     gateway: &GatewaySender,
@@ -548,6 +549,14 @@ pub(crate) async fn handle_subagent_request(
             &ctx,
         )
         .await;
+    if let Some(route) = assigned_route.as_ref() {
+        if effective_model_id.0.as_ref() != route.canonical().as_str()
+            || effective_inference_config.model != route.upstream().as_str()
+        {
+            send_failure(request, "Assigned exact model route does not match child configuration.");
+            return;
+        }
+    }
     let subagent_max_turns = resolve_subagent_max_turns(
         definition.max_turns,
         ctx.parent_max_turns,

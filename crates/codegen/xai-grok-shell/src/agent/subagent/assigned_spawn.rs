@@ -10,9 +10,9 @@ use xai_grok_tools::implementations::grok_build::task::types::SubagentRequest;
 use super::{assignment::AssignmentKey, exact_route::ExactRoute};
 
 pub(crate) struct InternalAssignedSpawn {
-    pub(super) request: Box<SubagentRequest>,
-    pub(super) key: AssignmentKey,
-    pub(super) route: ExactRoute,
+    pub(crate) request: Box<SubagentRequest>,
+    pub(crate) key: AssignmentKey,
+    pub(crate) route: ExactRoute,
 }
 
 #[derive(Clone)]
