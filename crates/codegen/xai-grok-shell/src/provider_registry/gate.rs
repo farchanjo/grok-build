@@ -25,53 +25,64 @@ pub fn multi_account_rollout_enabled() -> bool {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Shared-process env lock (tests only)
+// ---------------------------------------------------------------------------
+//
+// Under shared-process `cargo test`, every mutation of
+// `GROK_MULTI_ACCOUNT_ROLLOUT` — and every publish/refresh that *reads* the
+// gate — must hold this lock. Nextest (one process per test) is fine either
+// way; the lock is still required for `cargo test` compatibility.
+
+#[cfg(test)]
+mod env_lock {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    /// Acquire the process-wide multi-account rollout env lock.
+    pub(crate) fn acquire() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Process-wide lock for tests that mutate or depend on
+/// [`MULTI_ACCOUNT_ROLLOUT_ENV`]. Hold across env set/restore **and** any
+/// gate-reading publish/refresh.
+#[cfg(test)]
+pub(crate) fn multi_account_rollout_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    env_lock::acquire()
+}
+
+/// Run `f` while holding the multi-account rollout env lock and restoring the
+/// previous env value on exit (panic-safe).
+#[cfg(test)]
+pub(crate) fn with_multi_account_rollout_env<F: FnOnce()>(f: F) {
+    let _guard = multi_account_rollout_env_lock();
+    let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
+                None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
+            }
+        }
+    }
+    let _restore = Restore(previous);
+    f();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    /// Process-wide serialization for tests that mutate a shared env var.
-    /// Required so the mutations are safe both under nextest (per-test
-    /// processes) and under shared-process `cargo test`.
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    /// Restores an env var on drop, panic-safe: restores the previous value or
-    /// removes the var if it was absent when captured.
-    struct EnvRestore {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvRestore {
-        fn capture(key: &'static str) -> Self {
-            Self {
-                key,
-                previous: std::env::var(key).ok(),
-            }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
-
-    fn with_env_mutation<F: FnOnce()>(f: F) {
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _restore = EnvRestore::capture(MULTI_ACCOUNT_ROLLOUT_ENV);
-        f();
-    }
 
     #[test]
     fn rollout_gate_is_disabled_by_default_and_opt_in() {
-        with_env_mutation(|| {
+        with_multi_account_rollout_env(|| {
             unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
             assert!(
                 !multi_account_rollout_enabled(),
@@ -91,6 +102,8 @@ mod tests {
 
     #[test]
     fn constant_default_is_disabled() {
+        // Hold the shared lock so this read cannot race a concurrent mutator.
+        let _guard = multi_account_rollout_env_lock();
         assert!(!MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
     }
 }
