@@ -170,6 +170,7 @@ mod contain {
             &self,
             name: &str,
             create: bool,
+            require_leaf_link_count: bool,
         ) -> io::Result<Option<Self>> {
             validate_single_component(name)?;
             let os = std::ffi::OsStr::new(name);
@@ -197,7 +198,7 @@ mod contain {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error),
             };
-            owner_mode_check_private_dir(&dir)?;
+            owner_mode_check_private_dir(&dir, require_leaf_link_count)?;
             Ok(Some(Self {
                 dir,
                 path: self.path.join(name),
@@ -513,7 +514,10 @@ mod contain {
         Ok(())
     }
 
-    fn owner_mode_check_private_dir(dir: &File) -> io::Result<()> {
+    fn owner_mode_check_private_dir(
+        dir: &File,
+        require_leaf_no_nested_dirs: bool,
+    ) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
         let meta = dir.metadata()?;
         if !meta.file_type().is_dir() {
@@ -529,11 +533,13 @@ mod contain {
                 "private identity target not owned by current user",
             ));
         }
-        if meta.nlink() < 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "private identity target has an invalid link count",
-            ));
+        // WHY: directory link counts are not a portable structural signal.
+        // Traditional Unix nlink tracks subdirectories, but APFS can also
+        // advance nlink for ordinary files after private-identity writes.
+        // Leaf containment therefore scans for nested directories; intermediate
+        // fan-out directories (subagents/) skip this and may hold many children.
+        if require_leaf_no_nested_dirs {
+            reject_nested_directories(dir)?;
         }
         if meta.mode() & 0o077 != 0 {
             return Err(io::Error::new(
@@ -542,6 +548,132 @@ mod contain {
             ));
         }
         Ok(())
+    }
+
+    /// Reject unexpected nested directories under a private-identity leaf.
+    /// Regular identity files and journal temps remain allowed.
+    fn reject_nested_directories(dir: &File) -> io::Result<()> {
+        use std::ffi::CStr;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dup = unsafe { libc::dup(dir.as_raw_fd()) };
+        if dup < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let stream = unsafe { libc::fdopendir(dup) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::close(dup);
+            }
+            return Err(error);
+        }
+
+        let result = (|| {
+            loop {
+                clear_errno();
+                // SAFETY: stream is a live DIR* from fdopendir above.
+                let entry = unsafe { libc::readdir(stream) };
+                if entry.is_null() {
+                    let errno = current_errno();
+                    if errno != 0 {
+                        return Err(io::Error::from_raw_os_error(errno));
+                    }
+                    break;
+                }
+                // SAFETY: readdir returned a valid dirent for this platform.
+                let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+                let bytes = name.to_bytes();
+                if bytes == b"." || bytes == b".." {
+                    continue;
+                }
+                let d_type = unsafe { (*entry).d_type };
+                let is_dir = if d_type == libc::DT_DIR {
+                    true
+                } else if d_type == libc::DT_UNKNOWN || d_type == libc::DT_LNK {
+                    // Fall back to openat when the filesystem omits d_type or
+                    // the entry may be a symlink into a directory.
+                    match openat_component(
+                        dir,
+                        std::ffi::OsStr::from_bytes(bytes),
+                        libc::O_RDONLY
+                            | libc::O_DIRECTORY
+                            | libc::O_CLOEXEC
+                            | libc::O_NOFOLLOW
+                            | libc::O_NONBLOCK,
+                        0,
+                    ) {
+                        Ok(_) => true,
+                        Err(error)
+                            if error.kind() == io::ErrorKind::NotFound
+                                || error.raw_os_error() == Some(libc::ENOTDIR)
+                                || error.raw_os_error() == Some(libc::ELOOP) =>
+                        {
+                            false
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    false
+                };
+                if is_dir {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private identity target contains a nested directory",
+                    ));
+                }
+            }
+            Ok(())
+        })();
+
+        // SAFETY: stream owns the dup'd fd; closedir always releases it.
+        unsafe {
+            libc::closedir(stream);
+        }
+        result
+    }
+
+    fn clear_errno() {
+        // SAFETY: writes the thread-local errno slot.
+        unsafe {
+            *errno_ptr() = 0;
+        }
+    }
+
+    fn current_errno() -> i32 {
+        // SAFETY: reads the thread-local errno slot.
+        unsafe { *errno_ptr() }
+    }
+
+    fn errno_ptr() -> *mut libc::c_int {
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        // SAFETY: platform errno accessor.
+        {
+            return unsafe { libc::__error() };
+        }
+        #[cfg(target_os = "linux")]
+        // SAFETY: platform errno accessor.
+        {
+            return unsafe { libc::__errno_location() };
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly",
+            target_os = "linux"
+        )))]
+        compile_error!("private-identity nested-dir scan needs a platform errno accessor");
     }
 
     fn owner_mode_check_file(file: &File) -> io::Result<()> {
@@ -611,6 +743,7 @@ mod contain {
             &self,
             name: &str,
             create: bool,
+            require_leaf_link_count: bool,
         ) -> io::Result<Option<Self>> {
             validate_single_component(name)?;
             let path = self.path.join(name);
@@ -631,6 +764,7 @@ mod contain {
                     "private identity target is not a directory",
                 ));
             }
+            let _ = require_leaf_link_count;
             Ok(Some(Self { path }))
         }
 
@@ -706,6 +840,17 @@ mod contain {
 }
 
 use contain::SessionRoot;
+
+#[cfg(not(unix))]
+fn require_hardened_assigned_platform() -> io::Result<()> {
+    // The path backend cannot reproduce Unix dirfd-relative O_NOFOLLOW,
+    // ownership/mode, and link-count guarantees. Reject only hardened assigned
+    // mutation; legacy standalone session storage remains available.
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "assigned private identity requires Unix dirfd containment",
+    ))
+}
 
 fn write_txn_marker(root: &SessionRoot, marker: &TxnMarker) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(marker).map_err(io::Error::other)?;
@@ -2199,10 +2344,12 @@ fn open_private_identity_target(
         ));
     }
     let parent = SessionRoot::open(parent_session_dir)?;
-    let Some(subagents) = parent.open_or_create_private_dir("subagents", create)? else {
+    // Intermediate fan-out is expected; only the individual child leaf gets
+    // the structural link-count check.
+    let Some(subagents) = parent.open_or_create_private_dir("subagents", create, false)? else {
         return Ok(None);
     };
-    subagents.open_or_create_private_dir(subagent_id, create)
+    subagents.open_or_create_private_dir(subagent_id, create, true)
 }
 
 fn commit_private_identity_pair_rooted(
@@ -2304,6 +2451,8 @@ pub(crate) fn commit_private_identity_pair_for_subagent(
     primary: &[u8],
     companion: &[u8],
 ) -> io::Result<String> {
+    #[cfg(not(unix))]
+    require_hardened_assigned_platform()?;
     validate_private_bytes(primary, "primary")?;
     validate_private_bytes(companion, "companion")?;
     let root =
@@ -2336,6 +2485,8 @@ pub(crate) fn update_private_identity_pair_for_subagent(
     primary: Option<&[u8]>,
     companion: Option<&[u8]>,
 ) -> io::Result<()> {
+    #[cfg(not(unix))]
+    require_hardened_assigned_platform()?;
     let root =
         open_private_identity_target(parent_session_dir, subagent_id, false)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "subagent identity target missing")
@@ -2414,6 +2565,8 @@ pub(crate) fn replace_private_identity_pair_for_subagent(
     primary: &[u8],
     companion: &[u8],
 ) -> io::Result<String> {
+    #[cfg(not(unix))]
+    require_hardened_assigned_platform()?;
     let root =
         open_private_identity_target(parent_session_dir, subagent_id, true)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "subagent identity target missing")
@@ -2493,10 +2646,68 @@ pub(crate) fn load_private_identity_pair_for_subagent(
     max_companion_bytes: usize,
 ) -> io::Result<PrivateIdentityPair> {
     validate_private_read_bounds(max_primary_bytes, max_companion_bytes)?;
-    let Some(root) = open_private_identity_target(parent_session_dir, subagent_id, false)? else {
+    #[cfg(not(unix))]
+    {
+        return load_legacy_subagent_identity_without_mutation(
+            parent_session_dir,
+            subagent_id,
+            max_primary_bytes,
+        );
+    }
+    #[cfg(unix)]
+    {
+        let Some(root) = open_private_identity_target(parent_session_dir, subagent_id, false)?
+        else {
+            return Ok(PrivateIdentityPair::Missing);
+        };
+        load_private_identity_pair_rooted(root, max_primary_bytes, max_companion_bytes)
+    }
+}
+
+#[cfg(not(unix))]
+fn load_legacy_subagent_identity_without_mutation(
+    parent_session_dir: &Path,
+    subagent_id: &str,
+    max_primary_bytes: usize,
+) -> io::Result<PrivateIdentityPair> {
+    if subagent_id.is_empty()
+        || subagent_id.len() > 128
+        || !subagent_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid subagent identity target id",
+        ));
+    }
+    let target = parent_session_dir.join("subagents").join(subagent_id);
+    if !target.exists() {
         return Ok(PrivateIdentityPair::Missing);
-    };
-    load_private_identity_pair_rooted(root, max_primary_bytes, max_companion_bytes)
+    }
+    let primary = target.join(PRIVATE_PRIMARY_FILE);
+    let companion = target.join(PRIVATE_COMPANION_FILE);
+    let metadata = target.join(PRIVATE_META_FILE);
+    let primary_exists = primary.is_file();
+    let companion_exists = companion.exists();
+    let metadata_exists = metadata.exists();
+    if !primary_exists && !companion_exists && !metadata_exists {
+        return Ok(PrivateIdentityPair::Missing);
+    }
+    if primary_exists && !companion_exists && !metadata_exists {
+        let bytes = fs::read(primary)?;
+        if bytes.len() > max_primary_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "identity file exceeds size limit",
+            ));
+        }
+        return Ok(PrivateIdentityPair::LegacyPrimary(bytes));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "assigned private identity requires Unix dirfd containment",
+    ))
 }
 
 fn load_private_identity_pair_rooted(
@@ -2816,6 +3027,46 @@ mod private_identity_tests {
                 "recovery with an unchanged sibling failed after {completed_renames} boundaries"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_subagents_allows_siblings_but_structural_leaf_rejects_children_where_supported()
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        for id in ["one", "two"] {
+            commit_private_identity_pair_for_subagent(dir.path(), id, b"primary", b"companion")
+                .unwrap();
+        }
+        assert!(matches!(
+            load_private_identity_pair_for_subagent(dir.path(), "one", 1024, 1024).unwrap(),
+            PrivateIdentityPair::ValidPair { .. }
+        ));
+        assert!(matches!(
+            load_private_identity_pair_for_subagent(dir.path(), "two", 1024, 1024).unwrap(),
+            PrivateIdentityPair::ValidPair { .. }
+        ));
+
+        // Nested directories under a leaf are rejected by dirfd scan rather than
+        // nlink: APFS advances directory link counts for ordinary files too.
+        let leaf = dir.path().join("subagents").join("one");
+        std::fs::create_dir(leaf.join("unexpected-child")).unwrap();
+        let error =
+            load_private_identity_pair_for_subagent(dir.path(), "one", 1024, 1024).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("nested directory")
+                || error.to_string().contains("link count"),
+            "leaf must refuse nested children: {error}"
+        );
+        // Sibling leaf remains openable through the intermediate fan-out dir.
+        assert!(matches!(
+            load_private_identity_pair_for_subagent(dir.path(), "two", 1024, 1024).unwrap(),
+            PrivateIdentityPair::ValidPair { .. }
+        ));
     }
 
     #[cfg(unix)]

@@ -2104,6 +2104,38 @@ struct SessionInitResult {
     permission_events_rx: mpsc::UnboundedReceiver<PermissionEvent>,
     system_prompt: String,
 }
+
+fn deliver_session_init(
+    init_tx: tokio::sync::oneshot::Sender<
+        Result<SessionInitResult, xai_grok_agent::AgentBuildError>,
+    >,
+    init: SessionInitResult,
+) -> bool {
+    deliver_session_init_with(init_tx, init, |init| {
+        let _ = init.handle.cmd_tx.send(SessionCommand::Shutdown);
+    })
+}
+
+fn deliver_session_init_with<T, E>(
+    init_tx: tokio::sync::oneshot::Sender<Result<T, E>>,
+    init: T,
+    reject: impl FnOnce(T),
+) -> bool {
+    match init_tx.send(Ok(init)) {
+        Ok(()) => true,
+        Err(Ok(init)) => {
+            // The caller's pre-promotion future was cancelled after this actor
+            // started. Without this branch the dedicated session thread would
+            // wait forever with no owner able to send Shutdown.
+            reject(init);
+            false
+        }
+        Err(Err(_)) => {
+            unreachable!("deliver_session_init_with only sends successful init results")
+        }
+    }
+}
+
 /// Spawn a session actor on a dedicated thread with its own tokio runtime and `LocalSet`.
 ///
 /// The entire `spawn_session_actor` body runs on the session thread — the `!Send`
@@ -2389,11 +2421,16 @@ pub(crate) async fn spawn_session_on_thread(
                             return;
                         }
                     };
-                let _ = init_tx.send(Ok(SessionInitResult {
-                    handle,
-                    permission_events_rx,
-                    system_prompt,
-                }));
+                if !deliver_session_init(
+                    init_tx,
+                    SessionInitResult {
+                        handle,
+                        permission_events_rx,
+                        system_prompt,
+                    },
+                ) {
+                    return;
+                }
                 let _ = session_done_rx.await;
             });
         })
@@ -2527,6 +2564,31 @@ fn resumed_prefix_carries_fallback_date(
         contains("<user_info>") && contains(crate::session::user_message::USER_INFO_DATE_MARKER)
     })
 }
+#[cfg(test)]
+mod session_init_delivery_tests {
+    use super::deliver_session_init_with;
+
+    #[test]
+    fn dropped_pre_promotion_receiver_rejects_started_session() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<&'static str, ()>>();
+        drop(rx);
+        let rejected = std::cell::Cell::new(None);
+        assert!(!deliver_session_init_with(tx, "started", |value| {
+            rejected.set(Some(value));
+        }));
+        assert_eq!(rejected.get(), Some("started"));
+    }
+
+    #[test]
+    fn live_pre_promotion_receiver_accepts_started_session() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<&'static str, ()>>();
+        assert!(deliver_session_init_with(tx, "started", |_| {
+            panic!("live receiver must not reject session init");
+        }));
+        assert_eq!(rx.blocking_recv().unwrap(), Ok("started"));
+    }
+}
+
 #[cfg(test)]
 mod resumed_prefix_fallback_tests {
     use super::resumed_prefix_carries_fallback_date;

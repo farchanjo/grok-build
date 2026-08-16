@@ -73,6 +73,57 @@ pub(super) fn task_model_override_error(
     )
 }
 
+pub(super) fn assigned_route_matches_final(
+    assigned: Option<&crate::agent::subagent::AssignedRoute>,
+    final_live: Option<&ExactRoute>,
+) -> bool {
+    assigned.is_none_or(|assigned| {
+        final_live.is_some_and(|live| assigned.route.matches_live(live))
+    })
+}
+
+pub(super) fn assigned_unknown_model_error(
+    assigned: bool,
+    model_unknown: bool,
+) -> Option<&'static str> {
+    (assigned && model_unknown)
+        .then_some("Assigned exact model route is unavailable in the live model catalogue.")
+}
+
+#[cfg(unix)]
+pub(super) fn assigned_platform_error(_assigned: bool) -> Option<&'static str> {
+    None
+}
+
+#[cfg(not(unix))]
+pub(super) fn assigned_platform_error(assigned: bool) -> Option<&'static str> {
+    assigned.then_some("Assigned exact-route subagents require Unix identity containment.")
+}
+
+pub(super) fn resolve_final_exact_route(
+    required: bool,
+    inference_config: &xai_grok_inference::InferenceConfig,
+    ctx: &SubagentSpawnContext,
+    model_id: &acp::ModelId,
+) -> Option<ExactRoute> {
+    if !required {
+        return None;
+    }
+    let live_context = crate::session::route_context::resolve_for_models_manager_with_selection(
+        inference_config,
+        &ctx.models_manager,
+        model_id.0.as_ref(),
+        Some(ctx.auth_manager.grok_home()),
+    );
+    xai_grok_models::CanonicalModelId::new(model_id.0.to_string())
+        .ok()
+        .and_then(|canonical| {
+            xai_grok_models::UpstreamModelId::new(inference_config.model.clone())
+                .ok()
+                .and_then(|upstream| ExactRoute::new(canonical, upstream, live_context))
+        })
+}
+
 /// This is a free async function, NOT a method on MvpAgent. It receives
 /// a `SubagentSpawnContext` with everything it needs, and a mutable
 /// reference to the coordinator for tracking.
@@ -108,6 +159,10 @@ pub(crate) async fn handle_assigned_subagent_request(
         id: acp::SessionId::new(ctx.parent_session_id.clone()),
         cwd: ctx.parent_cwd.to_string_lossy().to_string(),
     });
+    if let Some(error) = assigned_platform_error(assigned_route.is_some()) {
+        send_failure(request, error);
+        return;
+    }
     if assigned_route.is_none() {
         if coordinator.borrow().has_assigned_identity(&request.id) {
             send_failure(request, "Public subagent spawn cannot replace an assigned identity.");
@@ -331,7 +386,7 @@ pub(crate) async fn handle_assigned_subagent_request(
         send_failure(request, &error);
         return;
     }
-    let worktree_path = if let Some(ref source) = resume_source {
+    let (worktree_path, owned_worktree) = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
         {
@@ -341,13 +396,13 @@ pub(crate) async fn handle_assigned_subagent_request(
             );
         }
         match source.worktree_path.as_deref() {
-            None => None,
+            None => (None, None),
             Some(dest) => {
                 match resume_worktree_action(
                     dest.is_dir(),
                     source.snapshot_ref.as_deref(),
                 ) {
-                    ResumeWorktreeAction::Reuse => Some(dest.to_path_buf()),
+                    ResumeWorktreeAction::Reuse => (Some(dest.to_path_buf()), None),
                     ResumeWorktreeAction::Rehydrate => {
                         let snapshot_ref = source
                             .snapshot_ref
@@ -369,7 +424,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                                     snapshot_ref = %snapshot_ref,
                                     "Rehydrated subagent worktree from snapshot for resume"
                                 );
-                                Some(path)
+                                (Some(path.clone()), Some(path))
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -377,7 +432,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                                     error = %e,
                                     "Failed to rehydrate subagent worktree, falling back to shared workspace"
                                 );
-                                None
+                                (None, None)
                             }
                         }
                     }
@@ -387,7 +442,7 @@ pub(crate) async fn handle_assigned_subagent_request(
                             worktree = %dest.display(),
                             "Resumed subagent worktree dir missing with no snapshot; using shared workspace"
                         );
-                        None
+                        (None, None)
                     }
                 }
             }
@@ -412,54 +467,103 @@ pub(crate) async fn handle_assigned_subagent_request(
         let subagent_id = request.id.clone();
         let creation_mode: xai_fast_worktree::CreationMode = ctx.worktree_type.into();
         let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
+        let creation_dest = dest.clone();
+        let dest_existed_before = dest.exists();
+        let creation_claim = FreshWorktreeClaim::new(
+            request.id.clone(),
+            dest.clone(),
+            !dest_existed_before,
+        );
+        let blocking_claim = creation_claim.clone();
         match tokio::task::spawn_blocking(move || {
-                let mut builder = xai_fast_worktree::WorktreeBuilder::new(
-                        &source_clone,
-                        &dest,
-                    )
-                    .working_tree_mode(
-                        xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree,
-                    )
-                    .creation_mode(creation_mode)
-                    .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
-                    .session_id(subagent_id);
-                if let Some(delegate) = btrfs_delegate {
-                    builder = builder.btrfs_delegate(delegate);
-                }
-                builder.create()
+                let result = (|| {
+                    let mut builder = xai_fast_worktree::WorktreeBuilder::new(
+                            &source_clone,
+                            &creation_dest,
+                        )
+                        .working_tree_mode(
+                            xai_fast_worktree::WorkingTreeMode::PreserveWorkingTree,
+                        )
+                        .creation_mode(creation_mode)
+                        .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
+                        .session_id(subagent_id);
+                    if let Some(delegate) = btrfs_delegate {
+                        builder = builder.btrfs_delegate(delegate);
+                    }
+                    builder.create()
+                })();
+                drop(blocking_claim);
+                result
             })
             .await
         {
             Ok(Ok(report)) => {
+                creation_claim.arm();
+                let owned_worktree = creation_claim.transfer();
+                debug_assert_eq!(owned_worktree, report.worktree_path);
                 tracing::info!(
                     subagent_id = %request.id,
                     worktree_path = %report.worktree_path.display(),
                     commit = %report.commit,
                     "Created isolated worktree for subagent"
                 );
-                Some(report.worktree_path)
+                (Some(report.worktree_path), Some(owned_worktree))
             }
             Ok(Err(e)) => {
+                let partial = if !dest_existed_before && dest.exists() {
+                    Some(creation_claim.transfer())
+                } else {
+                    drop(creation_claim);
+                    None
+                };
+                let action = if partial.is_some() {
+                    "failing spawn so the partial destination can be removed"
+                } else {
+                    "falling back to shared workspace"
+                };
                 tracing::warn!(
                     subagent_id = %request.id,
                     error = %e,
-                    "Failed to create worktree, falling back to shared workspace"
+                    partial_worktree = partial.as_ref().map(|path| path.display().to_string()),
+                    action,
+                    "Failed to create worktree"
                 );
-                None
+                (None, partial)
             }
             Err(e) => {
+                // Dropping our claim does not disarm the clone held by a
+                // still-running blocking worker. Its eventual drop removes any
+                // fresh destination even though this await was interrupted.
+                drop(creation_claim);
                 tracing::warn!(
                     subagent_id = %request.id,
                     error = %e,
-                    "Worktree creation task panicked, falling back to shared workspace"
+                    "Worktree creation task panicked; creation claim retains cleanup ownership"
                 );
-                None
+                (None, None)
             }
         }
     } else {
-        None
+        (None, None)
     };
-    let worktree_freshly_created = resume_source.is_none() && worktree_path.is_some();
+    // A completed failed creation can still leave a fresh partial destination.
+    // Transfer that path to the same pre-promotion owner, but never claim a path
+    // that existed before this spawn attempt. A cancelled/panicked blocking
+    // task keeps its cross-thread creation claim. Do not promote a shared-
+    // workspace child while a completed partial path is still owned: returning
+    // lets the guard remove it deterministically.
+    let partial_worktree_failed = worktree_path.is_none() && owned_worktree.is_some();
+    let mut live_child_until_promoted = LiveChildUntilPromoted::new(
+        request.id.clone(),
+        ctx.workspace_ops.clone(),
+        owned_worktree,
+    );
+    if partial_worktree_failed {
+        let message = "Failed to create an isolated subagent worktree cleanly.";
+        pending_guard.set_error(message.into());
+        send_failure(request, message);
+        return;
+    }
     if let Some(raw_cwd) = request.cwd.as_deref() {
         match sanitize_cwd_value(raw_cwd) {
             Some(cwd_path) => {
@@ -598,33 +702,6 @@ pub(crate) async fn handle_assigned_subagent_request(
             &ctx,
         )
         .await;
-    if let Some(assigned) = assigned_route.as_ref() {
-        let live_context = crate::session::route_context::resolve_for_models_manager_with_selection(
-            &effective_inference_config,
-            &ctx.models_manager,
-            effective_model_id.0.as_ref(),
-            Some(ctx.auth_manager.grok_home()),
-        );
-        let live_route = xai_grok_models::CanonicalModelId::new(
-            effective_model_id.0.to_string(),
-        )
-        .ok()
-        .and_then(|canonical| {
-            xai_grok_models::UpstreamModelId::new(effective_inference_config.model.clone())
-                .ok()
-                .and_then(|upstream| ExactRoute::new(canonical, upstream, live_context))
-        });
-        if !live_route
-            .as_ref()
-            .is_some_and(|live| assigned.route.matches_live(live))
-        {
-            send_failure(
-                request,
-                "Assigned exact model route does not match the live child configuration.",
-            );
-            return;
-        }
-    }
     let subagent_max_turns = resolve_subagent_max_turns(
         definition.max_turns,
         ctx.parent_max_turns,
@@ -634,6 +711,12 @@ pub(crate) async fn handle_assigned_subagent_request(
         let model_unknown = !model_str.is_empty() && !ctx.available_models.is_empty()
             && !ctx.available_models.contains_key(model_str)
             && !ctx.available_models.values().any(|e| e.info().model == *model_str);
+        if let Some(error) =
+            assigned_unknown_model_error(assigned_route.is_some(), model_unknown)
+        {
+            send_failure(request, error);
+            return;
+        }
         if model_unknown {
             let (parent_config, parent_mid) = read_parent_inference_config(&ctx).await;
             tracing::warn!(
@@ -670,36 +753,6 @@ pub(crate) async fn handle_assigned_subagent_request(
             return;
         }
     }
-    if let Some(source) = resume_source.as_ref()
-        && let Some(owner) = source.assigned_owner.as_ref()
-    {
-        let live_context = crate::session::route_context::resolve_for_models_manager_with_selection(
-            &effective_inference_config,
-            &ctx.models_manager,
-            effective_model_id.0.as_ref(),
-            Some(ctx.auth_manager.grok_home()),
-        );
-        let live_route = xai_grok_models::CanonicalModelId::new(
-            effective_model_id.0.to_string(),
-        )
-        .ok()
-        .and_then(|canonical| {
-            xai_grok_models::UpstreamModelId::new(effective_inference_config.model.clone())
-                .ok()
-                .and_then(|upstream| ExactRoute::new(canonical, upstream, live_context))
-        });
-        if !live_route
-            .as_ref()
-            .is_some_and(|live| owner.identity().matches_live(live))
-        {
-            let message = format!(
-                "Cannot resume from subagent '{}': assigned model route is no longer exact.",
-                source.subagent_id,
-            );
-            send_failure(request, &message);
-            return;
-        }
-    }
     if let Some(raw) = effective_runtime.reasoning_effort.as_deref() {
         match ctx
             .models_manager
@@ -716,8 +769,39 @@ pub(crate) async fn handle_assigned_subagent_request(
             }
         }
     }
+    let assigned_identity_requires_validation = assigned_route.is_some()
+        || resume_source
+            .as_ref()
+            .is_some_and(|source| source.assigned_owner.is_some());
+    let resolved_final_live_route = resolve_final_exact_route(
+        assigned_identity_requires_validation,
+        &effective_inference_config,
+        &ctx,
+        &effective_model_id,
+    );
+    if !assigned_route_matches_final(assigned_route.as_ref(), resolved_final_live_route.as_ref()) {
+        send_failure(
+            request,
+            "Assigned exact model route drifted after final child model resolution.",
+        );
+        return;
+    }
+    if let Some(source) = resume_source.as_ref()
+        && let Some(owner) = source.assigned_owner.as_ref()
+        && !resolved_final_live_route
+            .as_ref()
+            .is_some_and(|live| owner.identity().matches_live(live))
+    {
+        let message = format!(
+            "Cannot resume from subagent '{}': assigned model route is no longer exact.",
+            source.subagent_id,
+        );
+        send_failure(request, &message);
+        return;
+    }
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
+    live_child_until_promoted.own_session(child_session_id.0.to_string());
     let override_cwd = select_override_cwd(
         resume_source.as_ref().map(|source| &source.source),
         request.cwd.as_deref(),
@@ -1454,13 +1538,13 @@ pub(crate) async fn handle_assigned_subagent_request(
             return;
         }
     };
+    live_child_until_promoted.own_child(child_handle.clone());
     if cancel_token.is_cancelled() {
+        live_child_until_promoted.teardown().await;
         pending_guard.defuse();
-        ctx.workspace_ops.end_local_session(child_session_id.0.as_ref());
         cancel_pending_subagent_at_promote(
                 request,
                 assigned_meta_owner.as_ref(),
-                &child_handle,
                 &subagent_id,
                 &child_session_id,
                 &parent_session_dir,
@@ -1469,16 +1553,12 @@ pub(crate) async fn handle_assigned_subagent_request(
                 gateway,
                 &ctx.parent_session_id,
                 ctx.parent_cmd_tx.as_ref(),
-                worktree_path.as_deref(),
-                worktree_freshly_created,
                 start.elapsed().as_millis() as u64,
                 &gcs_upload_ctx,
-            )
-            .await;
+            );
         return;
     }
-    pending_guard.defuse();
-    coordinator
+    let promotion = coordinator
         .borrow_mut()
         .insert_owned(SubagentTracker {
             subagent_id: request.id.clone(),
@@ -1505,6 +1585,28 @@ pub(crate) async fn handle_assigned_subagent_request(
             explicitly_killed: false,
             assigned_meta_owner: assigned_meta_owner.clone(),
         }, assigned_meta_owner.as_ref());
+    if let Err(error) = promotion {
+        let message = format!("Failed to promote live subagent: {error}");
+        live_child_until_promoted.teardown().await;
+        pending_guard.set_error(message.clone());
+        fail_subagent(
+            request,
+            &message,
+            &subagent_id,
+            &child_session_id,
+            &parent_session_dir,
+            &subagent_meta_dir,
+            assigned_meta_owner.as_ref(),
+            gateway,
+            &ctx.parent_session_id,
+            ctx.parent_cmd_tx.as_ref(),
+            start.elapsed().as_millis() as u64,
+            &gcs_upload_ctx,
+        );
+        return;
+    }
+    pending_guard.defuse();
+    live_child_until_promoted.disarm_after_promotion();
     spawn_progress_publisher(
         child_handle.signals_handle.clone(),
         gateway.clone(),

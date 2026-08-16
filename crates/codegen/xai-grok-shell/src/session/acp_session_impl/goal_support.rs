@@ -1039,7 +1039,7 @@ impl SessionActor {
     ) -> Option<crate::agent::subagent::assigned_spawn::GoalAssignedSpawnSender> {
         self.tool_context
             .assigned_spawn_sender
-            .clone()
+            .as_ref()
             .map(|sender| {
                 crate::agent::subagent::assigned_spawn::GoalAssignedSpawnSender::new(
                     sender,

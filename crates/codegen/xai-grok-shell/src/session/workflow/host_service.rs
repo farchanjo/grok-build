@@ -10,8 +10,7 @@ use xai_workflow::{
     WorkflowHostRequest,
 };
 
-use crate::agent::subagent::assigned_spawn::{AssignedSpawnSender, InternalAssignedSpawn};
-use crate::agent::subagent::assignment::AssignmentKey;
+use crate::agent::subagent::assigned_spawn::TrustedAssignedSpawnSender;
 use crate::agent::subagent::exact_route::ExactRoute;
 
 use super::notify::WorkflowNotifySender;
@@ -46,7 +45,7 @@ pub(crate) struct WorkflowHostParams {
     pub subagent_event_tx: mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
-    pub assigned_spawn_sender: Option<AssignedSpawnSender>,
+    pub assigned_spawn_sender: Option<TrustedAssignedSpawnSender>,
     pub models_manager: crate::agent::models::ModelsManager,
     pub inference_config: xai_grok_inference::InferenceConfig,
     pub grok_home: Option<PathBuf>,
@@ -382,8 +381,7 @@ impl HostService {
         // the canonical selection that the exact route just validated.
         let mut opts = opts;
         opts.model = Some(canonical.as_str().to_owned());
-        let key = AssignmentKey::workflow(&self.params.run_id, assignment_seq);
-        self.spawn_agent_with_assignment(opts, Some((key, route)))
+        self.spawn_agent_with_assignment(opts, Some((assignment_seq, route)))
             .await
     }
 
@@ -394,7 +392,7 @@ impl HostService {
     async fn spawn_agent_with_assignment(
         &self,
         mut opts: AgentOpts,
-        assigned: Option<(AssignmentKey, ExactRoute)>,
+        assigned: Option<(u64, ExactRoute)>,
     ) -> Result<AgentResult, HostError> {
         use xai_grok_tools::implementations::grok_build::task::types::{
             ModelOverrideProvenance, SubagentEvent, SubagentOwner, SubagentRequest,
@@ -549,31 +547,25 @@ impl HostService {
                 fork_context,
             );
 
-            let sent = match assigned.as_ref() {
-                Some((key, route)) => self
+            let send_result = match assigned.as_ref() {
+                Some((assignment_seq, route)) => self
                     .params
                     .assigned_spawn_sender
                     .as_ref()
                     .ok_or_else(|| {
                         HostError::Failed("assigned spawn capability unavailable".into())
                     })?
-                    .send(InternalAssignedSpawn {
-                        request: Box::new(request),
-                        key: key.clone(),
-                        route: route.clone(),
-                    })
-                    .is_ok(),
+                    .send_workflow(*assignment_seq, Box::new(request), route.clone())
+                    .map_err(|error| error.to_string()),
                 None => self
                     .params
                     .subagent_event_tx
                     .send(SubagentEvent::Spawn(Box::new(request)))
-                    .is_ok(),
+                    .map_err(|_| "subagent coordinator channel closed".to_string()),
             };
-            if !sent {
+            if let Err(error) = send_result {
                 row.finish("failed", total_tokens, total_duration);
-                return Err(HostError::Failed(
-                    "subagent coordinator channel closed".into(),
-                ));
+                return Err(HostError::Failed(error));
             }
             self.active_agents.fetch_add(1, Ordering::Relaxed);
             self.tick();

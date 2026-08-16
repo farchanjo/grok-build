@@ -457,9 +457,9 @@ mod tests {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             assigned_meta_owner: Some(owner_b.clone()),
         }));
-        coordinator.move_pending_to_failed_owned("assigned-1", "late A", Some(&owner_a));
+        let _ = coordinator.move_pending_to_failed_owned("assigned-1", "late A", Some(&owner_a));
         assert_eq!(coordinator.registry_snapshot(), (1, 0, 0));
-        coordinator.move_pending_to_cancelled_owned("assigned-1", "late A", Some(&owner_a));
+        let _ = coordinator.move_pending_to_cancelled_owned("assigned-1", "late A", Some(&owner_a));
         assert_eq!(coordinator.registry_snapshot(), (1, 0, 0));
         assert!(!coordinator.remove_pending_owned("assigned-1", Some(&owner_a)));
         assert_eq!(coordinator.registry_snapshot(), (1, 0, 0));

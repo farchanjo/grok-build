@@ -793,7 +793,7 @@ pub struct MvpAgent {
     assigned_spawn_tx: crate::agent::subagent::assigned_spawn::AssignedSpawnSender,
     /// Private receiver paired with `assigned_spawn_tx`; drained alongside
     /// public subagent events by the coordinator.
-    assigned_spawn_rx: RefCell<Option<tokio::sync::mpsc::UnboundedReceiver<crate::agent::subagent::assigned_spawn::InternalAssignedSpawn>>>,
+    assigned_spawn_rx: RefCell<Option<crate::agent::subagent::assigned_spawn::AssignedSpawnReceiver>>,
     /// Receiver for subagent events. Taken once by `start_subagent_coordinator()`.
     /// `None` after the coordinator drain task has been spawned.
     subagent_event_rx: RefCell<

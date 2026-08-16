@@ -28,12 +28,9 @@ impl MvpAgent {
                 loop {
                     let (event, assigned_route) = tokio::select! {
                         Some(event) = rx.recv() => (event, None),
-                        Some(assigned) = assigned_rx.recv() => (
-                            SubagentEvent::Spawn(assigned.request),
-                            Some(crate::agent::subagent::AssignedRoute::new(
-                                assigned.key,
-                                assigned.route,
-                            )),
+                        Some((request, assigned)) = assigned_rx.recv() => (
+                            SubagentEvent::Spawn(request),
+                            Some(assigned),
                         ),
                         else => break,
                     };
@@ -587,7 +584,7 @@ impl MvpAgent {
             inherited_tool_overrides,
             yolo_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
-            assigned_spawn_sender: self.assigned_spawn_tx.clone(),
+            assigned_spawn_sender: self.assigned_spawn_tx.trusted_sender(),
             parent_depth,
             inference_idle_timeout_secs,
             auto_compact_threshold_tiers:

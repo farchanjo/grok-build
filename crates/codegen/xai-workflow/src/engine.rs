@@ -934,6 +934,83 @@ mod tests {
     }
 
     #[test]
+    fn failed_spawn_send_keeps_allocated_sequence_monotonic() {
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        let ctx = Rc::new(RefCell::new(Ctx {
+            host_tx: closed_tx,
+            journal: Journal::new(None),
+            seq: 0,
+        }));
+        let error = host_call::<AgentResult>(
+            &ctx,
+            "spawn_agent",
+            serde_json::json!({"prompt": "first"}),
+            |reply| WorkflowHostRequest::SpawnAgent {
+                opts: crate::host::AgentOpts {
+                    prompt: "first".into(),
+                    ..Default::default()
+                },
+                reply,
+            },
+            |_| serde_json::Value::Null,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            find_control_token(&error),
+            Some(ControlToken::Fatal(message)) if message == "workflow host channel closed"
+        ));
+        // Allocation happens before send acceptance and is never rewound.
+        assert_eq!(ctx.borrow().seq, 1);
+
+        // Production runs terminate on the fatal above. This unit test bridges
+        // journal density only so a later live spawn can prove the already-
+        // advanced sequence is what the contextual envelope carries.
+        ctx.borrow_mut()
+            .journal
+            .record(
+                0,
+                "spawn_agent",
+                "aborted-before-host-accept".into(),
+                serde_json::Value::Null,
+            )
+            .expect("placeholder for the aborted allocation must be dense");
+
+        let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+        ctx.borrow_mut().host_tx = live_tx;
+        let host = std::thread::spawn(move || {
+            let message = live_rx.blocking_recv().unwrap();
+            let WorkflowHostMessage::AssignedSpawn(envelope) = message else {
+                panic!("spawn must retain its contextual assignment envelope")
+            };
+            assert_eq!(envelope.assignment_seq, 1);
+            let WorkflowHostRequest::SpawnAgent { reply, .. } = envelope.request else {
+                panic!("expected spawn request")
+            };
+            let _ = reply.send(Ok(agent_result("second")));
+        });
+        let value = host_call::<AgentResult>(
+            &ctx,
+            "spawn_agent",
+            serde_json::json!({"prompt": "second"}),
+            |reply| WorkflowHostRequest::SpawnAgent {
+                opts: crate::host::AgentOpts {
+                    prompt: "second".into(),
+                    ..Default::default()
+                },
+                reply,
+            },
+            |result: AgentResult| {
+                serde_json::Value::String(result.output.as_str().unwrap().to_string())
+            },
+        )
+        .unwrap();
+        host.join().unwrap();
+        assert_eq!(value, serde_json::json!("second"));
+        assert_eq!(ctx.borrow().seq, 2);
+    }
+
+    #[test]
     fn happy_path_completes_with_agent_output() {
         let (tx, rx) = mpsc::unbounded_channel();
         let host = spawn_mock_host(rx, |req| match req {

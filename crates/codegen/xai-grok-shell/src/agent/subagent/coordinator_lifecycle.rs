@@ -302,14 +302,14 @@ impl SubagentCoordinator {
         error: &str,
         cancelled: bool,
         expected_owner: Option<&identity_store::AssignedMetaOwner>,
-    ) {
+    ) -> bool {
         if !self.pending.get(id).is_some_and(|pending| {
             Self::assigned_owner_matches(pending.assigned_meta_owner.as_ref(), expected_owner)
         }) {
-            return;
+            return false;
         }
         let Some(pending) = self.pending.remove(id) else {
-            return;
+            return false;
         };
         self.record_failure_completion(FailureCompletion {
             subagent_id: pending.subagent_id,
@@ -325,32 +325,33 @@ impl SubagentCoordinator {
             surface_completion: pending.surface_completion,
             cancelled,
         });
+        true
     }
     /// Move a pending subagent to `completed` as a failure so it stays queryable
     /// via `get_task_output`.
     pub fn move_pending_to_failed(&mut self, id: &str, error: &str) {
-        self.move_pending_to_failed_owned(id, error, None);
+        let _ = self.move_pending_to_failed_owned(id, error, None);
     }
     pub fn move_pending_to_failed_owned(
         &mut self,
         id: &str,
         error: &str,
         expected_owner: Option<&identity_store::AssignedMetaOwner>,
-    ) {
-        self.move_pending_to_terminal(id, error, false, expected_owner);
+    ) -> bool {
+        self.move_pending_to_terminal(id, error, false, expected_owner)
     }
     /// Like [`Self::move_pending_to_failed`] but stamps `"cancelled"` — a pending
     /// subagent killed while initializing.
     pub fn move_pending_to_cancelled(&mut self, id: &str, error: &str) {
-        self.move_pending_to_cancelled_owned(id, error, None);
+        let _ = self.move_pending_to_cancelled_owned(id, error, None);
     }
     pub fn move_pending_to_cancelled_owned(
         &mut self,
         id: &str,
         error: &str,
         expected_owner: Option<&identity_store::AssignedMetaOwner>,
-    ) {
-        self.move_pending_to_terminal(id, error, true, expected_owner);
+    ) -> bool {
+        self.move_pending_to_terminal(id, error, true, expected_owner)
     }
     /// Complete a provider-backed agent that does not own an in-process
     /// [`SubagentTracker`] (currently the Codex app-server bridge).
@@ -517,32 +518,40 @@ impl SubagentCoordinator {
         }
         self.completion_notify.notify_waiters();
     }
+    #[cfg(test)]
     pub fn insert(&mut self, tracker: SubagentTracker) {
+        let id = tracker.subagent_id.clone();
         let expected_owner = tracker.assigned_meta_owner.clone();
-        self.insert_owned(tracker, expected_owner.as_ref());
+        if !self.pending.contains_key(&id) && expected_owner.is_none() {
+            self.active.insert(id, tracker);
+            self.sync_running_gauge();
+            return;
+        }
+        self.insert_owned(tracker, expected_owner.as_ref())
+            .unwrap_or_else(|error| panic!("failed to promote subagent {id}: {error}"));
     }
+    #[must_use]
     pub(crate) fn insert_owned(
         &mut self,
         tracker: SubagentTracker,
         expected_owner: Option<&identity_store::AssignedMetaOwner>,
-    ) {
+    ) -> Result<(), PromoteError> {
         let id = tracker.subagent_id.clone();
-        let can_promote = match self.pending.get(&id) {
-            Some(pending) => Self::assigned_owner_matches(
-                pending.assigned_meta_owner.as_ref(),
-                expected_owner,
-            ) && Self::assigned_owner_matches(
+        let Some(pending) = self.pending.get(&id) else {
+            return Err(PromoteError::MissingPending);
+        };
+        if !Self::assigned_owner_matches(pending.assigned_meta_owner.as_ref(), expected_owner)
+            || !Self::assigned_owner_matches(
                 tracker.assigned_meta_owner.as_ref(),
                 expected_owner,
-            ),
-            None => expected_owner.is_none() && tracker.assigned_meta_owner.is_none(),
-        };
-        if !can_promote {
-            return;
+            )
+        {
+            return Err(PromoteError::OwnerMismatch);
         }
         self.pending.remove(&id);
         self.active.insert(id, tracker);
         self.sync_running_gauge();
+        Ok(())
     }
     /// Move a finished subagent from `active` to `completed`.
     /// Returns the tracker if it was active.

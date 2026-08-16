@@ -1,6 +1,10 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
-use super::handle_request::{canonical_total_tokens, usage_is_incomplete};
+use super::exact_route::ExactRoute;
+use super::handle_request::{
+    assigned_platform_error, assigned_route_matches_final, assigned_unknown_model_error,
+    canonical_total_tokens, resolve_final_exact_route, usage_is_incomplete,
+};
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
 };
@@ -20,6 +24,92 @@ fn cancellation_makes_an_otherwise_complete_usage_snapshot_incomplete() {
     assert!(usage_is_incomplete(false, true, 10, false));
     assert!(!usage_is_incomplete(false, false, 0, false));
     assert!(usage_is_incomplete(true, false, 0, false));
+}
+
+#[test]
+fn assigned_path_platform_gate_matches_hardened_containment_support() {
+    #[cfg(unix)]
+    assert_eq!(assigned_platform_error(true), None);
+    #[cfg(not(unix))]
+    assert!(assigned_platform_error(true).is_some());
+    assert_eq!(assigned_platform_error(false), None);
+}
+
+#[test]
+fn assigned_unknown_model_fallback_fails_closed() {
+    assert!(
+        assigned_unknown_model_error(true, true)
+            .is_some_and(|error| error.contains("unavailable in the live model catalogue"))
+    );
+    assert_eq!(assigned_unknown_model_error(true, false), None);
+    assert_eq!(assigned_unknown_model_error(false, true), None);
+}
+
+#[test]
+fn assigned_route_revalidates_the_final_resolved_route() {
+    use xai_grok_inference::{
+        ProviderRouteContext, RouteApiSurface, RouteAuthority, RouteCredentialRoute,
+        RouteProviderKind,
+    };
+    use xai_grok_models::{CanonicalModelId, UpstreamModelId};
+
+    let make_route = |binding_generation| {
+        let upstream = UpstreamModelId::new("gpt-4o").unwrap();
+        ExactRoute::new(
+            CanonicalModelId::new("openai:gpt-4o").unwrap(),
+            upstream,
+            ProviderRouteContext::builder()
+                .instance_id("account")
+                .incarnation("01234567-89ab-cdef-0123-456789abcdef")
+                .provider_kind(RouteProviderKind::OpenAi)
+                .api_surface(RouteApiSurface::OpenAiPlatform)
+                .credential_route(RouteCredentialRoute::ApiKey)
+                .registry_generation(1)
+                .binding_generation(binding_generation)
+                .authority(RouteAuthority::Authoritative)
+                .model_partition("gpt-4o")
+                .build()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let assigned_route = AssignedRoute::new(
+        assignment::AssignmentKey::workflow("run", 1).unwrap(),
+        make_route(1),
+    );
+    let matching = make_route(1);
+    let drifted = make_route(2);
+    assert!(assigned_route_matches_final(
+        Some(&assigned_route),
+        Some(&matching)
+    ));
+    assert!(!assigned_route_matches_final(
+        Some(&assigned_route),
+        Some(&drifted)
+    ));
+    assert!(!assigned_route_matches_final(Some(&assigned_route), None));
+    assert!(assigned_route_matches_final(None, None));
+}
+
+#[test]
+fn final_route_resolution_observes_post_resolution_config_mutation() {
+    let ctx = ctx_with_toggle(HashMap::new());
+    let mut matching_config = ctx.inference_config.clone();
+    matching_config.model = "test".into();
+    let assigned = resolve_final_exact_route(true, &matching_config, &ctx, &ctx.model_id)
+        .expect("test config produces a route");
+    let assigned_route = AssignedRoute::new(
+        assignment::AssignmentKey::workflow("run", 2).unwrap(),
+        assigned,
+    );
+    let mut drifted_config = matching_config;
+    drifted_config.model = "post-resolution-drift".into();
+    let drifted = resolve_final_exact_route(true, &drifted_config, &ctx, &ctx.model_id)
+        .expect("post-resolution config produces a different live route");
+    assert!(!assigned_route_matches_final(
+        Some(&assigned_route),
+        Some(&drifted),
+    ));
 }
 /// Invariant: resolving a subagent applies the parent session's
 /// `--tools`/`--disallowed-tools`/`--permission-mode` — driven through
@@ -1412,6 +1502,133 @@ fn list_running_for_parent_returns_empty_when_no_active() {
     let seeds = coordinator.list_running_for_parent("parent-1");
     assert!(seeds.is_empty());
 }
+
+#[tokio::test]
+async fn insert_owned_reports_missing_pending_and_owner_mismatch() {
+    let mut coordinator = SubagentCoordinator::new();
+    let tracker = dummy_tracker("missing", "parent", "explore", "missing");
+    assert_eq!(
+        coordinator.insert_owned(tracker, None),
+        Err(PromoteError::MissingPending)
+    );
+
+    let id = "owned-mismatch";
+    assert!(coordinator.insert_pending(PendingSubagent {
+        subagent_id: id.into(),
+        subagent_type: "explore".into(),
+        description: "pending".into(),
+        persona: None,
+        parent_prompt_id: None,
+        parent_session_id: "parent".into(),
+        owner: SubagentOwner::Task,
+        started_at: std::time::Instant::now(),
+        run_in_background: false,
+        surface_completion: true,
+        color: None,
+        cancel_token: CancellationToken::new(),
+        assigned_meta_owner: Some(identity_store::owner_for_test("pending")),
+    }));
+    let mut tracker = dummy_tracker(id, "parent", "explore", "live");
+    tracker.assigned_meta_owner = Some(identity_store::owner_for_test("tracker"));
+    assert_eq!(
+        coordinator.insert_owned(tracker, Some(&identity_store::owner_for_test("expected"))),
+        Err(PromoteError::OwnerMismatch)
+    );
+    assert!(!coordinator.is_active(id));
+}
+
+#[test]
+fn dropped_creation_claim_removes_fresh_partial_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let partial = temp.path().join("partial-worktree");
+    std::fs::create_dir(&partial).unwrap();
+    std::fs::write(partial.join("partial"), "created before cancellation").unwrap();
+    let claim = FreshWorktreeClaim::new_for_test(
+        "cancelled-creation".into(),
+        partial.clone(),
+    );
+    let blocking_worker_claim = claim.clone();
+    drop(claim);
+    assert!(
+        partial.exists(),
+        "the worker's clone must retain cleanup ownership after await cancellation"
+    );
+    drop(blocking_worker_claim);
+    assert!(
+        !partial.exists(),
+        "the final creation-claim clone must remove a fresh partial path"
+    );
+}
+
+#[tokio::test]
+async fn refused_promotion_tears_down_live_child_and_fresh_worktree() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "initial").unwrap();
+    git_commit_all(&repo, "initial");
+    let worktree = temp.path().join("refused-live");
+    xai_fast_worktree::WorktreeBuilder::new(&repo, &worktree)
+        .standalone(true)
+        .create()
+        .unwrap();
+
+    let id = "refused-live";
+    let mut coordinator = SubagentCoordinator::new();
+    assert!(coordinator.insert_pending(PendingSubagent {
+        subagent_id: id.into(),
+        subagent_type: "explore".into(),
+        description: "pending".into(),
+        persona: None,
+        parent_prompt_id: None,
+        parent_session_id: "parent".into(),
+        owner: SubagentOwner::Task,
+        started_at: std::time::Instant::now(),
+        run_in_background: false,
+        surface_completion: true,
+        color: None,
+        cancel_token: CancellationToken::new(),
+        assigned_meta_owner: Some(identity_store::owner_for_test("pending")),
+    }));
+    let mut tracker = dummy_tracker(id, "parent", "explore", "live");
+    let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
+    tracker.child_handle.cmd_tx = shutdown_tx;
+    let child_handle = tracker.child_handle.clone();
+    tracker.assigned_meta_owner = Some(identity_store::owner_for_test("different"));
+    assert_eq!(
+        coordinator.insert_owned(
+            tracker,
+            Some(&identity_store::owner_for_test("expected")),
+        ),
+        Err(PromoteError::OwnerMismatch)
+    );
+
+    let mut guard = LiveChildUntilPromoted::new(
+        id.into(),
+        xai_grok_workspace::WorkspaceOps::for_test(),
+        Some(worktree.clone()),
+    );
+    guard.own_session(id.into());
+    guard.own_child(child_handle);
+    assert!(guard.owns_resources());
+    guard.teardown().await;
+    assert!(!guard.owns_resources());
+    assert!(!worktree.exists());
+    assert!(matches!(shutdown_rx.try_recv(), Ok(SessionCommand::Shutdown)));
+    assert!(!coordinator.is_active(id));
+    assert_eq!(coordinator.registry_snapshot(), (1, 0, 0));
+    assert!(coordinator.move_pending_to_failed_owned(
+        id,
+        "promotion refused",
+        Some(&identity_store::owner_for_test("pending")),
+    ));
+    assert_eq!(coordinator.registry_snapshot(), (0, 0, 1));
+}
+
 fn dummy_tracker(
     subagent_id: &str,
     parent_session_id: &str,
@@ -3033,6 +3250,46 @@ fn subagent_keeps_default_flavor_when_parent_model_is_non_strict() {
             "a non-strict parent model must leave subagents on the default harness",
         );
 }
+#[tokio::test]
+async fn public_subagent_event_spawn_rejects_assigned_identity_before_resolution() {
+    let ctx = ctx_with_toggle(HashMap::new());
+    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
+    let gateway = test_gateway();
+    let (request, result_rx) = make_request("explore");
+    let id = request.id.clone();
+    assert!(coordinator.borrow_mut().insert_pending(PendingSubagent {
+        subagent_id: id.clone(),
+        subagent_type: "explore".into(),
+        description: "assigned".into(),
+        persona: None,
+        parent_prompt_id: None,
+        parent_session_id: ctx.parent_session_id.clone(),
+        owner: SubagentOwner::Task,
+        started_at: std::time::Instant::now(),
+        run_in_background: false,
+        surface_completion: false,
+        color: None,
+        cancel_token: CancellationToken::new(),
+        assigned_meta_owner: Some(identity_store::owner_for_test("public")),
+    }));
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway)).await;
+        })
+        .await;
+    let result = result_rx.await.unwrap();
+    assert!(!result.success);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Public subagent spawn cannot replace"))
+    );
+    assert!(coordinator.borrow().has_assigned_identity(&id));
+}
+
 fn make_background_request(
     subagent_type: &str,
 ) -> (SubagentRequest, oneshot::Receiver<SubagentResult>) {
@@ -3315,7 +3572,7 @@ async fn background_unknown_type_emits_subagent_finished_notification() {
 /// (on both the persist + gateway channels), delivers a cancelled result, and
 /// leaves the entry queryable as `Cancelled`.
 #[tokio::test]
-async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish() {
+async fn live_guard_cancel_at_promote_emits_exactly_one_cancelled_finish() {
     use crate::test_support::lsp_runtime::{
         ctx_with_toggle_and_cmd_tx, test_gateway_with_receiver,
     };
@@ -3359,24 +3616,28 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
         depth: 0,
         auth_manager: ctx.auth_manager.clone(),
     };
+    let mut live_guard = LiveChildUntilPromoted::new(
+        subagent_id.clone(),
+        ctx.workspace_ops.clone(),
+        None,
+    );
+    live_guard.own_session(child_session_id.0.to_string());
+    live_guard.own_child(child_handle);
+    live_guard.teardown().await;
     cancel_pending_subagent_at_promote(
-            request,
-            None,
-            &child_handle,
-            &subagent_id,
-            &child_session_id,
-            &meta_dir,
-            &meta_dir,
-            &coordinator,
-            &gateway,
-            &ctx.parent_session_id,
-            ctx.parent_cmd_tx.as_ref(),
-            None,
-            false,
-            42,
-            &gcs_ctx,
-        )
-        .await;
+        request,
+        None,
+        &subagent_id,
+        &child_session_id,
+        &meta_dir,
+        &meta_dir,
+        &coordinator,
+        &gateway,
+        &ctx.parent_session_id,
+        ctx.parent_cmd_tx.as_ref(),
+        42,
+        &gcs_ctx,
+    );
     let mut persisted = 0;
     while let Ok(cmd) = cmd_rx.try_recv() {
         if let SessionCommand::XaiSessionNotification { notification } = cmd
@@ -3415,9 +3676,9 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
         _ => panic!("expected Ready(Cancelled) snapshot after promote-abort"),
     }
 }
-/// Drive `cancel_pending_subagent_at_promote` against a real `worktree` and
-/// assert it still emits EXACTLY ONE cancelled finish + leaves the entry
-/// queryable as Cancelled. The caller asserts the worktree dir's fate.
+/// Drive the live-resource guard and cancel-at-promote completion against a
+/// real worktree. It must emit exactly one cancelled finish and leave the
+/// entry queryable as cancelled; the caller asserts the worktree's fate.
 async fn run_promote_cancel_with_worktree(
     worktree: &Path,
     worktree_freshly_created: bool,
@@ -3464,24 +3725,28 @@ async fn run_promote_cancel_with_worktree(
         depth: 0,
         auth_manager: ctx.auth_manager.clone(),
     };
+    let mut live_guard = LiveChildUntilPromoted::new(
+        subagent_id.clone(),
+        ctx.workspace_ops.clone(),
+        worktree_freshly_created.then(|| worktree.to_path_buf()),
+    );
+    live_guard.own_session(child_session_id.0.to_string());
+    live_guard.own_child(child_handle);
+    live_guard.teardown().await;
     cancel_pending_subagent_at_promote(
-            request,
-            None,
-            &child_handle,
-            &subagent_id,
-            &child_session_id,
-            &meta_dir,
-            &meta_dir,
-            &coordinator,
-            &gateway,
-            &ctx.parent_session_id,
-            ctx.parent_cmd_tx.as_ref(),
-            Some(worktree),
-            worktree_freshly_created,
-            42,
-            &gcs_ctx,
-        )
-        .await;
+        request,
+        None,
+        &subagent_id,
+        &child_session_id,
+        &meta_dir,
+        &meta_dir,
+        &coordinator,
+        &gateway,
+        &ctx.parent_session_id,
+        ctx.parent_cmd_tx.as_ref(),
+        42,
+        &gcs_ctx,
+    );
     let mut persisted = 0;
     while let Ok(cmd) = cmd_rx.try_recv() {
         if let SessionCommand::XaiSessionNotification { notification } = cmd
@@ -3507,12 +3772,11 @@ async fn run_promote_cancel_with_worktree(
             Some(SnapshotLookup::Ready(snap)) if matches!(snap.status, SubagentSnapshotStatus::Cancelled { .. })
         ));
 }
-/// The promote-abort teardown removes a FRESHLY-created worktree (this
-/// subagent's own, pristine) but PRESERVES a resumed subagent's reused
-/// worktree (it aliases the source's dir — deleting it would lose the
-/// source's working state). Exactly one cancelled finish emits either way.
+/// The promotion guard removes a freshly-created worktree (this subagent's
+/// own) but preserves a resumed subagent's reused worktree (the source still
+/// owns it). Exactly one cancelled finish emits either way.
 #[tokio::test]
-async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
+async fn live_promotion_guard_removes_fresh_worktree_preserves_resumed() {
     xai_test_utils::require_git!();
     use xai_test_utils::git::{git_commit_all, init_git_repo};
     let temp = tempfile::TempDir::new().unwrap();
@@ -3549,6 +3813,25 @@ async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
             "source edit",
             "the source's working state must be left untouched"
         );
+    for (name, reason) in [
+        (
+            "subagent-rehydrated",
+            "a resumed worktree newly rehydrated for this attempt must be removed",
+        ),
+        (
+            "subagent-partial",
+            "a partial fresh destination left by failed creation must be removed",
+        ),
+    ] {
+        let owned = temp.path().join(name);
+        xai_fast_worktree::WorktreeBuilder::new(&repo, &owned)
+            .standalone(true)
+            .create()
+            .unwrap();
+        assert!(owned.exists());
+        run_promote_cancel_with_worktree(&owned, true).await;
+        assert!(!owned.exists(), "{reason}");
+    }
 }
 #[test]
 fn record_pre_spawn_failure_populates_completed_and_summary() {

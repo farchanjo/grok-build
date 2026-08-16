@@ -54,8 +54,15 @@ pub(crate) struct AssignedRoute {
 }
 
 impl AssignedRoute {
-    pub(crate) fn new(key: assignment::AssignmentKey, route: exact_route::ExactRoute) -> Self {
+    /// Construct a sealed assigned route. Keys stay inside the subagent module
+    /// seam; trusted receivers assemble this before leaving the private channel.
+    fn new(key: assignment::AssignmentKey, route: exact_route::ExactRoute) -> Self {
         Self { key, route }
+    }
+
+    #[cfg(test)]
+    fn key_for_test(&self) -> &assignment::AssignmentKey {
+        &self.key
     }
 }
 /// How the child session's initial context was bootstrapped.
@@ -187,8 +194,9 @@ pub(crate) struct SubagentSpawnContext {
     pub inherited_tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
     pub yolo_mode: bool,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
-    /// Capability minted by MvpAgent for private exact-route assignments.
-    pub assigned_spawn_sender: crate::agent::subagent::assigned_spawn::AssignedSpawnSender,
+    /// Derived capability minted by MvpAgent for private exact-route assignments;
+    /// it shares transport state but does not expose assignment keys.
+    pub assigned_spawn_sender: crate::agent::subagent::assigned_spawn::TrustedAssignedSpawnSender,
     pub parent_depth: u32,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
@@ -608,6 +616,15 @@ struct FailureCompletion<'a> {
 /// `start_subagent_coordinator`).
 pub(crate) type BlockWaitSlot =
     std::rc::Rc<std::cell::RefCell<Option<oneshot::Sender<Option<SubagentSnapshot>>>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PromoteError {
+    #[error("pending subagent no longer exists")]
+    MissingPending,
+    #[error("pending assigned owner does not match the live child")]
+    OwnerMismatch,
+}
+
 /// Owns the active-subagent map and completed-result cache.
 /// Stored as a field on `MvpAgent`.
 ///
@@ -1706,7 +1723,7 @@ impl Drop for PendingGuard<'_> {
                 .error
                 .take()
                 .unwrap_or_else(|| "Subagent failed during initialization".to_string());
-            self.coordinator.borrow_mut().move_pending_to_failed_owned(
+            let _ = self.coordinator.borrow_mut().move_pending_to_failed_owned(
                 &self.id,
                 &error,
                 self.assigned_meta_owner.as_ref(),
@@ -1714,6 +1731,173 @@ impl Drop for PendingGuard<'_> {
         }
     }
 }
+
+/// Cross-thread cancellation backstop for fresh worktree creation. If the
+/// awaiting spawn future disappears, the blocking worker's final clone removes
+/// the destination that did not predate this attempt instead of leaving a
+/// worktree outside coordinator ownership.
+#[derive(Clone)]
+struct FreshWorktreeClaim {
+    state: Arc<FreshWorktreeClaimState>,
+}
+
+struct FreshWorktreeClaimState {
+    subagent_id: String,
+    path: PathBuf,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl FreshWorktreeClaim {
+    #[cfg(test)]
+    fn new_for_test(subagent_id: String, path: PathBuf) -> Self {
+        Self::new(subagent_id, path, true)
+    }
+
+    fn new(subagent_id: String, path: PathBuf, armed: bool) -> Self {
+        Self {
+            state: Arc::new(FreshWorktreeClaimState {
+                subagent_id,
+                path,
+                armed: std::sync::atomic::AtomicBool::new(armed),
+            }),
+        }
+    }
+
+    fn arm(&self) {
+        self.state
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn transfer(self) -> PathBuf {
+        let path = self.state.path.clone();
+        self.state
+            .armed
+            .store(false, std::sync::atomic::Ordering::Release);
+        path
+    }
+}
+
+impl Drop for FreshWorktreeClaimState {
+    fn drop(&mut self) {
+        if !self.armed.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let delegate = crate::session::worktree::btrfs_delegate_from_env();
+        if let Err(error) = xai_fast_worktree::remove_worktree_with_delegate(&self.path, delegate) {
+            tracing::warn!(
+                subagent_id = %self.subagent_id,
+                worktree_path = %self.path.display(),
+                %error,
+                "failed to remove freshly-created worktree from creation claim"
+            );
+        }
+    }
+}
+
+/// Owns every resource created for a child until coordinator promotion commits.
+///
+/// Async abort paths call [`Self::teardown`] for non-blocking worktree removal;
+/// `Drop` is the cancellation/early-return backstop and performs the same
+/// cleanup synchronously. Session-thread initialization also rejects itself if
+/// this owner future is cancelled before it receives the handle. Only a
+/// confirmed `insert_owned` may disarm the guard.
+struct LiveChildUntilPromoted {
+    subagent_id: String,
+    workspace_ops: xai_grok_workspace::WorkspaceOps,
+    fresh_worktree: Option<PathBuf>,
+    child_handle: Option<SessionHandle>,
+    child_session_id: Option<String>,
+    armed: bool,
+}
+
+impl LiveChildUntilPromoted {
+    fn new(
+        subagent_id: String,
+        workspace_ops: xai_grok_workspace::WorkspaceOps,
+        fresh_worktree: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            subagent_id,
+            workspace_ops,
+            fresh_worktree,
+            child_handle: None,
+            child_session_id: None,
+            armed: true,
+        }
+    }
+
+    fn own_child(&mut self, child_handle: SessionHandle) {
+        self.child_handle = Some(child_handle);
+    }
+
+    fn own_session(&mut self, child_session_id: String) {
+        self.child_session_id = Some(child_session_id);
+    }
+
+    #[cfg(test)]
+    fn owns_resources(&self) -> bool {
+        self.fresh_worktree.is_some()
+            || self.child_handle.is_some()
+            || self.child_session_id.is_some()
+    }
+
+    fn shutdown_child(&mut self) {
+        if let Some(child_handle) = self.child_handle.take() {
+            let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
+        }
+        if let Some(child_session_id) = self.child_session_id.take() {
+            self.workspace_ops.end_local_session(&child_session_id);
+        }
+    }
+
+    async fn teardown(&mut self) {
+        self.shutdown_child();
+        let Some(worktree) = self.fresh_worktree.as_ref() else {
+            return;
+        };
+        if let Err(error) = crate::session::worktree::remove_subagent_worktree(worktree).await {
+            tracing::warn!(
+                subagent_id = %self.subagent_id,
+                worktree_path = %worktree.display(),
+                %error,
+                "failed to remove freshly-created worktree before child promotion"
+            );
+            return;
+        }
+        self.fresh_worktree = None;
+    }
+
+    fn disarm_after_promotion(&mut self) {
+        debug_assert!(self.armed, "promotion guard disarmed more than once");
+        self.child_handle = None;
+        self.child_session_id = None;
+        self.fresh_worktree = None;
+        self.armed = false;
+    }
+}
+
+impl Drop for LiveChildUntilPromoted {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.shutdown_child();
+        let Some(worktree) = self.fresh_worktree.take() else {
+            return;
+        };
+        let delegate = crate::session::worktree::btrfs_delegate_from_env();
+        if let Err(error) = xai_fast_worktree::remove_worktree_with_delegate(&worktree, delegate) {
+            tracing::warn!(
+                subagent_id = %self.subagent_id,
+                worktree_path = %worktree.display(),
+                %error,
+                "failed to remove freshly-created worktree from promotion guard drop"
+            );
+        }
+    }
+}
+
 /// Resolve the effective working directory for a child session.
 ///
 /// Precedence: worktree path > `override_cwd` (non-empty) > parent cwd. The
@@ -2431,15 +2615,12 @@ fn fail_subagent(
     );
     let _ = request.result_tx.send(result);
 }
-/// Tear down a subagent killed while pending: shut the idle child, dispose its
-/// worktree (only if `worktree_freshly_created` — a resumed subagent's aliases
-/// the source's and must survive), persist + emit a single cancelled
-/// `SubagentFinished`, move the entry to completed-as-cancelled (stays
-/// queryable), and deliver the result. Defuse the `PendingGuard` before calling.
-async fn cancel_pending_subagent_at_promote(
+/// Complete a pending subagent that the promotion checkpoint cancelled after
+/// [`LiveChildUntilPromoted`] has already shut down its child/session and
+/// removed its freshly-created worktree.
+fn cancel_pending_subagent_at_promote(
     request: SubagentRequest,
     assigned_meta_owner: Option<&identity_store::AssignedMetaOwner>,
-    child_handle: &SessionHandle,
     subagent_id: &str,
     child_session_id: &acp::SessionId,
     parent_session_dir: &Path,
@@ -2448,23 +2629,9 @@ async fn cancel_pending_subagent_at_promote(
     gateway: &GatewaySender,
     parent_session_id: &str,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
-    worktree_path: Option<&Path>,
-    worktree_freshly_created: bool,
     duration_ms: u64,
     gcs_ctx: &GcsUploadContext,
 ) {
-    let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
-    if worktree_freshly_created
-        && let Some(wt_path) = worktree_path
-        && let Err(e) = crate::session::worktree::remove_subagent_worktree(wt_path).await
-    {
-        tracing::warn!(
-            subagent_id,
-            worktree_path = %wt_path.display(),
-            error = %e,
-            "failed to remove pristine worktree for killed-while-pending subagent"
-        );
-    }
     let result = SubagentResult {
         success: false,
         cancelled: true,
@@ -2499,7 +2666,7 @@ async fn cancel_pending_subagent_at_promote(
         },
         parent_cmd_tx,
     );
-    coordinator.borrow_mut().move_pending_to_cancelled_owned(
+    let _ = coordinator.borrow_mut().move_pending_to_cancelled_owned(
         subagent_id,
         "Subagent was cancelled",
         assigned_meta_owner,

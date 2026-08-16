@@ -628,22 +628,25 @@ impl ChannelSpawner {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx,
         };
-        let sent = match &self.assigned_sender {
-            Some(sender) => sender.send("skeptic", Some(skeptic_idx), request).is_ok(),
+        match &self.assigned_sender {
+            Some(sender) => sender
+                .send("skeptic", Some(skeptic_idx), request)
+                .map_err(SpawnError::Transport)?,
             // Unit fixtures retain the legacy event assertion. Production
             // sessions always receive the ACP-minted private capability.
             #[cfg(test)]
             None => self
                 .event_tx
                 .send(SubagentEvent::Spawn(Box::new(request)))
-                .is_ok(),
+                .map_err(|_| {
+                    SpawnError::Transport("subagent coordinator channel closed".to_string())
+                })?,
             #[cfg(not(test))]
-            None => false,
-        };
-        if !sent {
-            return Err(SpawnError::Transport(
-                "subagent coordinator channel closed".to_string(),
-            ));
+            None => {
+                return Err(SpawnError::Transport(
+                    "assigned spawn capability unavailable".to_string(),
+                ));
+            }
         }
         let result = result_rx
             .await
