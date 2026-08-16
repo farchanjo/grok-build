@@ -565,22 +565,105 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_arms_bind_real_methods_for_sse_companions() {
-        // Fixture: every SSE companion in the catalog has a typed client method
-        // name that appears in the generated dispatch runtime source.
+    fn dispatch_arms_bind_real_methods_for_sse_binary_multipart() {
+        // Per-arm local inspection (not global substrings): each match arm body
+        // must call its own client_method. Covers SSE companions, binary, and
+        // multipart primaries.
         let runtime = include_str!("typed_dispatch_runtime.rs");
-        for op in CLI_OPERATIONS.iter().filter(|op| op.is_sse) {
+        let interesting: Vec<_> = CLI_OPERATIONS
+            .iter()
+            .filter(|op| op.is_sse || op.is_binary || op.is_multipart)
+            .collect();
+        assert!(
+            interesting.len() >= 20,
+            "expected substantial SSE/binary/multipart coverage, got {}",
+            interesting.len()
+        );
+        for op in interesting {
+            let body = extract_match_arm_body(runtime, op.operation_id)
+                .unwrap_or_else(|| panic!("missing arm for {}", op.operation_id));
             assert!(
-                runtime.contains(&format!(".{}(", op.client_method)),
-                "missing typed dispatch call for {}",
-                op.operation_id
+                body.contains(&format!(".{}(", op.client_method)),
+                "arm {} must call .{}( locally; body snippet: {}",
+                op.operation_id,
+                op.client_method,
+                &body[..body.len().min(200)]
             );
-            assert!(
-                runtime.contains(&format!("\"{}\" =>", op.operation_id)),
-                "missing dispatch arm for {}",
-                op.operation_id
-            );
+            // Binary arms must pass sink/output; multipart must use files.
+            if op.is_binary {
+                assert!(
+                    body.contains("output") || body.contains("sink"),
+                    "binary arm {} should pass output/sink",
+                    op.operation_id
+                );
+            }
+            if op.is_multipart {
+                assert!(
+                    body.contains("multipart_from") || body.contains("files"),
+                    "multipart arm {} should use files",
+                    op.operation_id
+                );
+            }
+            if op.is_sse {
+                assert!(
+                    body.contains("events") || body.contains("_stream"),
+                    "sse arm {} should stream events",
+                    op.operation_id
+                );
+            }
         }
+    }
+
+    /// Brace-balanced body of `"operation_id" => { ... }`.
+    fn extract_match_arm_body<'a>(source: &'a str, operation_id: &str) -> Option<&'a str> {
+        let needle = format!("\"{operation_id}\" =>");
+        let idx = source.find(&needle)?;
+        let brace = source[idx..].find('{')? + idx;
+        let mut depth = 0usize;
+        for (i, ch) in source[brace..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[brace..=brace + i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn dry_run_never_enters_live_credential_phase() {
+        use super::super::typed_dispatch_runtime::{LIVE_CREDENTIAL_PHASE_COUNT, dispatch_runtime};
+        use std::sync::atomic::Ordering;
+
+        let op = find_cli_operation("openai", "listModels").expect("listModels");
+        // Poison env with sentinel secrets that must never be resolved on dry-run.
+        // (Resolution would not panic, but LIVE_CREDENTIAL_PHASE_COUNT proves the
+        // credential phase was never entered.)
+        let before = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
+        let code = dispatch_runtime(
+            "openai",
+            op,
+            &[],
+            &[],
+            None,
+            true, // dry_run
+            false,
+            None,
+            &[],
+        )
+        .await
+        .expect("dry_run");
+        assert_eq!(code, ExitCode::Success);
+        let after = LIVE_CREDENTIAL_PHASE_COUNT.load(Ordering::SeqCst);
+        assert_eq!(
+            after, before,
+            "dry-run must not enter live credential phase (before={before}, after={after})"
+        );
     }
 
     #[test]

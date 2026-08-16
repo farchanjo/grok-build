@@ -771,11 +771,7 @@ def build_meta_rows(
             )
             transports = list(ep.transports)
             mode = op.mode
-            is_binary = mode == "binary" or (
-                "http_binary" in transports and mode != "sse" and mode != "multipart"
-                and primary_mode_from_transports(transports) == "binary"
-            )
-            # Prefer actual op mode for flags.
+            # Mode flags come from the actual ops.rs method (authoritative).
             is_binary = mode == "binary"
             is_sse = mode == "sse"
             is_multipart = mode == "multipart"
@@ -935,6 +931,55 @@ def validate_rows(rows: list[MetaRow], inventories: dict[str, list[InventoryEndp
         expect = requires_confirmation(r.method, r.operation_id)
         if r.requires_confirmation != expect:
             errors.append(f"confirmation mismatch {r.operation_id}")
+
+    # Inventory transport vs actual op-mode fidelity (authoritative inventories).
+    inv_by_key: dict[tuple[str, str, str], InventoryEndpoint] = {}
+    for prov, eps in inventories.items():
+        for ep in eps:
+            inv_by_key[(prov, ep.method, ep.path)] = ep
+    for r in rows:
+        inv_provider = "openrouter" if r.provider == "openrouter" else "openai"
+        inv = inv_by_key.get((inv_provider, r.method, r.path))
+        if inv is None:
+            continue
+        inv_t = set(inv.transports)
+        if r.is_primary:
+            if r.is_binary and "http_binary" not in inv_t:
+                errors.append(
+                    f"binary mode without inventory http_binary: {r.provider}::{r.operation_id}"
+                )
+            if r.is_multipart and "http_multipart" not in inv_t:
+                errors.append(
+                    f"multipart mode without inventory http_multipart: {r.provider}::{r.operation_id}"
+                )
+            if r.is_websocket and "websocket" not in inv_t:
+                errors.append(
+                    f"websocket mode without inventory websocket: {r.provider}::{r.operation_id}"
+                )
+            # Sole-binary inventory must not be typed as JSON primary.
+            if inv_t == {"http_binary"} and not r.is_binary:
+                errors.append(
+                    f"inventory sole http_binary but op not binary: {r.provider}::{r.operation_id}"
+                )
+            # SSE inventory requires a stream companion when primary is not pure SSE.
+            if "http_sse" in inv_t and r.mode != "sse":
+                stream_id = r.operation_id + "_stream"
+                if not any(
+                    x.provider == r.provider and x.operation_id == stream_id for x in rows
+                ):
+                    errors.append(
+                        f"inventory http_sse missing companion: {r.provider}::{stream_id}"
+                    )
+        else:
+            # Companions are SSE-only arms.
+            if r.is_sse and r.transports != ["http_sse"]:
+                errors.append(
+                    f"sse companion transports must be [http_sse]: {r.provider}::{r.operation_id}"
+                )
+            if not r.is_sse:
+                errors.append(
+                    f"non-primary non-sse binding: {r.provider}::{r.operation_id}"
+                )
 
     return errors
 
@@ -1306,24 +1351,8 @@ pub async fn dispatch_runtime(
     ) {
         return Err(format!("unsupported HTTP method {}", op.method));
     }
-    let home = xai_grok_config::grok_home();
-    let meta = resolve_provider_from_registry(provider, &home)?;
-    let pid = ProviderId::new(provider).map_err(|e| e.to_string())?;
-    // Credential selection is provider-native and metadata-driven: admin slots
-    // never fall back to the application key when admin is missing.
-    let want_admin = op.is_admin || op.credential_class == "admin";
-    let app_token = if want_admin {
-        None
-    } else {
-        resolve_app_token(provider, &home, &pid, meta.env_key.as_deref())
-    };
-    let admin_token = if want_admin {
-        resolve_admin_token(provider, &home, &pid, meta.admin_env_key.as_deref())
-    } else {
-        // Still load admin token into config for dual-slot clients that need it,
-        // but OpenRouter/OpenAI application ops must not borrow it as app token.
-        resolve_admin_token(provider, &home, &pid, meta.admin_env_key.as_deref())
-    };
+    // Merge typed params first. Dry-run must return before any credential
+    // resolver, env/vault/auth-file access, token construction, or network setup.
     let merged = merge_params(input_json, path_params, query)?;
     if dry_run {
         write_json(&json!({
@@ -1341,6 +1370,19 @@ pub async fn dispatch_runtime(
         .map_err(|e| e.to_string())?;
         return Ok(ExitCode::Success);
     }
+    note_live_dispatch_credential_phase();
+    let home = xai_grok_config::grok_home();
+    let meta = resolve_provider_from_registry(provider, &home)?;
+    let pid = ProviderId::new(provider).map_err(|e| e.to_string())?;
+    // Credential selection is provider-native and metadata-driven: admin slots
+    // never fall back to the application key when admin is missing.
+    let want_admin = op.is_admin || op.credential_class == "admin";
+    let app_token = if want_admin {
+        None
+    } else {
+        resolve_app_token(provider, &home, &pid, meta.env_key.as_deref())
+    };
+    let admin_token = resolve_admin_token(provider, &home, &pid, meta.admin_env_key.as_deref());
     if want_admin && admin_token.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
         return Err(format!(
             "admin credential required for {}::{} (never borrowing application key)",
@@ -1375,6 +1417,18 @@ pub async fn dispatch_runtime(
         }
         other => Err(format!("unknown namespace {other}")),
     }
+}
+
+/// Test seam: live dispatch increments this before any credential resolution.
+/// Dry-run must never call this (proves zero credential-phase entry).
+#[cfg(test)]
+pub(crate) static LIVE_CREDENTIAL_PHASE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_live_dispatch_credential_phase() {
+    #[cfg(test)]
+    LIVE_CREDENTIAL_PHASE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 '''
     parts = [header]
@@ -1713,6 +1767,83 @@ def _rustfmt_text(source: str, name: str) -> str:
         return p.read_text()
 
 
+def _extract_match_arm_body(source: str, operation_id: str) -> str | None:
+    """Return the body of `"operation_id" => { ... }` (brace-balanced)."""
+    needle = f'"{operation_id}" =>'
+    idx = source.find(needle)
+    if idx < 0:
+        return None
+    brace = source.find("{", idx)
+    if brace < 0:
+        return None
+    depth = 0
+    for i in range(brace, len(source)):
+        ch = source[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace : i + 1]
+    return None
+
+
+def _assert_dispatch_arm_methods(dispatch: str, rows: list[MetaRow]) -> list[str]:
+    """Per-arm method fidelity: each arm body must call its client_method."""
+    errors: list[str] = []
+    for r in rows:
+        body = _extract_match_arm_body(dispatch, r.operation_id)
+        if body is None:
+            errors.append(f"missing dispatch arm for {r.provider}::{r.operation_id}")
+            continue
+        if f".{r.client_method}(" not in body:
+            errors.append(
+                f"dispatch arm for {r.operation_id} lacks local typed call .{r.client_method}("
+            )
+        # Detect swapped methods: another op's method in this arm when not own.
+        # (Own method required above; extra foreign methods are allowed only if
+        # they are not a different catalog method — keep this strict for primary.)
+    return errors
+
+
+def _check_detects_swapped_method(rows: list[MetaRow]) -> list[str]:
+    """Regression: swapped client_method in one arm must fail check logic.
+
+    Does not mutate on-disk sources. Mutates an in-memory emit only.
+    """
+    if len(rows) < 2:
+        return ["swap fixture needs >=2 rows"]
+    # Prefer two same-namespace rows with distinct methods.
+    a = next((r for r in rows if r.provider == "openai" and r.is_primary), rows[0])
+    b = next(
+        (
+            r
+            for r in rows
+            if r.provider == a.provider
+            and r.client_method != a.client_method
+            and r.is_primary
+        ),
+        None,
+    )
+    if b is None:
+        return ["swap fixture could not find distinct methods"]
+    source = emit_typed_dispatch(rows)
+    body = _extract_match_arm_body(source, a.operation_id)
+    if body is None:
+        return [f"swap fixture missing arm {a.operation_id}"]
+    poisoned = body.replace(f".{a.client_method}(", f".{b.client_method}(", 1)
+    if poisoned == body:
+        return [f"swap fixture could not rewrite method in {a.operation_id}"]
+    mutated = source.replace(body, poisoned, 1)
+    errs = _assert_dispatch_arm_methods(mutated, rows)
+    if not any(a.operation_id in e for e in errs):
+        return [
+            f"swap fixture failed to detect swapped method in {a.operation_id} "
+            f"({a.client_method} -> {b.client_method})"
+        ]
+    return []
+
+
 def check_only() -> int:
     # Compare derived artifacts to freshly computed content without writing ops
     # repairs first — but repairs must already be applied for --check to pass.
@@ -1728,11 +1859,13 @@ def check_only() -> int:
     # formatting is deterministic against repository rustfmt.toml.
     expected_bindings = _rustfmt_text(emit_bindings_rs(rows), "bindings.rs")
     expected_cli = _rustfmt_text(emit_cli_ops(rows), "generated_ops.rs")
+    expected_dispatch = _rustfmt_text(emit_typed_dispatch(rows), "typed_dispatch_runtime.rs")
     expected_table = json.dumps(emit_operation_table(rows), indent=2) + "\n"
     expected_report = json.dumps(emit_bindings_report(rows), indent=2) + "\n"
     pairs = [
         (GEN / "bindings.rs", expected_bindings),
         (SHELL_CLI / "generated_ops.rs", expected_cli),
+        (SHELL_CLI / "typed_dispatch_runtime.rs", expected_dispatch),
         (BASELINES / "operation_table.json", expected_table),
         (BASELINES / "operation_bindings_report.json", expected_report),
     ]
@@ -1744,15 +1877,12 @@ def check_only() -> int:
         if actual != expected:
             errors.append(f"stale generated artifact {path}")
 
-    # Dispatch coverage: every row has an arm with a real typed method call.
+    # Per-arm dispatch method fidelity (not global substring).
     dispatch = (SHELL_CLI / "typed_dispatch_runtime.rs").read_text()
-    for r in rows:
-        if f'"{r.operation_id}" =>' not in dispatch:
-            errors.append(f"missing dispatch arm for {r.provider}::{r.operation_id}")
-        if f".{r.client_method}(" not in dispatch:
-            errors.append(
-                f"dispatch arm for {r.operation_id} lacks typed method call {r.client_method}"
-            )
+    errors.extend(_assert_dispatch_arm_methods(dispatch, rows))
+
+    # Self-test: swapped method must be rejected without mutating source.
+    errors.extend(_check_detects_swapped_method(rows))
 
     if errors:
         print("CHECK FAIL:", file=sys.stderr)

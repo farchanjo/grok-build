@@ -1,6 +1,6 @@
 //! Distinct OpenRouter-native CLI namespace (`grok openrouter ...`).
 
-use super::generated_ops::operations_for_namespace;
+use super::generated_ops::{find_cli_operation, operations_for_namespace};
 use super::output::{ExitCode, write_json};
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -38,10 +38,29 @@ pub enum OpenRouterCliCommand {
         #[arg(long)]
         input: Option<String>,
     },
-    /// Best-effort account key metadata (operation_id resolved from inventory).
+    /// Current application key metadata (`getCurrentKey` / exact `GET /key`).
     Key,
     /// Best-effort credits read.
     Credits,
+}
+
+/// Resolve the Key shorthand to the application `getCurrentKey` operation only.
+///
+/// Never selects BYOK/admin key-list operations (substring `"key"` is unsafe).
+pub fn resolve_key_operation_id() -> Result<&'static str, String> {
+    let op = find_cli_operation("openrouter", "getCurrentKey").ok_or_else(|| {
+        "openrouter getCurrentKey binding missing from generated catalog".to_owned()
+    })?;
+    if op.path != "/key" || op.method != "GET" {
+        return Err(format!(
+            "getCurrentKey must be GET /key (got {} {})",
+            op.method, op.path
+        ));
+    }
+    if op.is_admin || op.credential_class != "application" {
+        return Err("getCurrentKey must use application credential class (not admin/BYOK)".into());
+    }
+    Ok(op.operation_id)
 }
 
 pub async fn run_openrouter_cli(args: OpenRouterCliArgs) -> i32 {
@@ -95,28 +114,18 @@ async fn run_inner(args: OpenRouterCliArgs) -> Result<ExitCode, String> {
             .await
         }
         OpenRouterCliCommand::Key => {
-            // Prefer inventory operation ids containing "key".
-            if let Some(op) = operations_for_namespace("openrouter").find(|op| {
-                op.operation_id.to_ascii_lowercase().contains("key") && op.method == "GET"
-            }) {
-                return crate::cli::openai_cmd::call_namespace(
-                    &args.provider,
-                    "openrouter",
-                    op.operation_id,
-                    &[],
-                    &[],
-                    None,
-                    args.dry_run,
-                    args.yes,
-                )
-                .await;
-            }
-            write_json(&json!({
-                "hint": "use `grok openrouter ops` and `grok openrouter call <operationId>`",
-                "provider": args.provider,
-            }))
-            .map_err(|e| e.to_string())?;
-            Ok(ExitCode::Success)
+            let operation_id = resolve_key_operation_id()?;
+            crate::cli::openai_cmd::call_namespace(
+                &args.provider,
+                "openrouter",
+                operation_id,
+                &[],
+                &[],
+                None,
+                args.dry_run,
+                args.yes,
+            )
+            .await
         }
         OpenRouterCliCommand::Credits => {
             if let Some(op) = operations_for_namespace("openrouter").find(|op| {
@@ -152,5 +161,26 @@ mod tests {
     fn parses_ops() {
         let args = OpenRouterCliArgs::try_parse_from(["openrouter", "ops"]).unwrap();
         assert!(matches!(args.command, OpenRouterCliCommand::Ops));
+    }
+
+    #[test]
+    fn key_shorthand_binds_get_current_key_application_not_byok() {
+        let id = resolve_key_operation_id().expect("getCurrentKey");
+        assert_eq!(id, "getCurrentKey");
+        let op = find_cli_operation("openrouter", id).unwrap();
+        assert_eq!(op.path, "/key");
+        assert_eq!(op.method, "GET");
+        assert!(!op.is_admin);
+        assert_eq!(op.credential_class, "application");
+        // Catalog order would hit listBYOKKeys first under substring "key".
+        let first_keyish = operations_for_namespace("openrouter")
+            .find(|op| op.operation_id.to_ascii_lowercase().contains("key") && op.method == "GET")
+            .expect("keyish");
+        assert_ne!(
+            first_keyish.operation_id, "getCurrentKey",
+            "fixture assumes substring order still prefers BYOK so this regression stays meaningful"
+        );
+        assert_ne!(first_keyish.path, "/key");
+        assert!(first_keyish.is_admin || first_keyish.credential_class == "admin");
     }
 }

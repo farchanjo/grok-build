@@ -25,10 +25,13 @@ python3 crates/codegen/xai-grok-inference/baselines/scripts/generate_operation_m
 python3 crates/codegen/xai-grok-inference/baselines/scripts/generate_operation_metadata.py --write
 ```
 
-`--check` rejects missing/extra primaries, operation-id drift, transport
-mismatch, duplicate names, and stale generated artifacts. Rustfmt uses the
-repository `rustfmt.toml`. Truthful counts: **287** OpenAI primaries, **89**
-OpenRouter primaries, **20** SSE companions, **7** binary primaries.
+`--check` rejects missing/extra primaries, operation-id drift, inventory
+transport vs op-mode mismatches (binary/multipart/websocket/SSE companions),
+duplicate names, stale generated artifacts (including full
+`typed_dispatch_runtime.rs` byte-compare after rustfmt), and per-arm swapped
+client methods (self-test fixture). Rustfmt uses the repository `rustfmt.toml`.
+Truthful counts: **287** OpenAI primaries, **89** OpenRouter primaries, **20**
+SSE companions, **7** binary primaries.
 
 ## Full schema client generation (requires pinned OpenAPI blobs)
 

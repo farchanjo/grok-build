@@ -234,10 +234,22 @@ pub trait CredentialResolver: Send + Sync {
 }
 
 /// Static bearer pair used by tests and simple CLI wiring.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct StaticCredentials {
     pub application: Option<String>,
     pub admin: Option<String>,
+}
+
+impl std::fmt::Debug for StaticCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StaticCredentials")
+            .field(
+                "application",
+                &self.application.as_ref().map(|_| "<redacted>"),
+            )
+            .field("admin", &self.admin.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl CredentialResolver for StaticCredentials {

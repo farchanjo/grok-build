@@ -80,24 +80,8 @@ pub async fn dispatch_runtime(
     ) {
         return Err(format!("unsupported HTTP method {}", op.method));
     }
-    let home = xai_grok_config::grok_home();
-    let meta = resolve_provider_from_registry(provider, &home)?;
-    let pid = ProviderId::new(provider).map_err(|e| e.to_string())?;
-    // Credential selection is provider-native and metadata-driven: admin slots
-    // never fall back to the application key when admin is missing.
-    let want_admin = op.is_admin || op.credential_class == "admin";
-    let app_token = if want_admin {
-        None
-    } else {
-        resolve_app_token(provider, &home, &pid, meta.env_key.as_deref())
-    };
-    let admin_token = if want_admin {
-        resolve_admin_token(provider, &home, &pid, meta.admin_env_key.as_deref())
-    } else {
-        // Still load admin token into config for dual-slot clients that need it,
-        // but OpenRouter/OpenAI application ops must not borrow it as app token.
-        resolve_admin_token(provider, &home, &pid, meta.admin_env_key.as_deref())
-    };
+    // Merge typed params first. Dry-run must return before any credential
+    // resolver, env/vault/auth-file access, token construction, or network setup.
     let merged = merge_params(input_json, path_params, query)?;
     if dry_run {
         write_json(&json!({
@@ -115,6 +99,19 @@ pub async fn dispatch_runtime(
         .map_err(|e| e.to_string())?;
         return Ok(ExitCode::Success);
     }
+    note_live_dispatch_credential_phase();
+    let home = xai_grok_config::grok_home();
+    let meta = resolve_provider_from_registry(provider, &home)?;
+    let pid = ProviderId::new(provider).map_err(|e| e.to_string())?;
+    // Credential selection is provider-native and metadata-driven: admin slots
+    // never fall back to the application key when admin is missing.
+    let want_admin = op.is_admin || op.credential_class == "admin";
+    let app_token = if want_admin {
+        None
+    } else {
+        resolve_app_token(provider, &home, &pid, meta.env_key.as_deref())
+    };
+    let admin_token = resolve_admin_token(provider, &home, &pid, meta.admin_env_key.as_deref());
     if want_admin
         && admin_token
             .as_ref()
@@ -154,6 +151,18 @@ pub async fn dispatch_runtime(
         }
         other => Err(format!("unknown namespace {other}")),
     }
+}
+
+/// Test seam: live dispatch increments this before any credential resolution.
+/// Dry-run must never call this (proves zero credential-phase entry).
+#[cfg(test)]
+pub(crate) static LIVE_CREDENTIAL_PHASE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn note_live_dispatch_credential_phase() {
+    #[cfg(test)]
+    LIVE_CREDENTIAL_PHASE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 async fn dispatch_openai(
