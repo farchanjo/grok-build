@@ -512,6 +512,9 @@ pub(crate) struct ChannelSpawner {
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
+    /// Trusted ACP-boundary capability. `None` is retained only for legacy unit fixtures.
+    pub(crate) assigned_sender:
+        Option<crate::agent::subagent::assigned_spawn::GoalAssignedSpawnSender>,
     pub(crate) parent_session_id: String,
     pub(crate) parent_prompt_id: Option<String>,
     pub(crate) cwd: Option<String>,
@@ -553,7 +556,9 @@ impl GoalClassifierSpawner for ChannelSpawner {
             override_,
             self.events.as_ref(),
             prompt,
-            |model, harness, prompt| self.send_one(id, prompt, model, harness, resume_from),
+            |model, harness, prompt| {
+                self.send_one(id, skeptic_idx, prompt, model, harness, resume_from)
+            },
         )
         .await;
 
@@ -590,6 +595,7 @@ impl ChannelSpawner {
     async fn send_one(
         &self,
         id: &str,
+        skeptic_idx: u32,
         prompt: String,
         model: Option<String>,
         harness_agent_type: Option<String>,
@@ -622,11 +628,19 @@ impl ChannelSpawner {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx,
         };
-        if self
-            .event_tx
-            .send(SubagentEvent::Spawn(Box::new(request)))
-            .is_err()
-        {
+        let sent = match &self.assigned_sender {
+            Some(sender) => sender.send("skeptic", Some(skeptic_idx), request).is_ok(),
+            // Unit fixtures retain the legacy event assertion. Production
+            // sessions always receive the ACP-minted private capability.
+            #[cfg(test)]
+            None => self
+                .event_tx
+                .send(SubagentEvent::Spawn(Box::new(request)))
+                .is_ok(),
+            #[cfg(not(test))]
+            None => false,
+        };
+        if !sent {
             return Err(SpawnError::Transport(
                 "subagent coordinator channel closed".to_string(),
             ));
@@ -2456,6 +2470,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
@@ -2506,6 +2521,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
@@ -2576,6 +2592,7 @@ mod tests {
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
@@ -5871,6 +5888,7 @@ mod tests {
         });
 
         let spawner: Arc<dyn GoalClassifierSpawner> = Arc::new(ChannelSpawner {
+            assigned_sender: None,
             event_tx: tx,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
@@ -6244,6 +6262,7 @@ mod tests {
         });
 
         let spawner = ChannelSpawner {
+            assigned_sender: None,
             event_tx,
             parent_session_id: "parent-session".into(),
             parent_prompt_id: None,

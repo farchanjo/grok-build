@@ -515,6 +515,7 @@ impl SessionActor {
         };
 
         let (
+            goal_id,
             objective,
             verifier_id,
             baseline_commit,
@@ -534,6 +535,7 @@ impl SessionActor {
                 };
             };
             (
+                o.goal_id.clone(),
                 o.objective.clone(),
                 o.verifier_id.clone(),
                 o.changes_baseline_commit.clone(),
@@ -561,12 +563,8 @@ impl SessionActor {
             (composed.to_send, composed.to_persist)
         };
 
-        let model_id = self
-            .chat_state_handle
-            .get_inference_settings()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let inference_config = self.reconstruct_full_config().await;
+        let model_id = inference_config.model.clone();
 
         let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {
             tracing::warn!("verification stage: no subagent coordinator channel; failing open");
@@ -641,6 +639,8 @@ impl SessionActor {
 
         let spawner: std::sync::Arc<dyn crate::session::goal_classifier::GoalClassifierSpawner> =
             std::sync::Arc::new(ChannelSpawner {
+                assigned_sender: self
+                    .trusted_goal_assigned_sender(goal_id.clone(), inference_config),
                 event_tx,
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,

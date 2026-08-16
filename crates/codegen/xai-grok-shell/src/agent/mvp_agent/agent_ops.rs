@@ -3238,6 +3238,7 @@ impl MvpAgent {
                     )
             })?;
         tool_ctx.subagent_event_tx = Some(self.subagent_event_tx.clone());
+        tool_ctx.assigned_spawn_sender = Some(self.assigned_spawn_tx.clone());
         tool_ctx.synthetic_trace_tx = self
             .subagent_coordinator
             .borrow()
