@@ -310,10 +310,20 @@ fn metadata_text(s: &SkillInfo) -> String {
     cap_chars(&joined, MAX_METADATA_TOTAL_CHARS)
 }
 
-/// Unique CandidateRow identifier (scope + name + path so same-named skills do
-/// not collide).
+/// Unique, path-free CandidateRow identifier (`scope|name|#hash`). The hash is a
+/// stable SHA-256 digest of the absolute path, so no absolute path (or home
+/// path) ever appears in candidate ids or `CandidateRow::Debug`.
 fn candidate_id(s: &SkillInfo) -> String {
-    format!("{}|{}|{}", scope_label(s.scope), s.name, s.path)
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"prime-candidate/v1\0");
+    hasher.update(s.path.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(16);
+    for b in &digest[..8] {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    format!("{}|{}|#{hex}", scope_label(s.scope), s.name)
 }
 
 /// Authoritative eligibility: delegates to the tools predicate so the two layers
@@ -476,49 +486,116 @@ pub async fn semantic_fill(
     outcome
 }
 
-/// Bounded, TOCTOU-hardened body reader (unix: O_NOFOLLOW | O_NONBLOCK).
-#[cfg(unix)]
-fn read_body_bounded_blocking(path: &Path) -> std::io::Result<String> {
-    use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+/// Trim `buf` to at most `max` bytes while preserving UTF-8 validity: backs up
+/// to the previous character boundary so a multibyte code point is never split.
+fn utf8_prefix_trim(buf: &mut Vec<u8>, max: usize) {
+    if buf.len() <= max {
+        return;
+    }
+    let mut end = max;
+    // Back up over continuation bytes (10xxxxxx).
+    while end > 0 && (buf[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    if end > 0 {
+        let lead = buf[end - 1];
+        let need = if lead < 0x80 {
+            1
+        } else if lead < 0xE0 {
+            2
+        } else if lead < 0xF0 {
+            3
+        } else {
+            4
+        };
+        // If the lead byte does not fit within `max`, drop it entirely.
+        if (end - 1) + need > max {
+            end -= 1;
+        }
+    }
+    buf.truncate(end);
+}
 
-    let meta = std::fs::symlink_metadata(path)?;
-    if !meta.file_type().is_file() {
+/// Bounded, TOCTOU-hardened body reader (Unix).
+///
+/// Opens the canonical trusted root directory fd and walks every relative
+/// component with `openat` + `O_NOFOLLOW|O_DIRECTORY` (final component
+/// `O_NOFOLLOW|O_NONBLOCK`), so an intermediate-directory symlink swap cannot
+/// redirect the read outside the root: each component is resolved beneath the
+/// previously opened directory handle, never through a path string. The final
+/// handle must be a regular file; content is read bounded and trimmed to a
+/// UTF-8 boundary.
+#[cfg(unix)]
+fn read_body_bounded(root: &Path, rel: &Path, _fallback_path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+
+    let err_from = |e: nix::errno::Errno| std::io::Error::from_raw_os_error(e as i32);
+
+    let root_fd = open(
+        root,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(err_from)?;
+
+    let comps: Vec<&[u8]> = rel.components().map(|c| c.as_os_str().as_bytes()).collect();
+    if comps.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "skill path has no relative components",
+        ));
+    }
+
+    let mut dir: OwnedFd = root_fd;
+    let mut file_fd: Option<OwnedFd> = None;
+    let last = comps.len() - 1;
+    for (i, comp) in comps.iter().enumerate() {
+        if i == last {
+            file_fd = Some(
+                openat(
+                    &dir,
+                    *comp,
+                    OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(err_from)?,
+            );
+            break;
+        }
+        let fd = openat(
+            &dir,
+            *comp,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(err_from)?;
+        dir = fd;
+    }
+    let Some(file_fd) = file_fd else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "skill path has no final component",
+        ));
+    };
+
+    let mut file = std::fs::File::from(file_fd);
+    let meta = file.metadata()?;
+    if !meta.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "skill file is not a regular file",
         ));
     }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-    let file = opts.open(path)?;
-    let fmeta = file.metadata()?;
-    if !fmeta.file_type().is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "opened handle is not a regular file",
-        ));
-    }
-    let (dev_a, ino_a) = (fmeta.dev(), fmeta.ino());
     let mut buf = Vec::new();
-    let mut f = file;
-    let mut take = f.by_ref().take(MAX_LOADED_BODY_BYTES.saturating_add(1));
+    let mut take = file.by_ref().take(MAX_LOADED_BODY_BYTES.saturating_add(1));
     let _ = take.read_to_end(&mut buf)?;
-    if buf.len() as u64 > MAX_LOADED_BODY_BYTES {
-        buf.truncate(MAX_LOADED_BODY_BYTES as usize);
-    }
-    drop(f);
-
-    // Post-read identity revalidation → discard on swap during read.
-    if let Ok(m) = std::fs::symlink_metadata(path)
-        && (m.dev() != dev_a || m.ino() != ino_a)
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "file identity changed during read",
-        ));
-    }
+    utf8_prefix_trim(&mut buf, MAX_LOADED_BODY_BYTES as usize);
     String::from_utf8(buf).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -527,24 +604,26 @@ fn read_body_bounded_blocking(path: &Path) -> std::io::Result<String> {
     })
 }
 
-/// Portable bounded reader fallback (regular-file guard + `take` cap).
+/// Portable bounded reader fallback (non-Unix).
+///
+/// Fails closed on non-regular files and reads bounded. Does not offer the
+/// `openat` intermediate-directory guarantee on these platforms (documented);
+/// content is still capped and UTF-8-trimmed at the boundary.
 #[cfg(not(unix))]
-fn read_body_bounded_blocking(path: &Path) -> std::io::Result<String> {
+fn read_body_bounded(_root: &Path, _rel: &Path, fallback_path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let meta = std::fs::metadata(path)?;
+    let meta = std::fs::metadata(fallback_path)?;
     if !meta.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "skill file is not a regular file",
         ));
     }
-    let mut f = std::fs::File::open(path)?;
+    let mut f = std::fs::File::open(fallback_path)?;
     let mut buf = Vec::new();
     let mut take = f.by_ref().take(MAX_LOADED_BODY_BYTES.saturating_add(1));
     let _ = take.read_to_end(&mut buf)?;
-    if buf.len() as u64 > MAX_LOADED_BODY_BYTES {
-        buf.truncate(MAX_LOADED_BODY_BYTES as usize);
-    }
+    utf8_prefix_trim(&mut buf, MAX_LOADED_BODY_BYTES as usize);
     String::from_utf8(buf).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -554,14 +633,20 @@ fn read_body_bounded_blocking(path: &Path) -> std::io::Result<String> {
 }
 
 /// Load + extract a skill body natively (frontmatter strip + contained internal
-/// links) through a bounded, cancellation-selected reader.
+/// links) through a bounded, cancellation-selected reader. `root`+`rel` are the
+/// canonical trusted root and its relative skill path (Unix openat walk);
+/// `fallback_path` is the snapshot path used by the non-Unix fallback.
 async fn load_skill_body_bounded(
-    cur: &SkillInfo,
+    root: &Path,
+    rel: &Path,
+    fallback_path: &Path,
     cancel: &CancellationToken,
 ) -> Result<String, PrimeDropReason> {
-    let path = cur.path.clone();
-    let handle =
-        tokio::task::spawn_blocking(move || read_body_bounded_blocking(Path::new(&path)).ok());
+    let root = root.to_path_buf();
+    let rel = rel.to_path_buf();
+    let fallback = fallback_path.to_path_buf();
+    let fb = fallback.clone();
+    let handle = tokio::task::spawn_blocking(move || read_body_bounded(&root, &rel, &fb).ok());
     let raw = tokio::select! {
         biased;
         _ = cancel.cancelled() => None,
@@ -573,7 +658,7 @@ async fn load_skill_body_bounded(
 
     // Reuse native frontmatter + link-rewrite behavior (never diverging).
     let body = extract_skill_body(&raw);
-    let dir = Path::new(&cur.path).parent().map(Path::to_path_buf);
+    let dir = Path::new(&fallback).parent().map(Path::to_path_buf);
     let body = match dir {
         Some(d) => resolve_skill_internal_links(&body, &d),
         None => body,
@@ -603,7 +688,12 @@ pub async fn load_and_revalidate(
     cancel: &CancellationToken,
 ) -> LoadedBatch {
     let target = target.max(1);
-    let fresh = refresh.refresh().await;
+    // Cancellation-race the async fresh-snapshot refresh against the gate.
+    let fresh = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return LoadedBatch { loaded: Vec::new(), drop_reasons: Vec::new() },
+        fresh = refresh.refresh() => fresh,
+    };
     let fresh_eligible: Vec<&SkillInfo> = fresh.iter().filter(|s| is_eligible(s)).collect();
 
     let mut loaded = Vec::new();
@@ -656,11 +746,20 @@ pub async fn load_and_revalidate(
             continue;
         }
 
-        // Canonical containment (fails closed on unresolvable paths).
+        // Canonical containment (fails closed on unresolvable paths; a vanished
+        // file between the lstat and here is classified ChangedOrGone, not a
+        // containment violation).
         let canon = match dunce::canonicalize(&cur.path) {
             Ok(c) => c,
             Err(_) => {
-                drop_reasons.push(PrimeDropReason::NotContained);
+                let vanished = std::fs::symlink_metadata(&cur.path)
+                    .err()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+                drop_reasons.push(if vanished {
+                    PrimeDropReason::ChangedOrGone
+                } else {
+                    PrimeDropReason::NotContained
+                });
                 continue;
             }
         };
@@ -669,18 +768,20 @@ pub async fn load_and_revalidate(
             drop_reasons.push(PrimeDropReason::NotContained);
             continue;
         }
+        // The canonical root that contains the skill + its relative path are
+        // used by the openat component walk (never a path string re-open).
+        let Some(root) = trusted_roots.iter().find(|r| canon.starts_with(r)) else {
+            drop_reasons.push(PrimeDropReason::NotContained);
+            continue;
+        };
+        let Ok(rel) = canon.strip_prefix(root) else {
+            drop_reasons.push(PrimeDropReason::NotContained);
+            continue;
+        };
 
         // Bounded native body load (never trust snapshot body fields).
-        match load_skill_body_bounded(cur, cancel).await {
+        match load_skill_body_bounded(root, rel, Path::new(&cur.path), cancel).await {
             Ok(body) => {
-                // Post-read canonical re-verification (close check→read race).
-                let still_contained = dunce::canonicalize(&cur.path)
-                    .map(|c2| trusted_roots.iter().any(|r| c2.starts_with(r)))
-                    .unwrap_or(false);
-                if !still_contained {
-                    drop_reasons.push(PrimeDropReason::NotContained);
-                    continue;
-                }
                 loaded.push(LoadedSkill {
                     name: cur.name.clone(),
                     scope: cur.scope,
@@ -707,6 +808,7 @@ pub async fn load_and_revalidate(
 mod tests {
     use super::*;
     use crate::session::prime::inventory::InventoryEntry;
+    use crate::session::prime::{PrimeError, PrimeInput, run_prime_selection};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -869,11 +971,15 @@ mod tests {
     }
 
     #[test]
-    fn candidate_ids_unique_for_same_named_skills() {
+    fn candidate_ids_unique_path_free_for_same_named_skills() {
         let a = skill("commit", "/local/commit/SKILL.md");
         let b = skill("commit", "/user/commit/SKILL.md");
         assert_ne!(candidate_id(&a), candidate_id(&b));
-        assert!(candidate_id(&a).contains("/local/commit/SKILL.md"));
+        // Path-free: no absolute path (or home path) ever appears in the id.
+        let id = candidate_id(&a);
+        assert!(!id.contains("local/commit"), "path leaked into id: {id}");
+        assert!(!id.contains("SKILL.md"), "path leaked into id: {id}");
+        assert!(!id.starts_with('/'), "path leaked into id: {id}");
     }
 
     // ── Semantic fill ─────────────────────────────────────────────────
@@ -884,6 +990,7 @@ mod tests {
         reverse: Mutex<bool>,
         fail_rerank: Mutex<bool>,
         fail_embed: Mutex<bool>,
+        slow_ms: Mutex<u64>,
     }
 
     impl RecordingExecutor {
@@ -894,6 +1001,7 @@ mod tests {
                 reverse: Mutex::new(false),
                 fail_rerank: Mutex::new(false),
                 fail_embed: Mutex::new(false),
+                slow_ms: Mutex::new(0),
             }
         }
         fn set_reverse(&self, v: bool) {
@@ -904,6 +1012,9 @@ mod tests {
         }
         fn set_fail_embed(&self, v: bool) {
             *self.fail_embed.lock().unwrap() = v;
+        }
+        fn set_slow_ms(&self, v: u64) {
+            *self.slow_ms.lock().unwrap() = v;
         }
         fn rerank_docs(&self) -> Vec<Vec<String>> {
             self.rerank_docs.lock().unwrap().clone()
@@ -930,6 +1041,13 @@ mod tests {
             }
             if *self.fail_embed.lock().unwrap() {
                 return Err(RetrievalError::Timeout);
+            }
+            let slow = *self.slow_ms.lock().unwrap();
+            if slow > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(slow)).await;
+                if cancel.is_cancelled() {
+                    return Err(RetrievalError::Cancelled);
+                }
             }
             if let Some(d) = pins.total_deadline {
                 if d.is_zero() {
@@ -1212,10 +1330,42 @@ mod tests {
         assert!(out.degradations.is_empty(), "no fake degradation on cancel");
     }
 
-    #[test]
-    fn semantic_shortlist_is_capped() {
-        // Semantic fill caps to MAX_SEMANTIC_SHORTLIST; verify via a unit path.
-        assert!(MAX_SEMANTIC_SHORTLIST > 0);
+    #[tokio::test]
+    async fn semantic_shortlist_is_capped_at_eight() {
+        let ex = Arc::new(RecordingExecutor::new());
+        let service = service_with(ex.clone());
+        // 12 non-pinned candidates → the shortlist ships at most 8 rows.
+        let skills: Vec<SkillInfo> = (0..12)
+            .map(|i| skill(&format!("s{i:02}"), &format!("/s/s{i:02}/SKILL.md")))
+            .collect();
+        let ranked: Vec<usize> = (0..12).collect();
+        let pinned: HashSet<String> = HashSet::new();
+        let out = semantic_fill(
+            &service,
+            "p1",
+            "query text",
+            &skills,
+            &ranked,
+            &pinned,
+            CancellationToken::new(),
+            false,
+        )
+        .await;
+        assert_eq!(out.shortlist_size, MAX_SEMANTIC_SHORTLIST);
+        let docs: Vec<Vec<String>> = ex.rerank_docs();
+        assert!(
+            !docs.is_empty(),
+            "executor must have been called with the bounded shortlist"
+        );
+        for call in &docs {
+            assert!(
+                call.len() <= MAX_SEMANTIC_SHORTLIST,
+                "executor received {} rows (> {}): {:?}",
+                call.len(),
+                MAX_SEMANTIC_SHORTLIST,
+                call
+            );
+        }
     }
 
     // ── Revalidation / bounded body loading ───────────────────────────
@@ -1408,5 +1558,165 @@ mod tests {
         let batch = load_and_revalidate(&skills, &[0], 1, &refresh, &[root], &cancel).await;
         assert_eq!(batch.drop_reasons, vec![PrimeDropReason::Unreadable]);
         assert!(batch.loaded.is_empty());
+    }
+
+    #[test]
+    fn utf8_prefix_trim_preserves_valid_utf8_at_cap_boundary() {
+        let max = MAX_LOADED_BODY_BYTES as usize;
+        // `a` * (max-2) + emoji (4 bytes) = max+2 bytes; the cap boundary lands
+        // mid-emoji.
+        let body = format!("{}🙂", "a".repeat(max - 2));
+        assert_eq!(body.len(), max + 2);
+        let mut buf = body.into_bytes();
+        utf8_prefix_trim(&mut buf, max);
+        assert_eq!(buf.len(), max - 2, "must back up to a char boundary");
+        assert!(String::from_utf8(buf).is_ok(), "result must be valid UTF-8");
+    }
+
+    #[tokio::test]
+    async fn qualified_pin_survives_semantic_fill_e2e() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let dep_dir = root.join("skills").join("deploy");
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        std::fs::write(dep_dir.join("SKILL.md"), "# Deploy\n").unwrap();
+        let deploy = SkillInfo {
+            name: "deploy".into(),
+            path: dep_dir.join("SKILL.md").to_string_lossy().to_string(),
+            scope: SkillScope::Local,
+            ..SkillInfo::default()
+        };
+        let oth_dir = root.join("skills").join("other");
+        std::fs::create_dir_all(&oth_dir).unwrap();
+        std::fs::write(oth_dir.join("SKILL.md"), "# Other\n").unwrap();
+        let other = SkillInfo {
+            name: "other".into(),
+            path: oth_dir.join("SKILL.md").to_string_lossy().to_string(),
+            scope: SkillScope::Local,
+            ..SkillInfo::default()
+        };
+        let skills = vec![deploy, other];
+        let ex = Arc::new(RecordingExecutor::new());
+        ex.set_reverse(true); // rerank would displace unpinned rows
+        let service = service_with(ex.clone());
+        let mut cfg = SkillPrimeConfig::default();
+        cfg.enabled = true;
+        cfg.max_results = 5;
+        let snapshot = skills.clone();
+        let refresh = move || {
+            let s = snapshot.clone();
+            async move { s }
+        };
+        let input = PrimeInput {
+            eligible_skills: &skills,
+            refresh_skills: &refresh,
+            workspace_root: &root,
+            trusted_roots: &[root.clone()],
+            prompt: "deploy the release",
+            explicit_skill: Some("local:deploy"),
+            config: cfg,
+            context_window: None,
+            semantic_profile: Some("p1"),
+            semantic_service: Some(&service),
+            inventory: None,
+        };
+        let sel = run_prime_selection(&input, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            sel.selected.first().map(|s| s.name.as_str()),
+            Some("deploy"),
+            "qualified pin must survive semantic fill: {:?}",
+            sel.budget_state.selected_names
+        );
+    }
+
+    #[tokio::test]
+    async fn run_prime_hard_mode_returns_err_e2e() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let sdir = root.join("skills").join("a");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(sdir.join("SKILL.md"), "# A\n").unwrap();
+        let a = SkillInfo {
+            name: "a".into(),
+            path: sdir.join("SKILL.md").to_string_lossy().to_string(),
+            ..SkillInfo::default()
+        };
+        let skills = vec![a];
+        let ex = Arc::new(RecordingExecutor::new());
+        ex.set_fail_embed(true);
+        let service = service_with(ex.clone());
+        let mut cfg = SkillPrimeConfig::default();
+        cfg.enabled = true;
+        cfg.degrade_on_error = false;
+        let snapshot = skills.clone();
+        let refresh = move || {
+            let s = snapshot.clone();
+            async move { s }
+        };
+        let input = PrimeInput {
+            eligible_skills: &skills,
+            refresh_skills: &refresh,
+            workspace_root: &root,
+            trusted_roots: &[root.clone()],
+            prompt: "deploy the release",
+            explicit_skill: None,
+            config: cfg,
+            context_window: None,
+            semantic_profile: Some("p1"),
+            semantic_service: Some(&service),
+            inventory: None,
+        };
+        let res = run_prime_selection(&input, CancellationToken::new()).await;
+        assert!(
+            matches!(res, Err(PrimeError::SemanticRetrievalFailed)),
+            "hard mode must fail the run: {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_prime_deadline_fires_during_semantic_fill_e2e() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let sdir = root.join("skills").join("a");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(sdir.join("SKILL.md"), "# A\n").unwrap();
+        let a = SkillInfo {
+            name: "a".into(),
+            path: sdir.join("SKILL.md").to_string_lossy().to_string(),
+            ..SkillInfo::default()
+        };
+        let skills = vec![a];
+        let ex = Arc::new(RecordingExecutor::new());
+        ex.set_slow_ms(400); // semantic fill would block past the deadline
+        let service = service_with(ex.clone());
+        let mut cfg = SkillPrimeConfig::default();
+        cfg.enabled = true;
+        cfg.deadline_ms = 80;
+        let snapshot = skills.clone();
+        let refresh = move || {
+            let s = snapshot.clone();
+            async move { s }
+        };
+        let input = PrimeInput {
+            eligible_skills: &skills,
+            refresh_skills: &refresh,
+            workspace_root: &root,
+            trusted_roots: &[root.clone()],
+            prompt: "deploy the release",
+            explicit_skill: None,
+            config: cfg,
+            context_window: None,
+            semantic_profile: Some("p1"),
+            semantic_service: Some(&service),
+            inventory: None,
+        };
+        let sel = run_prime_selection(&input, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(sel.cancelled, "in-flight deadline must abort the run");
+        assert!(sel.selected.is_empty());
+        assert!(sel.rendered.is_none());
     }
 }

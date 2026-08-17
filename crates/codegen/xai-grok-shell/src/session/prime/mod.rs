@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 use xai_grok_config_types::SkillPrimeConfig;
+use xai_grok_tools::implementations::skills::skill::format_skill_name;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
 
 use crate::retrieval::{DegradationKind, DegradationNotice, RetrievalService};
@@ -129,8 +130,6 @@ pub enum PrimeError {
     /// The optional semantic refinement failed and `degrade_on_error` is
     /// disabled, so the run fails closed instead of silently under-filling.
     SemanticRetrievalFailed,
-    /// The prime deadline or cancellation fired before content was produced.
-    Aborted,
 }
 
 impl std::fmt::Display for PrimeError {
@@ -139,7 +138,6 @@ impl std::fmt::Display for PrimeError {
             PrimeError::SemanticRetrievalFailed => {
                 f.write_str("skill prime semantic retrieval failed; degrade_on_error disabled")
             }
-            PrimeError::Aborted => f.write_str("skill prime aborted (deadline or cancel)"),
         }
     }
 }
@@ -196,16 +194,18 @@ impl std::fmt::Debug for PrimeSkillSelection {
     }
 }
 
-/// Conservative bytes-per-token used for the token budget: a documented upper
-/// bound so CJK/emoji/entity-heavy rendered text never exceeds the cap.
+/// Conservative bytes-per-token heuristic used for the configured token budget
+/// (see [`render::RenderBudgets`]): a documented proxy, not an absolute
+/// guarantee against an arbitrary future tokenizer.
 pub const TOKEN_BYTES_EST: usize = 2;
 
 /// Render budgets derived from `SkillPrimeConfig` (+ context window).
 ///
 /// `RenderBudgets.max_tokens` is `Some(0)` when the context-fraction allows a
-/// **zero** token allowance (renders nothing), `Some(n)` otherwise, and `None`
-/// only when no token cap is configured (never the case for config-derived
-/// budgets). Fraction is clamped to `[0.0, 1.0]`; a zero window yields `Some(0)`.
+/// **zero** token allowance (renders no body rows), `Some(n)` otherwise, and
+/// `None` only when no token cap is configured (never the case for
+/// config-derived budgets). Fraction is clamped to `[0.0, 1.0]`; a zero window
+/// yields `Some(0)`.
 pub fn render_budgets(config: &SkillPrimeConfig, context_window: Option<usize>) -> RenderBudgets {
     let per_body = config.max_body_chars.max(1) as usize;
     let max_total = config.max_total_chars.max(1) as usize;
@@ -228,29 +228,51 @@ pub fn render_budgets(config: &SkillPrimeConfig, context_window: Option<usize>) 
 }
 
 /// Prime-wide absolute deadline + cancellation. A background task cancels the
-/// deadline token after `deadline_ms`; `deadline 0` cancels immediately.
+/// deadline token after `deadline_ms`; `deadline 0` cancels immediately. The
+/// timer task is aborted when the gate is dropped, so it never outlives the run.
 struct PrimeGate {
     cancel: CancellationToken,
     deadline: CancellationToken,
+    stop: CancellationToken,
 }
 
 impl PrimeGate {
     fn new(cancel: CancellationToken, deadline_ms: u64) -> Self {
         let deadline = cancel.child_token();
+        let stop = cancel.child_token();
         if deadline_ms == 0 {
             deadline.cancel();
         } else {
             let dl = deadline.clone();
+            let stop_tok = stop.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(deadline_ms)).await;
-                dl.cancel();
+                tokio::select! {
+                    biased;
+                    _ = stop_tok.cancelled() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(deadline_ms)) => {
+                        dl.cancel();
+                    }
+                }
             });
         }
-        Self { cancel, deadline }
+        Self {
+            cancel,
+            deadline,
+            stop,
+        }
     }
 
     fn cancelled(&self) -> bool {
         self.cancel.is_cancelled() || self.deadline.is_cancelled()
+    }
+}
+
+impl Drop for PrimeGate {
+    fn drop(&mut self) {
+        // Abort the deadline timer task and propagate cancellation to any child
+        // token still held by in-flight work.
+        self.stop.cancel();
+        self.deadline.cancel();
     }
 }
 
@@ -287,25 +309,32 @@ pub async fn run_prime_selection(
     let _started_at = Instant::now();
     let mut degradations: Vec<DegradationNotice> = Vec::new();
 
+    // Disabled is a distinct, non-cancelled state: an empty selection with
+    // `cancelled = false`. The deadline gate is only constructed when enabled.
+    if !input.config.enabled {
+        return Ok(PrimeSkillSelection::empty(false, false));
+    }
     let gate = PrimeGate::new(cancel, input.config.deadline_ms);
-    if !input.config.enabled || gate.cancelled() {
+    if gate.cancelled() {
         return Ok(PrimeSkillSelection::empty(true, false));
     }
 
     // ── Bounded inventory (blocking walk off the executor) ────────────────
     let mut owned_inventory;
     let default_inventory = WorkspaceInventory::default();
+    let mut walk_failed = false;
     let inventory: &WorkspaceInventory = if let Some(i) = input.inventory {
         i
     } else if let Ok(owned) = build_inventory_guarded(input.workspace_root, &gate).await {
         owned_inventory = owned;
         &owned_inventory
     } else {
-        // Walk failed / aborted: report incomplete, continue without evidence.
+        // Walk failed or aborted: report incomplete, continue without evidence.
+        walk_failed = true;
         owned_inventory = default_inventory;
         &owned_inventory
     };
-    let inventory_error = inventory.incomplete();
+    let inventory_error = inventory.incomplete() || walk_failed;
     if gate.cancelled() {
         return Ok(PrimeSkillSelection::empty(true, inventory_error));
     }
@@ -318,16 +347,25 @@ pub async fn run_prime_selection(
         input.explicit_skill,
     );
 
-    // Pinned name set for shortlist exclusion / ordering.
+    // Pinned name set for shortlist exclusion / ordering. The explicit name is
+    // normalized once to the concrete selected skill identities: any eligible
+    // skill whose bare name or qualified native name (`scope:name`) equals the
+    // explicit pin is pinned, so semantic fill (which matches the bare names)
+    // preserves the same skill.
     let pinned: HashSet<String> = input
         .explicit_skill
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+        .map(|name| {
+            input
+                .eligible_skills
+                .iter()
+                .filter(|s| s.name == name || format_skill_name(s) == name)
+                .map(|s| s.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
 
     // ── Optional semantic refinement ───────────────────────────────────────
     let mut order = ranked.clone();
-    let mut cancelled = false;
     if !input.prompt.trim().is_empty()
         && let Some(profile) = input.semantic_profile
         && let Some(service) = input.semantic_service
@@ -383,8 +421,12 @@ pub async fn run_prime_selection(
     }
 
     // ── Safe render (within body/token/context budgets) ───────────────────
+    // A deadline/cancel firing just before render still yields no content.
+    if gate.cancelled() {
+        return Ok(PrimeSkillSelection::empty(true, inventory_error));
+    }
     let budgets = render_budgets(&input.config, input.context_window.map(|w| w as usize));
-    let rendered = if batch.loaded.is_empty() || gate.cancelled() {
+    let rendered = if batch.loaded.is_empty() {
         None
     } else {
         Some(render_skills(&batch.loaded, &budgets))
@@ -405,7 +447,7 @@ pub async fn run_prime_selection(
         budget_state,
         inventory_truncated: inventory_error,
         snapshot_generation: None,
-        cancelled,
+        cancelled: false,
     })
 }
 

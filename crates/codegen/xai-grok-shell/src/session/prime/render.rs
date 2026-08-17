@@ -15,15 +15,23 @@
 //! **Budget units are unified.** The per-body cap is applied to the final
 //! *escaped* snippet's UTF-8 characters (with the truncation marker included in
 //! the budget), and the aggregate cap is enforced on Unicode character counts
-//! (never bytes). The token budget uses a documented conservative upper bound
-//! (`bytes ÷ TOKEN_BYTES`), so CJK/emoji/entity-heavy content never exceeds it.
-//! Aggregated counts are exposed in [`RenderedSkills`].
+//! (never bytes).
+//!
+//! **Token budget is a conservative configured proxy**, not a provable
+//! upper bound against an arbitrary future tokenizer: `estimate_tokens =
+//! bytes ÷ TOKEN_BYTES` is a documented heuristic that comfortably covers the
+//! tokenizers in use (CJK ≈1 token/3 bytes, English ≈1 token/4 bytes, escaped
+//! entities expand bytes) but makes no absolute guarantee. The token cap
+//! applies to **body rows only** — the constant wrapper header/footer are
+//! excluded from the body token budget. `max_tokens = Some(0)` renders **no
+//! body rows** (the constant wrapper may still be emitted). Aggregated counts
+//! are exposed in [`RenderedSkills`].
 
 use xai_grok_tools::implementations::skills::types::SkillScope;
 
 use super::TOKEN_BYTES_EST;
 
-/// Conservative bytes-per-token (documented upper bound; see module doc).
+/// Conservative bytes-per-token heuristic for the token proxy (see module doc).
 const TOKEN_BYTES: usize = TOKEN_BYTES_EST;
 
 /// How much rendered context each body/aggregate may consume.
@@ -33,12 +41,12 @@ pub struct RenderBudgets {
     pub per_body_chars: usize,
     /// Max aggregated **characters** across all overhead + bodies.
     pub max_total_chars: usize,
-    /// Aggregate token budget. `Some(0)` = render nothing; `Some(n)` = cap;
-    /// `None` = no token cap configured.
+    /// Body-row token budget (proxy, body rows only). `Some(0)` = no body rows;
+    /// `Some(n)` = cap; `None` = no token cap configured.
     pub max_tokens: Option<usize>,
 }
 
-/// Rough upper-bound token estimate for UTF-8 bytes (never O(size) surplus).
+/// Conservative heuristic token estimate for UTF-8 bytes (see module doc).
 #[inline]
 pub fn estimate_tokens(bytes: usize) -> usize {
     bytes.div_ceil(TOKEN_BYTES)
@@ -197,11 +205,13 @@ pub fn render_skills(loaded: &[LoadedSkill], budgets: &RenderBudgets) -> Rendere
     let footer_chars = footer.chars().count();
     let footer_bytes = footer.len();
 
-    // Assemble within aggregate char + token budgets.
+    // Assemble within aggregate char + token budgets. The token budget applies
+    // to **body rows only** (the constant wrapper header/footer are excluded);
+    // the char budget covers the whole rendered text.
     let mut text = String::new();
     text.push_str(header);
     let mut used_chars = header.chars().count();
-    let mut used_bytes = header.len();
+    let mut used_body_bytes = 0usize;
 
     let mut dropped_for_aggregate = 0usize;
     for (i, row) in rows.iter().enumerate() {
@@ -212,19 +222,19 @@ pub fn render_skills(loaded: &[LoadedSkill], budgets: &RenderBudgets) -> Rendere
             break;
         }
         if let Some(t) = budgets.max_tokens
-            && estimate_tokens(used_bytes.saturating_add(rb).saturating_add(footer_bytes)) > t
+            && estimate_tokens(used_body_bytes.saturating_add(rb)) > t
         {
             dropped_for_aggregate = rows.len() - i;
             break;
         }
         used_chars = used_chars.saturating_add(rc);
-        used_bytes = used_bytes.saturating_add(rb);
+        used_body_bytes = used_body_bytes.saturating_add(rb);
         text.push_str(row);
     }
     text.push_str(footer);
 
     let chars = used_chars.saturating_add(footer_chars);
-    let bytes = used_bytes.saturating_add(footer_bytes);
+    let bytes = text.len();
     RenderedSkills {
         text,
         chars,
@@ -379,13 +389,14 @@ mod tests {
 
     #[test]
     fn token_budget_caps_content_rows() {
-        // Determine a token cap that fits the constant header (and its footer)
-        // but not a body row: the row must be dropped.
-        let header_tokens = estimate_tokens(HEADER.len() + footer().len());
+        // The token budget applies to body rows only (the constant wrapper
+        // header/footer are excluded): a cap below the row's own token estimate
+        // drops the row.
+        let body_tokens = estimate_tokens("hello world".len());
         let tight = RenderBudgets {
             per_body_chars: 100_000,
             max_total_chars: 100_000,
-            max_tokens: Some(header_tokens),
+            max_tokens: Some(body_tokens - 1),
         };
         let out = render_skills(&[lm("a", SkillScope::Repo, "/r/x", "hello world")], &tight);
         assert!(
@@ -394,11 +405,11 @@ mod tests {
         );
 
         // A generous cap lets the row through, and the final token estimate is
-        // the conservative bytes÷2 upper bound (never under-counts density).
+        // the documented bytes÷2 heuristic.
         let loose = RenderBudgets {
             per_body_chars: 100_000,
             max_total_chars: 100_000,
-            max_tokens: Some(header_tokens.saturating_add(10_000)),
+            max_tokens: Some(body_tokens.saturating_add(100)),
         };
         let out2 = render_skills(&[lm("a", SkillScope::Repo, "/r/x", "hello world")], &loose);
         assert!(out2.text.contains("hello world"));

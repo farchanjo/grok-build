@@ -435,9 +435,14 @@ pub fn resolve_skill_internal_links(body: &str, skill_dir: &std::path::Path) -> 
             LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
                 if let Some(def_span) = ref_def_spans.get(id) {
                     let def_src = &body[def_span.clone()];
-                    if let Some(rel) = def_src.rfind(url_str) {
-                        let start = def_span.start + rel;
-                        push_edit(&mut edits, start..start + url_str.len(), resolved_str);
+                    // Only rewrite the URL portion (`[label]: url`), never a URL
+                    // string that also appears in the label.
+                    if let Some(col) = def_src.find("]:") {
+                        let url_region = &def_src[col + 2..];
+                        if let Some(rel) = url_region.find(url_str) {
+                            let start = def_span.start + col + 2 + rel;
+                            push_edit(&mut edits, start..start + url_str.len(), resolved_str);
+                        }
                     }
                 }
             }

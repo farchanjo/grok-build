@@ -10,8 +10,11 @@
 //! file-name order, so the *set* of collected paths under truncation is
 //! deterministic across runs over the same tree (unlike filesystem readdir
 //! order). Hidden entries are included (so `.<grok>/skills/...` can contribute
-//! path evidence), and cross-device entries are excluded *and reported* via
-//! [`WorkspaceInventory::cross_device`] so an incomplete walk is never silent.
+//! path evidence) while VCS internals (`.git`, `.hg`, `.svn`) are explicitly
+//! skipped. Cross-device entries are excluded *and reported* via
+//! [`WorkspaceInventory::cross_device`] so an incomplete walk is never silent
+//! (device detection is Unix-only; on non-Unix the walker does not perform
+//! cross-device detection — documented).
 //!
 //! PR19 (`/clear`, touched paths) is not wired here — this exposes a
 //! race-free session-cache/invalidation seam ([`InventoryCache`]).
@@ -145,6 +148,12 @@ pub fn build_inventory(root: &Path, limits: InventoryLimits) -> Result<Workspace
         .sort_by_file_name(|a, b| a.cmp(b))
         .hidden(false) // include dot-dirs (e.g. `.grok/skills`)
         .filter_entry(move |entry| {
+            // Skip VCS internals explicitly (cheap regardless of walker behavior)
+            // while retaining dot-dirs like `.grok`.
+            let name = entry.file_name().to_str().unwrap_or_default();
+            if name == ".git" || name == ".hg" || name == ".svn" {
+                return false;
+            }
             if !symlink_stays_in_root(entry.path(), &confine) {
                 return false;
             }
@@ -460,6 +469,58 @@ mod tests {
         ));
         // Zero budget means "no limit".
         assert!(!wall_clock_exceeded(start, past, Duration::ZERO));
+    }
+
+    #[test]
+    fn inventory_skips_vcs_dirs_but_keeps_grok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        // A populated `.git` tree must never appear in the inventory.
+        write_tree(
+            &root,
+            &[".git/objects/ab/abcdef", ".git/HEAD", "src/main.rs"],
+        );
+        write_tree(
+            &root,
+            &[
+                ".grok/skills/deploy/SKILL.md",
+                ".hg/store/00manifest",
+                ".svn/entries",
+            ],
+        );
+
+        let inv = build_default(&root);
+        let paths = inv.paths();
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".git")),
+            "`.git` leaked: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".hg")),
+            "`.hg` leaked: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".svn")),
+            "`.svn` leaked: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.starts_with(".grok")),
+            "`.grok` must be retained: {paths:?}"
+        );
+        assert!(paths.iter().any(|p| *p == "src/main.rs"));
+    }
+
+    #[test]
+    fn device_of_reports_same_device_for_siblings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let file = root.join("a.rs");
+        std::fs::write(&file, "x").unwrap();
+        match (device_of(&root), device_of(&file)) {
+            (Some(a), Some(b)) => assert_eq!(a, b, "siblings must share a device"),
+            // Non-Unix: detection disabled (documented).
+            _ => {}
+        }
     }
 
     #[test]
