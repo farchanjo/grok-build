@@ -15,6 +15,8 @@ pub mod lifecycle_state;
 pub mod management;
 pub mod notify;
 pub mod references;
+/// Exact retrieval route/credential resolution (PR16).
+pub mod retrieval_runtime;
 pub mod route_guard;
 pub mod runtime_cache;
 pub mod secrets;
@@ -61,6 +63,12 @@ pub use management::{
         ProviderMutationResult, ProviderSavePatch, ProviderSaveRequest, ProviderStatusSnapshot,
         ReferenceImpactSnapshot, RegistryGeneration, SecretFieldUpdate,
     },
+};
+pub use retrieval_runtime::{
+    ResolvedRetrievalRuntime, RetrievalResolveCounters, RetrievalResolveOptions,
+    RetrievalRuntimeError, embed_with_runtime, embedding_request_from_config,
+    rerank_request_from_config, rerank_with_runtime, resolve_embedding_runtime,
+    resolve_reranker_runtime,
 };
 pub use route_guard::{
     RouteGuardError, RouteGuardErrorCategory, RouteGuardRequest, assert_not_sibling_borrow,
