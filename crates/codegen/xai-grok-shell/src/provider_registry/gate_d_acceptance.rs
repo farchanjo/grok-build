@@ -262,25 +262,54 @@ mod tests {
                 "unexpected rejection: {err}"
             );
 
-            // OpenRouter additional without tools advertising is not eligible.
-            models.insert(
-                "or_team:notools".into(),
-                entry_with_provider_tools(
-                    "notools",
-                    Some(("or_team", ModelProviderKind::OpenRouter)),
-                    None,
-                ),
+            // OpenRouter additional: credentialed + visible so only the tools
+            // gate rejects (not vault-missing → generic Unknown).
+            let mut or_notools = entry_with_provider_tools(
+                "notools",
+                Some(("or_team", ModelProviderKind::OpenRouter)),
+                None, // supports_tools absent → OpenRouter tools gate fails
             );
+            or_notools.api_key = Some("sk-test-or-notools".into());
+            models.insert("or_team:notools".into(), or_notools);
             origins.insert(
                 "or_team:notools".into(),
                 CatalogEntryOrigin::GeneratedAdditionalAccount,
             );
-            assert!(!is_task_agent_eligible(&models["or_team:notools"], false));
+            assert!(
+                !is_task_agent_eligible(&models["or_team:notools"], false),
+                "credentialed OpenRouter without tools must fail tools policy"
+            );
             let err = task_model_error_for_catalog("or_team:notools", &models, false)
                 .expect("OpenRouter without tools must be rejected");
             assert!(
-                err.contains("does not advertise tool support") || err.contains("Unknown"),
-                "{err}"
+                err.contains("does not advertise tool support"),
+                "must hit tools-specific production path, not generic Unknown: {err}"
+            );
+
+            // Separate: uncredentialed OpenRouter fails closed before tools wording.
+            let uncred = entry_with_provider_tools(
+                "uncred",
+                Some(("or_uncred", ModelProviderKind::OpenRouter)),
+                Some(true),
+            );
+            models.insert("or_uncred:uncred".into(), uncred);
+            origins.insert(
+                "or_uncred:uncred".into(),
+                CatalogEntryOrigin::GeneratedAdditionalAccount,
+            );
+            assert!(
+                !is_task_agent_eligible(&models["or_uncred:uncred"], false),
+                "uncredentialed OpenRouter must not be task-eligible"
+            );
+            let err = task_model_error_for_catalog("or_uncred:uncred", &models, false)
+                .expect("uncredentialed OpenRouter must be rejected");
+            assert!(
+                err.contains("Unknown Task.model slug"),
+                "uncredentialed path must fail closed without tools-specific wording: {err}"
+            );
+            assert!(
+                !err.contains("does not advertise tool support"),
+                "uncredentialed rejection must not claim tools policy: {err}"
             );
         });
     }
