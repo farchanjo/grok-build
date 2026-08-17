@@ -1,7 +1,9 @@
 //! Gate D acceptance coverage for multi-account catalogs.
 //!
-//! Reuses production seams (publication gate, identity resolution, management
-//! service, TOML edit). Shared-process env mutations hold the rollout lock.
+//! Reuses production seams (publication gate, identity resolution, Task.model
+//! eligibility, management service, TOML edit). All gate-env mutations use
+//! [`crate::provider_registry::with_multi_account_rollout_env`] (panic-safe
+//! restore + shared lock).
 
 #[cfg(test)]
 mod tests {
@@ -13,7 +15,8 @@ mod tests {
     };
     use crate::agent::model_providers::{ModelProviderKind, ResolvedModelProvider};
     use crate::agent::models::{
-        resolve_default_model_with_origins, selectable_catalog_key_for_persisted_with_origins,
+        is_task_agent_eligible, resolve_default_model_with_origins,
+        selectable_catalog_key_for_persisted_with_origins, task_model_error_for_catalog,
     };
     use crate::inference::ApiBackend;
     use crate::provider_registry::management::ProviderManagementService;
@@ -24,7 +27,7 @@ mod tests {
     use crate::provider_registry::toml_edit::{ProviderTomlPatch, upsert_provider};
     use crate::provider_registry::{
         MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED, MULTI_ACCOUNT_ROLLOUT_ENV, ProviderId,
-        multi_account_rollout_enabled, multi_account_rollout_env_lock,
+        multi_account_rollout_enabled, with_multi_account_rollout_env,
     };
     use agent_client_protocol as acp;
     use indexmap::IndexMap;
@@ -37,6 +40,14 @@ mod tests {
     }
 
     fn entry_with_provider(model: &str, provider: Option<(&str, ModelProviderKind)>) -> ModelEntry {
+        entry_with_provider_tools(model, provider, None)
+    }
+
+    fn entry_with_provider_tools(
+        model: &str,
+        provider: Option<(&str, ModelProviderKind)>,
+        supports_tools: Option<bool>,
+    ) -> ModelEntry {
         ModelEntry {
             info: ModelInfo {
                 user_selectable: true,
@@ -70,7 +81,7 @@ mod tests {
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
-                supports_tools: None,
+                supports_tools,
                 supports_native_schema: None,
                 supports_strict_tools: None,
                 supports_image_input: None,
@@ -128,175 +139,247 @@ mod tests {
 
     #[test]
     fn gate_d_default_enabled_and_kill_switch() {
-        let _gate = multi_account_rollout_env_lock();
-        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
-        assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
-        assert!(multi_account_rollout_enabled());
-        for off in ["0", "false", "off", "no"] {
-            unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, off) };
-            assert!(!multi_account_rollout_enabled(), "{off}");
-        }
-        for on in ["1", "true", "on", "yes"] {
-            unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, on) };
-            assert!(multi_account_rollout_enabled(), "{on}");
-        }
-        match previous {
-            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
-            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
-        }
+        with_multi_account_rollout_env(|| {
+            unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+            assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
+            assert!(multi_account_rollout_enabled());
+            for off in ["0", "false", "off", "no"] {
+                unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, off) };
+                assert!(!multi_account_rollout_enabled(), "{off}");
+            }
+            for on in ["1", "true", "on", "yes"] {
+                unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, on) };
+                assert!(multi_account_rollout_enabled(), "{on}");
+            }
+        });
     }
 
     #[test]
-    fn gate_open_selection_default_resume_and_task_eligibility() {
-        let _gate = multi_account_rollout_env_lock();
-        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+    fn gate_open_selection_default_and_resume() {
+        with_multi_account_rollout_env(|| {
+            unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
 
-        let (mut models, origins) = four_account_catalog();
-        apply_multi_account_publication_gate(&mut models, &origins);
-        for key in ["openai_work:gpt-4o", "openrouter_team:shared-model"] {
-            assert!(!models[key].info.hidden);
-            assert!(models[key].info.user_selectable);
-            assert!(
-                resolve_model_identity_with_origins(&models, &origins, key)
-                    .resolved()
-                    .is_some(),
-                "exact additional key must resolve when gate open"
-            );
-        }
-
-        let available: IndexMap<acp::ModelId, acp::ModelInfo> = models
-            .keys()
-            .map(|k| {
-                let id = acp::ModelId::new(k.clone());
-                (id.clone(), acp::ModelInfo::new(id, k.clone()))
-            })
-            .collect();
-        let resumed = selectable_catalog_key_for_persisted_with_origins(
-            &models,
-            &available,
-            &origins,
-            &acp::ModelId::new("openai_work:gpt-4o"),
-        );
-        assert_eq!(
-            resumed.as_ref().map(|m| m.0.as_ref()),
-            Some("openai_work:gpt-4o")
-        );
-
-        // Built-in permanent / reserved binding must not silent-sibling to
-        // additional accounts for bare slugs that map to a reserved key.
-        match resolve_model_identity_with_origins(&models, &origins, "gpt-4o") {
-            ModelIdentityResolution::Resolved(r) => {
-                assert_eq!(r.canonical_id.as_str(), "openai:gpt-4o");
-                assert_ne!(r.provenance, ModelIdentityProvenance::UniqueLegacyAlias);
+            let (mut models, origins) = four_account_catalog();
+            apply_multi_account_publication_gate(&mut models, &origins);
+            for key in ["openai_work:gpt-4o", "openrouter_team:shared-model"] {
+                assert!(models.contains_key(key));
+                assert!(!models[key].info.hidden);
+                assert!(models[key].info.user_selectable);
+                assert!(
+                    resolve_model_identity_with_origins(&models, &origins, key)
+                        .resolved()
+                        .is_some(),
+                    "exact additional key must resolve when gate open"
+                );
             }
-            ModelIdentityResolution::Ambiguous { .. } => {}
-            ModelIdentityResolution::Missing { .. } => {
-                panic!("gpt-4o should not be missing with openai:gpt-4o present")
-            }
-        }
 
-        let cfg = crate::agent::config::Config::default();
-        let (default_key, _, _) =
-            resolve_default_model_with_origins(&cfg, &models, &origins, false);
-        assert!(
-            models.contains_key(&default_key),
-            "default must land on a catalog key: {default_key}"
-        );
-
-        match previous {
-            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
-            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
-        }
-    }
-
-    #[test]
-    fn gate_off_selection_default_and_resume_fail_closed() {
-        let _gate = multi_account_rollout_env_lock();
-        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, "false") };
-
-        let (mut models, origins) = four_account_catalog();
-        apply_multi_account_publication_gate(&mut models, &origins);
-        assert!(models["openai_work:gpt-4o"].info.hidden);
-        assert!(!models["openai_work:gpt-4o"].info.user_selectable);
-        assert!(
-            resolve_model_identity_with_origins(&models, &origins, "openai_work:gpt-4o")
-                .resolved()
-                .is_none()
-        );
-
-        let available: IndexMap<acp::ModelId, acp::ModelInfo> = models
-            .iter()
-            .filter(|(_, e)| e.info.user_selectable && !e.info.hidden)
-            .map(|(k, _)| {
-                let id = acp::ModelId::new(k.clone());
-                (id.clone(), acp::ModelInfo::new(id, k.clone()))
-            })
-            .collect();
-        assert!(
-            selectable_catalog_key_for_persisted_with_origins(
+            let available: IndexMap<acp::ModelId, acp::ModelInfo> = models
+                .keys()
+                .map(|k| {
+                    let id = acp::ModelId::new(k.clone());
+                    (id.clone(), acp::ModelInfo::new(id, k.clone()))
+                })
+                .collect();
+            let resumed = selectable_catalog_key_for_persisted_with_origins(
                 &models,
                 &available,
                 &origins,
                 &acp::ModelId::new("openai_work:gpt-4o"),
-            )
-            .is_none(),
-            "resume of additional account fails closed when kill switch is on"
-        );
+            );
+            assert_eq!(
+                resumed.as_ref().map(|m| m.0.as_ref()),
+                Some("openai_work:gpt-4o")
+            );
 
-        let cfg = crate::agent::config::Config::default();
-        let (default_key, _, _) =
-            resolve_default_model_with_origins(&cfg, &models, &origins, false);
-        assert!(
-            !default_key.starts_with("openai_work:")
-                && !default_key.starts_with("openrouter_team:"),
-            "default must not pick gated additional account: {default_key}"
-        );
+            // Built-in permanent / reserved binding must win for bare gpt-4o.
+            match resolve_model_identity_with_origins(&models, &origins, "gpt-4o") {
+                ModelIdentityResolution::Resolved(r) => {
+                    assert_eq!(r.canonical_id.as_str(), "openai:gpt-4o");
+                    assert_ne!(
+                        r.provenance,
+                        ModelIdentityProvenance::UniqueLegacyAlias,
+                        "must not silent-sibling via legacy alias"
+                    );
+                }
+                other => panic!("expected resolved openai:gpt-4o, got {other:?}"),
+            }
 
-        match previous {
-            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
-            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
-        }
+            let cfg = crate::agent::config::Config::default();
+            let (default_key, _, _) =
+                resolve_default_model_with_origins(&cfg, &models, &origins, false);
+            assert!(
+                models.contains_key(&default_key),
+                "default must land on a catalog key: {default_key}"
+            );
+        });
+    }
+
+    #[test]
+    fn gate_open_task_eligibility_for_additional_accounts() {
+        with_multi_account_rollout_env(|| {
+            unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+
+            // OpenAiCompatible avoids vault credential gating so the tools /
+            // visibility axis is isolated. Built-in openai: remains hard-rejected.
+            let mut models = IndexMap::new();
+            models.insert(
+                "lab_vllm:shared".into(),
+                entry_with_provider_tools(
+                    "shared",
+                    Some(("lab_vllm", ModelProviderKind::OpenAiCompatible)),
+                    Some(true),
+                ),
+            );
+            models.insert(
+                "openai:gpt-4o".into(),
+                entry_with_provider_tools(
+                    "gpt-4o",
+                    Some(("openai", ModelProviderKind::OpenAi)),
+                    Some(true),
+                ),
+            );
+            let mut origins = CatalogOrigins::new();
+            origins.insert(
+                "lab_vllm:shared".into(),
+                CatalogEntryOrigin::GeneratedAdditionalAccount,
+            );
+            origins.insert("openai:gpt-4o".into(), CatalogEntryOrigin::GeneratedBuiltIn);
+            apply_multi_account_publication_gate(&mut models, &origins);
+
+            assert!(
+                is_task_agent_eligible(&models["lab_vllm:shared"], false),
+                "gate-on additional exact id with tools must be task-eligible"
+            );
+            assert!(
+                task_model_error_for_catalog("lab_vllm:shared", &models, false).is_none(),
+                "Task.model must accept gate-on additional exact id"
+            );
+            // Production hard reject for experimental openai: catalog prefix.
+            let err = task_model_error_for_catalog("openai:gpt-4o", &models, false)
+                .expect("openai: prefix must stay hard-rejected");
+            assert!(
+                err.contains("unverified tool support") || err.contains("openai:"),
+                "unexpected rejection: {err}"
+            );
+
+            // OpenRouter additional without tools advertising is not eligible.
+            models.insert(
+                "or_team:notools".into(),
+                entry_with_provider_tools(
+                    "notools",
+                    Some(("or_team", ModelProviderKind::OpenRouter)),
+                    None,
+                ),
+            );
+            origins.insert(
+                "or_team:notools".into(),
+                CatalogEntryOrigin::GeneratedAdditionalAccount,
+            );
+            assert!(!is_task_agent_eligible(&models["or_team:notools"], false));
+            let err = task_model_error_for_catalog("or_team:notools", &models, false)
+                .expect("OpenRouter without tools must be rejected");
+            assert!(
+                err.contains("does not advertise tool support") || err.contains("Unknown"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn gate_off_selection_default_resume_and_task_fail_closed() {
+        with_multi_account_rollout_env(|| {
+            unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, "false") };
+
+            let (mut models, origins) = four_account_catalog();
+            apply_multi_account_publication_gate(&mut models, &origins);
+            // Omit parity: additional keys leave the catalog map.
+            assert!(!models.contains_key("openai_work:gpt-4o"));
+            assert!(!models.contains_key("openrouter_team:shared-model"));
+            assert!(models.contains_key("openai:gpt-4o"));
+            assert!(
+                resolve_model_identity_with_origins(&models, &origins, "openai_work:gpt-4o")
+                    .resolved()
+                    .is_none()
+            );
+
+            let available: IndexMap<acp::ModelId, acp::ModelInfo> = models
+                .keys()
+                .map(|k| {
+                    let id = acp::ModelId::new(k.clone());
+                    (id.clone(), acp::ModelInfo::new(id, k.clone()))
+                })
+                .collect();
+            assert!(
+                selectable_catalog_key_for_persisted_with_origins(
+                    &models,
+                    &available,
+                    &origins,
+                    &acp::ModelId::new("openai_work:gpt-4o"),
+                )
+                .is_none(),
+                "resume of additional account fails closed when kill switch is on"
+            );
+
+            let cfg = crate::agent::config::Config::default();
+            let (default_key, _, _) =
+                resolve_default_model_with_origins(&cfg, &models, &origins, false);
+            assert!(
+                !default_key.starts_with("openai_work:")
+                    && !default_key.starts_with("openrouter_team:"),
+                "default must not pick gated additional account: {default_key}"
+            );
+
+            // Task.model: omitted additional keys are not advertised / rejected.
+            assert!(
+                task_model_error_for_catalog("openai_work:gpt-4o", &models, false).is_some(),
+                "gate-off must reject Task.model for omitted additional id"
+            );
+            let err = task_model_error_for_catalog("openai_work:gpt-4o", &models, false).unwrap();
+            assert!(
+                !err.contains("openai_work:gpt-4o") || err.contains("Unknown"),
+                "guidance must not treat omitted additional as a valid advertised slug path only: {err}"
+            );
+            // Built-in openai: prefix remains hard-rejected under kill switch.
+            let err = task_model_error_for_catalog("openai:gpt-4o", &models, false)
+                .expect("openai: hard reject");
+            assert!(
+                err.contains("unverified") || err.contains("openai:"),
+                "{err}"
+            );
+        });
     }
 
     #[test]
     fn ambiguous_bare_slug_two_additional_accounts_fails_closed() {
-        let _gate = multi_account_rollout_env_lock();
-        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+        with_multi_account_rollout_env(|| {
+            unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
 
-        let mut models = IndexMap::new();
-        models.insert(
-            "work_a:shared".into(),
-            entry_with_provider("shared", Some(("work_a", ModelProviderKind::OpenAi))),
-        );
-        models.insert(
-            "work_b:shared".into(),
-            entry_with_provider("shared", Some(("work_b", ModelProviderKind::OpenAi))),
-        );
-        let mut origins = CatalogOrigins::new();
-        origins.insert(
-            "work_a:shared".into(),
-            CatalogEntryOrigin::GeneratedAdditionalAccount,
-        );
-        origins.insert(
-            "work_b:shared".into(),
-            CatalogEntryOrigin::GeneratedAdditionalAccount,
-        );
-        match resolve_model_identity_with_origins(&models, &origins, "shared") {
-            ModelIdentityResolution::Ambiguous { candidates, .. } => {
-                let ids: Vec<_> = candidates.iter().map(|c| c.as_str()).collect();
-                assert_eq!(ids, vec!["work_a:shared", "work_b:shared"]);
+            let mut models = IndexMap::new();
+            models.insert(
+                "work_a:shared".into(),
+                entry_with_provider("shared", Some(("work_a", ModelProviderKind::OpenAi))),
+            );
+            models.insert(
+                "work_b:shared".into(),
+                entry_with_provider("shared", Some(("work_b", ModelProviderKind::OpenAi))),
+            );
+            let mut origins = CatalogOrigins::new();
+            origins.insert(
+                "work_a:shared".into(),
+                CatalogEntryOrigin::GeneratedAdditionalAccount,
+            );
+            origins.insert(
+                "work_b:shared".into(),
+                CatalogEntryOrigin::GeneratedAdditionalAccount,
+            );
+            match resolve_model_identity_with_origins(&models, &origins, "shared") {
+                ModelIdentityResolution::Ambiguous { candidates, .. } => {
+                    let ids: Vec<_> = candidates.iter().map(|c| c.as_str()).collect();
+                    assert_eq!(ids, vec!["work_a:shared", "work_b:shared"]);
+                }
+                other => panic!("expected ambiguous bare slug, got {other:?}"),
             }
-            other => panic!("expected ambiguous bare slug, got {other:?}"),
-        }
-
-        match previous {
-            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
-            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
-        }
+        });
     }
 
     #[test]

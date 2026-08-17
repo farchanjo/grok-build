@@ -153,6 +153,14 @@ pub fn classify_catalog_origin(
     }
 }
 
+/// Apply the multi-account publication gate to a non-publisher catalog map.
+///
+/// When the rollout is open (Gate D default), this is a no-op. When the
+/// explicit kill switch is off, **omit** generated additional-account keys
+/// entirely — matching [`crate::agent::provider_catalog::CatalogPublisher`]
+/// gate-off retention — rather than leaving hidden/non-selectable rows that
+/// origin-unaware consumers could still observe. Legacy built-in, generated
+/// built-in, and explicit user keys are retained.
 pub fn apply_multi_account_publication_gate(
     catalog: &mut IndexMap<String, ModelEntry>,
     origins: &CatalogOrigins,
@@ -160,12 +168,7 @@ pub fn apply_multi_account_publication_gate(
     if crate::provider_registry::multi_account_rollout_enabled() {
         return;
     }
-    for (key, entry) in catalog.iter_mut() {
-        if is_additional_account_key(key, origins) {
-            entry.info.hidden = true;
-            entry.info.user_selectable = false;
-        }
-    }
+    catalog.retain(|key, _| !is_additional_account_key(key, origins));
 }
 
 fn additional_account_gated(key: &str, origins: &CatalogOrigins) -> bool {
@@ -705,92 +708,87 @@ mod tests {
     }
 
     #[test]
-    fn additional_account_gated_when_rollout_off() {
-        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_env_lock};
-        let _guard = multi_account_rollout_env_lock();
-        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        // Explicit kill switch (absent env is default-enabled after Gate D).
-        unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, "0") };
+    fn additional_account_omitted_when_rollout_off() {
+        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, with_multi_account_rollout_env};
+        with_multi_account_rollout_env(|| {
+            // Explicit kill switch (absent env is default-enabled after Gate D).
+            unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, "0") };
 
-        let mut models = IndexMap::new();
-        models.insert("openai-gpt-5.6-sol".into(), entry("gpt-5.6-sol"));
-        models.insert(
-            "work-openai:gpt-5.6-sol".into(),
-            entry_with_provider(
-                "gpt-5.6-sol",
-                Some(("work-openai", ModelProviderKind::OpenAi)),
-            ),
-        );
-        let mut origins = CatalogOrigins::new();
-        origins.insert(
-            "openai-gpt-5.6-sol".into(),
-            CatalogEntryOrigin::LegacyBuiltIn,
-        );
-        origins.insert(
-            "work-openai:gpt-5.6-sol".into(),
-            CatalogEntryOrigin::GeneratedAdditionalAccount,
-        );
-        apply_multi_account_publication_gate(&mut models, &origins);
-        assert!(models["work-openai:gpt-5.6-sol"].info.hidden);
-        assert!(!models["openai-gpt-5.6-sol"].info.hidden);
-        assert!(
-            resolve_model_identity_with_origins(&models, &origins, "work-openai:gpt-5.6-sol")
-                .resolved()
-                .is_none()
-        );
-        // Compatibility path never over-hides.
-        assert!(
-            resolve_model_identity(&models, "work-openai:gpt-5.6-sol")
-                .resolved()
-                .is_some()
-        );
-
-        match previous {
-            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
-            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
-        }
+            let mut models = IndexMap::new();
+            models.insert("openai-gpt-5.6-sol".into(), entry("gpt-5.6-sol"));
+            models.insert(
+                "work-openai:gpt-5.6-sol".into(),
+                entry_with_provider(
+                    "gpt-5.6-sol",
+                    Some(("work-openai", ModelProviderKind::OpenAi)),
+                ),
+            );
+            let mut origins = CatalogOrigins::new();
+            origins.insert(
+                "openai-gpt-5.6-sol".into(),
+                CatalogEntryOrigin::LegacyBuiltIn,
+            );
+            origins.insert(
+                "work-openai:gpt-5.6-sol".into(),
+                CatalogEntryOrigin::GeneratedAdditionalAccount,
+            );
+            apply_multi_account_publication_gate(&mut models, &origins);
+            // Gate-off omits additional accounts (publisher parity).
+            assert!(!models.contains_key("work-openai:gpt-5.6-sol"));
+            assert!(models.contains_key("openai-gpt-5.6-sol"));
+            assert!(
+                resolve_model_identity_with_origins(&models, &origins, "work-openai:gpt-5.6-sol")
+                    .resolved()
+                    .is_none()
+            );
+            // Origin-unaware path also cannot observe an omitted key.
+            assert!(
+                resolve_model_identity(&models, "work-openai:gpt-5.6-sol")
+                    .resolved()
+                    .is_none()
+            );
+        });
     }
 
     #[test]
     fn additional_account_selectable_when_gate_open_by_default() {
-        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_env_lock};
-        let _guard = multi_account_rollout_env_lock();
-        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, with_multi_account_rollout_env};
+        with_multi_account_rollout_env(|| {
+            unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
 
-        let mut models = IndexMap::new();
-        models.insert("openai-gpt-5.6-sol".into(), entry("gpt-5.6-sol"));
-        models.insert(
-            "work-openai:gpt-5.6-sol".into(),
-            entry_with_provider(
-                "gpt-5.6-sol",
-                Some(("work-openai", ModelProviderKind::OpenAi)),
-            ),
-        );
-        let mut origins = CatalogOrigins::new();
-        origins.insert(
-            "openai-gpt-5.6-sol".into(),
-            CatalogEntryOrigin::LegacyBuiltIn,
-        );
-        origins.insert(
-            "work-openai:gpt-5.6-sol".into(),
-            CatalogEntryOrigin::GeneratedAdditionalAccount,
-        );
-        apply_multi_account_publication_gate(&mut models, &origins);
-        assert!(
-            !models["work-openai:gpt-5.6-sol"].info.hidden,
-            "gate open must not force-hide additional accounts"
-        );
-        assert!(
-            resolve_model_identity_with_origins(&models, &origins, "work-openai:gpt-5.6-sol")
-                .resolved()
-                .is_some()
-        );
-
-        match previous {
-            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
-            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
-        }
+            let mut models = IndexMap::new();
+            models.insert("openai-gpt-5.6-sol".into(), entry("gpt-5.6-sol"));
+            models.insert(
+                "work-openai:gpt-5.6-sol".into(),
+                entry_with_provider(
+                    "gpt-5.6-sol",
+                    Some(("work-openai", ModelProviderKind::OpenAi)),
+                ),
+            );
+            let mut origins = CatalogOrigins::new();
+            origins.insert(
+                "openai-gpt-5.6-sol".into(),
+                CatalogEntryOrigin::LegacyBuiltIn,
+            );
+            origins.insert(
+                "work-openai:gpt-5.6-sol".into(),
+                CatalogEntryOrigin::GeneratedAdditionalAccount,
+            );
+            apply_multi_account_publication_gate(&mut models, &origins);
+            assert!(
+                models.contains_key("work-openai:gpt-5.6-sol"),
+                "gate open must retain additional accounts"
+            );
+            assert!(
+                !models["work-openai:gpt-5.6-sol"].info.hidden,
+                "gate open must not force-hide additional accounts"
+            );
+            assert!(
+                resolve_model_identity_with_origins(&models, &origins, "work-openai:gpt-5.6-sol")
+                    .resolved()
+                    .is_some()
+            );
+        });
     }
 
     #[test]

@@ -7,10 +7,10 @@
 //! [`crate::provider_registry::ProviderCacheStore`], and publishes one atomic
 //! [`CatalogSnapshot`] generation.
 //!
-//! Multi-account selection is default-enabled after Gate D; explicit
-//! `GROK_MULTI_ACCOUNT_ROLLOUT=0` (or false/off/no) remains a kill switch that
-//! omits additional accounts. The single user-facing API is
-//! [`CatalogSnapshot::gated_projection`].
+//! Multi-account selection is **default-enabled** after Gate D. Explicit
+//! `GROK_MULTI_ACCOUNT_ROLLOUT=0|false|off|no` is a rollback kill switch that
+//! omits additional accounts from projection and retained raw. The single
+//! user-facing API is [`CatalogSnapshot::gated_projection`].
 
 mod bounds;
 mod http_body;

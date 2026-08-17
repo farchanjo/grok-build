@@ -2508,17 +2508,13 @@ mod tests {
     fn multi_account_gate_enabled_by_default_after_gate_d() {
         use super::super::gate::{
             MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED, MULTI_ACCOUNT_ROLLOUT_ENV,
-            multi_account_rollout_enabled, multi_account_rollout_env_lock,
+            multi_account_rollout_enabled, with_multi_account_rollout_env,
         };
-        let _gate = multi_account_rollout_env_lock();
-        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
-        assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
-        assert!(multi_account_rollout_enabled());
-        match previous {
-            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
-            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
-        }
+        with_multi_account_rollout_env(|| {
+            unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+            assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
+            assert!(multi_account_rollout_enabled());
+        });
     }
 
     #[test]

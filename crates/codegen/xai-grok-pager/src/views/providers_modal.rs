@@ -1651,18 +1651,4 @@ mod tests {
         assert_eq!(pending.base_url, "http://127.0.0.1:8000/v1");
         assert!(!format!("{pending:?}").contains("sk-"));
     }
-
-    #[test]
-    fn list_operation_id_is_tracked_for_late_async_discard() {
-        let mut state = ProviderModalState::new();
-        // List-level mutations stamp a pending op id for late-async discard.
-        state.pending_list_operation_id = Some("op-list-1".into());
-        assert_eq!(
-            state.pending_list_operation_id.as_deref(),
-            Some("op-list-1")
-        );
-        // Cleared pending means a historical result must be discarded.
-        state.pending_list_operation_id = None;
-        assert!(state.pending_list_operation_id.is_none());
-    }
 }

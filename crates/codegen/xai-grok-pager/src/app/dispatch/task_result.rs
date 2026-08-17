@@ -1611,6 +1611,10 @@ mod management_result_tests {
 
     #[test]
     fn mutation_op_correlation_exact_match_only() {
+        // Production stamp sites (Enable/Disable/Add/Clone/Save in settings/ui)
+        // set pending_*_operation_id before spawning the async mutation. Result
+        // handling discards via this pure correlator — unit coverage for that
+        // contract (not a full AppView effects harness).
         // Late same-id equal-gen completion with matching op → accept.
         assert!(mutation_operation_matches(Some("op-1"), Some("op-1")));
         // Wrong incarnation / different op id → discard.

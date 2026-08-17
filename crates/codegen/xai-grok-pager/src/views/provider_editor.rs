@@ -1754,7 +1754,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_toggle_enabled_and_operation_id_persistence() {
+    fn clone_and_toggle_enabled_keyboard_commands() {
         let mut state = ProviderEditorState::new(sample_detail());
         state.page = ProviderEditorPage::References;
         state.clone_id_draft = "local_vllm_clone".into();
@@ -1778,12 +1778,6 @@ mod tests {
             handle_key(&mut state, &key(KeyCode::Enter)),
             EditorOutcome::Command(EditorCommand::ToggleEnabled)
         );
-
-        // Pending mutation op-id is used for late-async discard correlation.
-        state.pending_operation_id = Some("op-editor-1".into());
-        assert_eq!(state.pending_operation_id.as_deref(), Some("op-editor-1"));
-        state.pending_operation_id = None;
-        assert!(state.pending_operation_id.is_none());
     }
 
     #[test]
