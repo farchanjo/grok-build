@@ -1092,6 +1092,78 @@ pub struct OpenrouterCredits {
     pub bucket: String,
 }
 
+/// Bounded provider operation purpose (never free-form / never secrets).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderPurpose {
+    Chat,
+    Embeddings,
+    Rerank,
+    Catalog,
+    Admin,
+    Management,
+    Auxiliary,
+}
+
+impl ProviderPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Embeddings => "embeddings",
+            Self::Rerank => "rerank",
+            Self::Catalog => "catalog",
+            Self::Admin => "admin",
+            Self::Management => "management",
+            Self::Auxiliary => "auxiliary",
+        }
+    }
+}
+
+/// Validate a provider instance id for telemetry: lowercase slug only.
+/// Rejects URLs, paths, spaces, credential-shaped prefixes, and over-long
+/// values. Returns None when unsafe.
+pub fn sanitize_provider_instance_id(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.len() > 64 {
+        return None;
+    }
+    if !raw
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    if raw.contains("://") || raw.contains('/') || raw.contains('\\') {
+        return None;
+    }
+    // Credential-shaped or key-like prefixes never export as instance ids.
+    let lower = raw.to_ascii_lowercase();
+    if lower.starts_with("sk-")
+        || lower.starts_with("rk-")
+        || lower.starts_with("pk-")
+        || lower.starts_with("api-")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("password")
+    {
+        return None;
+    }
+    Some(raw.to_owned())
+}
+
+/// PR13: provider route-guard / lifecycle failure (secret-free).
+/// Never carries keys, fingerprints, display names, org/project, custom URLs,
+/// prompts, bodies, or vectors.
+#[derive(Serialize)]
+pub struct ProviderRouteGuardFailed {
+    /// Validated instance slug only.
+    pub provider_instance_id: String,
+    pub purpose: ProviderPurpose,
+    /// Bounded error category (`disabled`, `tombstoned`, …).
+    pub error_category: String,
+    pub registry_generation: u64,
+    pub is_retry: bool,
+}
+
 #[derive(Serialize)]
 pub struct MemoryFlushed {
     pub trigger: MemoryFlushTrigger,
@@ -1774,6 +1846,11 @@ telemetry_event!(
     OpenrouterCredits,
     "openrouter_credits",
     external = crate::external::schema::map_openrouter_credits
+);
+telemetry_event!(
+    ProviderRouteGuardFailed,
+    "provider_route_guard_failed",
+    external = crate::external::schema::map_provider_route_guard_failed
 );
 telemetry_event!(MemoryFlushed, "memory_flushed");
 telemetry_event!(MediaGenerated, "media_generated");

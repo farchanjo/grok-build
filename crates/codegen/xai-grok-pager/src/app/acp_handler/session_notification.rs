@@ -193,10 +193,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     let mut plugins_changed_needs_skills_refetch = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
-    let raw_meta = session_notif
-        .meta
-        .as_ref()
-        .and_then(|v| v.as_object());
+    let raw_meta = session_notif.meta.as_ref().and_then(|v| v.as_object());
     let changed = match session_notif.update {
         XaiSessionUpdate::RetryState(ref retry) => {
             let binding =

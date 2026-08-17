@@ -190,6 +190,27 @@ impl ProviderService {
         self
     }
 
+    /// Attach Grok-owned incarnations from lifecycle state (secret-free).
+    /// Built-ins receive stable compatibility incarnations. Configured
+    /// instances receive their durable row when present.
+    pub fn with_lifecycle_incarnations(mut self, home: &std::path::Path) -> Self {
+        use super::lifecycle_state::{load_lifecycle_state, stable_builtin_incarnation};
+        let state = load_lifecycle_state(home).unwrap_or_default();
+        let mut descriptors = (*self.descriptors).clone();
+        for (id, desc) in descriptors.iter_mut() {
+            if desc.incarnation.is_some() {
+                continue;
+            }
+            if let Some(inc) = state.incarnation_for(id) {
+                desc.incarnation = Some(inc);
+            } else if let Some(inc) = stable_builtin_incarnation(id) {
+                desc.incarnation = Some(inc);
+            }
+        }
+        self.descriptors = Arc::new(descriptors);
+        self
+    }
+
     /// Monotonic snapshot generation, stable for the life of this service.
     pub fn generation(&self) -> u64 {
         self.generation

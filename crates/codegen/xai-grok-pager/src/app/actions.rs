@@ -1493,6 +1493,16 @@ pub enum ProviderOperation {
     LoadReferences {
         provider_id: String,
     },
+    ForceRemove {
+        provider_id: String,
+        typed_id: String,
+        expected_generation: u64,
+        expected_incarnation: Option<String>,
+        clear_app: bool,
+        clear_admin: bool,
+        clear_cache: bool,
+        operation_id: Option<String>,
+    },
 }
 
 #[derive(Debug)]

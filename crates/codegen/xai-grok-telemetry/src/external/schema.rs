@@ -51,6 +51,9 @@ pub enum ExternalEventName {
     /// connection test / catalog refresh when the remaining credits fall below
     /// the low-credit threshold. The balance is **bucketed**, never exact.
     OpenrouterCredits,
+    /// Provider route-guard / lifecycle failure (disabled, tombstoned, etc.).
+    /// Bounded instance id + purpose + error category only.
+    ProviderRouteGuardFailed,
 }
 
 impl ExternalEventName {
@@ -84,6 +87,7 @@ impl ExternalEventName {
             // bucketed ("lt_1", "1_to_10", "10_to_100", "gte_100", "unknown")
             // + provider attr. Exact balances never leave the process.
             Self::OpenrouterCredits => "grok_code.openrouter_credits",
+            Self::ProviderRouteGuardFailed => "grok_code.provider_route_guard_failed",
         }
     }
 }
@@ -200,6 +204,14 @@ pub enum ExternalKey {
     /// Bucketed OpenRouter credits balance ("lt_1", "1_to_10", "10_to_100",
     /// "gte_100", "unknown"). Exact balances never reach the wire.
     CreditsBucket,
+    /// Validated provider instance slug only (`[a-z0-9_]{1,64}`). Never a
+    /// display name, URL, org/project, or secret.
+    ProviderInstanceId,
+    /// Bounded purpose enum (`chat`, `embeddings`, `rerank`, `catalog`,
+    /// `admin`, `management`, `auxiliary`). Never free-form text.
+    ProviderPurpose,
+    /// Monotonic registry generation (integer only).
+    RegistryGeneration,
 }
 
 impl ExternalKey {
@@ -280,6 +292,9 @@ impl ExternalKey {
             Self::GenerationId => "generation_id",
             Self::ServedModel => "served_model",
             Self::CreditsBucket => "credits_bucket",
+            Self::ProviderInstanceId => "provider_instance_id",
+            Self::ProviderPurpose => "provider_purpose",
+            Self::RegistryGeneration => "registry_generation",
         }
     }
 }
@@ -361,6 +376,9 @@ pub(crate) const ALL_KEYS: &[ExternalKey] = &[
     ExternalKey::GenerationId,
     ExternalKey::ServedModel,
     ExternalKey::CreditsBucket,
+    ExternalKey::ProviderInstanceId,
+    ExternalKey::ProviderPurpose,
+    ExternalKey::RegistryGeneration,
 ];
 
 /// Compile-time completeness guard: a new `ExternalKey` variant that is not
@@ -964,6 +982,36 @@ pub fn map_openrouter_credits(ev: &events::OpenrouterCredits) -> Option<External
             .attr(ExternalKey::CreditsBucket, ev.bucket.as_str())
             .attr(ExternalKey::ProviderName, "OpenRouter"),
     )
+}
+
+/// `ProviderRouteGuardFailed` → `grok_code.provider_route_guard_failed`.
+/// Instance id is re-validated; purpose is enum-only; error_category is a
+/// short bounded token. Never secrets, fingerprints, display names, URLs,
+/// org/project, prompts, bodies, or vectors.
+pub fn map_provider_route_guard_failed(
+    ev: &events::ProviderRouteGuardFailed,
+) -> Option<ExternalRecord> {
+    let id = events::sanitize_provider_instance_id(&ev.provider_instance_id)?;
+    let category = sanitize_error_category(&ev.error_category)?;
+    Some(
+        ExternalRecord::event(ExternalEventName::ProviderRouteGuardFailed)
+            .attr(ExternalKey::ProviderInstanceId, id)
+            .attr(ExternalKey::ProviderPurpose, ev.purpose.as_str())
+            .attr(ExternalKey::ErrorCategory, category)
+            .attr(ExternalKey::RegistryGeneration, ev.registry_generation),
+    )
+}
+
+fn sanitize_error_category(raw: &str) -> Option<&'static str> {
+    match raw {
+        "missing" => Some("missing"),
+        "disabled" => Some("disabled"),
+        "incarnation_mismatch" => Some("incarnation_mismatch"),
+        "tombstoned" => Some("tombstoned"),
+        "generation_replaced" => Some("generation_replaced"),
+        "sibling_isolation" => Some("sibling_isolation"),
+        _ => None,
+    }
 }
 
 /// `ToolCallCompleted` → `grok_code.tool_result` + `tool.usage`.

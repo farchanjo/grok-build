@@ -9,7 +9,10 @@ pub mod gate;
 pub mod id;
 pub mod instance;
 pub mod lifecycle;
+pub mod lifecycle_state;
 pub mod management;
+pub mod references;
+pub mod route_guard;
 pub mod secrets;
 pub mod service;
 pub mod toml_edit;
@@ -39,15 +42,25 @@ pub use lifecycle::{
     ProviderLifecycleError, ProviderMetadata, ProviderRegistrySnapshot, namespaced_model_id,
     parse_namespaced_model_id, resolve_legacy_model_alias,
 };
+pub use lifecycle_state::{
+    InstanceLifecycleRecord, LifecycleStateError, ProviderLifecycleState, ProviderTombstone,
+    load_lifecycle_state, provenance_matches_lifecycle, stable_builtin_incarnation,
+    store_lifecycle_state,
+};
 pub use management::{
     ProviderManagementService,
     dto::{
         CapabilityStatusSnapshot, CatalogStatusSnapshot, CredentialPresence, CredentialSlotUpdate,
-        ProviderAddRequest, ProviderCloneRequest, ProviderCreditsSnapshot, ProviderDetailDto,
-        ProviderEditorPage, ProviderListRow, ProviderListSnapshot, ProviderMutationResult,
-        ProviderSavePatch, ProviderSaveRequest, ProviderStatusSnapshot, ReferenceImpactSnapshot,
-        RegistryGeneration, SecretFieldUpdate,
+        ForceRemoveClearOptions, ImpactGroup, ImpactGroupKind, ImpactReference, ProviderAddRequest,
+        ProviderCloneRequest, ProviderConflictInfo, ProviderCreditsSnapshot, ProviderDetailDto,
+        ProviderEditorPage, ProviderForceRemoveRequest, ProviderListRow, ProviderListSnapshot,
+        ProviderMutationResult, ProviderSavePatch, ProviderSaveRequest, ProviderStatusSnapshot,
+        ReferenceImpactSnapshot, RegistryGeneration, SecretFieldUpdate,
     },
+};
+pub use route_guard::{
+    RouteGuardError, RouteGuardErrorCategory, RouteGuardRequest, assert_not_sibling_borrow,
+    assert_route_usable,
 };
 pub use secrets::{
     ProviderCredentialKind, ProviderOAuthBinding, ProviderSecretScope, admin_key_scope,

@@ -78,11 +78,6 @@ pub use openai_platform::{
     PlatformError, PlatformResult, PlatformTransport, TOTAL_BINDING_COUNT, TransportPolicy,
     assert_zero_uncovered_operations, coverage_report_json,
 };
-pub use route_context::{
-    NormalizedOrigin, ProviderRouteContext, ProviderRouteContextBuilder, RouteApiSurface,
-    RouteAuthority, RouteContextUpdate, RouteCredentialRoute, RoutePacingOverride,
-    RouteProviderKind,
-};
 pub use openrouter_baseline::{
     OpenRouterEndpoint, OpenRouterEndpointInventory, coding_agent_priority_endpoints,
     inventory_has_endpoint, openrouter_endpoint_inventory, schema_field_names,
@@ -90,6 +85,11 @@ pub use openrouter_baseline::{
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,
     format_inference_error, resolve_max_retries, retry_backoff_with_jitter,
+};
+pub use route_context::{
+    NormalizedOrigin, ProviderRouteContext, ProviderRouteContextBuilder, RouteApiSurface,
+    RouteAuthority, RouteContextUpdate, RouteCredentialRoute, RoutePacingOverride,
+    RouteProviderKind,
 };
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;

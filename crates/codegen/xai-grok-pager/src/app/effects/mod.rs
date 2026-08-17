@@ -4989,6 +4989,37 @@ async fn run_provider_operation(
             });
             (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
         }
+        ProviderOperation::ForceRemove {
+            provider_id,
+            typed_id,
+            expected_generation,
+            expected_incarnation,
+            clear_app,
+            clear_admin,
+            clear_cache,
+            operation_id,
+        } => {
+            use xai_grok_shell::provider_registry::management::dto::{
+                ForceRemoveClearOptions, ProviderForceRemoveRequest, RegistryGeneration,
+            };
+            let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
+            let result = svc.force_remove(ProviderForceRemoveRequest {
+                id: provider_id.clone(),
+                typed_id_confirmation: typed_id,
+                expected_generation: RegistryGeneration(expected_generation),
+                expected_incarnation,
+                clear: ForceRemoveClearOptions {
+                    clear_application_key: clear_app,
+                    clear_admin_key: clear_admin,
+                    clear_oauth: false,
+                    clear_catalog_cache: clear_cache,
+                    clear_capability_cache: clear_cache,
+                },
+                operation_id,
+            });
+            management = Some(actions::ProviderManagementResult::Mutation(result));
+            (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
+        }
         ProviderOperation::Refresh(provider) => {
             if provider == ProviderKind::Anthropic {
                 // The subscription-backed CLI is independent of the Messages

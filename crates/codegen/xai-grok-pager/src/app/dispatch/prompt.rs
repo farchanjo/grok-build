@@ -1337,7 +1337,16 @@ pub(super) fn handle_prompt_response(
                         b.route_authority,
                         b.correlation_token,
                     ),
-                    None => (None, 0, 0, false, false, String::new(), String::new(), String::new()),
+                    None => (
+                        None,
+                        0,
+                        0,
+                        false,
+                        false,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ),
                 };
                 // New failure supersedes any prior in-flight repair binding;
                 // delayed completion of the old op will not match the new stash.

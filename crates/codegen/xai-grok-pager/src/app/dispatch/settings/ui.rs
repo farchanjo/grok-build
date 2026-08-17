@@ -380,6 +380,34 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                     EditorCommand::LoadReferences => ProviderOperation::LoadReferences {
                         provider_id: editor.detail.id.clone(),
                     },
+                    EditorCommand::ForceRemove {
+                        typed_id,
+                        clear_app,
+                        clear_admin,
+                        clear_cache,
+                    } => ProviderOperation::ForceRemove {
+                        provider_id: editor.detail.id.clone(),
+                        typed_id,
+                        expected_generation: editor.generation().get(),
+                        expected_incarnation: editor.detail.incarnation.clone(),
+                        clear_app,
+                        clear_admin,
+                        clear_cache,
+                        operation_id: Some(uuid::Uuid::new_v4().to_string()),
+                    },
+                    EditorCommand::ConflictReload => {
+                        let id = editor.detail.id.clone();
+                        editor.conflict = None;
+                        ProviderOperation::LoadEditorDetail { provider_id: id }
+                    }
+                    EditorCommand::ConflictClone { new_id } => {
+                        editor.conflict = None;
+                        ProviderOperation::CloneProvider {
+                            source_id: editor.detail.id.clone(),
+                            new_id,
+                            expected_generation: editor.generation().get(),
+                        }
+                    }
                     EditorCommand::ClearAppKey => {
                         editor.clear_app_key = true;
                         return vec![];

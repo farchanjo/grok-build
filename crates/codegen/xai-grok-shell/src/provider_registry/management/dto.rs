@@ -94,6 +94,12 @@ pub struct ProviderDetailDto {
     pub warnings: Vec<String>,
     /// Unsupported-edit fail-closed note when kind is unknown/legacy.
     pub unsupported_edit_reason: Option<String>,
+    /// Grok-owned lifecycle incarnation (UUID), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+    /// True when a tombstone blocks ordinary re-add of this id.
+    #[serde(default)]
+    pub tombstone_blocks_readd: bool,
 }
 
 /// Browse snapshot returned by the shell management service.
@@ -205,6 +211,18 @@ pub struct ProviderMutationResult {
     /// bookkeeping failed or had to be force-reconciled. Clients must reload.
     #[serde(default)]
     pub partial_commit: bool,
+    /// Live incarnation after the mutation (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+    /// Client operation id echo for late-async discard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// Stale multi-client conflict (safe field names only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ProviderConflictInfo>,
+    /// Safe field names changed by this mutation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_fields: Vec<String>,
 }
 
 /// Catalog summary for the Catalog page (secret-free).
@@ -252,18 +270,133 @@ pub struct ProviderCreditsSnapshot {
     pub error: Option<String>,
 }
 
-/// Reference-impact / preliminary remove readiness (PR13 owns final forced remove).
+/// Group kind for reverse-reference impact (secret-free labels only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactGroupKind {
+    ModelsAndDefaults,
+    Sessions,
+    AgentsAndSubagents,
+    WorkflowsAndGoals,
+    AuxiliaryRoutes,
+    Memory,
+    /// Structurally empty until PR15 named retrieval config.
+    RetrievalProfiles,
+    EmbeddingModels,
+    RerankerModels,
+}
+
+impl ImpactGroupKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ModelsAndDefaults => "Models & defaults",
+            Self::Sessions => "Sessions",
+            Self::AgentsAndSubagents => "Agents & subagents",
+            Self::WorkflowsAndGoals => "Workflows & goals",
+            Self::AuxiliaryRoutes => "Compaction / media / web / suggestion",
+            Self::Memory => "Memory",
+            Self::RetrievalProfiles => "Retrieval profiles",
+            Self::EmbeddingModels => "Embedding models",
+            Self::RerankerModels => "Reranker models",
+        }
+    }
+}
+
+/// One secret-free reverse reference row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImpactReference {
+    pub kind: ImpactGroupKind,
+    pub label: String,
+}
+
+/// Grouped reverse references for the References page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImpactGroup {
+    pub kind: ImpactGroupKind,
+    pub references: Vec<ImpactReference>,
+}
+
+/// Reference-impact / remove readiness with grouped durable & active refs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReferenceImpactSnapshot {
     pub provider_id: String,
     pub generation: RegistryGeneration,
     pub can_remove: bool,
     pub blocked_reason: Option<String>,
+    /// Compatibility flat list (model definitions). Prefer `groups`.
     pub model_references: Vec<String>,
+    /// Compatibility flat list (session pins). Prefer `groups`.
     pub session_pin_hints: Vec<String>,
     pub cache_present: bool,
     pub secrets_present: bool,
     pub guidance: String,
+    /// Grouped reverse references (bounded, secret-free).
+    #[serde(default)]
+    pub groups: Vec<ImpactGroup>,
+    /// Fail-closed scan diagnostics (never secrets).
+    #[serde(default)]
+    pub scan_errors: Vec<String>,
+    /// True when any group hit its bound.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Disable excludes from new selection and blocks the next request/turn.
+    #[serde(default = "default_true")]
+    pub disable_blocks_next_turn: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Optional credential/cache clear choices for forced remove (never implicit).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ForceRemoveClearOptions {
+    pub clear_application_key: bool,
+    pub clear_admin_key: bool,
+    pub clear_oauth: bool,
+    pub clear_catalog_cache: bool,
+    pub clear_capability_cache: bool,
+}
+
+/// Forced remove request: requires exact typed provider id barrier.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderForceRemoveRequest {
+    pub id: String,
+    /// Client must type the exact provider id (case-sensitive).
+    pub typed_id_confirmation: String,
+    pub expected_generation: RegistryGeneration,
+    /// Live incarnation when known (reject when mismatched).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_incarnation: Option<String>,
+    pub clear: ForceRemoveClearOptions,
+    /// Client operation id for late-async discard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+/// Safe conflict payload for stale multi-client edits (field names only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderConflictInfo {
+    pub provider_id: String,
+    pub client_generation: RegistryGeneration,
+    pub live_generation: RegistryGeneration,
+    /// Safe changed field names only — never secrets or raw values.
+    pub changed_fields: Vec<String>,
+    pub guidance: String,
+}
+
+/// Extended mutation result fields for PR13 async safety.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderMutationMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ProviderConflictInfo>,
+    /// Safe field names touched by this mutation (for leader broadcast).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_fields: Vec<String>,
 }
 
 /// Editor page identity (keyboard navigation).

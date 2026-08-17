@@ -243,6 +243,8 @@ impl ProviderManagementService {
             generation,
             warnings: Vec::new(),
             unsupported_edit_reason: unsupported,
+            incarnation: self.live_incarnation_str(id),
+            tombstone_blocks_readd: self.tombstone_blocks_readd(id),
         })
     }
 
@@ -289,9 +291,18 @@ impl ProviderManagementService {
             catalog_enabled: Some(true),
             ..Default::default()
         };
+        // Mint lifecycle incarnation before TOML write; refuse tombstoned ids.
+        let incarnation = match self.mint_incarnation_for_add(&pid, false) {
+            Ok(i) => i,
+            Err(e) => return err_result(pid.as_str(), self.current_generation(), e),
+        };
         match upsert_provider(&self.config_path, &pid, &patch, false) {
             Ok(()) => {
-                self.finalize_after_durable_write(pid.as_str(), req.expected_generation, true)
+                let mut result =
+                    self.finalize_after_durable_write(pid.as_str(), req.expected_generation, true);
+                result.incarnation = Some(incarnation.as_str().to_owned());
+                result.changed_fields = vec!["id".into(), "kind".into(), "base_url".into()];
+                result
             }
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
@@ -410,6 +421,10 @@ impl ProviderManagementService {
                     stale: false,
                     guidance: Some(STALE_GUIDANCE.into()),
                     partial_commit: true,
+                    incarnation: finalized.incarnation,
+                    operation_id: None,
+                    conflict: None,
+                    changed_fields: finalized.changed_fields,
                 };
             }
         }
@@ -550,7 +565,7 @@ impl ProviderManagementService {
         }
     }
 
-    /// Preliminary remove readiness only (PR13 owns forced remove safety).
+    /// Grouped reverse-reference impact for disable/remove UX.
     pub fn reference_impact(&self, id: &str) -> Result<ReferenceImpactSnapshot, String> {
         let generation = self.current_generation();
         let (entries, _) = self.load_entries()?;
@@ -558,76 +573,37 @@ impl ProviderManagementService {
             && BuiltInProviderId::parse(id).is_none()
             && id != crate::agent::zai::ZAI_PROVIDER_ID
         {
-            // Still allow impact report when only in service as built-in.
             let service =
                 ProviderService::from_model_providers(&entries).map_err(|e| e.to_string())?;
             if service.get(id).is_none() {
                 return Err(format!("provider `{id}` not found"));
             }
         }
-        let mut model_refs = Vec::new();
-        // Scan raw config for model → provider references without inventing deletions.
-        if let Ok(raw) = fs::read_to_string(&self.config_path)
-            && let Ok(val) = toml::from_str::<toml::Value>(&raw)
-        {
-            if let Some(models) = val.get("model").and_then(|v| v.as_table()) {
-                for (model_id, entry) in models {
-                    if entry.get("model_provider").and_then(|v| v.as_str()) == Some(id) {
-                        model_refs.push(model_id.clone());
-                    }
-                }
-            }
-        }
         let secrets_present = {
             let c = self.credential_presence(id);
             c.has_application_key || c.has_admin_key || c.has_oauth
         };
-        // Cache presence is best-effort: only report true when we can resolve
-        // origin and a catalog/capability envelope loads. Never auto-delete.
         let cache_present = self.catalog_cache_hint(id).is_some();
         let is_built_in = BuiltInProviderId::parse(id).is_some();
-        let (can_remove, blocked_reason) = if is_built_in {
-            (
-                false,
-                Some("Built-in product providers cannot be removed from the registry.".into()),
-            )
-        } else if !model_refs.is_empty() {
-            (
-                false,
-                Some(format!(
-                    "Referenced by {} model definition(s); reassign models before remove.",
-                    model_refs.len()
-                )),
-            )
-        } else {
-            (true, None)
-        };
-        let guidance = if can_remove {
-            "Preliminary remove is allowed. Final forced-remove safety (shared-state confirmations) is owned by PR13. Use CLI `grok provider remove --yes` only after review."
-                .into()
-        } else {
-            blocked_reason
-                .clone()
-                .unwrap_or_else(|| "Remove is not ready.".into())
-        };
-        Ok(ReferenceImpactSnapshot {
-            provider_id: id.to_owned(),
-            generation,
-            can_remove,
-            blocked_reason,
-            model_references: model_refs,
-            session_pin_hints: Vec::new(),
-            cache_present,
-            secrets_present,
-            guidance,
-        })
+        Ok(
+            crate::provider_registry::references::build_reference_impact(
+                &self.home,
+                &self.config_path,
+                id,
+                generation,
+                is_built_in,
+                secrets_present,
+                cache_present,
+            ),
+        )
     }
 
     /// Optional metadata remove for configured providers when impact allows.
     /// Does not auto-delete secrets/caches (never rename/delete legacy caches).
     ///
     /// Uses the same exclusive lifecycle lock + generation precheck + CAS bump
-    /// as add/save/enable.
+    /// as add/save/enable. Clean remove forgets the live incarnation row without
+    /// a tombstone; re-add still mints a new incarnation.
     pub fn remove_metadata(
         &self,
         id: &str,
@@ -646,7 +622,13 @@ impl ProviderManagementService {
             Err(e) => return err_result(id, self.current_generation(), e),
         };
         if let Err(msg) = self.require_generation_locked(expected) {
-            return stale_result(id, self.current_generation(), msg);
+            return stale_result_with_expected(
+                id,
+                expected,
+                self.current_generation(),
+                vec!["generation".into()],
+                msg,
+            );
         }
         let impact = match self.reference_impact(id) {
             Ok(i) => i,
@@ -666,7 +648,179 @@ impl ProviderManagementService {
             Err(e) => return err_result(id, self.current_generation(), e.to_string()),
         };
         match remove_provider(&self.config_path, &pid) {
-            Ok(()) => self.finalize_after_durable_write(pid.as_str(), expected, true),
+            Ok(()) => {
+                // Forget live row (no tombstone on clean zero-ref remove).
+                let _ = crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(
+                    &self.home,
+                    |st| {
+                        st.forget_live(pid.as_str());
+                        Ok(((), true))
+                    },
+                );
+                let mut result = self.finalize_after_durable_write(pid.as_str(), expected, true);
+                result.changed_fields = vec!["removed".into()];
+                result
+            }
+            Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
+        }
+    }
+
+    /// Forced remove: typed exact provider ID barrier, incarnation tombstone,
+    /// optional independent secret/cache clears. Built-ins cannot be removed.
+    pub fn force_remove(&self, req: ProviderForceRemoveRequest) -> ProviderMutationResult {
+        let id = req.id.as_str();
+        if req.typed_id_confirmation != id {
+            return err_result(
+                id,
+                self.current_generation(),
+                "typed provider id does not match; forced remove requires the exact id".into(),
+            );
+        }
+        if BuiltInProviderId::parse(id).is_some() {
+            return err_result(
+                id,
+                self.current_generation(),
+                "built-in product providers cannot be removed".into(),
+            );
+        }
+        let _lock = match self.acquire_mutation_lock() {
+            Ok(l) => l,
+            Err(e) => return err_result(id, self.current_generation(), e),
+        };
+        if let Err(msg) = self.require_generation_locked(req.expected_generation) {
+            return stale_result_with_expected(
+                id,
+                req.expected_generation,
+                self.current_generation(),
+                vec!["generation".into()],
+                msg,
+            );
+        }
+        let pid = match ProviderId::new(id) {
+            Ok(p) => p,
+            Err(e) => return err_result(id, self.current_generation(), e.to_string()),
+        };
+        let expected_inc = req
+            .expected_incarnation
+            .as_deref()
+            .and_then(|s| super::instance::ProviderIncarnation::new(s).ok());
+        // Ensure a live incarnation exists, then tombstone before metadata is reusable.
+        let tombstoned = match crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(
+            &self.home,
+            |st| {
+                if !st.instances.contains_key(pid.as_str()) {
+                    // Legacy configured provider without lifecycle row.
+                    let incarnation = expected_inc.clone().unwrap_or_else(|| {
+                        super::instance::ProviderIncarnation::new(uuid::Uuid::new_v4().to_string())
+                            .expect("uuid v4 is canonical")
+                    });
+                    st.instances.insert(
+                        pid.as_str().to_owned(),
+                        super::lifecycle_state::InstanceLifecycleRecord {
+                            incarnation,
+                            restored: false,
+                        },
+                    );
+                }
+                let inc = st.tombstone_remove(&pid, expected_inc.as_ref())?;
+                Ok((inc, true))
+            },
+        ) {
+            Ok(inc) => inc,
+            Err(e) => return err_result(id, self.current_generation(), e.to_string()),
+        };
+        // Optional secret clears (never implicit).
+        if req.clear.clear_application_key {
+            let _ = clear_provider_secret(&self.home, &application_key_scope(&pid));
+        }
+        if req.clear.clear_admin_key {
+            let _ = clear_provider_secret(&self.home, &admin_key_scope(&pid));
+        }
+        if req.clear.clear_oauth {
+            let _ = crate::auth::clear_provider_api_key(&self.home, &oauth_scope_string(&pid));
+        }
+        // Optional cache clears (instance-scoped only; never siblings).
+        if req.clear.clear_catalog_cache {
+            let _ = CatalogCacheStore::remove(&self.home, &pid);
+        }
+        if req.clear.clear_capability_cache {
+            let _ = CapabilityCacheStore::remove(&self.home, &pid);
+        }
+        if req.clear.clear_catalog_cache && req.clear.clear_capability_cache {
+            let _ = super::cache::ProviderCacheStore::remove_instance(&self.home, &pid);
+        }
+        match remove_provider(&self.config_path, &pid) {
+            Ok(()) => {
+                let mut result =
+                    self.finalize_after_durable_write(pid.as_str(), req.expected_generation, true);
+                result.incarnation = Some(tombstoned.as_str().to_owned());
+                result.operation_id = req.operation_id.clone();
+                result.changed_fields =
+                    vec!["removed".into(), "tombstone".into(), "incarnation".into()];
+                result.guidance = Some(
+                    "Forced remove completed. Old sessions bound to the prior incarnation will not rebind if this id is recreated. Use explicit restore to reuse the tombstoned incarnation, or Clone for a new id."
+                        .into(),
+                );
+                result
+            }
+            Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
+        }
+    }
+
+    /// Explicit restore of a tombstoned id (distinct from ordinary re-add).
+    pub fn restore_tombstoned(
+        &self,
+        id: &str,
+        kind: &str,
+        base_url: &str,
+        expected: RegistryGeneration,
+    ) -> ProviderMutationResult {
+        let _lock = match self.acquire_mutation_lock() {
+            Ok(l) => l,
+            Err(e) => return err_result(id, self.current_generation(), e),
+        };
+        if let Err(msg) = self.require_generation_locked(expected) {
+            return stale_result_with_expected(
+                id,
+                expected,
+                self.current_generation(),
+                vec!["generation".into()],
+                msg,
+            );
+        }
+        let pid = match ProviderId::new(id) {
+            Ok(p) => p,
+            Err(e) => return err_result(id, self.current_generation(), e.to_string()),
+        };
+        let incarnation = match self.mint_incarnation_for_add(&pid, true) {
+            Ok(i) => i,
+            Err(e) => return err_result(id, self.current_generation(), e),
+        };
+        if let Err(e) = validate_http_base_url(base_url) {
+            return err_result(id, self.current_generation(), e.to_string());
+        }
+        let kind_norm = normalize_kind_for_add(kind);
+        let Some(kind_norm) = kind_norm else {
+            return err_result(
+                id,
+                self.current_generation(),
+                format!("unsupported kind `{kind}`"),
+            );
+        };
+        let patch = ProviderTomlPatch {
+            base_url: Some(base_url.to_owned()),
+            kind: Some(kind_norm.to_owned()),
+            enabled: Some(true),
+            catalog_enabled: Some(true),
+            ..Default::default()
+        };
+        match upsert_provider(&self.config_path, &pid, &patch, false) {
+            Ok(()) => {
+                let mut result = self.finalize_after_durable_write(pid.as_str(), expected, true);
+                result.incarnation = Some(incarnation.as_str().to_owned());
+                result.changed_fields = vec!["restored".into(), "incarnation".into()];
+                result
+            }
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
     }
@@ -1348,6 +1502,10 @@ impl ProviderManagementService {
                             "Mutation committed; generation bookkeeping recovered after: {msg}. Reload."
                         )),
                         partial_commit: true,
+                        incarnation: None,
+                        operation_id: None,
+                        conflict: None,
+                        changed_fields: Vec::new(),
                     },
                     Err(io_err) => ProviderMutationResult {
                         ok: false,
@@ -1360,6 +1518,10 @@ impl ProviderManagementService {
                         stale: false,
                         guidance: Some(STALE_GUIDANCE.into()),
                         partial_commit: true,
+                        incarnation: None,
+                        operation_id: None,
+                        conflict: None,
+                        changed_fields: Vec::new(),
                     },
                 }
             }
@@ -1373,6 +1535,90 @@ impl ProviderManagementService {
         let fp = config_fingerprint(&self.config_path);
         write_generation_state(&self.home, next, &fp)?;
         Ok(next)
+    }
+
+    fn mint_incarnation_for_add(
+        &self,
+        pid: &ProviderId,
+        restore: bool,
+    ) -> Result<super::instance::ProviderIncarnation, String> {
+        crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(&self.home, |st| {
+            let inc = st.mint_or_restore(pid, restore)?;
+            Ok((inc, true))
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    fn live_incarnation_str(&self, id: &str) -> Option<String> {
+        // Read-only: never mint during detail/list.
+        if let Some(inc) = super::lifecycle_state::stable_builtin_incarnation(id) {
+            return Some(inc.as_str().to_owned());
+        }
+        let state =
+            crate::provider_registry::lifecycle_state::load_lifecycle_state(&self.home).ok()?;
+        state.incarnation_for(id).map(|i| i.as_str().to_owned())
+    }
+
+    fn tombstone_blocks_readd(&self, id: &str) -> bool {
+        crate::provider_registry::lifecycle_state::load_lifecycle_state(&self.home)
+            .map(|s| s.has_blocking_tombstone_for_id(id))
+            .unwrap_or(false)
+    }
+
+    /// Safe changed-field names for a save patch (no secret values).
+    pub fn safe_changed_fields(patch: &ProviderSavePatch) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut push = |name: &str, set: bool| {
+            if set {
+                fields.push(name.to_owned());
+            }
+        };
+        push("display_name", patch.display_name.is_some());
+        push("kind", patch.kind.is_some());
+        push("base_url", patch.base_url.is_some());
+        push("admin_base_url", patch.admin_base_url.is_some());
+        push("enabled", patch.enabled.is_some());
+        push("default_backend", patch.default_backend.is_some());
+        push("auth_scheme", patch.auth_scheme.is_some());
+        push("env_key", patch.env_key.is_some());
+        push("admin_env_key", patch.admin_env_key.is_some());
+        push("catalog_enabled", patch.catalog_enabled.is_some());
+        push("capability_mode", patch.capability_mode.is_some());
+        push("catalog_ttl_secs", patch.catalog_ttl_secs.is_some());
+        push("request_timeout_secs", patch.request_timeout_secs.is_some());
+        push("organization", patch.organization.is_some());
+        push("project", patch.project.is_some());
+        push("api_surface", patch.api_surface.is_some());
+        push("credential_route", patch.credential_route.is_some());
+        push("extra_headers", patch.extra_headers.is_some());
+        push("capabilities", patch.capabilities.is_some());
+        push(
+            "openrouter_fallback_models",
+            patch.openrouter_fallback_models.is_some(),
+        );
+        push(
+            "openrouter_data_collection",
+            patch.openrouter_data_collection.is_some(),
+        );
+        push(
+            "openrouter_require_parameters",
+            patch.openrouter_require_parameters.is_some(),
+        );
+        push(
+            "openrouter_allow_fallbacks",
+            patch.openrouter_allow_fallbacks.is_some(),
+        );
+        push("openrouter_zdr", patch.openrouter_zdr.is_some());
+        push("openrouter_order", patch.openrouter_order.is_some());
+        push("openrouter_only", patch.openrouter_only.is_some());
+        push("openrouter_ignore", patch.openrouter_ignore.is_some());
+        push(
+            "openrouter_quantizations",
+            patch.openrouter_quantizations.is_some(),
+        );
+        push("openrouter_sort", patch.openrouter_sort.is_some());
+        push("openrouter_pacing", patch.openrouter_pacing.is_some());
+        fields
     }
 
     async fn probe_configured_models_list(&self, id: &str) -> Result<String, String> {
@@ -1754,18 +2000,61 @@ fn ok_result(id: String, generation: RegistryGeneration) -> ProviderMutationResu
         stale: false,
         guidance: None,
         partial_commit: false,
+        incarnation: None,
+        operation_id: None,
+        conflict: None,
+        changed_fields: Vec::new(),
     }
 }
 
 fn stale_result(id: &str, generation: RegistryGeneration, msg: String) -> ProviderMutationResult {
+    let live = generation;
     ProviderMutationResult {
         ok: false,
         id: id.to_owned(),
-        generation,
+        generation: live,
         error: Some(msg),
         stale: true,
         guidance: Some(STALE_GUIDANCE.into()),
         partial_commit: false,
+        incarnation: None,
+        operation_id: None,
+        conflict: Some(ProviderConflictInfo {
+            provider_id: id.to_owned(),
+            client_generation: RegistryGeneration(0), // filled by caller when known
+            live_generation: live,
+            changed_fields: vec!["generation".into()],
+            guidance: STALE_GUIDANCE.into(),
+        }),
+        changed_fields: Vec::new(),
+    }
+}
+
+fn stale_result_with_expected(
+    id: &str,
+    client: RegistryGeneration,
+    live: RegistryGeneration,
+    changed_fields: Vec<String>,
+    msg: String,
+) -> ProviderMutationResult {
+    ProviderMutationResult {
+        ok: false,
+        id: id.to_owned(),
+        generation: live,
+        error: Some(msg),
+        stale: true,
+        guidance: Some(STALE_GUIDANCE.into()),
+        partial_commit: false,
+        incarnation: None,
+        operation_id: None,
+        conflict: Some(ProviderConflictInfo {
+            provider_id: id.to_owned(),
+            client_generation: client,
+            live_generation: live,
+            changed_fields,
+            guidance: "Registry generation is stale. Choose Reload to discard local edits, or Clone into a new id.".into(),
+        }),
+        changed_fields: Vec::new(),
     }
 }
 
@@ -1778,6 +2067,10 @@ fn err_result(id: &str, generation: RegistryGeneration, msg: String) -> Provider
         stale: false,
         guidance: None,
         partial_commit: false,
+        incarnation: None,
+        operation_id: None,
+        conflict: None,
+        changed_fields: Vec::new(),
     }
 }
 
@@ -2015,6 +2308,92 @@ mod tests {
         fs::write(&file_home, b"x").unwrap();
         let err = write_generation_state(&file_home, 1, "abc");
         assert!(err.is_err(), "must fail when home is not a directory");
+    }
+
+    #[test]
+    fn force_remove_tombstone_blocks_readd_and_new_incarnation_on_restore() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        let add = s.add(ProviderAddRequest {
+            id: "work".into(),
+            kind: "openai_compatible".into(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            display_name: None,
+            admin_base_url: None,
+            enabled: true,
+            expected_generation: g0,
+        });
+        assert!(add.ok, "{:?}", add.error);
+        let inc1 = add.incarnation.clone().expect("minted incarnation");
+        // Model reference blocks normal remove.
+        let cfg = dir.path().join("config.toml");
+        let mut text = fs::read_to_string(&cfg).unwrap();
+        text.push_str("\n[model.m1]\nmodel_provider = \"work\"\nmodel = \"x\"\n");
+        fs::write(&cfg, text).unwrap();
+        let impact = s.reference_impact("work").unwrap();
+        assert!(!impact.can_remove);
+        let blocked = s.remove_metadata("work", s.current_generation(), true);
+        assert!(!blocked.ok);
+
+        // Wrong typed id fails.
+        let bad = s.force_remove(ProviderForceRemoveRequest {
+            id: "work".into(),
+            typed_id_confirmation: "Work".into(),
+            expected_generation: s.current_generation(),
+            expected_incarnation: Some(inc1.clone()),
+            clear: ForceRemoveClearOptions::default(),
+            operation_id: Some("op1".into()),
+        });
+        assert!(!bad.ok);
+
+        let forced = s.force_remove(ProviderForceRemoveRequest {
+            id: "work".into(),
+            typed_id_confirmation: "work".into(),
+            expected_generation: s.current_generation(),
+            expected_incarnation: Some(inc1.clone()),
+            clear: ForceRemoveClearOptions::default(),
+            operation_id: Some("op2".into()),
+        });
+        assert!(forced.ok, "{:?}", forced.error);
+        assert!(s.tombstone_blocks_readd("work"));
+
+        // Ordinary re-add blocked.
+        let readd = s.add(ProviderAddRequest {
+            id: "work".into(),
+            kind: "openai_compatible".into(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            display_name: None,
+            admin_base_url: None,
+            enabled: true,
+            expected_generation: s.current_generation(),
+        });
+        assert!(!readd.ok);
+        assert!(
+            readd
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("forcibly removed")
+                || readd.error.as_deref().unwrap_or("").contains("tombstone")
+                || readd.error.as_deref().unwrap_or("").contains("restore")
+        );
+
+        // Explicit restore reuses incarnation.
+        let restored = s.restore_tombstoned(
+            "work",
+            "openai_compatible",
+            "http://127.0.0.1:9/v1",
+            s.current_generation(),
+        );
+        assert!(restored.ok, "{:?}", restored.error);
+        assert_eq!(restored.incarnation.as_deref(), Some(inc1.as_str()));
+    }
+
+    #[test]
+    fn multi_account_gate_stays_off_by_default() {
+        assert!(!super::super::gate::multi_account_rollout_enabled());
+        assert!(!super::super::gate::MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
     }
 
     #[test]

@@ -1353,12 +1353,20 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         ProviderManagementResult::Mutation(result) => {
                             if result.ok {
                                 state.list_generation = result.generation.get();
+                                let partial = if result.partial_commit {
+                                    " (reload required)"
+                                } else {
+                                    ""
+                                };
                                 state.management_message = Some(format!(
-                                    "Saved `{}` (gen {})",
+                                    "Saved `{}` (gen {}){partial}",
                                     result.id,
                                     result.generation.get()
                                 ));
                                 state.management_error = None;
+                                if let Some(ed) = state.editor_mut() {
+                                    ed.conflict = None;
+                                }
                                 follow_up.push(crate::app::actions::Effect::ProviderOperation {
                                     agent_id,
                                     operation:
@@ -1394,6 +1402,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                 state.management_error = Some(full.clone());
                                 if let Some(ed) = state.editor_mut() {
                                     ed.error = Some(full);
+                                    if let Some(conflict) = result.conflict.clone() {
+                                        ed.enter_conflict(conflict);
+                                    }
                                 }
                             }
                         }

@@ -393,6 +393,10 @@ fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
                 | "x.ai/models/update"
                 | "x.ai/mcp/servers_updated"
                 | "x.ai/announcements/update"
+                // Provider registry/config generation: every client refreshes
+                // /providers, /model, settings/search snapshots. Version-tolerant:
+                // unknown optional fields are ignored by old clients.
+                | "x.ai/providers/update"
         )
     )
 }
@@ -6255,6 +6259,25 @@ mod tests {
         );
         cancel.cancel();
     }
+    /// `x.ai/providers/update` is machine-wide (registry generation). Old
+    /// clients ignore unknown optional fields; new clients refresh /providers.
+    #[test]
+    fn providers_update_is_machine_wide_and_version_tolerant() {
+        let update = r#"{"jsonrpc":"2.0","method":"_x.ai/providers/update","params":{"generation":7,"changed_ids":["work"],"changed_fields":["enabled"],"schema_version":1}}"#;
+        assert!(
+            is_machine_wide_broadcast_notification(&serde_json::from_str(update).unwrap()),
+            "providers/update must be machine-wide"
+        );
+        let minimal = r#"{"jsonrpc":"2.0","method":"x.ai/providers/update","params":{}}"#;
+        assert!(is_machine_wide_broadcast_notification(
+            &serde_json::from_str(minimal).unwrap()
+        ));
+        let unknown = r#"{"jsonrpc":"2.0","method":"x.ai/providers/unknown","params":{}}"#;
+        assert!(!is_machine_wide_broadcast_notification(
+            &serde_json::from_str(unknown).unwrap()
+        ));
+    }
+
     /// `x.ai/models/update` is a machine-wide catalog notification with no
     /// sessionId; it must broadcast to every registered client so every model
     /// picker refreshes after a config.toml / models_cache.json hot-reload —

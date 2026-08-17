@@ -63,6 +63,13 @@ pub enum EditorField {
     ToggleEnabled,
     Clone,
     References,
+    ForceRemove,
+    ClearAppOnRemove,
+    ClearAdminOnRemove,
+    ClearCacheOnRemove,
+    ConfirmTypedId,
+    ConflictReload,
+    ConflictClone,
 }
 
 impl EditorField {
@@ -109,6 +116,13 @@ impl EditorField {
             Self::ToggleEnabled => "Enable / Disable",
             Self::Clone => "Clone instance",
             Self::References => "Reference impact",
+            Self::ForceRemove => "Force remove (typed id)",
+            Self::ClearAppOnRemove => "Clear application key on force remove",
+            Self::ClearAdminOnRemove => "Clear admin key on force remove",
+            Self::ClearCacheOnRemove => "Clear caches on force remove",
+            Self::ConfirmTypedId => "Type exact provider id to force remove",
+            Self::ConflictReload => "Reload (discard local edits)",
+            Self::ConflictClone => "Clone into new id",
         }
     }
 }
@@ -172,7 +186,17 @@ fn fields_for_page(page: ProviderEditorPage) -> &'static [EditorField] {
             EditorField::Credits,
             EditorField::Save,
         ],
-        ProviderEditorPage::References => &[EditorField::References, EditorField::Clone],
+        ProviderEditorPage::References => &[
+            EditorField::References,
+            EditorField::ForceRemove,
+            EditorField::ClearAppOnRemove,
+            EditorField::ClearAdminOnRemove,
+            EditorField::ClearCacheOnRemove,
+            EditorField::ConfirmTypedId,
+            EditorField::Clone,
+            EditorField::ConflictReload,
+            EditorField::ConflictClone,
+        ],
     }
 }
 
@@ -201,6 +225,13 @@ pub struct ProviderEditorState {
     pub clone_id_draft: String,
     /// Baseline detail used for dirty-field Save patches (Issue 8).
     baseline: ProviderDetailDto,
+    /// Force-remove typed id barrier draft.
+    pub force_remove_typed_id: String,
+    pub force_clear_app: bool,
+    pub force_clear_admin: bool,
+    pub force_clear_cache: bool,
+    /// Stale multi-client conflict (safe field names only).
+    pub conflict: Option<xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo>,
 }
 
 impl std::fmt::Debug for ProviderEditorState {
@@ -217,6 +248,8 @@ impl std::fmt::Debug for ProviderEditorState {
             .field("has_admin_secret", &self.submitted_admin_secret.is_some())
             .field("clear_app_key", &self.clear_app_key)
             .field("clear_admin_key", &self.clear_admin_key)
+            .field("force_remove_typed", &self.force_remove_typed_id)
+            .field("has_conflict", &self.conflict.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -244,7 +277,25 @@ impl ProviderEditorState {
             clear_app_key: false,
             clear_admin_key: false,
             clone_id_draft: String::new(),
+            force_remove_typed_id: String::new(),
+            force_clear_app: false,
+            force_clear_admin: false,
+            force_clear_cache: false,
+            conflict: None,
         }
+    }
+
+    /// Enter conflict recovery mode after a stale mutation (safe field names only).
+    pub fn enter_conflict(
+        &mut self,
+        conflict: xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo,
+    ) {
+        self.conflict = Some(conflict);
+        self.page = ProviderEditorPage::References;
+        self.error = Some(
+            "Stale generation conflict. Reload to discard local edits, or Clone into a new id."
+                .into(),
+        );
     }
 
     /// Reload after successful save (Issue 3).
@@ -386,7 +437,8 @@ impl ProviderEditorState {
                 })
                 .unwrap_or_default(),
             EditorField::AppKeySlot | EditorField::AdminKeySlot => String::new(),
-            EditorField::Clone => self.clone_id_draft.clone(),
+            EditorField::Clone | EditorField::ConflictClone => self.clone_id_draft.clone(),
+            EditorField::ConfirmTypedId => self.force_remove_typed_id.clone(),
             _ => return,
         };
         self.editor = LineEditor::default();
@@ -536,8 +588,11 @@ impl ProviderEditorState {
                     self.clear_admin_key = false;
                 }
             }
-            EditorField::Clone => {
+            EditorField::Clone | EditorField::ConflictClone => {
                 self.clone_id_draft = text.trim().to_owned();
+            }
+            EditorField::ConfirmTypedId => {
+                self.force_remove_typed_id = text.trim().to_owned();
             }
             _ => {}
         }
@@ -563,10 +618,22 @@ pub enum EditorCommand {
     RefreshCapabilities,
     Credits,
     ToggleEnabled,
-    Clone { new_id: String },
+    Clone {
+        new_id: String,
+    },
     LoadReferences,
     ClearAppKey,
     ClearAdminKey,
+    ForceRemove {
+        typed_id: String,
+        clear_app: bool,
+        clear_admin: bool,
+        clear_cache: bool,
+    },
+    ConflictReload,
+    ConflictClone {
+        new_id: String,
+    },
 }
 
 pub fn handle_key(state: &mut ProviderEditorState, key: &KeyEvent) -> EditorOutcome {
@@ -682,6 +749,13 @@ fn activate_field(state: &mut ProviderEditorState) -> EditorOutcome {
                 | EditorField::References
                 | EditorField::Clone
                 | EditorField::ToggleEnabled
+                | EditorField::ForceRemove
+                | EditorField::ClearAppOnRemove
+                | EditorField::ClearAdminOnRemove
+                | EditorField::ClearCacheOnRemove
+                | EditorField::ConfirmTypedId
+                | EditorField::ConflictReload
+                | EditorField::ConflictClone
         )
     {
         state.error = state.detail.unsupported_edit_reason.clone().or_else(|| {
@@ -737,6 +811,61 @@ fn activate_field(state: &mut ProviderEditorState) -> EditorOutcome {
         EditorField::Credits => EditorOutcome::Command(EditorCommand::Credits),
         EditorField::ToggleEnabled => EditorOutcome::Command(EditorCommand::ToggleEnabled),
         EditorField::References => EditorOutcome::Command(EditorCommand::LoadReferences),
+        EditorField::ClearAppOnRemove => {
+            state.force_clear_app = !state.force_clear_app;
+            EditorOutcome::Changed
+        }
+        EditorField::ClearAdminOnRemove => {
+            state.force_clear_admin = !state.force_clear_admin;
+            EditorOutcome::Changed
+        }
+        EditorField::ClearCacheOnRemove => {
+            state.force_clear_cache = !state.force_clear_cache;
+            EditorOutcome::Changed
+        }
+        EditorField::ConfirmTypedId => {
+            state.begin_edit_current();
+            EditorOutcome::Changed
+        }
+        EditorField::ForceRemove => {
+            if state.detail.is_built_in {
+                state.error = Some("Built-in providers cannot be removed.".into());
+                return EditorOutcome::Changed;
+            }
+            if state.force_remove_typed_id != state.detail.id {
+                state.error = Some(
+                    "Type the exact provider id on ConfirmTypedId before force remove.".into(),
+                );
+                return EditorOutcome::Changed;
+            }
+            EditorOutcome::Command(EditorCommand::ForceRemove {
+                typed_id: state.force_remove_typed_id.clone(),
+                clear_app: state.force_clear_app,
+                clear_admin: state.force_clear_admin,
+                clear_cache: state.force_clear_cache,
+            })
+        }
+        EditorField::ConflictReload => {
+            if state.conflict.is_some() {
+                EditorOutcome::Command(EditorCommand::ConflictReload)
+            } else {
+                EditorOutcome::Unchanged
+            }
+        }
+        EditorField::ConflictClone => {
+            if state.conflict.is_some() {
+                if state.clone_id_draft.is_empty() {
+                    state.begin_edit_current();
+                    EditorOutcome::Changed
+                } else {
+                    EditorOutcome::Command(EditorCommand::ConflictClone {
+                        new_id: state.clone_id_draft.clone(),
+                    })
+                }
+            } else {
+                EditorOutcome::Unchanged
+            }
+        }
         EditorField::Clone => {
             if state.clone_id_draft.is_empty() {
                 state.begin_edit_current();
@@ -982,16 +1111,38 @@ pub fn render_editor(buf: &mut Buffer, area: Rect, state: &ProviderEditorState, 
             }
         }
         ProviderEditorPage::References => {
+            if let Some(c) = &state.conflict {
+                put_line(
+                    buf,
+                    area,
+                    y,
+                    &format!(
+                        "CONFLICT gen client={} live={} fields={}",
+                        c.client_generation.get(),
+                        c.live_generation.get(),
+                        c.changed_fields.join(", ")
+                    ),
+                    Style::default().fg(theme.warning),
+                );
+                put_line(
+                    buf,
+                    area,
+                    y,
+                    &c.guidance,
+                    Style::default().fg(theme.gray_dim),
+                );
+            }
             if let Some(r) = &state.references {
                 put_line(
                     buf,
                     area,
                     y,
                     &format!(
-                        "Remove ready: {} · caches={} secrets={}",
+                        "Remove ready: {} · caches={} secrets={} · next-turn block={}",
                         if r.can_remove { "yes" } else { "no" },
                         yn(r.cache_present),
-                        yn(r.secrets_present)
+                        yn(r.secrets_present),
+                        yn(r.disable_blocks_next_turn),
                     ),
                     Style::default().fg(theme.gray),
                 );
@@ -1002,12 +1153,40 @@ pub fn render_editor(buf: &mut Buffer, area: Rect, state: &ProviderEditorState, 
                     &r.guidance,
                     Style::default().fg(theme.gray_dim),
                 );
-                for m in &r.model_references {
+                for g in &r.groups {
+                    if g.references.is_empty()
+                        && matches!(
+                            g.kind,
+                            xai_grok_shell::provider_registry::management::dto::ImpactGroupKind::RetrievalProfiles
+                                | xai_grok_shell::provider_registry::management::dto::ImpactGroupKind::EmbeddingModels
+                                | xai_grok_shell::provider_registry::management::dto::ImpactGroupKind::RerankerModels
+                        )
+                    {
+                        continue;
+                    }
                     put_line(
                         buf,
                         area,
                         y,
-                        &format!("  model ref: {m}"),
+                        &format!("{} ({})", g.kind.label(), g.references.len()),
+                        Style::default().fg(theme.accent_user),
+                    );
+                    for m in g.references.iter().take(8) {
+                        put_line(
+                            buf,
+                            area,
+                            y,
+                            &format!("  · {}", m.label),
+                            Style::default().fg(theme.warning),
+                        );
+                    }
+                }
+                for err in r.scan_errors.iter().take(3) {
+                    put_line(
+                        buf,
+                        area,
+                        y,
+                        &format!("scan: {err}"),
                         Style::default().fg(theme.warning),
                     );
                 }
@@ -1016,7 +1195,7 @@ pub fn render_editor(buf: &mut Buffer, area: Rect, state: &ProviderEditorState, 
                     buf,
                     area,
                     y,
-                    "Press Enter on Reference impact to load preliminary remove readiness.",
+                    "Press Enter on Reference impact to load remove readiness and reverse refs.",
                     Style::default().fg(theme.gray_dim),
                 );
             }
@@ -1143,6 +1322,37 @@ fn field_value_display(state: &ProviderEditorState, field: EditorField) -> Strin
             }
         }
         EditorField::References => "Enter to load impact".into(),
+        EditorField::ForceRemove => {
+            if state.detail.is_built_in {
+                "built-ins cannot be removed".into()
+            } else {
+                "Enter after typing exact id below".into()
+            }
+        }
+        EditorField::ClearAppOnRemove => yn(state.force_clear_app).into(),
+        EditorField::ClearAdminOnRemove => yn(state.force_clear_admin).into(),
+        EditorField::ClearCacheOnRemove => yn(state.force_clear_cache).into(),
+        EditorField::ConfirmTypedId => {
+            if state.force_remove_typed_id.is_empty() {
+                "type exact provider id".into()
+            } else {
+                format!("typed: {}", state.force_remove_typed_id)
+            }
+        }
+        EditorField::ConflictReload => {
+            if state.conflict.is_some() {
+                "Enter to reload from shell".into()
+            } else {
+                "(no conflict)".into()
+            }
+        }
+        EditorField::ConflictClone => {
+            if state.conflict.is_some() {
+                "Enter to clone into a new id".into()
+            } else {
+                "(no conflict)".into()
+            }
+        }
     }
 }
 
@@ -1384,7 +1594,58 @@ mod tests {
             generation: RegistryGeneration(3),
             warnings: Vec::new(),
             unsupported_edit_reason: None,
+            incarnation: Some("123e4567-e89b-12d3-a456-426614174000".into()),
+            tombstone_blocks_readd: false,
         }
+    }
+
+    #[test]
+    fn force_remove_requires_exact_typed_id() {
+        let mut state = ProviderEditorState::new(sample_detail());
+        state.page = ProviderEditorPage::References;
+        state.force_remove_typed_id = "wrong".into();
+        state.field_index = fields_for_page(ProviderEditorPage::References)
+            .iter()
+            .position(|f| *f == EditorField::ForceRemove)
+            .unwrap();
+        let out = handle_key(&mut state, &key(KeyCode::Enter));
+        assert_eq!(out, EditorOutcome::Changed);
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("exact provider id")
+        );
+        state.force_remove_typed_id = "local_vllm".into();
+        let out = handle_key(&mut state, &key(KeyCode::Enter));
+        assert!(matches!(
+            out,
+            EditorOutcome::Command(EditorCommand::ForceRemove { .. })
+        ));
+    }
+
+    #[test]
+    fn conflict_mode_exposes_reload_and_clone() {
+        let mut state = ProviderEditorState::new(sample_detail());
+        state.enter_conflict(
+            xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo {
+                provider_id: "local_vllm".into(),
+                client_generation: RegistryGeneration(1),
+                live_generation: RegistryGeneration(2),
+                changed_fields: vec!["display_name".into()],
+                guidance: "Reload or Clone".into(),
+            },
+        );
+        assert!(state.conflict.is_some());
+        state.field_index = fields_for_page(ProviderEditorPage::References)
+            .iter()
+            .position(|f| *f == EditorField::ConflictReload)
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            EditorOutcome::Command(EditorCommand::ConflictReload)
+        );
     }
 
     fn key(code: KeyCode) -> KeyEvent {
