@@ -515,7 +515,7 @@ impl SkillManager {
     pub fn eligible_native_skills(&self) -> Vec<SkillInfo> {
         dedup_by_canonical_path(&self.discovered_skills, &self.startup_skills)
             .into_iter()
-            .filter(|s| s.enabled && !s.disable_model_invocation)
+            .filter(SkillInfo::is_native_model_invocable)
             .collect()
     }
 

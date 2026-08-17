@@ -6,15 +6,26 @@
 //! 2. Deterministically ranks the eligible native skill snapshot (pinned-first,
 //!    exact `when-to-use` / prompt-path / workspace-path evidence), optionally
 //!    refines a bounded non-pinned shortlist via the PR17 semantic retrieval
-//!    service (metadata only — bodies stay local), and selects within
-//!    [`SkillPrimeConfig`] result/body/total/token/context-fraction budgets.
-//! 3. Revalidates eligibility/trust/canonical containment against the fresh
-//!    authoritative snapshot immediately before loading bodies natively.
-//! 4. Renders selected bodies as untrusted quoted context with provenance and
-//!    a precedence statement, escaped so no skill can forge the wrapper.
+//!    service (frontmatter-authorized metadata only — bodies stay local), and
+//!    selects within [`SkillPrimeConfig`] result/body/total/token/context-fraction
+//!    budgets.
+//! 3. Revalidates eligibility/trust/canonical containment against a **fresh**
+//!    authoritative snapshot ([`SkillRefresh`], an async callback the session
+//!    wires to `bridge.eligible_native_skills()`) immediately before loading
+//!    bodies — and backfills the next-ranked candidates when revalidation drops
+//!    one, up to `max_results`.
+//! 4. Renders selected bodies as untrusted quoted context with provenance and a
+//!    precedence statement, escaped so no skill can forge the wrapper.
 //!
-//! It never splices a conversation and performs no prompt injection (that is
-//! PR19). Query/body/vector/raw provider errors are kept out of Debug/telemetry.
+//! A single prime-wide absolute deadline and cancellation token bound the
+//! entire run — inventory (run off the async executor via `spawn_blocking`),
+//! the semantic call, the fresh-snapshot refresh, body loading, and render. On
+//! cancellation the run returns **no content** with `cancelled = true` and never
+//! emits a spurious `SemanticUnavailable`. Full skill bodies never leave local
+//! processing, and query/body/vector/raw provider errors never reach
+//! Debug/telemetry.
+//!
+//! It never splices a conversation and performs no prompt injection (PR19).
 
 pub mod inventory;
 pub mod render;
@@ -22,7 +33,7 @@ pub mod skills;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 use xai_grok_config_types::SkillPrimeConfig;
@@ -30,30 +41,60 @@ use xai_grok_tools::implementations::skills::types::SkillInfo;
 
 use crate::retrieval::{DegradationKind, DegradationNotice, RetrievalService};
 
-pub use self::render::{LoadedSkill, RenderBudgets, RenderedSkills};
-pub use self::skills::{PrimeBudgetState, PrimeDropReason};
-
-use self::inventory::{InventoryLimits, WorkspaceInventory, build_inventory};
+use self::inventory::{InventoryLimits, WorkspaceInventory};
 use self::render::render_skills;
+
+pub use self::render::{LoadedSkill, RenderBudgets, RenderedSkills};
+pub use self::skills::{PrimeBudgetState, PrimeDropReason, SemanticFillOutcome};
+
+/// Async supplier of the authoritative eligible native skill snapshot. PR19
+/// wires this to `ToolBridge::eligible_native_skills()`. The shell calls this
+/// at load time and awaits a genuinely async refresh — it never clones a stale
+/// pre-fetched snapshot — which closes the TOCTOU window between rank and load.
+#[async_trait::async_trait]
+pub trait SkillRefresh: Send + Sync {
+    async fn refresh(&self) -> Vec<SkillInfo>;
+}
+
+#[async_trait::async_trait]
+impl<F, Fut> SkillRefresh for F
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = Vec<SkillInfo>> + Send,
+{
+    async fn refresh(&self) -> Vec<SkillInfo> {
+        (self)().await
+    }
+}
+
+/// No-op refresh used by [`PrimeInput::default`].
+struct NoopRefresh;
+#[async_trait::async_trait]
+impl SkillRefresh for NoopRefresh {
+    async fn refresh(&self) -> Vec<SkillInfo> {
+        Vec::new()
+    }
+}
+const NOOP_REFRESH: NoopRefresh = NoopRefresh;
 
 /// Inputs for a prime selection+render run.
 pub struct PrimeInput<'a> {
     /// Authoritative eligible native skill snapshot (post-precedence/post-shadowing).
     pub eligible_skills: &'a [SkillInfo],
-    /// Re-fetch the live authoritative eligible snapshot for revalidation (the
-    /// session reads `bridge.eligible_native_skills()` here).
-    pub refresh_skills: &'a dyn Fn() -> Vec<SkillInfo>,
-    /// Session workspace / git root that roots the inventory and default trust.
+    /// Fresh async revalidation source (PR19 wires `bridge.eligible_native_skills`).
+    pub refresh_skills: &'a dyn SkillRefresh,
+    /// Session workspace / git root that roots the inventory.
     pub workspace_root: &'a Path,
-    /// Canonical containment roots (workspace root plus any user/grok skill
-    /// roots). Bodies are refused if their canonical path escapes every root.
+    /// Canonical containment roots. Bodies are read only for `SKILL.md` files
+    /// under these roots (plus the canonical workspace root).
     pub trusted_roots: &'a [PathBuf],
     /// Current prompt text used for scoring (may be empty).
     pub prompt: &'a str,
-    /// An explicitly invoked skill name to pin first (never duplicated).
+    /// An explicitly invoked skill name to pin first (never duplicated). Matches
+    /// the bare name or the qualified native name (`scope:name`).
     pub explicit_skill: Option<&'a str>,
     pub config: SkillPrimeConfig,
-    /// Context window in tokens (used for the context-fraction budget).
+    /// Reserved context window tokens (used for the context-fraction budget).
     pub context_window: Option<u64>,
     /// Optional semantic refinement profile id (must match a published profile).
     pub semantic_profile: Option<&'a str>,
@@ -65,11 +106,9 @@ pub struct PrimeInput<'a> {
 
 impl Default for PrimeInput<'_> {
     fn default() -> Self {
-        // Most fields are typically supplied; this satisfies callers that only
-        // need the deterministic/default shape for tests.
         Self {
             eligible_skills: &[],
-            refresh_skills: &(|| Vec::new()) as &dyn Fn() -> Vec<SkillInfo>,
+            refresh_skills: &NOOP_REFRESH,
             workspace_root: Path::new("."),
             trusted_roots: &[],
             prompt: "",
@@ -83,35 +122,68 @@ impl Default for PrimeInput<'_> {
     }
 }
 
-/// Secret-free, constitutional result of a prime run.
+/// Secret-free export that lets `degrade_on_error = false` fail the prime run.
+/// Never carries query/body/vector/raw provider error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimeError {
+    /// The optional semantic refinement failed and `degrade_on_error` is
+    /// disabled, so the run fails closed instead of silently under-filling.
+    SemanticRetrievalFailed,
+    /// The prime deadline or cancellation fired before content was produced.
+    Aborted,
+}
+
+impl std::fmt::Display for PrimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrimeError::SemanticRetrievalFailed => {
+                f.write_str("skill prime semantic retrieval failed; degrade_on_error disabled")
+            }
+            PrimeError::Aborted => f.write_str("skill prime aborted (deadline or cancel)"),
+        }
+    }
+}
+
+/// Secret-free result of a prime run.
 pub struct PrimeSkillSelection {
-    /// Selected + natively-loaded skills (name/scope/path provenance + body).
+    /// Selected + natively-loaded skills (name/scope/source path + bounded body).
     pub selected: Vec<LoadedSkill>,
-    /// Safe rendered content (None when nothing selected or rendering empty).
+    /// Safe rendered content (None when nothing selected/rendering empty).
     pub rendered: Option<RenderedSkills>,
     /// Secret-free degradations from optional semantic refinement.
     pub degradations: Vec<DegradationNotice>,
     /// Budget/selection state for PR19 accounting.
     pub budget_state: PrimeBudgetState,
-    /// True when the workspace inventory walk hit a limit.
+    /// True when the inventory walk hit a limit or skipped work (cross-device/error).
     pub inventory_truncated: bool,
-    /// Snapshot generation the authoritative snapshot was read at. `None` until
-    /// PR19 plumb is a concrete generation.
+    /// Snapshot generation seam for PR19 (currently `None`).
     pub snapshot_generation: Option<u64>,
-    /// Cancellation surfaced from a semantic stage (PR19 may abort the turn).
+    /// True when the run was cancelled/deadlined; content is then empty.
     pub cancelled: bool,
 }
 
 impl PrimeSkillSelection {
-    /// All degradation kinds seen (secret-free label).
+    /// All degradation kinds seen (secret-free).
     pub fn degradation_kinds(&self) -> Vec<DegradationKind> {
         self.degradations.iter().map(|d| d.kind).collect()
+    }
+
+    pub(crate) fn empty(cancelled: bool, inventory_truncated: bool) -> Self {
+        Self {
+            selected: Vec::new(),
+            rendered: None,
+            degradations: Vec::new(),
+            budget_state: PrimeBudgetState::default(),
+            inventory_truncated,
+            snapshot_generation: None,
+            cancelled,
+        }
     }
 }
 
 impl std::fmt::Debug for PrimeSkillSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never expose query/body/vector/raw provider errors through Debug.
+        // Never expose query/body/vector/raw provider errors or home paths.
         f.debug_struct("PrimeSkillSelection")
             .field("selected_names", &self.budget_state.selected_names)
             .field("degradations", &self.degradations)
@@ -124,16 +196,30 @@ impl std::fmt::Debug for PrimeSkillSelection {
     }
 }
 
-/// Render budgets derived from `SkillPrimeConfig` (+ context fraction).
-pub fn render_budgets(config: &SkillPrimeConfig, context_window: Option<u64>) -> RenderBudgets {
+/// Conservative bytes-per-token used for the token budget: a documented upper
+/// bound so CJK/emoji/entity-heavy rendered text never exceeds the cap.
+pub const TOKEN_BYTES_EST: usize = 2;
+
+/// Render budgets derived from `SkillPrimeConfig` (+ context window).
+///
+/// `RenderBudgets.max_tokens` is `Some(0)` when the context-fraction allows a
+/// **zero** token allowance (renders nothing), `Some(n)` otherwise, and `None`
+/// only when no token cap is configured (never the case for config-derived
+/// budgets). Fraction is clamped to `[0.0, 1.0]`; a zero window yields `Some(0)`.
+pub fn render_budgets(config: &SkillPrimeConfig, context_window: Option<usize>) -> RenderBudgets {
     let per_body = config.max_body_chars.max(1) as usize;
     let max_total = config.max_total_chars.max(1) as usize;
-    let mut max_tokens = config.max_tokens as usize;
-    if let Some(window) = context_window {
-        // context_fraction * window_tokens (f64 to avoid float-truncation drift).
-        let allowed = (window as f64 * config.max_context_fraction as f64).round() as usize;
-        max_tokens = max_tokens.min(allowed);
-    }
+    let fraction = config.max_context_fraction.clamp(0.0, 1.0) as f64;
+
+    let max_tokens = if let Some(window) = context_window {
+        // context_fraction × window tokens (rounded; f64 avoids float drift).
+        // `as usize` saturates for degenerately large values.
+        let allowed = (window as f64 * fraction).round() as usize;
+        Some((config.max_tokens as usize).min(allowed))
+    } else {
+        Some(config.max_tokens as usize)
+    };
+
     RenderBudgets {
         per_body_chars: per_body,
         max_total_chars: max_total,
@@ -141,48 +227,90 @@ pub fn render_budgets(config: &SkillPrimeConfig, context_window: Option<u64>) ->
     }
 }
 
-/// Whether the prime deadline has elapsed (used to gate optional semantic fill).
-/// `deadline_ms == 0` degrades immediately (deterministic test seam).
-fn deadline_reached(started: Instant, deadline_ms: u64) -> bool {
-    started.elapsed().as_millis() as u64 >= deadline_ms
+/// Prime-wide absolute deadline + cancellation. A background task cancels the
+/// deadline token after `deadline_ms`; `deadline 0` cancels immediately.
+struct PrimeGate {
+    cancel: CancellationToken,
+    deadline: CancellationToken,
+}
+
+impl PrimeGate {
+    fn new(cancel: CancellationToken, deadline_ms: u64) -> Self {
+        let deadline = cancel.child_token();
+        if deadline_ms == 0 {
+            deadline.cancel();
+        } else {
+            let dl = deadline.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(deadline_ms)).await;
+                dl.cancel();
+            });
+        }
+        Self { cancel, deadline }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled() || self.deadline.is_cancelled()
+    }
+}
+
+/// Run the bounded blocking inventory walk off the async executor, cancel-aware.
+async fn build_inventory_guarded(
+    root: &Path,
+    gate: &PrimeGate,
+) -> Result<WorkspaceInventory, String> {
+    let root = root.to_path_buf();
+    let limits = InventoryLimits::default();
+    let handle = tokio::task::spawn_blocking(move || inventory::build_inventory(&root, limits));
+    tokio::select! {
+        biased;
+        _ = gate.cancel.cancelled() => Err("prime cancelled".into()),
+        _ = gate.deadline.cancelled() => Err("prime deadline".into()),
+        res = handle => match res {
+            Ok(Ok(inv)) => Ok(inv),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(format!("inventory walk task error: {e}")),
+        },
+    }
 }
 
 /// Run deterministic selection + safe render within `config` budgets.
 ///
-/// Public (callable) seam for PR19. This function never splices a
-/// conversation — it returns a [`PrimeSkillSelection`].
+/// Public (callable) seam for PR19. Never splices a conversation. Cancellation
+/// and deadline are prime-wide; a cancelled run returns an empty selection with
+/// `cancelled = true`. Returns [`PrimeError::SemanticRetrievalFailed`] only when
+/// `degrade_on_error` is disabled and the optional semantic refinement fails.
 pub async fn run_prime_selection(
     input: &PrimeInput<'_>,
     cancel: CancellationToken,
-) -> PrimeSkillSelection {
-    let started = Instant::now();
+) -> Result<PrimeSkillSelection, PrimeError> {
+    let _started_at = Instant::now();
     let mut degradations: Vec<DegradationNotice> = Vec::new();
-    let mut cancelled = false;
 
-    if !input.config.enabled {
-        return PrimeSkillSelection {
-            selected: Vec::new(),
-            rendered: None,
-            degradations,
-            budget_state: PrimeBudgetState::default(),
-            inventory_truncated: false,
-            snapshot_generation: None,
-            cancelled,
-        };
+    let gate = PrimeGate::new(cancel, input.config.deadline_ms);
+    if !input.config.enabled || gate.cancelled() {
+        return Ok(PrimeSkillSelection::empty(true, false));
     }
 
-    // Inventory (bounded).
-    let owned_inventory;
-    let inventory: &WorkspaceInventory = match input.inventory {
-        Some(i) => i,
-        None => {
-            owned_inventory = build_inventory(input.workspace_root, InventoryLimits::default())
-                .unwrap_or_else(|_| WorkspaceInventory::default());
-            &owned_inventory
-        }
+    // ── Bounded inventory (blocking walk off the executor) ────────────────
+    let mut owned_inventory;
+    let default_inventory = WorkspaceInventory::default();
+    let inventory: &WorkspaceInventory = if let Some(i) = input.inventory {
+        i
+    } else if let Ok(owned) = build_inventory_guarded(input.workspace_root, &gate).await {
+        owned_inventory = owned;
+        &owned_inventory
+    } else {
+        // Walk failed / aborted: report incomplete, continue without evidence.
+        owned_inventory = default_inventory;
+        &owned_inventory
     };
+    let inventory_error = inventory.incomplete();
+    if gate.cancelled() {
+        return Ok(PrimeSkillSelection::empty(true, inventory_error));
+    }
 
-    // Deterministic ranking.
+    // ── Deterministic ranking ───────────────────────────────────────────────
     let ranked = skills::rank_skills(
         input.eligible_skills,
         input.prompt,
@@ -191,43 +319,46 @@ pub async fn run_prime_selection(
     );
 
     // Pinned name set for shortlist exclusion / ordering.
-    let pinned: HashSet<&str> = input.explicit_skill.into_iter().collect();
+    let pinned: HashSet<String> = input
+        .explicit_skill
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
 
-    // Optional semantic refinement.
+    // ── Optional semantic refinement ───────────────────────────────────────
     let mut order = ranked.clone();
+    let mut cancelled = false;
     if !input.prompt.trim().is_empty()
         && let Some(profile) = input.semantic_profile
         && let Some(service) = input.semantic_service
     {
-        if deadline_reached(started, input.config.deadline_ms) {
-            degradations.push(DegradationNotice::new(
-                DegradationKind::BudgetExhausted,
-                profile,
-                crate::retrieval::RetrievalStage::Orchestrate,
-                None,
-            ));
-        } else {
-            let outcome = skills::semantic_fill(
-                service,
-                profile,
-                input.prompt,
-                input.eligible_skills,
-                &order,
-                &pinned,
-                cancel.child_token(),
-            )
-            .await;
-            cancelled = outcome.cancelled;
-            degradations.extend(outcome.degradations);
-            order = outcome.order;
+        let hard = !input.config.degrade_on_error;
+        let outcome: SemanticFillOutcome = skills::semantic_fill(
+            service,
+            profile,
+            input.prompt,
+            input.eligible_skills,
+            &order,
+            &pinned,
+            gate.deadline.child_token(),
+            hard,
+        )
+        .await;
+
+        if outcome.cancelled {
+            return Ok(PrimeSkillSelection::empty(true, inventory_error));
         }
+        if outcome.hard_error.is_some() {
+            return Err(PrimeError::SemanticRetrievalFailed);
+        }
+        degradations.extend(outcome.degradations);
+        order = outcome.order;
     }
 
-    // Select within result budget.
-    let selected = skills::select_limit(&order, &input.config);
-    let over_result_limit = order.len() > input.config.max_results.max(1) as usize;
+    let target = input.config.max_results.max(1) as usize;
 
-    // Revalidate + load bodies.
+    // ── Revalidate against a fresh snapshot + bounded body load (with
+    //    backfill) ─────────────────────────────────────────────────────────
     let canonical_roots: Vec<PathBuf> = input
         .trusted_roots
         .iter()
@@ -239,75 +370,57 @@ pub async fn run_prime_selection(
         .collect();
     let batch = skills::load_and_revalidate(
         input.eligible_skills,
-        &selected,
+        &order,
+        target,
         input.refresh_skills,
         &canonical_roots,
+        &gate.deadline,
     )
     .await;
 
-    // Render within body/token/context budgets.
-    let budgets = render_budgets(&input.config, input.context_window);
-    let rendered = if batch.loaded.is_empty() {
+    if gate.cancelled() {
+        return Ok(PrimeSkillSelection::empty(true, inventory_error));
+    }
+
+    // ── Safe render (within body/token/context budgets) ───────────────────
+    let budgets = render_budgets(&input.config, input.context_window.map(|w| w as usize));
+    let rendered = if batch.loaded.is_empty() || gate.cancelled() {
         None
     } else {
-        Some(self::render::render_skills(&batch.loaded, &budgets))
+        Some(render_skills(&batch.loaded, &budgets))
     };
 
-    let selected_names = selected
-        .iter()
-        .map(|&i| input.eligible_skills[i].name.clone())
-        .collect();
-
+    let selected_names = batch.loaded.iter().map(|l| l.name.clone()).collect();
     let budget_state = PrimeBudgetState {
         selected_names,
         dropped: batch.drop_reasons.len(),
         drop_reasons: batch.drop_reasons,
-        over_result_limit,
+        over_result_limit: order.len() > target,
     };
 
-    PrimeSkillSelection {
+    Ok(PrimeSkillSelection {
         selected: batch.loaded,
         rendered,
         degradations,
         budget_state,
-        inventory_truncated: inventory.truncated,
+        inventory_truncated: inventory_error,
         snapshot_generation: None,
         cancelled,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn deadline_reached_logic() {
-        // 0 deadline degrades immediately (deterministic).
-        assert!(deadline_reached(Instant::now(), 0));
-        // A huge deadline is never reached for a fresh start.
-        assert!(!deadline_reached(Instant::now(), u64::MAX));
-    }
-
-    #[test]
-    fn render_budgets_respect_context_fraction_and_tokens() {
-        let mut cfg = SkillPrimeConfig::default();
-        cfg.max_tokens = 10_000;
-        cfg.max_context_fraction = 0.01;
-        // 100k-token window * 1% = 1000 tokens allowed < 10k.
-        let b = render_budgets(&cfg, Some(100_000));
-        assert_eq!(b.max_tokens, 1_000);
-        // Without window, config token budget wins.
-        let b2 = render_budgets(&cfg, None);
-        assert_eq!(b2.max_tokens, 10_000);
-    }
-
     #[tokio::test]
-    async fn api_is_selection_only_no_conversation_splice() {
+    async fn pre_cancelled_token_returns_empty_without_err() {
         let mut cfg = SkillPrimeConfig::default();
         cfg.enabled = true;
+        cfg.deadline_ms = 1000;
         let input = PrimeInput {
             eligible_skills: &[],
-            refresh_skills: &(|| Vec::new()),
+            refresh_skills: &(|| async { Vec::new() }),
             workspace_root: Path::new("."),
             trusted_roots: &[],
             prompt: "",
@@ -318,8 +431,112 @@ mod tests {
             semantic_service: None,
             inventory: None,
         };
-        let sel = run_prime_selection(&input, CancellationToken::new()).await;
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let sel = run_prime_selection(&input, cancelled).await.unwrap();
+        assert!(sel.cancelled, "cancelled flag must be set");
         assert!(sel.selected.is_empty());
         assert!(sel.rendered.is_none());
+    }
+
+    #[tokio::test]
+    async fn zero_deadline_aborts_with_cancelled_true() {
+        let mut cfg = SkillPrimeConfig::default();
+        cfg.enabled = true;
+        cfg.deadline_ms = 0;
+        let input = PrimeInput {
+            config: cfg,
+            ..PrimeInput::default()
+        };
+        let sel = run_prime_selection(&input, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(sel.cancelled);
+        assert!(sel.selected.is_empty());
+        assert!(sel.rendered.is_none());
+    }
+
+    #[test]
+    fn render_budgets_respect_context_fraction_zero_and_clamp() {
+        let mut cfg = SkillPrimeConfig::default();
+        cfg.max_tokens = 10_000;
+        cfg.max_context_fraction = 0.01;
+        // 100k-token window * 1% = 1000 tokens allowed < 10k.
+        let b = render_budgets(&cfg, Some(100_000));
+        assert_eq!(b.max_tokens, Some(1_000));
+        // Fraction 0.0 => a zero token allowance renders nothing (no sentinel
+        // ambiguity with "no cap").
+        cfg.max_context_fraction = 0.0;
+        let b = render_budgets(&cfg, Some(100_000));
+        assert_eq!(b.max_tokens, Some(0));
+        // Fraction > 1 is clamped to 1.0.
+        cfg.max_context_fraction = 3.0;
+        let b = render_budgets(&cfg, Some(10_000));
+        assert_eq!(b.max_tokens, Some(10_000));
+        // Zero window yields Some(0).
+        cfg.max_context_fraction = 0.5;
+        let b = render_budgets(&cfg, Some(0));
+        assert_eq!(b.max_tokens, Some(0));
+        // Without a window, the config's own token budget applies.
+        let b = render_budgets(&cfg, None);
+        assert_eq!(b.max_tokens, Some(10_000));
+
+        // Negative fraction (parsed negative) clamps to 0 → zero allowance.
+        cfg.max_context_fraction = -1.0;
+        let b = render_budgets(&cfg, Some(50_000));
+        assert_eq!(b.max_tokens, Some(0));
+    }
+
+    #[tokio::test]
+    async fn selected_names_reflect_loaded_skills_only() {
+        // A ranking that selects two skills where one disappears → the budget
+        // state lists only the loaded names (never pre-drop).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let sdir = root.join("skills").join("a");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(sdir.join("SKILL.md"), "# Skill A\n").unwrap();
+        let path_a = sdir.join("SKILL.md").to_string_lossy().to_string();
+
+        let bdir = root.join("skills").join("gone");
+        // no SKILL.md for b (unreadable at load).
+
+        let a = SkillInfo {
+            name: "a".into(),
+            path: path_a,
+            ..SkillInfo::default()
+        };
+        let b = SkillInfo {
+            name: "gone".into(),
+            path: bdir.join("SKILL.md").to_string_lossy().to_string(),
+            ..SkillInfo::default()
+        };
+        let skills = vec![a, b];
+        let snapshot = skills.clone();
+        let refresh = move || {
+            let s = snapshot.clone();
+            async move { s }
+        };
+        let mut cfg = SkillPrimeConfig::default();
+        cfg.enabled = true;
+        cfg.max_results = 5;
+        let input = PrimeInput {
+            eligible_skills: &skills,
+            refresh_skills: &refresh,
+            workspace_root: &root,
+            trusted_roots: &[root.clone()],
+            prompt: "",
+            explicit_skill: None,
+            config: cfg,
+            context_window: None,
+            semantic_profile: None,
+            semantic_service: None,
+            inventory: None,
+        };
+        let sel = run_prime_selection(&input, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(sel.budget_state.selected_names, vec!["a".to_string()]);
+        assert!(sel.budget_state.dropped >= 1);
     }
 }

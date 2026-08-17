@@ -123,6 +123,19 @@ pub struct SkillInfo {
 }
 
 impl SkillInfo {
+    /// Authoritative predicate for whether a skill is eligible for **native
+    /// model invocation**: it is enabled and not `disable_model_invocation`.
+    ///
+    /// This is the single source of truth for prime eligibility and the native
+    /// skill-tool gate. `user_invocable = false` does **not** affect this
+    /// predicate — such skills remain loadable by the prime path even though
+    /// they are not offered in the model-facing skill tool. Callers that need
+    /// the stricter "invoke through the skill tool" gate also check
+    /// `user_invocable`.
+    pub fn is_native_model_invocable(&self) -> bool {
+        self.enabled && !self.disable_model_invocation
+    }
+
     /// Dedup key. Plugin skills use `plugin:<name>` (name is the directory
     /// basename, so siblings never collide); others use the bare name.
     pub fn dedup_key(&self) -> String {

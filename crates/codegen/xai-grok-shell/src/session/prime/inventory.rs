@@ -2,40 +2,36 @@
 //!
 //! Roots a bounded scan at the workspace/git root and collects a normalized,
 //! deterministic set of relative paths. The walker mirrors the safe workspace
-//! walker semantics used by the fs surfaces ([`xai_grok_workspace::file_system`]):
-//! it honors ignore rules, never follows a symlink (and never descends through
-//! one that would escape the canonical root), and applies explicit
-//! entry/depth/aggregate-byte/wall-clock limits so a pathological tree cannot
-//! balloon memory or latency.
+//! walker semantics used by the fs surfaces: it honors ignore rules, never
+//! follows an escaping symlink, and applies explicit entry/depth/aggregate-byte/
+//! wall-clock limits so a pathological tree cannot balloon memory or latency.
+//!
+//! **Deterministic under limits:** directory entries are traversed in sorted
+//! file-name order, so the *set* of collected paths under truncation is
+//! deterministic across runs over the same tree (unlike filesystem readdir
+//! order). Hidden entries are included (so `.<grok>/skills/...` can contribute
+//! path evidence), and cross-device entries are excluded *and reported* via
+//! [`WorkspaceInventory::cross_device`] so an incomplete walk is never silent.
 //!
 //! PR19 (`/clear`, touched paths) is not wired here — this exposes a
-//! session-cache/invalidation seam ([`InventoryCache`]) that PR19 can drive
-//! without turning the inventory into a live per-turn walker.
+//! race-free session-cache/invalidation seam ([`InventoryCache`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Directory entry level below which the walker stops (0 = only files but no
-/// descent into subdirectories of the root). Mirrors the shell fs default so
-/// path scoring sees a shallow, cheap slice of the workspace.
+/// Directory entry level below which the walker stops.
 const DEFAULT_MAX_DEPTH: usize = 4;
+/// Cap on remembered dirty paths before the cache forces a full rebuild.
+const CACHE_DIRTY_CAP: usize = 4096;
 
 /// Bounded inventory limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InventoryLimits {
-    /// Max depth below the root (number of directory levels descended).
     pub max_depth: usize,
-    /// Hard cap on the number of collected entries. The walk stops (and the
-    /// result is marked `truncated`) once the cap is reached.
     pub max_entries: usize,
-    /// Hard cap on the aggregate byte size of collected file entries
-    /// (directories count as zero). Stops the walk early when exceeded and
-    /// marks the result `truncated`.
     pub max_aggregate_bytes: u64,
-    /// Wall-clock budget for the whole walk. When exceeded the walk stops and
-    /// the result is marked `truncated`.
     pub max_wall_ms: u64,
 }
 
@@ -53,9 +49,7 @@ impl Default for InventoryLimits {
 /// One collected inventory path (normalized, root-relative).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryEntry {
-    /// Normalized path relative to the root, `/`-separated, deterministic sort.
     pub rel: String,
-    /// File size in bytes (0 for directories).
     pub size_bytes: u64,
     pub is_dir: bool,
     pub is_symlink: bool,
@@ -66,31 +60,35 @@ pub struct InventoryEntry {
 pub struct WorkspaceInventory {
     pub root: PathBuf,
     pub entries: Vec<InventoryEntry>,
-    /// True when the walk hit an entry/depth/byte/wall-clock limit and did not
-    /// cover the whole tree.
+    /// Precomputed `(rel_lower, last_segment_lower)` for cheap scoring (no
+    /// per-(skill, entry) allocation).
+    pub lowered_rels: Vec<(String, String)>,
+    /// True when the walk hit an entry/depth/byte/wall-clock limit.
     pub truncated: bool,
-    /// Monotonic epoch this inventory was built at (see [`InventoryCache`]).
+    /// True when entries were skipped because they sit on another device.
+    pub cross_device: bool,
     pub epoch: u64,
 }
 
 impl WorkspaceInventory {
-    /// All relative paths, in deterministic order.
     pub fn paths(&self) -> Vec<&str> {
         self.entries.iter().map(|e| e.rel.as_str()).collect()
+    }
+
+    /// True when the inventory does not fully cover the tree (limits, other
+    /// device, or an error). Path evidence is then treated as incomplete.
+    pub fn incomplete(&self) -> bool {
+        self.truncated || self.cross_device
     }
 }
 
 /// Test deadline guard; kept out of the hot walker so the limit is decidable.
-fn wall_clock_exceeded(
-    started: std::time::Instant,
-    now: std::time::Instant,
-    max: Duration,
-) -> bool {
+fn wall_clock_exceeded(started: Instant, now: Instant, max: Duration) -> bool {
     now.saturating_duration_since(started) >= max && !max.is_zero()
 }
 
 /// Whether a directory entry is a symlink whose canonical target leaves
-/// `canonical_root` (confinement fails closed for unverifiable/dangling links).
+/// `canonical_root`. Only symlinks are canonicalized (never normal entries).
 fn symlink_stays_in_root(path: &Path, canonical_root: &Path) -> bool {
     let is_symlink = std::fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
@@ -103,38 +101,71 @@ fn symlink_stays_in_root(path: &Path, canonical_root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Walk `root` per `limits`, returning (`entries`, `truncated`).
+/// Device id of `path`, if determinable (`None` on non-unix or errors).
+fn device_of(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Walk `root` per `limits`, returning a deterministic, bounded inventory.
 ///
-/// Entries are visited depth-first by the walker and then returned in a
-/// deterministic order (directories first, then case-insensitive by relative
-/// path, exact path as a tiebreak). Only normalized root-relative paths are
-/// produced; symlink entries that would escape the canonical root are excluded
-/// both as entries and as descent points. Unreadable entries are skipped.
+/// Directory entries are visited in sorted file-name order (deterministic set
+/// under truncation). Escaping symlinks are excluded and not descended; cross
+/// -device entries are excluded and flagged [`cross_device`]. Unreadable entries
+/// are skipped.
 pub fn build_inventory(root: &Path, limits: InventoryLimits) -> Result<WorkspaceInventory, String> {
     let canonical_root = dunce::canonicalize(root).map_err(|e| format!("inventory root: {e}"))?;
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let budget = Duration::from_millis(limits.max_wall_ms);
+    let root_dev = device_of(&canonical_root);
+    let cross_device = std::sync::Arc::new(AtomicBool::new(false));
 
     let mut builder = ignore::WalkBuilder::new(&canonical_root);
     let confine = canonical_root.clone();
+    let cross = cross_device.clone();
     builder
         .max_depth(Some(limits.max_depth))
         .follow_links(false)
-        .same_file_system(true)
+        // Do not rely on the walker to silently drop other mounts: we report it.
+        .same_file_system(false)
         .standard_filters(true)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .ignore(true)
         .require_git(false)
-        .filter_entry(move |entry| symlink_stays_in_root(entry.path(), &confine));
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .hidden(false) // include dot-dirs (e.g. `.grok/skills`)
+        .filter_entry(move |entry| {
+            if !symlink_stays_in_root(entry.path(), &confine) {
+                return false;
+            }
+            if let Some(dev) = root_dev {
+                #[cfg(unix)]
+                if let Some(entry_dev) = device_of(entry.path())
+                    && entry_dev != dev
+                {
+                    cross.store(true, Ordering::Relaxed);
+                    return false;
+                }
+            }
+            true
+        });
 
     let mut entries: Vec<InventoryEntry> = Vec::new();
     let mut truncated = false;
     let mut aggregate_bytes: u64 = 0;
 
     for dent in builder.build() {
-        if wall_clock_exceeded(started, std::time::Instant::now(), budget) {
+        if wall_clock_exceeded(started, Instant::now(), budget) {
             truncated = true;
             break;
         }
@@ -146,9 +177,7 @@ pub fn build_inventory(root: &Path, limits: InventoryLimits) -> Result<Workspace
             truncated = true;
             break;
         }
-
-        let abs = entry.path();
-        let Ok(rel) = abs.strip_prefix(&canonical_root) else {
+        let Ok(rel) = entry.path().strip_prefix(&canonical_root) else {
             continue;
         };
         let rel = normalize_rel(rel);
@@ -156,17 +185,12 @@ pub fn build_inventory(root: &Path, limits: InventoryLimits) -> Result<Workspace
             continue;
         }
 
-        let symlink_meta = std::fs::symlink_metadata(abs).ok();
-        let is_symlink = symlink_meta
-            .as_ref()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        let is_dir = std::fs::metadata(abs).map(|m| m.is_dir()).unwrap_or(false);
-        let size_bytes = if is_dir {
-            0
-        } else {
-            std::fs::metadata(abs).map(|m| m.len()).unwrap_or(0)
-        };
+        // One lstat per entry; no redundant `metadata` calls for normal files.
+        let smeta = std::fs::symlink_metadata(entry.path());
+        let Ok(smeta) = smeta else { continue };
+        let is_symlink = smeta.file_type().is_symlink();
+        let is_dir = smeta.is_dir();
+        let size_bytes = if smeta.is_file() { smeta.len() } else { 0 };
 
         if !is_dir {
             if aggregate_bytes.saturating_add(size_bytes) > limits.max_aggregate_bytes {
@@ -184,8 +208,7 @@ pub fn build_inventory(root: &Path, limits: InventoryLimits) -> Result<Workspace
         });
     }
 
-    // Deterministic order: directories first, then case-insensitive by rel,
-    // then exact rel (stable tiebreak for distinct-casing siblings).
+    // Deterministic order: dirs first, then case-insensitive, then exact.
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
@@ -193,41 +216,59 @@ pub fn build_inventory(root: &Path, limits: InventoryLimits) -> Result<Workspace
             .then_with(|| a.rel.cmp(&b.rel))
     });
 
+    let lowered_rels = entries
+        .iter()
+        .map(|e| {
+            let seg = e.rel.rsplit('/').next().unwrap_or("").to_lowercase();
+            (e.rel.to_lowercase(), seg)
+        })
+        .collect();
+
     Ok(WorkspaceInventory {
         root: canonical_root,
         entries,
+        lowered_rels,
         truncated,
+        cross_device: cross_device.load(Ordering::Relaxed),
         epoch: 0,
     })
 }
 
-/// Empty relative-path slots (`.`/`..`/empty) normalize away; otherwise join
-/// with `/` and collapse nothing (walk yields clean relative paths).
+/// Normalize a relative path to `/`-separated, with `.`/`..`/empty removed.
 fn normalize_rel(rel: &Path) -> String {
     let mut parts = Vec::new();
     for comp in rel.components() {
-        use std::path::Component;
         match comp {
-            Component::Normal(c) => parts.push(c.to_string_lossy().into_owned()),
-            Component::CurDir
-            | Component::ParentDir
-            | Component::RootDir
-            | Component::Prefix(_) => continue,
+            std::path::Component::Normal(c) => parts.push(c.to_string_lossy().into_owned()),
+            _ => continue,
         }
     }
     parts.join("/")
 }
 
-/// Session-cache/invalidation seam for PR19.
+/// Session-cache/invalidation seam for PR19 (race-free).
 ///
-/// This is intentionally a seam: it tracks an epoch and a set of dirty (touched)
-/// paths so PR19's `/__clear` and file-touch notifications can invalidate a
-/// cached inventory without rebuilding every turn. It performs no I/O and does
-/// not, on its own, change live turn behavior.
-#[derive(Debug, Default)]
+/// A single mutex guards the epoch and the (path, marked-at-epoch) dirty list, so
+/// `invalidate` / `mark_touched` / `clear_dirty_after` are atomic with respect to
+/// one another and never lose a mark across an epoch bump. The dirty list is
+/// capped; when it overflows the epoch is bumped to force a full rebuild.
+#[derive(Debug)]
 pub struct InventoryCache {
-    epoch: AtomicU64,
-    dirty: std::sync::Mutex<HashSet<PathBuf>>,
+    state: std::sync::Mutex<CacheState>,
+}
+
+#[derive(Debug, Default)]
+struct CacheState {
+    epoch: u64,
+    dirty: Vec<(PathBuf, u64)>,
+}
+
+impl Default for InventoryCache {
+    fn default() -> Self {
+        Self {
+            state: std::sync::Mutex::new(CacheState::default()),
+        }
+    }
 }
 
 impl InventoryCache {
@@ -235,41 +276,61 @@ impl InventoryCache {
         Self::default()
     }
 
-    /// Current cache epoch. Invalidated on every clear.
     pub fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Relaxed)
+        self.state.lock().unwrap().epoch
     }
 
-    /// Invalidate the whole inventory (`/clear`): bumps the epoch.
+    /// Invalidate the whole inventory (`/clear`): bumps the epoch and drops
+    /// every dirty mark (all were recorded under an older epoch).
     pub fn invalidate(&self) -> u64 {
-        let e = self.epoch.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-        self.dirty.lock().unwrap().clear();
-        e
+        let mut s = self.state.lock().unwrap();
+        s.epoch = s.epoch.saturating_add(1);
+        s.dirty.clear();
+        s.epoch
     }
 
-    /// Mark `path` as touched (a tool touched it). Next build at a new epoch
-    /// re-scans. Returns whether the path was already dirty.
+    /// Mark `path` as touched at the current epoch. Returns true if the cache
+    /// was forced to rebuild (dirty set overflow). Never lost across a concurrent
+    /// `invalidate`: `invalidate` bumps first under the same lock so any mark
+    /// below carries the new epoch.
     pub fn mark_touched(&self, path: &Path) -> bool {
-        let mut d = self.dirty.lock().unwrap();
-        d.insert(path.to_path_buf())
+        let mut s = self.state.lock().unwrap();
+        if s.dirty.len() >= CACHE_DIRTY_CAP {
+            // Bound memory: force a full rebuild.
+            s.epoch = s.epoch.saturating_add(1);
+            s.dirty.clear();
+            let e = s.epoch;
+            s.dirty.push((path.to_path_buf(), e));
+            return true;
+        }
+        s.dirty.retain(|(p, _)| p != path);
+        let e = s.epoch;
+        s.dirty.push((path.to_path_buf(), e));
+        false
     }
 
     /// Paths marked dirty since the last clear.
     pub fn dirty(&self) -> Vec<PathBuf> {
-        self.dirty.lock().unwrap().iter().cloned().collect()
+        self.state
+            .lock()
+            .unwrap()
+            .dirty
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
+    /// Remove dirty marks recorded at or before `epoch` (they were consumed).
+    /// Marks added after `epoch` are retained, so a late mark is never lost.
     pub fn clear_dirty_after(&self, epoch: u64) {
-        if epoch != self.epoch() {
-            self.dirty.lock().unwrap().clear();
-        }
+        let mut s = self.state.lock().unwrap();
+        s.dirty.retain(|(_, marked)| *marked > epoch);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn write_tree(root: &Path, files: &[&str]) {
         for f in files {
@@ -281,8 +342,12 @@ mod tests {
         }
     }
 
+    fn build_default(root: &Path) -> WorkspaceInventory {
+        build_inventory(root, InventoryLimits::default()).unwrap()
+    }
+
     #[test]
-    fn inventory_respects_gitignore() {
+    fn inventory_respects_gitignore_but_includes_dot_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(tmp.path()).unwrap();
         std::fs::write(root.join(".gitignore"), "ignored.md\nnode_modules/\n").unwrap();
@@ -295,11 +360,17 @@ mod tests {
                 "node_modules/x.js",
             ],
         );
+        // A skill dir (dot-dir) must appear now that hidden(false) is set.
+        write_tree(&root, &[".grok/skills/deploy/SKILL.md"]);
 
-        let inv = build_inventory(&root, InventoryLimits::default()).unwrap();
+        let inv = build_default(&root);
         let paths = inv.paths();
         assert!(paths.iter().any(|p| *p == "src/a.rs"));
         assert!(paths.iter().any(|p| *p == "docs/readme.md"));
+        assert!(
+            paths.iter().any(|p| p.starts_with(".grok/skills/deploy")),
+            "dot-dir missed"
+        );
         assert!(
             !paths.iter().any(|p| *p == "ignored.md"),
             "gitignored leaked"
@@ -316,14 +387,42 @@ mod tests {
         let root = dunce::canonicalize(tmp.path()).unwrap();
         write_tree(&root, &["b.rs", "a.rs", "C_DIR/x", "a_dir/y"]);
 
-        let a = build_inventory(&root, InventoryLimits::default()).unwrap();
-        let b = build_inventory(&root, InventoryLimits::default()).unwrap();
+        let a = build_default(&root);
+        let b = build_default(&root);
         assert_eq!(a.paths(), b.paths());
         let rels = a.paths();
-        // Case-insensitive, stable (a_dir before C_DIR).
         let a_idx = rels.iter().position(|p| *p == "a_dir/y").unwrap();
         let c_idx = rels.iter().position(|p| *p == "C_DIR/x").unwrap();
         assert!(a_idx < c_idx);
+    }
+
+    #[test]
+    fn inventory_deterministic_set_under_tight_entry_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        write_tree(&root, &["z.rs", "a.rs", "m.rs", "b.rs"]);
+        let a = build_inventory(
+            &root,
+            InventoryLimits {
+                max_entries: 2,
+                ..InventoryLimits::default()
+            },
+        )
+        .unwrap();
+        let b = build_inventory(
+            &root,
+            InventoryLimits {
+                max_entries: 2,
+                ..InventoryLimits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(a.entries, b.entries, "truncated set must be deterministic");
+        assert!(
+            a.truncated,
+            "truncated flag must be true under a tight entry limit"
+        );
+        assert_eq!(a.entries.len(), 2);
     }
 
     #[test]
@@ -332,11 +431,10 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(tmp.path()).unwrap();
         std::fs::write(outside.path().join("secret.txt"), "outside").unwrap();
-        // Symlink inside root that points outside the root.
         std::os::unix::fs::symlink(outside.path(), root.join("escape")).unwrap();
         std::fs::write(root.join("ok.txt"), "inside").unwrap();
 
-        let inv = build_inventory(&root, InventoryLimits::default()).unwrap();
+        let inv = build_default(&root);
         assert!(
             !inv.entries
                 .iter()
@@ -347,42 +445,13 @@ mod tests {
     }
 
     #[test]
-    fn inventory_entry_and_depth_limits_set_truncated() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = dunce::canonicalize(tmp.path()).unwrap();
-        write_tree(
-            &root,
-            &[
-                "a.rs",
-                "b.rs",
-                "c.rs",
-                "sub/d.rs",
-                "sub/e.rs",
-                "deep/x/f.rs",
-            ],
-        );
-        let tight = build_inventory(
-            &root,
-            InventoryLimits {
-                max_entries: 2,
-                max_depth: 2,
-                ..InventoryLimits::default()
-            },
-        )
-        .unwrap();
-        assert!(tight.truncated || tight.entries.len() <= 2);
-        assert!(tight.entries.len() <= 2);
-    }
-
-    #[test]
     fn inventory_wall_clock_guard_deterministic() {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         assert!(!wall_clock_exceeded(
             start,
             start,
             Duration::from_millis(1000)
         ));
-        // Simulated past deadline.
         let past = start + Duration::from_millis(2000);
         assert!(wall_clock_exceeded(
             start,
@@ -394,13 +463,42 @@ mod tests {
     }
 
     #[test]
-    fn inventory_cache_epoch_and_dirty_seam() {
+    fn inventory_cache_no_lost_marks_across_invalidate() {
         let cache = InventoryCache::new();
         let e0 = cache.epoch();
-        cache.mark_touched(Path::new("src/main.rs"));
+        cache.mark_touched(Path::new("src/a.rs"));
         assert_eq!(cache.dirty().len(), 1);
+        // invalidate bumps the epoch first (under the same lock), so no mark is
+        // lost and the dirty set is cleared.
         let e1 = cache.invalidate();
         assert!(e1 > e0);
-        assert!(cache.dirty().is_empty(), "clear drops dirty");
+        assert!(cache.dirty().is_empty());
+
+        // A mark after the invalidate records the new epoch and survives a
+        // clear_dirty_after of the *old* epoch without being lost.
+        cache.mark_touched(Path::new("src/b.rs"));
+        cache.clear_dirty_after(e0);
+        assert_eq!(cache.dirty(), vec![PathBuf::from("src/b.rs")]);
+        // clear_dirty_after of its own epoch consumes it.
+        cache.clear_dirty_after(cache.epoch());
+        assert!(cache.dirty().is_empty());
+    }
+
+    #[test]
+    fn inventory_cache_dirty_cap_forces_rebuild_and_bounds_memory() {
+        let cache = InventoryCache::new();
+        // Blow past the cap.
+        let mut forced = false;
+        for i in 0..(CACHE_DIRTY_CAP as u64 + 100) {
+            if cache.mark_touched(&PathBuf::from(format!("/p/{i}"))) {
+                forced = true;
+                break;
+            }
+        }
+        assert!(forced, "overflow must force a rebuild");
+        assert!(
+            cache.dirty().len() <= CACHE_DIRTY_CAP,
+            "dirty set must stay bounded"
+        );
     }
 }
