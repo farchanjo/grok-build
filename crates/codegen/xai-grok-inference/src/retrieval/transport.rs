@@ -221,7 +221,9 @@ impl RetrievalTransport {
                 .await
             {
                 Ok(v) => return Ok(v),
-                Err(e) if e.is_retryable() && attempts <= self.policy.max_retries + 1 => {
+                // Total attempts = 1 + max_retries. Retry only while attempts
+                // already spent is still strictly less than that budget.
+                Err(e) if e.is_retryable() && attempts < 1 + self.policy.max_retries => {
                     let sleep_ms = match &e {
                         RetrievalError::RateLimited {
                             retry_after_ms: Some(ms),
@@ -267,6 +269,11 @@ impl RetrievalTransport {
                 return Err(RetrievalError::Cancelled);
             }
             let mut builder = self.http.post(current.clone());
+            // Extra headers first, then force Content-Type/Accept/auth/org/project
+            // so extras cannot override typed owners.
+            for (k, v) in &self.extra_headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
             builder = apply_auth(builder, &self.auth_scheme, credential)?;
             builder = builder
                 .header("Content-Type", "application/json")
@@ -278,9 +285,6 @@ impl RetrievalTransport {
             }
             if let Some(proj) = &self.project {
                 builder = builder.header("OpenAI-Project", proj.as_str());
-            }
-            for (k, v) in &self.extra_headers {
-                builder = builder.header(k.as_str(), v.as_str());
             }
 
             let response = tokio::select! {
@@ -331,18 +335,13 @@ impl RetrievalTransport {
             let retry_after_ms = parse_retry_after(response.headers());
 
             if status.as_u16() == 429 {
+                // Drain a small error preview only; do not buffer the full body.
+                let _ =
+                    read_body_bounded(response, self.policy.max_error_preview_chars, cancel).await;
                 return Err(RetrievalError::RateLimited { retry_after_ms });
             }
 
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| RetrievalError::Transport(e.to_string()))?;
-            if bytes.len() > self.policy.max_response_bytes {
-                return Err(RetrievalError::OversizedResponse {
-                    limit_bytes: self.policy.max_response_bytes,
-                });
-            }
+            let bytes = read_body_bounded(response, self.policy.max_response_bytes, cancel).await?;
 
             if !status.is_success() {
                 let preview = redact_error_preview(
@@ -368,6 +367,36 @@ impl RetrievalTransport {
             return Ok(value);
         }
     }
+}
+
+/// Stream response body chunks until complete or hard byte cap exceeded.
+async fn read_body_bounded(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    cancel: &CancellationToken,
+) -> RetrievalResult<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(RetrievalError::Cancelled);
+        }
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => return Err(RetrievalError::Cancelled),
+            c = response.chunk() => c.map_err(|e| RetrievalError::Transport(e.to_string()))?,
+        };
+        match chunk {
+            Some(bytes) => {
+                if out.len().saturating_add(bytes.len()) > max_bytes {
+                    return Err(RetrievalError::OversizedResponse {
+                        limit_bytes: max_bytes,
+                    });
+                }
+                out.extend_from_slice(&bytes);
+            }
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 fn apply_auth(
@@ -433,7 +462,16 @@ fn validate_header_name(name: &str) -> RetrievalResult<()> {
 fn validate_extra_headers(headers: &[(String, String)]) -> RetrievalResult<()> {
     for (k, v) in headers {
         let lower = k.to_ascii_lowercase();
-        if lower == "authorization" || lower == "cookie" || lower == "proxy-authorization" {
+        // Auth / cookie / first-party / typed org-project / content negotiation
+        // owners must not be set via free-form extra_headers.
+        if lower == "authorization"
+            || lower == "cookie"
+            || lower == "proxy-authorization"
+            || lower == "content-type"
+            || lower == "accept"
+            || lower == "openai-organization"
+            || lower == "openai-project"
+        {
             return Err(RetrievalError::InvalidRequest(format!(
                 "refusing to set restricted header `{k}` via extra_headers"
             )));
@@ -443,9 +481,9 @@ fn validate_extra_headers(headers: &[(String, String)]) -> RetrievalResult<()> {
                 "refusing first-party header `{k}` on retrieval client"
             )));
         }
-        if v.chars().any(|c| c == '\r' || c == '\n') {
+        if v.chars().any(|c| c == '\r' || c == '\n' || c.is_control()) {
             return Err(RetrievalError::InvalidRequest(format!(
-                "header `{k}` contains invalid newline"
+                "header `{k}` contains invalid control character"
             )));
         }
     }
@@ -513,6 +551,16 @@ mod tests {
             .push(("Authorization".into(), "Bearer x".into()));
         let err = RetrievalTransport::from_route(&route).unwrap_err();
         assert!(matches!(err, RetrievalError::InvalidRequest(_)));
+        let mut route2 = sample_route(RetrievalAuthScheme::Bearer);
+        route2
+            .extra_headers
+            .push(("OpenAI-Organization".into(), "org".into()));
+        assert!(RetrievalTransport::from_route(&route2).is_err());
+        let mut route3 = sample_route(RetrievalAuthScheme::Bearer);
+        route3
+            .extra_headers
+            .push(("Content-Type".into(), "text/plain".into()));
+        assert!(RetrievalTransport::from_route(&route3).is_err());
     }
 
     #[test]

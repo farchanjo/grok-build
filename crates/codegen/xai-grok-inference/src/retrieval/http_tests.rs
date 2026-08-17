@@ -554,3 +554,371 @@ fn transport_join_relative_endpoint_attacks() {
     assert!(t.join_endpoint("../x").is_err());
     assert!(t.join_endpoint("a?q=1").is_err());
 }
+
+async fn embed_once(
+    base: &str,
+    auth: RetrievalAuthScheme,
+    cred: RetrievalCredential,
+    max_retries: u32,
+) -> Result<(), RetrievalError> {
+    let mut route = route_for(base, auth);
+    route.max_retries = max_retries;
+    let client = OpenaiCompatibleEmbeddings::new(route).unwrap();
+    client
+        .embed(
+            EmbeddingRequest {
+                model: "m".into(),
+                inputs: vec!["x".into()],
+                dimensions: Some(1),
+                encoding: EmbeddingEncodingFormat::Float,
+                endpoint: "/embeddings".into(),
+            },
+            &cred,
+            CancellationToken::new(),
+        )
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test]
+async fn no_retry_on_401_403_422() {
+    for status in [401u16, 403, 422] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        let app = Router::new().route(
+            "/v1/embeddings",
+            post(move || {
+                let hits = hits2.clone();
+                let status = StatusCode::from_u16(status).unwrap();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (status, "nope").into_response()
+                }
+            }),
+        );
+        let (addr, _h) = spawn_router(app).await;
+        let base = format!("http://{addr}/v1");
+        let err = embed_once(
+            &base,
+            RetrievalAuthScheme::None,
+            RetrievalCredential::none(),
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RetrievalError::Http { status: s, .. } if s == status));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "status {status} retried");
+    }
+}
+
+#[tokio::test]
+async fn retry_503_then_success() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                axum::Json(json!({"data":[{"index":0,"embedding":[1.0]}]})).into_response()
+            }
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/v1");
+    embed_once(
+        &base,
+        RetrievalAuthScheme::None,
+        RetrievalCredential::none(),
+        2,
+    )
+    .await
+    .unwrap();
+    assert!(hits.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn max_retries_zero_is_single_attempt() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/v1");
+    let err = embed_once(
+        &base,
+        RetrievalAuthScheme::None,
+        RetrievalCredential::none(),
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, RetrievalError::Http { status: 503, .. }));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn x_api_key_wire_header() {
+    let spy = Spy::default();
+    let spy2 = spy.clone();
+    let app = Router::new()
+        .route(
+            "/v1/embeddings",
+            post(move |State(s): State<Spy>, req: Request<Body>| {
+                let s = s.clone();
+                async move {
+                    let headers = req.headers().clone();
+                    s.requests.lock().await.push(Captured {
+                        authorization: headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_owned),
+                        custom_auth: headers
+                            .get("x-api-key")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_owned),
+                        body: String::new(),
+                    });
+                    axum::Json(json!({"data":[{"index":0,"embedding":[1.0]}]}))
+                }
+            }),
+        )
+        .with_state(spy2);
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::XApiKey);
+    route.extra_headers.clear();
+    let client = OpenaiCompatibleEmbeddings::new(route).unwrap();
+    client
+        .embed(
+            EmbeddingRequest {
+                model: "m".into(),
+                inputs: vec!["x".into()],
+                dimensions: None,
+                encoding: EmbeddingEncodingFormat::Float,
+                endpoint: "/embeddings".into(),
+            },
+            &RetrievalCredential::new(Some("xk-secret".into())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let caps = spy.requests.lock().await;
+    assert_eq!(caps[0].custom_auth.as_deref(), Some("xk-secret"));
+    assert!(caps[0].authorization.is_none());
+}
+
+#[tokio::test]
+async fn same_origin_redirect_success() {
+    let app = Router::new()
+        .route(
+            "/v1/embeddings",
+            post(|| async {
+                Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header("Location", "/v1/embeddings-final")
+                    .body(Body::empty())
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/v1/embeddings-final",
+            post(|| async { axum::Json(json!({"data":[{"index":0,"embedding":[1.0]}]})) }),
+        );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/v1");
+    embed_once(
+        &base,
+        RetrievalAuthScheme::None,
+        RetrievalCredential::none(),
+        0,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn oversized_response_aborts() {
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post(|| async {
+            // Body larger than route max_response_bytes (set low below).
+            let big = "x".repeat(4096);
+            (StatusCode::OK, big).into_response()
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::None);
+    route.max_response_bytes = 64;
+    let client = OpenaiCompatibleEmbeddings::new(route).unwrap();
+    let err = client
+        .embed(
+            EmbeddingRequest {
+                model: "m".into(),
+                inputs: vec!["x".into()],
+                dimensions: None,
+                encoding: EmbeddingEncodingFormat::Float,
+                endpoint: "/embeddings".into(),
+            },
+            &RetrievalCredential::none(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RetrievalError::OversizedResponse { .. }));
+}
+
+#[tokio::test]
+async fn total_deadline_exceeded_fast() {
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post(|| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            axum::Json(json!({"data":[{"index":0,"embedding":[1.0]}]}))
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::None);
+    route.total_deadline = Duration::from_millis(80);
+    route.request_timeout = Duration::from_secs(30);
+    route.max_retries = 0;
+    let client = OpenaiCompatibleEmbeddings::new(route).unwrap();
+    let err = client
+        .embed(
+            EmbeddingRequest {
+                model: "m".into(),
+                inputs: vec!["x".into()],
+                dimensions: None,
+                encoding: EmbeddingEncodingFormat::Float,
+                endpoint: "/embeddings".into(),
+            },
+            &RetrievalCredential::none(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    // May surface as Timeout (per-attempt clamp) or DeadlineExceeded.
+    assert!(
+        matches!(
+            err,
+            RetrievalError::DeadlineExceeded | RetrievalError::Timeout | RetrievalError::Cancelled
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn openrouter_rerank_429_then_success() {
+    use super::openrouter_rerank::OpenRouterRerankAdapter;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/api/v1/rerank",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return Response::builder()
+                        .status(StatusCode::TOO_MANY_REQUESTS)
+                        .header("Retry-After", "0")
+                        .body(Body::from("rate"))
+                        .unwrap();
+                }
+                axum::Json(json!({
+                    "model": "rr",
+                    "results": [{
+                        "index": 0,
+                        "relevance_score": 0.5,
+                        "document": {"text": "a"}
+                    }]
+                }))
+                .into_response()
+            }
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    // OpenRouter client joins paths onto base; use openrouter-like base.
+    let base = format!("http://{addr}/api/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::Bearer);
+    route.api_surface = "openrouter_native".into();
+    route.provider_kind = "openrouter".into();
+    route.purpose = RetrievalPurpose::Rerank;
+    route.max_retries = 2;
+    route.extra_headers.clear();
+    let client = OpenRouterRerankAdapter::new(route).unwrap();
+    let res = client
+        .rerank(
+            RerankRequest {
+                model: "rr".into(),
+                query: "q".into(),
+                documents: vec!["a".into()],
+                top_n: Some(1),
+                endpoint: "/rerank".into(),
+                return_documents: false,
+            },
+            &RetrievalCredential::new(Some("or-key".into())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.hits[0].index, 0);
+    assert!(hits.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn openrouter_rerank_401_no_retry() {
+    use super::openrouter_rerank::OpenRouterRerankAdapter;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/api/v1/rerank",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::UNAUTHORIZED.into_response()
+            }
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/api/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::Bearer);
+    route.api_surface = "openrouter_native".into();
+    route.provider_kind = "openrouter".into();
+    route.purpose = RetrievalPurpose::Rerank;
+    route.max_retries = 3;
+    route.extra_headers.clear();
+    let client = OpenRouterRerankAdapter::new(route).unwrap();
+    let err = client
+        .rerank(
+            RerankRequest {
+                model: "rr".into(),
+                query: "q".into(),
+                documents: vec!["a".into()],
+                top_n: None,
+                endpoint: "/rerank".into(),
+                return_documents: false,
+            },
+            &RetrievalCredential::new(Some("or-key".into())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RetrievalError::Http { status: 401, .. }));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}

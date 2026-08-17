@@ -25,13 +25,12 @@ use xai_grok_inference::{
 };
 
 use super::id::{BuiltInProviderId, ProviderId};
-use super::instance::{ApiSurface, CredentialRoute, ProviderKind};
+use super::instance::{ApiSurface, CredentialRoute, ProviderInstanceDescriptor, ProviderKind};
 use super::lifecycle::{CapabilityMode, ProviderAuthScheme, ProviderMetadata};
-use super::lifecycle_state::load_lifecycle_state;
-use super::route_guard::{RouteGuardRequest, assert_route_usable};
+use super::lifecycle_state::{ProviderLifecycleState, load_lifecycle_state};
+use super::route_guard::{RouteGuardError, RouteGuardRequest, assert_route_usable};
 use super::runtime_cache::load_runtime;
 use super::secrets::{application_key_scope, read_provider_secret};
-use super::service::ProviderService;
 use crate::auth::{OPENAI_API_KEY_SCOPE, OPENROUTER_API_KEY_SCOPE, read_provider_api_key};
 use crate::retrieval_config::validate::ProviderCapabilityView;
 
@@ -53,6 +52,13 @@ impl RetrievalResolveCounters {
 }
 
 /// Inputs controlling optional provenance pins for route-guard.
+///
+/// Generation pin semantics (retrieval-strict, independent of soft chat guard):
+/// - `session_registry_generation: None` — fresh resolve; live generation is
+///   returned/pinned on the result and is **not** treated as a stale bound.
+/// - `session_registry_generation: Some(g)` — bound route; any mismatch with
+///   live generation fails closed on the **next** request (regardless of
+///   `is_retry` or incarnation pin).
 #[derive(Debug, Clone, Default)]
 pub struct RetrievalResolveOptions<'a> {
     pub provenance_incarnation: Option<&'a str>,
@@ -220,21 +226,33 @@ fn resolve_inner(
         ));
     }
 
-    let (service, _lifecycle, generation) =
+    let (service, lifecycle, generation) =
         load_runtime(home).map_err(RetrievalRuntimeError::Lifecycle)?;
 
-    // Fail closed on unreadable lifecycle for route guard (already inside
-    // assert_route_usable); also pre-check tombstone via capability view.
-    let _ =
-        load_lifecycle_state(home).map_err(|e| RetrievalRuntimeError::Lifecycle(e.to_string()))?;
+    // Retrieval-strict generation: pinned Some(stale) always fails on mismatch.
+    // None means fresh resolve — pin live generation on the result only.
+    if let Some(expected) = opts.session_registry_generation {
+        if generation != 0 && expected != 0 && expected != generation {
+            return Err(RetrievalRuntimeError::RouteGuard(
+                RouteGuardError::GenerationReplaced {
+                    id: provider_id.to_owned(),
+                    expected,
+                    live: generation,
+                }
+                .to_string(),
+            ));
+        }
+    }
 
+    // Incarnation/tombstone/disabled/missing via shared guard. Do **not** inject
+    // live generation when caller omitted a pin (fresh resolve).
     assert_route_usable(
         home,
         &service,
         &RouteGuardRequest {
             provider_instance_id: provider_id,
             provenance_incarnation: opts.provenance_incarnation,
-            session_registry_generation: opts.session_registry_generation.or(Some(generation)),
+            session_registry_generation: opts.session_registry_generation,
             is_retry: opts.is_retry,
         },
     )
@@ -256,11 +274,21 @@ fn resolve_inner(
         }
     })?;
 
+    // Auth scheme is needed to interpret CredentialRoute::None (vault-backed
+    // vs intentional no-auth) before credential resolution.
+    let auth_scheme = map_auth_scheme(meta, desc.auth_scheme.as_deref())?;
+    let (surface, cred_route) = select_retrieval_route(desc, provider_id, &auth_scheme)?;
+
     // --- Capability + surface BEFORE credentials ---
     if let Some(c) = counters {
         c.capability_checks.fetch_add(1, Ordering::SeqCst);
     }
-    let cap_view = capability_view_from_meta(meta, desc.enabled);
+    let cap_view = capability_view_from_meta(meta, desc, &lifecycle);
+    if cap_view.tombstoned {
+        return Err(RetrievalRuntimeError::RouteGuard(format!(
+            "provider `{provider_id}` is tombstoned"
+        )));
+    }
     match purpose {
         RetrievalPurpose::Embeddings => {
             if !cap_view.can_embed() {
@@ -270,7 +298,7 @@ fn resolve_inner(
                 });
             }
             let protocol = emb_protocol.unwrap_or(EmbeddingProtocol::OpenaiCompatible);
-            validate_embedding_surface(desc.kind, primary_surface(desc), protocol, provider_id)?;
+            validate_embedding_surface(desc.kind, surface, protocol, provider_id)?;
         }
         RetrievalPurpose::Rerank => {
             if !cap_view.can_rerank() {
@@ -280,11 +308,9 @@ fn resolve_inner(
                 });
             }
             let protocol = rr_protocol.unwrap_or(RerankerProtocol::OpenaiCompatible);
-            validate_rerank_surface(desc.kind, primary_surface(desc), protocol, provider_id)?;
+            validate_rerank_surface(desc.kind, surface, protocol, provider_id)?;
         }
     }
-
-    let auth_scheme = map_auth_scheme(meta, desc.auth_scheme.as_deref())?;
     let base_url = meta
         .base_url
         .clone()
@@ -295,18 +321,9 @@ fn resolve_inner(
             ))
         })?;
 
+    let organization = validate_org_project_field("organization", meta.organization.as_deref())?;
+    let project = validate_org_project_field("project", meta.project.as_deref())?;
     let extra_headers = validate_and_collect_headers(&meta.extra_headers)?;
-    let primary = primary_surface(desc);
-    let cred_route = primary_credential_route(desc);
-
-    // ChatGPT OAuth never serves application retrieval POSTs.
-    if cred_route == CredentialRoute::ChatGptOauth || primary == ApiSurface::ChatGptInference {
-        return Err(RetrievalRuntimeError::SurfaceMismatch {
-            id: provider_id.to_owned(),
-            detail: "ChatGPT OAuth / chatgpt_inference never serves retrieval application routes"
-                .into(),
-        });
-    }
 
     let request_timeout = Duration::from_secs(meta.request_timeout_secs.unwrap_or(60).max(1));
     let total_deadline = opts
@@ -316,7 +333,7 @@ fn resolve_inner(
     let route = RetrievalRouteContext {
         provider_instance_id: provider_id.to_owned(),
         provider_kind: desc.kind.as_str().to_owned(),
-        api_surface: primary.as_str().to_owned(),
+        api_surface: surface.as_str().to_owned(),
         credential_route: cred_route.as_str().to_owned(),
         auth_scheme: auth_scheme.clone(),
         base_url,
@@ -324,8 +341,8 @@ fn resolve_inner(
             .display_name
             .clone()
             .unwrap_or_else(|| provider_id.to_owned()),
-        organization: meta.organization.clone(),
-        project: meta.project.clone(),
+        organization,
+        project,
         extra_headers,
         incarnation: desc
             .incarnation
@@ -343,18 +360,22 @@ fn resolve_inner(
     };
 
     // --- Credentials only after capability/surface pass ---
-    let credential = match auth_scheme {
-        RetrievalAuthScheme::None => RetrievalCredential::none(),
+    let credential = match (&auth_scheme, cred_route) {
+        (RetrievalAuthScheme::None, _) | (_, CredentialRoute::None) => RetrievalCredential::none(),
         _ => {
             if let Some(c) = counters {
                 c.secret_lookups.fetch_add(1, Ordering::SeqCst);
             }
-            let token = resolve_application_credential(home, provider_id, meta, desc.kind)?;
+            let token =
+                resolve_application_credential(home, provider_id, meta, &desc.env_keys, desc.kind)?;
             RetrievalCredential::new(Some(token))
         }
     };
 
-    if !matches!(auth_scheme, RetrievalAuthScheme::None) && !credential.is_present() {
+    if !matches!(auth_scheme, RetrievalAuthScheme::None)
+        && !matches!(cred_route, CredentialRoute::None)
+        && !credential.is_present()
+    {
         return Err(RetrievalRuntimeError::MissingCredential {
             id: provider_id.to_owned(),
         });
@@ -372,17 +393,27 @@ fn resolve_inner(
     })
 }
 
-fn capability_view_from_meta(meta: &ProviderMetadata, enabled: bool) -> ProviderCapabilityView {
+fn capability_view_from_meta(
+    meta: &ProviderMetadata,
+    desc: &ProviderInstanceDescriptor,
+    lifecycle: &ProviderLifecycleState,
+) -> ProviderCapabilityView {
     let rerank = meta
         .capabilities
         .extra
         .get("rerank")
         .copied()
         .or_else(|| meta.capabilities.extra.get("reranking").copied());
+    let tombstoned = desc
+        .incarnation
+        .as_ref()
+        .map(|inc| lifecycle.is_tombstoned(meta.id.as_str(), inc))
+        .unwrap_or(false)
+        || lifecycle.has_blocking_tombstone_for_id(meta.id.as_str());
     ProviderCapabilityView {
         id: meta.id.as_str().to_owned(),
-        enabled,
-        tombstoned: false,
+        enabled: desc.enabled,
+        tombstoned,
         exists: true,
         embeddings: meta.capabilities.embeddings,
         rerank,
@@ -391,23 +422,88 @@ fn capability_view_from_meta(meta: &ProviderMetadata, enabled: bool) -> Provider
     }
 }
 
-fn primary_surface(desc: &super::instance::ProviderInstanceDescriptor) -> ApiSurface {
-    desc.primary_route()
-        .map(|r| r.api_surface)
-        .unwrap_or_else(|| match desc.kind {
-            ProviderKind::OpenAi => ApiSurface::OpenAiPlatform,
-            ProviderKind::OpenRouter => ApiSurface::OpenRouterNative,
-            ProviderKind::Anthropic => ApiSurface::AnthropicMessages,
-            ProviderKind::Xai | ProviderKind::OpenAiCompatible | ProviderKind::Zai => {
-                ApiSurface::OpenAiCompatibleSubset
+/// Select an application-capable retrieval surface + credential route.
+///
+/// Prefers `ApiKey` / `OpenAiPlatform` over session/OAuth/helper.
+/// `CredentialRoute::None` is accepted only for intentional no-auth
+/// (`RetrievalAuthScheme::None`); vault-backed providers without an env_key
+/// are often classified as `None` by the descriptor — those promote to
+/// `ApiKey` when the auth scheme expects a secret.
+/// Explicitly rejects AuthHelper-only and XaiSession-only (no silent substitute).
+fn select_retrieval_route(
+    desc: &ProviderInstanceDescriptor,
+    provider_id: &str,
+    auth_scheme: &RetrievalAuthScheme,
+) -> Result<(ApiSurface, CredentialRoute), RetrievalRuntimeError> {
+    let mut none_candidate: Option<ApiSurface> = None;
+    for r in &desc.routes {
+        if r.api_surface == ApiSurface::ChatGptInference {
+            continue;
+        }
+        match r.credential_route {
+            CredentialRoute::ApiKey | CredentialRoute::OpenAiPlatform => {
+                return Ok((r.api_surface, r.credential_route));
             }
-        })
+            CredentialRoute::None => {
+                if none_candidate.is_none() {
+                    none_candidate = Some(r.api_surface);
+                }
+            }
+            CredentialRoute::ChatGptOauth
+            | CredentialRoute::AuthHelper
+            | CredentialRoute::XaiSession => continue,
+        }
+    }
+    if let Some(surface) = none_candidate {
+        return match auth_scheme {
+            RetrievalAuthScheme::None => Ok((surface, CredentialRoute::None)),
+            _ => Ok((surface, CredentialRoute::ApiKey)),
+        };
+    }
+    let primary = desc.primary_route();
+    let cred = primary.map(|r| r.credential_route);
+    match cred {
+        Some(CredentialRoute::AuthHelper) => Err(RetrievalRuntimeError::SurfaceMismatch {
+            id: provider_id.to_owned(),
+            detail: "auth_helper credential route is not supported for retrieval (no silent API-key substitute; helpers are not executed)".into(),
+        }),
+        Some(CredentialRoute::XaiSession) => Err(RetrievalRuntimeError::SurfaceMismatch {
+            id: provider_id.to_owned(),
+            detail: "xai_session credential route is not supported for retrieval (no silent API-key or session borrow)".into(),
+        }),
+        Some(CredentialRoute::ChatGptOauth) | None
+            if primary.map(|r| r.api_surface) == Some(ApiSurface::ChatGptInference) =>
+        {
+            Err(RetrievalRuntimeError::SurfaceMismatch {
+                id: provider_id.to_owned(),
+                detail: "ChatGPT OAuth / chatgpt_inference never serves retrieval application routes"
+                    .into(),
+            })
+        }
+        Some(CredentialRoute::ChatGptOauth) => Err(RetrievalRuntimeError::SurfaceMismatch {
+            id: provider_id.to_owned(),
+            detail: "ChatGPT OAuth never serves retrieval application routes".into(),
+        }),
+        _ => Err(RetrievalRuntimeError::SurfaceMismatch {
+            id: provider_id.to_owned(),
+            detail: "no application-capable credential route for retrieval".into(),
+        }),
+    }
 }
 
-fn primary_credential_route(desc: &super::instance::ProviderInstanceDescriptor) -> CredentialRoute {
-    desc.primary_route()
-        .map(|r| r.credential_route)
-        .unwrap_or(CredentialRoute::ApiKey)
+fn validate_org_project_field(
+    label: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, RetrievalRuntimeError> {
+    let Some(v) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if v.chars().any(|c| c == '\r' || c == '\n' || c.is_control()) {
+        return Err(RetrievalRuntimeError::InvalidConfig(format!(
+            "{label} contains invalid control characters"
+        )));
+    }
+    Ok(Some(v.to_owned()))
 }
 
 fn validate_embedding_surface(
@@ -535,22 +631,39 @@ fn map_auth_scheme(
             ProviderAuthScheme::CustomHeader => "custom_header",
         });
     match spelling {
-        "bearer" | "" => Ok(RetrievalAuthScheme::Bearer),
+        "bearer" => Ok(RetrievalAuthScheme::Bearer),
         "none" => Ok(RetrievalAuthScheme::None),
         "x_api_key" | "x-api-key" | "xapikey" => Ok(RetrievalAuthScheme::XApiKey),
+        // Explicit default: `custom_header` alone wires the credential as
+        // `x-api-key` (same header name as the XApiKey scheme). Callers that
+        // need a different name must spell it as the auth_scheme value under
+        // CustomHeader metadata (validated restricted-name rules apply).
         "custom_header" => Ok(RetrievalAuthScheme::CustomHeader {
-            // Default custom header name when only the scheme is declared.
             name: "x-api-key".into(),
         }),
         other => {
-            // Treat unknown non-keyword spelling as a custom header name when
-            // metadata says CustomHeader; otherwise fail closed.
+            // Only accept unknown spelling as a custom header **name** when
+            // metadata already classifies the scheme as CustomHeader.
+            // Typo/unknown strings otherwise fail closed (never become Bearer).
             if meta.auth_scheme == ProviderAuthScheme::CustomHeader {
-                Ok(RetrievalAuthScheme::CustomHeader {
-                    name: other.to_owned(),
-                })
+                let name = other.to_owned();
+                let lower = name.to_ascii_lowercase();
+                if lower == "authorization"
+                    || lower == "cookie"
+                    || lower == "proxy-authorization"
+                    || lower.starts_with("x-grok-")
+                    || lower == "openai-organization"
+                    || lower == "openai-project"
+                {
+                    return Err(RetrievalRuntimeError::InvalidConfig(format!(
+                        "restricted custom auth header name `{name}`"
+                    )));
+                }
+                Ok(RetrievalAuthScheme::CustomHeader { name })
             } else {
-                Ok(RetrievalAuthScheme::Bearer)
+                Err(RetrievalRuntimeError::InvalidConfig(format!(
+                    "unknown auth_scheme `{other}` (refusing silent Bearer fallback)"
+                )))
             }
         }
     }
@@ -561,32 +674,68 @@ fn validate_and_collect_headers(
 ) -> Result<Vec<(String, String)>, RetrievalRuntimeError> {
     super::lifecycle::validate_extra_headers(headers)
         .map_err(|e| RetrievalRuntimeError::InvalidConfig(e.to_string()))?;
-    Ok(headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect())
+    let mut out = Vec::with_capacity(headers.len());
+    for (k, v) in headers {
+        let lower = k.to_ascii_lowercase();
+        // Typed org/project and content/auth owners are not free-form extras.
+        if lower == "openai-organization"
+            || lower == "openai-project"
+            || lower == "content-type"
+            || lower == "accept"
+            || lower == "authorization"
+            || lower == "cookie"
+            || lower == "proxy-authorization"
+        {
+            return Err(RetrievalRuntimeError::InvalidConfig(format!(
+                "extra_headers must not set restricted header `{k}` (use typed fields / auth scheme)"
+            )));
+        }
+        if v.chars().any(|c| c == '\r' || c == '\n' || c.is_control()) {
+            return Err(RetrievalRuntimeError::InvalidConfig(format!(
+                "header `{k}` contains invalid control characters"
+            )));
+        }
+        out.push((k.clone(), v.clone()));
+    }
+    Ok(out)
 }
 
 /// Resolve application credential for the **exact** instance only.
 ///
 /// Rules:
-/// - Configured ids: only `openai_compatible::<id>::api_key` vault + exact
-///   instance `env_key` list. Never built-in OPENAI/OPENROUTER/xAI env or vault.
+/// - Configured ids: ordered `env_keys` from the descriptor (full list), then
+///   one vault read of `openai_compatible::<id>::api_key`. Never built-in
+///   OPENAI/OPENROUTER/xAI env or vault for configured siblings.
 /// - Built-in openai/openrouter: only their matching built-in scopes/env.
-/// - Never admin key. Never ChatGPT OAuth. Never xAI session for non-xAI.
-/// - Application never borrows another instance's material.
+/// - Built-in xai: only when selected route is ApiKey (`XAI_API_KEY`); never
+///   session material.
+/// - Never admin key. Never ChatGPT OAuth.
 fn resolve_application_credential(
     home: &Path,
     provider_id: &str,
     meta: &ProviderMetadata,
+    env_keys: &[String],
     kind: ProviderKind,
 ) -> Result<String, RetrievalRuntimeError> {
-    // Exact instance env keys first (configured names only).
-    if let Some(env_name) = meta.env_key.as_deref() {
+    // Exact instance env keys in descriptor order (full list, not primary only).
+    for env_name in env_keys {
+        if env_name.trim().is_empty() {
+            continue;
+        }
         if let Ok(v) = std::env::var(env_name)
             && !v.trim().is_empty()
         {
             return Ok(v);
+        }
+    }
+    // Fallback: metadata primary if descriptor list empty (legacy tables).
+    if env_keys.is_empty() {
+        if let Some(env_name) = meta.env_key.as_deref() {
+            if let Ok(v) = std::env::var(env_name)
+                && !v.trim().is_empty()
+            {
+                return Ok(v);
+            }
         }
     }
 
@@ -595,18 +744,11 @@ fn resolve_application_credential(
         return resolve_builtin_application(home, provider_id);
     }
 
-    // Configured instance: namespaced vault only. Never fall back to built-in
-    // scopes even when kind matches openai/openrouter.
+    // Configured instance: single namespaced vault read only.
     let pid = ProviderId::new(provider_id)
         .map_err(|e| RetrievalRuntimeError::InvalidConfig(format!("invalid provider id: {e}")))?;
     let scope = application_key_scope(&pid);
     if let Ok(Some(v)) = read_provider_secret(home, &scope)
-        && !v.trim().is_empty()
-    {
-        return Ok(v);
-    }
-    // Also try the auth storage helper under the same scope string.
-    if let Ok(Some(v)) = read_provider_api_key(home, &scope)
         && !v.trim().is_empty()
     {
         return Ok(v);
@@ -656,8 +798,8 @@ fn resolve_builtin_application(
             // Anthropic is not a retrieval host in v1; still isolate its scope.
         }
         "xai" => {
-            // xAI session is first-party chat only; retrieval on xAI uses API key
-            // env if present (XAI_API_KEY), never session token borrowing.
+            // Only when the selected retrieval route is ApiKey (select_retrieval_route
+            // prefers ApiKey over XaiSession). Never reads session tokens.
             if let Ok(v) = std::env::var("XAI_API_KEY")
                 && !v.trim().is_empty()
             {
@@ -1065,19 +1207,328 @@ embeddings = true
     fn anthropic_surface_rejects_embeddings() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
-        // Built-in anthropic exists; resolve should surface-mismatch.
+        // Provide a vault key so MissingCredential cannot mask surface failure.
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "should-not-be-used-for-embed");
+        }
         let cfg = EmbeddingModelConfig {
             provider: "anthropic".into(),
             model: "e".into(),
             ..Default::default()
         };
-        let err = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
-            .unwrap_err();
-        // Capability may also fail first if manual defaults; accept surface or capability.
+        let counters = RetrievalResolveCounters::default();
+        let err = resolve_embedding_runtime(
+            home,
+            &cfg,
+            &RetrievalResolveOptions::default(),
+            Some(&counters),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, RetrievalRuntimeError::SurfaceMismatch { .. })
+                || matches!(err, RetrievalRuntimeError::CapabilityDenied { .. }),
+            "expected surface/capability, got {err}"
+        );
+        assert_eq!(
+            counters.secret_lookups(),
+            0,
+            "must not resolve secrets after surface/capability deny"
+        );
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+    }
+
+    #[test]
+    fn pinned_generation_mismatch_fails_closed() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_two_siblings(home);
+        let a = ProviderId::new("acct-a").unwrap();
+        store_provider_secret(home, &application_key_scope(&a), "secret-A").unwrap();
+        let cfg = EmbeddingModelConfig {
+            provider: "acct-a".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let live = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+            .unwrap();
+        let live_gen = live.route.registry_generation;
+        // Stale pin fails even when is_retry=false and no incarnation.
+        let err = resolve_embedding_runtime(
+            home,
+            &cfg,
+            &RetrievalResolveOptions {
+                session_registry_generation: Some(live_gen.saturating_add(99).max(1)),
+                is_retry: false,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, RetrievalRuntimeError::RouteGuard(ref m) if m.contains("generation")),
+            "{err}"
+        );
+        // Fresh resolve (None) still succeeds and pins live gen.
+        let again =
+            resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+                .unwrap();
+        assert_eq!(again.route.registry_generation, live_gen);
+    }
+
+    #[test]
+    fn incarnation_mismatch_and_tombstone_fail_closed() {
+        use crate::provider_registry::lifecycle_state::{
+            ProviderLifecycleState, store_lifecycle_state,
+        };
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_two_siblings(home);
+        let a = ProviderId::new("acct-a").unwrap();
+        store_provider_secret(home, &application_key_scope(&a), "secret-A").unwrap();
+        // Load live incarnation then pin a fake one.
+        let cfg = EmbeddingModelConfig {
+            provider: "acct-a".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let live = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+            .unwrap();
+        let fake = "00000000-0000-0000-0000-000000000099";
+        let err = resolve_embedding_runtime(
+            home,
+            &cfg,
+            &RetrievalResolveOptions {
+                provenance_incarnation: Some(fake),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, RetrievalRuntimeError::RouteGuard(_)),
+            "incarnation mismatch: {err}"
+        );
+        // Tombstone live incarnation; subsequent provenance pin must fail.
+        if let Some(inc) = live.route.incarnation.as_deref() {
+            let mut state = ProviderLifecycleState::empty();
+            let pid = ProviderId::new("acct-a").unwrap();
+            if let Ok(parsed) = crate::provider_registry::instance::ProviderIncarnation::new(inc) {
+                let _ = state.tombstone_remove(&pid, Some(&parsed));
+                store_lifecycle_state(home, &state).unwrap();
+                invalidate_for_home(home);
+                let err2 = resolve_embedding_runtime(
+                    home,
+                    &cfg,
+                    &RetrievalResolveOptions {
+                        provenance_incarnation: Some(inc),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(err2, RetrievalRuntimeError::RouteGuard(_)),
+                    "tombstone: {err2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_auth_scheme_fails_closed() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+[model_providers.typo_auth]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+auth_scheme = "beare"
+enabled = true
+capability_mode = "manual"
+
+[model_providers.typo_auth.capabilities]
+embeddings = true
+"#,
+        )
+        .unwrap();
+        invalidate_for_home(home);
+        let cfg = EmbeddingModelConfig {
+            provider: "typo_auth".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let err = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, RetrievalRuntimeError::InvalidConfig(ref m) if m.contains("unknown auth_scheme")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn multi_env_key_list_honored_and_isolated() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+[model_providers.envlist]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+env_key = ["GROK_TEST_RETR_PRIMARY_MISSING", "GROK_TEST_RETR_FALLBACK"]
+enabled = true
+capability_mode = "manual"
+
+[model_providers.envlist.capabilities]
+embeddings = true
+"#,
+        )
+        .unwrap();
+        invalidate_for_home(home);
+        unsafe {
+            std::env::remove_var("GROK_TEST_RETR_PRIMARY_MISSING");
+            std::env::set_var("GROK_TEST_RETR_FALLBACK", "from-fallback-list");
+            std::env::set_var("OPENAI_API_KEY", "builtin-must-not-win");
+        }
+        let cfg = EmbeddingModelConfig {
+            provider: "envlist".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let rt = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+            .unwrap();
+        assert_eq!(rt.credential.as_str(), Some("from-fallback-list"));
+        unsafe {
+            std::env::remove_var("GROK_TEST_RETR_FALLBACK");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn admin_vault_never_authenticates_application() {
+        use crate::provider_registry::secrets::{admin_key_scope, store_provider_secret};
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_two_siblings(home);
+        let a = ProviderId::new("acct-a").unwrap();
+        store_provider_secret(home, &admin_key_scope(&a), "admin-only-secret").unwrap();
+        // No application key.
+        let cfg = EmbeddingModelConfig {
+            provider: "acct-a".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let err = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RetrievalRuntimeError::MissingCredential { .. }
+        ));
+    }
+
+    #[test]
+    fn auth_helper_only_rejected_without_executing_helper() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+[model_providers.helper_only]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+credential_route = "auth_helper"
+auth_provider = "model_provider:helper_only"
+enabled = true
+capability_mode = "manual"
+
+[model_providers.helper_only.capabilities]
+embeddings = true
+"#,
+        )
+        .unwrap();
+        invalidate_for_home(home);
+        let cfg = EmbeddingModelConfig {
+            provider: "helper_only".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let counters = RetrievalResolveCounters::default();
+        let err = resolve_embedding_runtime(
+            home,
+            &cfg,
+            &RetrievalResolveOptions::default(),
+            Some(&counters),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, RetrievalRuntimeError::SurfaceMismatch { .. }),
+            "{err}"
+        );
+        assert_eq!(counters.secret_lookups(), 0);
+    }
+
+    #[test]
+    fn org_project_extra_header_collision_rejected() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+[model_providers.org_collide]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+organization = "real-org"
+auth_scheme = "none"
+enabled = true
+capability_mode = "manual"
+
+[model_providers.org_collide.extra_headers]
+OpenAI-Organization = "evil-org"
+
+[model_providers.org_collide.capabilities]
+embeddings = true
+"#,
+        )
+        .unwrap();
+        invalidate_for_home(home);
+        let cfg = EmbeddingModelConfig {
+            provider: "org_collide".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let err = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, RetrievalRuntimeError::InvalidConfig(_)),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn xai_session_only_path_not_silently_api_keyed_without_api_route() {
+        // Built-in xai has ApiKey route in the set; selection prefers it.
+        // When XAI_API_KEY missing, MissingCredential — never session.
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        unsafe {
+            std::env::remove_var("XAI_API_KEY");
+        }
+        let cfg = EmbeddingModelConfig {
+            provider: "xai".into(),
+            model: "e".into(),
+            ..Default::default()
+        };
+        let err = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
+            .unwrap_err();
+        // Capability may allow; credential or surface depending on routes.
+        assert!(
+            matches!(err, RetrievalRuntimeError::MissingCredential { .. })
                 || matches!(err, RetrievalRuntimeError::CapabilityDenied { .. })
-                || matches!(err, RetrievalRuntimeError::MissingCredential { .. }),
+                || matches!(err, RetrievalRuntimeError::SurfaceMismatch { .. }),
             "{err}"
         );
     }

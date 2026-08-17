@@ -372,6 +372,9 @@ impl RetrievalErrorCategory {
             404 => Self::NotFound,
             400 | 422 => Self::Validation,
             429 => Self::RateLimit,
+            // 408 Request Timeout is treated as transient server/transport-class
+            // for retry classification (same as platform-adjacent fail-open retry).
+            408 => Self::Server,
             s if (500..600).contains(&s) => Self::Server,
             _ => Self::Unknown,
         }
@@ -473,18 +476,19 @@ impl std::error::Error for RetrievalError {}
 
 impl RetrievalError {
     /// Whether a failed POST may be retried (request construction is retry-safe).
+    ///
+    /// `DeadlineExceeded` is **not** retryable: the total call budget is already
+    /// exhausted and another attempt would only multiply latency.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::RateLimited { .. }
-            | Self::Timeout
-            | Self::Transport(_)
-            | Self::DeadlineExceeded => true,
+            Self::RateLimited { .. } | Self::Timeout | Self::Transport(_) => true,
             Self::Http { category, .. } => matches!(
                 category,
                 RetrievalErrorCategory::RateLimit | RetrievalErrorCategory::Server
             ),
             // Never retry missing credentials, 400/schema/validation, 401/403,
-            // cross-origin redirect, cancellation, or malformed response.
+            // cross-origin redirect, cancellation, malformed response, or a
+            // total-deadline terminal gate.
             Self::MissingCredential
             | Self::InvalidRequest(_)
             | Self::InvalidUrl(_)
@@ -495,7 +499,8 @@ impl RetrievalError {
             | Self::Decode(_)
             | Self::MalformedResponse(_)
             | Self::Cancelled
-            | Self::OversizedResponse { .. } => false,
+            | Self::OversizedResponse { .. }
+            | Self::DeadlineExceeded => false,
         }
     }
 }
@@ -677,25 +682,104 @@ pub fn normalize_endpoint_path(path: &str) -> String {
     }
 }
 
-/// Redact a short preview of an error body (no auth headers, no cookies).
+/// Bounded, case-insensitive token/window redaction for error previews.
+///
+/// Stronger than needle-only replace: when a secret-bearing marker is found
+/// (case-insensitive), the marker **and** the following token (or a fixed
+/// window of up to 64 bytes) are replaced with `[redacted]` so Bearer tokens,
+/// API keys, JWTs, and query material cannot survive in Display/Debug.
 pub fn redact_error_preview(raw: &str, max_chars: usize) -> String {
-    let mut s: String = raw.chars().take(max_chars).collect();
-    // Strip obvious secret-bearing substrings without keeping values.
-    for needle in [
-        "Bearer ",
+    let markers = [
+        "authorization:",
+        "authorization=",
         "bearer ",
-        "api_key",
-        "api-key",
-        "authorization",
-        "Authorization",
+        "api-key:",
+        "api_key=",
+        "api-key=",
+        "x-api-key:",
+        "x-api-key=",
         "sk-",
         "xai-",
-    ] {
-        if s.to_ascii_lowercase()
-            .contains(&needle.to_ascii_lowercase())
-        {
-            s = s.replace(needle, "<redacted>");
+        "eyj", // JWT header prefix (base64url of `{"`)
+        "token=",
+        "access_token=",
+        "refresh_token=",
+        "password=",
+        "secret=",
+    ];
+    let mut out = raw.to_string();
+    // Iterate until no more markers (bounded passes).
+    for _ in 0..16 {
+        let lower = out.to_ascii_lowercase();
+        let mut best: Option<(usize, usize)> = None;
+        for m in markers {
+            if let Some(idx) = lower.find(m) {
+                let start = idx;
+                // Consume marker + following non-whitespace token, min 8 bytes
+                // after marker, max 64 after marker start of secret material.
+                let after_marker = start + m.len();
+                let rest = out.get(after_marker..).unwrap_or("");
+                let token_len = rest
+                    .chars()
+                    .take_while(|c| {
+                        !c.is_whitespace() && *c != '"' && *c != '\'' && *c != ',' && *c != '}'
+                    })
+                    .map(|c| c.len_utf8())
+                    .sum::<usize>()
+                    .max(8)
+                    .min(64);
+                let end = (after_marker + token_len).min(out.len());
+                let cand = (start, end);
+                best = Some(match best {
+                    None => cand,
+                    Some((bs, _be)) if start < bs => cand,
+                    Some(prev) => prev,
+                });
+            }
+        }
+        let Some((start, end)) = best else {
+            break;
+        };
+        if start >= end || end > out.len() {
+            break;
+        }
+        out.replace_range(start..end, "[redacted]");
+    }
+    if out.chars().count() > max_chars {
+        let trimmed: String = out.chars().take(max_chars).collect();
+        format!("{trimmed}…")
+    } else {
+        out
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_bearer_and_sk_tokens_case_insensitive() {
+        let cases = [
+            "Bearer sk-secret-value-here rejected",
+            "bearer SK-SECRET-VALUE-HERE rejected",
+            "BEARER sk-secret-value-here rejected",
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+            "api_key=super-secret-key-material",
+            "x-api-key: abcdefghijklmnop",
+            "?access_token=tok_abc123xyz&x=1",
+        ];
+        for c in cases {
+            let r = redact_error_preview(c, 256);
+            let lower = r.to_ascii_lowercase();
+            assert!(
+                !lower.contains("sk-secret")
+                    && !lower.contains("super-secret")
+                    && !lower.contains("abcdefghijklmnop")
+                    && !lower.contains("tok_abc123")
+                    && !lower.contains("eyjhbGci"),
+                "leaked in redaction of `{c}` → `{r}`"
+            );
+            assert!(r.contains("[redacted]"), "expected marker in `{r}`");
         }
     }
-    s
 }
