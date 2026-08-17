@@ -359,6 +359,115 @@ async fn hard_error_opt_in_on_semantic_failure() {
 }
 
 #[tokio::test]
+async fn hard_retrieve_rerank_budget_propagates_typed_attempt_error() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-hard-rerank-budget", clock);
+    let mut graph = test_graph_two_embed_routes();
+    // One embed success consumes 1 attempt; max_attempts=1 leaves none for rerank.
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_attempts = 1;
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .deadline_ms = 60_000;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
+    );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 8, fill: 0.1 });
+    fake.set_rerank("rr-a", FakeRerankScript::ReverseOrder);
+    let (svc, _) = service(reg, fake.clone());
+    let err = svc
+        .retrieve(
+            "default",
+            "q",
+            RetrieveCandidates::Explicit(vec![
+                CandidateRow {
+                    id: "1".into(),
+                    text: "a".into(),
+                    score: None,
+                    metadata: None,
+                },
+                CandidateRow {
+                    id: "2".into(),
+                    text: "b".into(),
+                    score: None,
+                    metadata: None,
+                },
+            ]),
+            PipelineOptions {
+                hard_error_on_semantic_failure: true,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            OrchestratorError::AttemptBudgetExceeded {
+                stage: super::error::RetrievalStage::Rerank,
+                ..
+            }
+        ),
+        "hard mode must surface typed rerank attempt error, got {err:?}"
+    );
+    assert!(
+        fake.rerank_calls().is_empty(),
+        "rerank executor must not run when attempt budget is exhausted"
+    );
+}
+
+#[tokio::test]
+async fn retrieve_cancel_stage_is_orchestrate() {
+    let clock = Arc::new(MockClock::new());
+    let (reg, fake) = build_reg(clock);
+    fake.set_embed("emb-a", FakeEmbedScript::WaitForCancel);
+    let (svc, _) = service(reg, fake);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let err = svc
+        .retrieve(
+            "default",
+            "q",
+            RetrieveCandidates::Explicit(vec![CandidateRow {
+                id: "1".into(),
+                text: "t".into(),
+                score: None,
+                metadata: None,
+            }]),
+            PipelineOptions::default(),
+            cancel,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            OrchestratorError::Cancelled {
+                stage: super::error::RetrievalStage::Orchestrate,
+                ..
+            }
+        ),
+        "retrieve cancel must use Orchestrate stage, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn hard_retrieve_preserves_typed_deadline_error() {
     let clock = Arc::new(MockClock::new());
     let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-hard-deadline", clock.clone());

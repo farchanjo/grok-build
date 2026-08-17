@@ -170,8 +170,13 @@ impl RetrievalService {
     ///
     /// **Hard semantic mode:** when `hard_error_on_semantic_failure` is set,
     /// typed deadline/attempt/input/output errors and `AllRoutesFailed`
-    /// propagate as their original variants (not collapsed). Soft mode maps
-    /// them to degradation notices so lexical order can continue.
+    /// propagate as their original variants for **both embed and rerank**
+    /// stages (not collapsed). Soft mode maps them to degradation notices so
+    /// lexical / pre-rerank order can continue.
+    ///
+    /// **Cancellation:** all cancel paths from `retrieve` surface
+    /// [`OrchestratorError::Cancelled`] with
+    /// [`RetrievalStage::Orchestrate`] (stable public contract).
     pub async fn retrieve(
         &self,
         profile_id: &str,
@@ -245,14 +250,24 @@ impl RetrievalService {
             }
         }
 
-        let (embed, embed_deg) = embed_or_degrade(
+        let (embed, embed_deg) = match embed_or_degrade(
             &ctx,
             vec![query.to_owned()],
             &options,
             cancel.child_token(),
             &mut budget,
         )
-        .await?;
+        .await
+        {
+            // Public retrieve cancel contract: always Orchestrate (Issue 11).
+            Err(OrchestratorError::Cancelled { profile_id, .. }) => {
+                return Err(OrchestratorError::Cancelled {
+                    profile_id,
+                    stage: RetrievalStage::Orchestrate,
+                });
+            }
+            other => other?,
+        };
         if cancel.is_cancelled() {
             return Err(OrchestratorError::Cancelled {
                 profile_id: profile_id.to_owned(),
@@ -303,25 +318,37 @@ impl RetrievalService {
                     }
                     rerank_out = Some(rr);
                 }
-                Err(OrchestratorError::Cancelled { .. }) => {
+                Err(OrchestratorError::Cancelled { profile_id, .. }) => {
                     return Err(OrchestratorError::Cancelled {
-                        profile_id: profile_id.to_owned(),
-                        stage: RetrievalStage::Rerank,
+                        profile_id,
+                        stage: RetrievalStage::Orchestrate,
                     });
                 }
-                Err(e @ OrchestratorError::OutputBudgetExceeded { .. })
-                    if options.hard_error_on_limit_exceeded
-                        || options.hard_error_on_semantic_failure =>
+                // Hard mode (and optional limit hard): typed budget errors propagate.
+                Err(
+                    e @ OrchestratorError::DeadlineExceeded { .. }
+                    | e @ OrchestratorError::AttemptBudgetExceeded { .. }
+                    | e @ OrchestratorError::InputBudgetExceeded { .. }
+                    | e @ OrchestratorError::OutputBudgetExceeded { .. },
+                ) if options.hard_error_on_semantic_failure
+                    || (options.hard_error_on_limit_exceeded
+                        && matches!(e, OrchestratorError::OutputBudgetExceeded { .. })) =>
                 {
                     return Err(e);
                 }
-                Err(OrchestratorError::OutputBudgetExceeded { .. }) => {
+                Err(OrchestratorError::DeadlineExceeded { .. })
+                | Err(OrchestratorError::AttemptBudgetExceeded { .. })
+                | Err(OrchestratorError::InputBudgetExceeded { .. })
+                | Err(OrchestratorError::OutputBudgetExceeded { .. }) => {
                     degradations.push(DegradationNotice::new(
                         DegradationKind::BudgetExhausted,
                         profile_id,
                         RetrievalStage::Rerank,
                         None,
                     ));
+                }
+                Err(e) if options.hard_error_on_semantic_failure => {
+                    return Err(e);
                 }
                 Err(_) => {
                     degradations.push(DegradationNotice::new(

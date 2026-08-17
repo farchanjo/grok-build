@@ -74,10 +74,15 @@ fn home_map() -> &'static parking_lot::RwLock<HashMap<PathBuf, Arc<RetrievalRegi
 
 /// Stable registry map key for a Grok home path.
 ///
-/// Uses an absolute path form **without** `canonicalize` (which fails when the
-/// directory does not yet exist and can change after creation/symlink
-/// resolution). Keys are therefore stable across install-before-create and
-/// later lookup of the same logical home.
+/// Builds an absolute path (joins with the process cwd when `home` is relative)
+/// **without** filesystem `canonicalize` (which fails when the directory does
+/// not yet exist and can change after create/symlink resolution).
+///
+/// `dunce::simplified` is applied only for Windows UNC / `\\?\` presentation;
+/// on Unix/macOS the path is returned as spelled. This function does **not**
+/// lexically collapse `.` / `..` components. Callers must pass a **consistent
+/// spelling** for install and lookup (production uses the process-cached
+/// `grok_home()` for both).
 pub fn stable_home_key(home: &Path) -> PathBuf {
     let absolute = if home.is_absolute() {
         home.to_path_buf()
@@ -86,8 +91,6 @@ pub fn stable_home_key(home: &Path) -> PathBuf {
             .map(|cwd| cwd.join(home))
             .unwrap_or_else(|_| home.to_path_buf())
     };
-    // Collapse `..` / `.` without requiring the path to exist (dunce does not
-    // touch the filesystem for simplified absolute paths on Unix).
     dunce::simplified(&absolute).to_path_buf()
 }
 

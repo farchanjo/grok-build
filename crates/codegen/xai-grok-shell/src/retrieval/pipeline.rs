@@ -31,7 +31,8 @@ use super::telemetry::{
 pub struct PipelineOptions {
     /// When true, semantic degradation (all routes failed / soft budget map)
     /// becomes a hard orchestrator error. Typed deadline/attempt/input/output
-    /// budget errors always propagate as their original variants in hard mode.
+    /// budget errors always propagate as their original variants in hard mode
+    /// for **both embed and rerank** stages.
     ///
     /// This flag does **not** control candidate/result over-limit behavior;
     /// use [`Self::hard_error_on_limit_exceeded`] for that (decoupled).
@@ -409,7 +410,7 @@ pub async fn rerank_with_profile(
     cancel: CancellationToken,
     budget: &mut ProfileBudgetTracker,
 ) -> OrchestratorResult<RerankStageResult> {
-    let _ = options;
+    let hard = options.hard_error_on_semantic_failure;
     let route_ids = &ctx.profile.reranker_route_ids;
     if route_ids.is_empty() {
         return Ok(RerankStageResult {
@@ -422,22 +423,20 @@ pub async fn rerank_with_profile(
 
     // Gate deadline/attempts before charging input so an already-exhausted
     // profile does not flip the cause to InputBudgetExceeded (Issues 2–3).
-    if budget
-        .ensure_not_expired(ctx.clock.now(), RetrievalStage::Rerank)
-        .is_err()
-        || budget.attempts_remaining() == 0
-    {
-        return Ok(RerankStageResult {
-            route_model_id: None,
-            result: None,
-            preserved_pre_rerank_order: true,
-            degradation: Some(DegradationNotice::new(
-                DegradationKind::BudgetExhausted,
-                &ctx.profile.id,
-                RetrievalStage::Rerank,
-                None,
-            )),
-        });
+    // Hard mode: propagate typed budget errors (Issue 10). Soft: BudgetExhausted.
+    if let Err(e) = budget.ensure_not_expired(ctx.clock.now(), RetrievalStage::Rerank) {
+        return rerank_budget_outcome(hard, e, &ctx.profile.id);
+    }
+    if budget.attempts_remaining() == 0 {
+        return rerank_budget_outcome(
+            hard,
+            OrchestratorError::AttemptBudgetExceeded {
+                profile_id: ctx.profile.id.clone(),
+                stage: RetrievalStage::Rerank,
+                max_attempts: budget.limits.max_attempts,
+            },
+            &ctx.profile.id,
+        );
     }
 
     let shortlist_n = budget.clamp_rerank_shortlist(documents.len());
@@ -445,22 +444,13 @@ pub async fn rerank_with_profile(
     // Per-request payload: query + documents (query may already have been
     // charged in the embed stage of the same retrieve — see module docs).
     let bytes = query.len() + total_input_bytes(documents.iter().map(|s| s.as_str()));
-    if let Err(_e) = budget.charge_input(bytes, RetrievalStage::Rerank) {
-        return Ok(RerankStageResult {
-            route_model_id: None,
-            result: None,
-            preserved_pre_rerank_order: true,
-            degradation: Some(DegradationNotice::new(
-                DegradationKind::BudgetExhausted,
-                &ctx.profile.id,
-                RetrievalStage::Rerank,
-                None,
-            )),
-        });
+    if let Err(e) = budget.charge_input(bytes, RetrievalStage::Rerank) {
+        return rerank_budget_outcome(hard, e, &ctx.profile.id);
     }
 
     let mut last_failure: Option<RouteFailureClass> = None;
-    let mut stopped_on_budget = false;
+    // Typed error when the loop stops on budget (deadline/attempts).
+    let mut hard_budget_err: Option<OrchestratorError> = None;
     let top_n = Some(budget.limits.max_results);
 
     for (idx, route_id) in route_ids.iter().enumerate() {
@@ -470,12 +460,16 @@ pub async fn rerank_with_profile(
                 stage: RetrievalStage::Rerank,
             });
         }
-        if budget
-            .ensure_not_expired(ctx.clock.now(), RetrievalStage::Rerank)
-            .is_err()
-            || budget.attempts_remaining() == 0
-        {
-            stopped_on_budget = true;
+        if let Err(e) = budget.ensure_not_expired(ctx.clock.now(), RetrievalStage::Rerank) {
+            hard_budget_err = Some(e);
+            break;
+        }
+        if budget.attempts_remaining() == 0 {
+            hard_budget_err = Some(OrchestratorError::AttemptBudgetExceeded {
+                profile_id: ctx.profile.id.clone(),
+                stage: RetrievalStage::Rerank,
+                max_attempts: budget.limits.max_attempts,
+            });
             break;
         }
         let Some(route) = ctx.snapshot.reranker_route(route_id) else {
@@ -501,11 +495,14 @@ pub async fn rerank_with_profile(
         );
         if effective.is_zero() {
             last_failure = Some(RouteFailureClass::Deadline);
-            stopped_on_budget = true;
+            hard_budget_err = Some(OrchestratorError::DeadlineExceeded {
+                profile_id: ctx.profile.id.clone(),
+                stage: RetrievalStage::Rerank,
+            });
             break;
         }
-        if budget.consume_attempt(RetrievalStage::Rerank).is_err() {
-            stopped_on_budget = true;
+        if let Err(e) = budget.consume_attempt(RetrievalStage::Rerank) {
+            hard_budget_err = Some(e);
             break;
         }
         let pins = RouteCallPins {
@@ -533,7 +530,14 @@ pub async fn rerank_with_profile(
         match outcome {
             Ok(result) => {
                 let out_bytes = result.hits.len().saturating_mul(32);
-                budget.charge_output_bytes(out_bytes)?;
+                // Output overflow is always typed (hard or soft handled by caller).
+                if let Err(e) = budget.charge_output_bytes(out_bytes) {
+                    return if hard {
+                        Err(e)
+                    } else {
+                        rerank_budget_outcome(false, e, &ctx.profile.id)
+                    };
+                }
                 ctx.cooldown.record_success(&cd_key);
                 emit(
                     ctx,
@@ -584,20 +588,41 @@ pub async fn rerank_with_profile(
         }
     }
 
-    let kind = if stopped_on_budget {
-        DegradationKind::BudgetExhausted
-    } else {
-        DegradationKind::RerankUnavailable
-    };
+    if let Some(e) = hard_budget_err {
+        return rerank_budget_outcome(hard, e, &ctx.profile.id);
+    }
     Ok(RerankStageResult {
         route_model_id: None,
         result: None,
         preserved_pre_rerank_order: true,
         degradation: Some(DegradationNotice::new(
-            kind,
+            DegradationKind::RerankUnavailable,
             &ctx.profile.id,
             RetrievalStage::Rerank,
             last_failure,
+        )),
+    })
+}
+
+/// Hard mode: return the typed budget error. Soft mode: preserve pre-rerank
+/// order with [`DegradationKind::BudgetExhausted`].
+fn rerank_budget_outcome(
+    hard: bool,
+    err: OrchestratorError,
+    profile_id: &str,
+) -> OrchestratorResult<RerankStageResult> {
+    if hard {
+        return Err(err);
+    }
+    Ok(RerankStageResult {
+        route_model_id: None,
+        result: None,
+        preserved_pre_rerank_order: true,
+        degradation: Some(DegradationNotice::new(
+            DegradationKind::BudgetExhausted,
+            profile_id,
+            RetrievalStage::Rerank,
+            None,
         )),
     })
 }
