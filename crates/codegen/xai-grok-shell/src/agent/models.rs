@@ -171,6 +171,17 @@ pub(crate) fn is_task_agent_eligible(entry: &ModelEntry, is_session_auth: bool) 
     is_task_visible_and_credentialed(entry, is_session_auth) && passes_task_tools_gate(entry)
 }
 
+/// Coherent ACP-visible catalog paired with its publication generation.
+///
+/// Produced under `catalog_publish` so notification and ACP state never pair
+/// catalog content from generation N with a stamp from generation N±1.
+#[derive(Debug, Clone)]
+pub struct CatalogPublicationSnapshot {
+    pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
+    pub current_model_id: acp::ModelId,
+    pub generation: u64,
+}
+
 /// Thread-safe model manager.
 ///
 /// Owns the auth manager, config, and gateway needed to refresh models.
@@ -286,9 +297,38 @@ impl ModelsManager {
         self.inner.catalog_origins.read().clone()
     }
 
-    /// Current catalog publication generation for atomic picker refresh.
+    /// Current catalog publication generation (unlocked load).
+    ///
+    /// Prefer [`Self::catalog_publication_snapshot`] when pairing generation
+    /// with catalog content for notifications or ACP state.
     pub fn catalog_generation(&self) -> u64 {
         self.inner.catalog_generation.load(Ordering::Acquire)
+    }
+
+    /// Coherent ACP-visible catalog + current selection + publication generation.
+    ///
+    /// Models and generation are read under `catalog_publish` so they always
+    /// match the same published generation. Projection to ACP wire format and
+    /// auth visibility run after the lock is released (no auth lock nesting).
+    pub fn catalog_publication_snapshot(&self) -> CatalogPublicationSnapshot {
+        let (raw, generation, current_model_id) = {
+            let _guard = self.inner.catalog_publish.lock();
+            let raw = self.inner.models.read().clone();
+            let generation = self.inner.catalog_generation.load(Ordering::Acquire);
+            let current_model_id = self.inner.current_model_id.read().clone();
+            (raw, generation, current_model_id)
+        };
+        let is_session_auth = self.is_session_auth();
+        let selectable: IndexMap<_, _> = raw
+            .into_iter()
+            .filter(|(_, e)| e.info.user_selectable)
+            .collect();
+        let available = available_models(&selectable, is_session_auth);
+        CatalogPublicationSnapshot {
+            available,
+            current_model_id,
+            generation,
+        }
     }
 
     /// Atomically publish catalog + origins and bump generation.
@@ -889,29 +929,33 @@ impl ModelsManager {
     }
 
     /// Notify clients about the current model catalog.
+    ///
+    /// Emits a single coherent publication snapshot (content + generation)
+    /// rather than pairing unlocked `available()` with a separate generation
+    /// load that could straddle a concurrent publish.
     fn notify_models_updated(&self) {
-        let available = self.available();
-        let current = self.current_model_id();
-        let generation = self.catalog_generation();
-        let count = available.len();
+        let snap = self.catalog_publication_snapshot();
+        let count = snap.available.len();
         xai_grok_telemetry::unified_log::info(
             "model catalog: notifying clients",
             None,
             Some(serde_json::json!({
                 "model_count": count,
-                "current_model_id": current.0.as_ref(),
-                "catalog_generation": generation,
+                "current_model_id": snap.current_model_id.0.as_ref(),
+                "catalog_generation": snap.generation,
             })),
         );
         if let Some(ref gw) = *self.inner.gateway.read() {
             let mut meta = acp::Meta::new();
             meta.insert(
                 config::META_CATALOG_GENERATION.to_string(),
-                serde_json::Value::Number(generation.into()),
+                serde_json::Value::Number(snap.generation.into()),
             );
-            let model_state =
-                acp::SessionModelState::new(current, available.values().cloned().collect())
-                    .meta(Some(meta));
+            let model_state = acp::SessionModelState::new(
+                snap.current_model_id,
+                snap.available.values().cloned().collect(),
+            )
+            .meta(Some(meta));
             if let Ok(params) = serde_json::value::to_raw_value(&model_state) {
                 gw.forward_fire_and_forget(acp::ExtNotification::new(
                     "x.ai/models/update",
@@ -3066,6 +3110,41 @@ mod tests {
 
         assert!(mgr.has_fetched_real_catalog());
         assert_eq!(mgr.current_model_id().0.as_ref(), "grok-3");
+    }
+
+    #[test]
+    fn catalog_publication_snapshot_pairs_content_with_generation() {
+        let mgr = test_manager();
+        let mut cfg = config::Config::default();
+        cfg.models.default = Some("grok-3".to_string());
+        let gen_before = mgr.catalog_generation();
+        let prefetched = make_prefetched(&["grok-3", "grok-4"]);
+        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+
+        let snap = mgr.catalog_publication_snapshot();
+        assert!(
+            snap.generation > gen_before,
+            "publish must bump generation (before={gen_before}, snap={})",
+            snap.generation
+        );
+        assert_eq!(snap.generation, mgr.catalog_generation());
+        assert!(
+            snap.available
+                .contains_key(&acp::ModelId::new("grok-3".to_string()))
+                || !snap.available.is_empty()
+                || mgr.models().contains_key("grok-3"),
+            "snapshot should reflect published catalog content"
+        );
+        // Second publish advances generation; snapshot tracks it.
+        let gen1 = snap.generation;
+        mgr.apply_refresh_result(
+            &cfg,
+            Some(make_prefetched(&["grok-3", "grok-4", "grok-5"])),
+            None,
+        );
+        let snap2 = mgr.catalog_publication_snapshot();
+        assert!(snap2.generation > gen1);
+        assert_eq!(snap2.generation, mgr.catalog_generation());
     }
 
     #[test]

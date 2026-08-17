@@ -246,15 +246,6 @@ impl ModelState {
         true
     }
 
-    /// Whether a picker selection opened at `opened_at_generation` is still
-    /// valid against the current catalog generation.
-    ///
-    /// Used by `/model` and default-model apply paths to reject confirmations
-    /// that predate a successful versioned catalog refresh.
-    pub fn selection_generation_is_current(&self, opened_at_generation: u64) -> bool {
-        opened_at_generation == self.catalog_generation
-    }
-
     /// Secret-free provider instance id from model meta (if present).
     pub fn provider_instance_id(&self, id: &acp::ModelId) -> Option<&str> {
         self.available
@@ -1154,8 +1145,6 @@ mod tests {
             Some("openai_work:gpt-4o")
         );
         assert_eq!(state.catalog_generation, 7);
-        assert!(state.selection_generation_is_current(7));
-        assert!(!state.selection_generation_is_current(3));
 
         // Stale lower generation rejects content entirely (no mix under gen 7).
         let mut stale = IndexMap::new();

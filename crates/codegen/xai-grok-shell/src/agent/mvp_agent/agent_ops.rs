@@ -2465,17 +2465,15 @@ impl MvpAgent {
         &self,
         session_id: Option<&acp::SessionId>,
     ) -> acp::SessionModelState {
+        // One coherent catalog + generation stamp (Issue 7): never pair
+        // unlocked available() with a separate catalog_generation() load.
+        let snap = self.models_manager.catalog_publication_snapshot();
         let model_id = lookup_session_model(
             &self.sessions.borrow(),
             session_id,
-            &self.models_manager.current_model_id(),
+            &snap.current_model_id,
         );
-        let mut available_models: Vec<acp::ModelInfo> = self
-            .models_manager
-            .available()
-            .values()
-            .cloned()
-            .collect();
+        let mut available_models: Vec<acp::ModelInfo> = snap.available.values().cloned().collect();
         let override_effort = session_id
             .and_then(|sid| self.sessions.borrow().get(sid).map(|h| h.reasoning_effort))
             .flatten()
@@ -2499,7 +2497,7 @@ impl MvpAgent {
         let mut meta = acp::Meta::new();
         meta.insert(
             crate::agent::config::META_CATALOG_GENERATION.to_string(),
-            serde_json::Value::Number(self.models_manager.catalog_generation().into()),
+            serde_json::Value::Number(snap.generation.into()),
         );
         acp::SessionModelState::new(model_id, available_models).meta(Some(meta))
     }
