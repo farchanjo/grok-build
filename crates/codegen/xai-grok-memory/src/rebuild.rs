@@ -7,18 +7,28 @@
 //! ## State machine
 //!
 //! - No fingerprint installed (fresh or legacy) with matching dimensions ⇒
-//!   **adopt** the current source's canonical fingerprint without rebuilding
-//!   (existing users do not reconnect, rewrite config, or rebuild).
-//! - Installed fingerprint differs, dimensions differ, or a prior incomplete
-//!   marker exists ⇒ mark **rebuild pending** and operate **FTS-only** (old
-//!   vectors are never queried / mixed).
-//! - A rebuild is **claimed** (across sessions/processes) then vectors are
-//!   embedded through the pinned source into a **staging** table in bounded
-//!   batches (no DB/write lock held across network awaits).
-//! - On success the complete vector set + dimensions + fingerprint are
-//!   installed **atomically** (single SQLite transaction) and pending is
-//!   cleared. On failure or crash/reopen, chunks/FTS survive, the diagnostic
-//!   old fingerprint is retained, and the index remains pending/FTS-only.
+//!   **adopt** the current source's canonical fingerprint **only when no
+//!   pending marker exists** (parseable or corrupt — `pending_marker_present`
+//!   blocks adopt) and the vec set is either genuinely empty on a brand-new
+//!   index (zero chunks, zero vectors) or a provably complete same-dims
+//!   legacy set. Adopt re-checks the marker inside its transaction (CAS) so a
+//!   concurrently created marker aborts the adopt.
+//! - Installed fingerprint differs, dimensions differ, vectors are missing,
+//!   or a prior incomplete marker exists ⇒ mark **rebuild pending** and
+//!   operate **FTS-only** (old vectors are never queried / mixed).
+//! - A rebuild is **claimed** with a true compare-and-swap (the claim write
+//!   and the staging-binding write are one transaction); only one process
+//!   wins. Stale/same-target takeovers observe the completed state as Ready.
+//! - Vectors are staged keyed by **chunk id AND content hash**; stale staged
+//!   rows for deleted/changed chunks are pruned each pass, so the attempt
+//!   converges under chunk churn. On success the complete vector set +
+//!   dimensions + fingerprint are installed **atomically** (single SQLite
+//!   transaction, with a transactional `(id, hash)` completeness re-check
+//!   inside the swap) and pending is cleared.
+//! - **Back-off vs batch cap:** a *failed* attempt persists `last_attempt_at`
+//!   and subsequent searches stay FTS-only within `backoff_secs`. The
+//!   per-search **batch cap** is a normal pause (progress), does **not** arm
+//!   the failure back-off, and the next search resumes immediately.
 //! - Staged rows are bound to the pending attempt `id`; a stale async result
 //!   for an old intended fingerprint/incarnation is discarded by never being
 //!   selected at install time. Claim expiration/recovery never installs stale
@@ -122,13 +132,6 @@ fn new_attempt_id() -> String {
 // ---------------------------------------------------------------------------
 // meta helpers over a raw connection (used from the index open path)
 // ---------------------------------------------------------------------------
-
-fn meta_set_tx(index: &MemoryIndex, key: &str, value: &str) -> Result<(), rusqlite::Error> {
-    index
-        .db()
-        .execute(schema::UPSERT_META_SQL, params![key, value])
-        .map(|_| ())
-}
 
 /// Run `f` inside one `BEGIN IMMEDIATE … COMMIT` transaction, rolling back on
 /// error. Used for every multi-statement marker/staging-binding write and for
@@ -261,11 +264,12 @@ fn meta_set_conn(db: &rusqlite::Connection, key: &str, value: &str) -> Result<()
 ///
 /// A **true compare-and-swap**: the new claimed JSON is written only when the
 /// stored JSON still equals the exact snapshot we read, so at most one
-/// process/attempt wins. The claim write and the staging-binding write happen
-/// in one transaction. Succeeds when unclaimed or stale
-/// (`claimed_at < now - stale_secs`) or when this same process already owns
-/// the claim (retry after failure). Returns `true` if this caller won; on
-/// success `*pending` is mutated to the claimed state.
+/// process/attempt wins. The claim CAS and the staging-binding write happen in
+/// **one transaction** (the `in_transaction` helper), so a crash cannot leave
+/// a claimed marker bound to a different staging id. Succeeds when unclaimed
+/// or stale (`claimed_at < now - stale_secs`) or when this same process
+/// already owns the claim (retry after failure). Returns `true` if this caller
+/// won; on success `*pending` is mutated to the claimed state.
 pub fn try_claim_rebuild(
     index: &MemoryIndex,
     pending: &mut PendingRebuild,
@@ -295,39 +299,103 @@ pub fn try_claim_rebuild(
     let new_json = claimed.to_json();
 
     let db = index.db();
-    // CAS + staging binding, atomically.
-    let updated = db
-        .execute(
-            "UPDATE meta SET value = ?1 WHERE key = ?2 AND value = ?3",
-            params![&new_json, schema::META_VECTOR_REBUILD_PENDING, &old_json],
-        )
-        .unwrap_or(0);
-    if updated != 1 {
-        // Lost the CAS to a concurrent writer — someone else owns the marker.
-        return false;
+    // CAS + staging binding in one transaction (accurate comment, real code).
+    let updated = in_transaction(db, |db| {
+        let updated = db
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = ?2 AND value = ?3",
+                params![&new_json, schema::META_VECTOR_REBUILD_PENDING, &old_json],
+            )
+            .unwrap_or(0);
+        if updated == 1 {
+            db.execute(
+                schema::UPSERT_META_SQL,
+                params![schema::META_VECTOR_STAGING_FP, &claimed.id],
+            )?;
+        }
+        Ok(updated)
+    });
+    match updated {
+        Ok(1) => {
+            *pending = claimed;
+            true
+        }
+        _ => {
+            // Lost the CAS to a concurrent writer — someone else owns the
+            // marker.
+            false
+        }
     }
-    let _ = meta_set_tx(index, schema::META_VECTOR_STAGING_FP, &claimed.id);
-    *pending = claimed;
-    true
 }
 
-/// Owner-scoped release of the rebuild claim: only clears the pending marker
-/// when `expected` (the exact claimed state we hold) is still the stored
-/// value. A superseding attempt or a steal via the stale window is never
-/// cleared.
-pub fn release_rebuild_claim(index: &MemoryIndex, expected: &PendingRebuild) {
-    let mut p = expected.clone();
-    p.claim = String::new();
-    p.claimed_at = 0;
-    p.status = "pending".into();
-    let _ = index.db().execute(
-        "UPDATE meta SET value = ?1 WHERE key = ?2 AND value = ?3",
-        params![
-            p.to_json(),
-            schema::META_VECTOR_REBUILD_PENDING,
-            expected.to_json()
-        ],
-    );
+/// Atomically clear a stale pending marker + staging when this builder
+/// observes a **completed** target (installed fingerprint == intended).
+///
+/// - `expected_id: Some(id)`: clears only when the stored marker still
+///   references our attempt id, or references *any* attempt for the same
+///   `intended_fp` (stale — the target is already installed). A marker for a
+///   **different** target (newer foreign attempt) is never touched.
+/// - `expected_id: None`: clears any parseable marker whose `intended` equals
+///   `intended_fp` (a marker for the already-completed target is stale), and
+///   drops that attempt's staging. Markers for other targets are preserved.
+/// Runs in one transaction so the clear is crash-atomic (F6).
+fn clear_completed_target(index: &MemoryIndex, expected_id: Option<&str>, intended_fp: &str) {
+    let _ = in_transaction(index.db(), |db| -> rusqlite::Result<()> {
+        let raw: Option<String> = db
+            .query_row(
+                schema::GET_META_SQL,
+                params![schema::META_VECTOR_REBUILD_PENDING],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        match raw {
+            None => {
+                // No marker; drop our attempt's staging rows if any.
+                if let Some(id) = expected_id {
+                    db.execute(
+                        "DELETE FROM vector_staging WHERE pending_id = ?1",
+                        params![id],
+                    )?;
+                }
+                Ok(())
+            }
+            Some(r) if r.trim().is_empty() => {
+                if let Some(id) = expected_id {
+                    db.execute(
+                        "DELETE FROM vector_staging WHERE pending_id = ?1",
+                        params![id],
+                    )?;
+                }
+                Ok(())
+            }
+            Some(r) => {
+                let Some(p) = PendingRebuild::parse(&r) else {
+                    // Corrupt/foreign marker — leave it untouched.
+                    return Ok(());
+                };
+                let ours = expected_id.is_some_and(|id| id == p.id);
+                let same_target = p.intended.is_empty() || p.intended == intended_fp;
+                if !ours && !same_target {
+                    // A newer foreign attempt for a different target — never
+                    // clear it.
+                    return Ok(());
+                }
+                db.execute(
+                    schema::UPSERT_META_SQL,
+                    params![schema::META_VECTOR_REBUILD_PENDING, ""],
+                )?;
+                db.execute(
+                    schema::UPSERT_META_SQL,
+                    params![schema::META_VECTOR_STAGING_FP, ""],
+                )?;
+                db.execute(
+                    "DELETE FROM vector_staging WHERE pending_id = ?1",
+                    params![&p.id],
+                )?;
+                Ok(())
+            }
+        }
+    });
 }
 
 /// Persist `last_attempt_at` on the pending marker, owner-scoped: only applies
@@ -485,6 +553,12 @@ pub fn discard_foreign_staging(
 /// (zero chunks + zero vectors) or (b) a populated legacy set was built in the
 /// same dimensions. The entire adopt (all metadata + staging clear) is one
 /// transaction, so a crash mid-adopt can never leave torn metadata.
+///
+/// **Marker CAS (F1):** inside the `BEGIN IMMEDIATE` transaction the stored
+/// pending marker is re-checked *before any mutation*; if a concurrent writer
+/// created a marker since the Phase-0 read, the adopt aborts (Err) and the
+/// caller must route to the rebuild path. Because `BEGIN IMMEDIATE` holds the
+/// SQLite write lock, no marker can be created between this check and COMMIT.
 pub fn adopt_installed(
     index: &MemoryIndex,
     fp: &VectorFingerprint,
@@ -498,6 +572,21 @@ pub fn adopt_installed(
     let db = index.db();
     db.execute_batch("BEGIN IMMEDIATE;")?;
     let result = (|| -> Result<(), rusqlite::Error> {
+        // Re-check the pending marker under the write lock. Any non-empty
+        // marker (parseable or corrupt) aborts the adopt.
+        let marker: Option<String> = db
+            .query_row(
+                schema::GET_META_SQL,
+                params![schema::META_VECTOR_REBUILD_PENDING],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        if marker.as_deref().is_some_and(|m| !m.trim().is_empty()) {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                Some("concurrent pending marker created; adopt aborted".into()),
+            ));
+        }
         meta_set_conn(db, "embedding_dimensions", &dimensions.to_string())?;
         meta_set_conn(db, schema::META_VECTOR_FINGERPRINT_HASH, &fp.hash)?;
         meta_set_conn(db, schema::META_VECTOR_FINGERPRINT, payload)?;
@@ -601,10 +690,16 @@ pub fn install_vectors(
         )?;
         meta_set_conn(db, schema::META_VECTOR_FINGERPRINT_HASH, &fp.hash)?;
         meta_set_conn(db, schema::META_VECTOR_FINGERPRINT, payload)?;
+        // Never downgrade the persisted vector schema compatibility version
+        // (F8): use the same max semantics as adopt.
+        let v_schema = u32::max(
+            index.installed_vector_schema_version(),
+            fp.vector_schema_version,
+        );
         meta_set_conn(
             db,
             schema::META_VECTOR_SCHEMA_VERSION,
-            &fp.vector_schema_version.to_string(),
+            &v_schema.to_string(),
         )?;
         meta_set_conn(db, schema::META_VECTOR_REBUILD_PENDING, "")?;
         meta_set_conn(db, schema::META_VECTOR_STAGING_FP, "")?;
@@ -733,8 +828,11 @@ pub async fn ensure_vectors_ready(
     let compatible =
         installed.as_deref() == Some(fp.hash.as_str()) && installed_dims == spec.dimensions;
     match installed {
-        Some(_) if compatible => {
-            // Compatible: reuse vectors. No rebuild.
+        Some(_) if compatible && idx.vec_row_count() == idx.chunk_count() => {
+            // Compatible AND the installed vector set covers every chunk
+            // (F9): reuse vectors. Clear any stale marker for this already
+            // completed target (F6), then return Ready.
+            clear_completed_target(&idx, None, fp.hash.as_str());
             return VectorReadiness::Ready;
         }
         Some(_) => { /* mismatch -> rebuild below */ }
@@ -779,33 +877,35 @@ pub async fn ensure_vectors_ready(
     } else {
         "fingerprint_mismatch"
     };
+
+    // Failure back-off: read the existing marker FIRST and, when back-off is
+    // active for our target, return FTS-only without rewriting the marker or
+    // discarding foreign staging (N-06 — no write amplification during
+    // back-off). If the target is already installed, observe completion and
+    // clear our stale marker (F6).
+    let existing_marker = idx
+        .meta_get(schema::META_VECTOR_REBUILD_PENDING)
+        .unwrap_or_default();
+    if let Some(p) = PendingRebuild::parse(&existing_marker)
+        && backoff_secs > 0
+        && p.last_attempt_at > 0
+        && now_secs() - p.last_attempt_at < backoff_secs
+        && (p.intended.is_empty() || p.intended == fp.hash)
+    {
+        if idx.installed_vector_fingerprint_hash().as_deref() == Some(fp.hash.as_str())
+            && idx.embedding_dimensions() == spec.dimensions
+        {
+            clear_completed_target(&idx, Some(&p.id), fp.hash.as_str());
+            return VectorReadiness::Ready;
+        }
+        return VectorReadiness::Pending { owned: false };
+    }
     let mut pending = match ensure_pending(&idx, &fp.hash, reason) {
         Ok(p) => p,
         Err(_) => return VectorReadiness::Pending { owned: false },
     };
     let _ = discard_foreign_staging(&idx, &pending.id);
     drop(idx);
-
-    // Failure back-off: repeated failed attempts stay FTS-only without
-    // launching a full rebuild on every search.
-    if backoff_secs > 0
-        && pending.last_attempt_at > 0
-        && now_secs() - pending.last_attempt_at < backoff_secs
-    {
-        if let Ok(idx) = open_index(
-            db_path,
-            storage.clone(),
-            index_config.clone(),
-            spec.dimensions,
-        ) {
-            if idx.installed_vector_fingerprint_hash().as_deref() == Some(fp.hash.as_str())
-                && idx.embedding_dimensions() == spec.dimensions
-            {
-                return VectorReadiness::Ready;
-            }
-        }
-        return VectorReadiness::Pending { owned: false };
-    }
 
     if !try_claim_rebuild_open(
         db_path,
@@ -816,7 +916,8 @@ pub async fn ensure_vectors_ready(
         stale_claim_secs,
     ) {
         // Another session/process owns (or just finished) the rebuild: if it
-        // already completed, observe Ready; otherwise defer (FTS-only).
+        // already completed, observe Ready (and clear our stale marker), else
+        // defer (FTS-only).
         if let Ok(idx) = open_index(
             db_path,
             storage.clone(),
@@ -826,6 +927,7 @@ pub async fn ensure_vectors_ready(
             if idx.installed_vector_fingerprint_hash().as_deref() == Some(fp.hash.as_str())
                 && idx.embedding_dimensions() == spec.dimensions
             {
+                clear_completed_target(&idx, Some(&pending.id), fp.hash.as_str());
                 return VectorReadiness::Ready;
             }
         }
@@ -850,10 +952,12 @@ pub async fn ensure_vectors_ready(
             Err(_) => return VectorReadiness::Pending { owned: true },
         };
         // If a concurrent owner completed the same target while we were
-        // preparing, observe the completed state (loser sees Ready).
+        // preparing, observe the completed state (loser sees Ready) and clear
+        // our stale marker (F6).
         if idx.installed_vector_fingerprint_hash().as_deref() == Some(fp.hash.as_str())
             && idx.embedding_dimensions() == spec.dimensions
         {
+            clear_completed_target(&idx, Some(&pending.id), fp.hash.as_str());
             return VectorReadiness::Ready;
         }
         // Pending must still reference our attempt id; a superseding rebuild
@@ -907,15 +1011,9 @@ pub async fn ensure_vectors_ready(
             if let Some(cap) = max_batches_per_call
                 && batches_done >= cap
             {
-                // Cap synchronous rebuild work per search; next search resumes.
-                if let Ok(idx) = open_index(
-                    db_path,
-                    storage.clone(),
-                    index_config.clone(),
-                    spec.dimensions,
-                ) {
-                    record_attempt(&idx, &pending, now_secs());
-                }
+                // Cap is a normal pause (progress), NOT a failure: do not
+                // record an attempt so the failure back-off stays idle and
+                // the next search resumes immediately (F2).
                 return VectorReadiness::Pending { owned: true };
             }
             if cancel.is_cancelled() {
@@ -2352,5 +2450,370 @@ mod tests {
             idx.installed_vector_fingerprint_hash().is_none(),
             "no fingerprint writes against a newer-schema DB"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21 re-review repair tests (F1-F10, N-01/N-06)
+    // -----------------------------------------------------------------------
+
+    /// F1: adopt re-checks the pending marker inside its transaction — a
+    /// concurrently created marker aborts the adopt (deterministic via two
+    /// connections).
+    #[tokio::test]
+    async fn test_adopt_cas_aborts_on_concurrent_marker() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        // Connection A: fresh db, passes a Phase-0-style no-marker read.
+        let idx_a = open_index(&db_path, storage.clone(), dims);
+        // Connection B commits a pending marker (the race window).
+        {
+            let idx_b = open_index(&db_path, storage.clone(), dims);
+            let spec_x = stub_spec(dims, "x");
+            let fp_x = fp_for(&spec_x);
+            ensure_pending(&idx_b, &fp_x.hash, "concurrent").unwrap();
+        }
+        // A's adopt must abort on the marker CAS.
+        let spec_a = stub_spec(dims, "a");
+        let fp_a = fp_for(&spec_a);
+        let payload_a = payload_for(&spec_a);
+        let r = adopt_installed(&idx_a, &fp_a, &payload_a, dims);
+        assert!(r.is_err(), "concurrent marker must abort the adopt");
+        assert!(
+            idx_a.installed_vector_fingerprint_hash().is_none(),
+            "aborted adopt must not install a fingerprint"
+        );
+        assert!(
+            pending_marker_present(&idx_a),
+            "concurrent marker must survive the aborted adopt"
+        );
+    }
+
+    /// F2/N-01: a batch-cap pause is progress, not failure — it must NOT arm
+    /// the failure back-off; the next search (with the production back-off
+    /// value) resumes immediately and completes.
+    #[tokio::test]
+    async fn test_cap_pause_does_not_back_off() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        for i in 0..40 {
+            let f = write_note(
+                &tmp,
+                &format!("a{i}.md"),
+                &format!("# A{i}\n\nRust content {i}."),
+            );
+            idx.reindex_file(&f, "workspace").unwrap();
+        }
+        drop(idx);
+        let spec_a = stub_spec(dims, "a");
+        install_vectors_for(&db_path, &storage, dims, &spec_a, "a").await;
+        let spec_b = crate::fingerprint::EmbeddingSourceSpec {
+            model: "b".into(),
+            ..spec_a.clone()
+        };
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "b"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        // First search with production back-off 60s: cap pauses after 32.
+        let out1 = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec_b,
+            embedder.clone(),
+            60,
+            60,
+            Some(1),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out1, VectorReadiness::Pending { owned: true }),
+            "{out1:?}"
+        );
+        let idx = open_index(&db_path, storage.clone(), dims);
+        let pending = pending_state(&idx).unwrap();
+        assert_eq!(
+            pending.last_attempt_at, 0,
+            "cap pause must not record a failure attempt (no back-off)"
+        );
+        let staged = staged_count(&idx, &pending.id);
+        assert!(staged > 0 && staged < 40, "cap bounds progress: {staged}");
+        drop(idx);
+        // Next search with the same 60s back-off resumes immediately and
+        // completes (back-off must not suppress a healthy rebuild).
+        let out2 = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec_b,
+            embedder,
+            60,
+            60,
+            Some(2),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(out2, VectorReadiness::Ready), "{out2:?}");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(idx.vec_row_count(), 40);
+    }
+
+    /// F6: observing a completed target clears the stale marker + staging.
+    #[tokio::test]
+    async fn test_observe_completed_clears_stale_marker() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let fa = write_note(&tmp, "a.md", "# A\n\nRust a content.");
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        idx.reindex_file(&fa, "workspace").unwrap();
+        drop(idx);
+        let spec_a = stub_spec(dims, "a");
+        install_vectors_for(&db_path, &storage, dims, &spec_a, "a").await;
+        let spec_b = crate::fingerprint::EmbeddingSourceSpec {
+            model: "b".into(),
+            ..spec_a.clone()
+        };
+        let fp_b = fp_for(&spec_b);
+        let pending;
+        // A "winner" builds and installs B, clearing the marker.
+        {
+            let idx = open_index(&db_path, storage.clone(), dims);
+            let mut p = ensure_pending(&idx, &fp_b.hash, "test").unwrap();
+            assert!(try_claim_rebuild(&idx, &mut p, 60));
+            let mock = MockEmbeddingProvider { dimensions: dims };
+            let chunks = idx.chunks_not_staged(&p.id).unwrap();
+            for (cid, text) in &chunks {
+                let v = mock.embed_batch(&[text.as_str()]).await.unwrap();
+                let hash = crate::chunker::chunk_hash(text);
+                stage_vector(&idx, &p.id, &fp_b.hash, cid.as_str(), &hash, &v[0]).unwrap();
+            }
+            let payload_b = payload_for(&spec_b);
+            assert!(install_vectors(&idx, &p, &fp_b, &payload_b, dims).unwrap());
+            pending = p;
+        }
+        // Re-arm a stale marker for OUR attempt id with staging.
+        {
+            let idx = open_index(&db_path, storage.clone(), dims);
+            let mut stale = pending.clone();
+            stale.claim = String::new();
+            stale.claimed_at = 0;
+            stale.status = "pending".into();
+            meta_set_conn(
+                idx.db(),
+                schema::META_VECTOR_REBUILD_PENDING,
+                &stale.to_json(),
+            )
+            .unwrap();
+            let mock = MockEmbeddingProvider { dimensions: dims };
+            let v = mock.embed_batch(&["# A\n\nRust a content."]).await.unwrap();
+            stage_vector(
+                &idx,
+                &pending.id,
+                &fp_b.hash,
+                &format!("{}:0", fa.to_string_lossy()),
+                "stale-hash",
+                &v[0],
+            )
+            .unwrap();
+        }
+        // A builder for B observes the completed target and clears stale state.
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "b"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        let out = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec_b,
+            embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(out, VectorReadiness::Ready), "{out:?}");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert!(
+            !pending_marker_present(&idx),
+            "stale marker must be cleared on observe-completed"
+        );
+        let staged_left: i64 = idx
+            .db()
+            .query_row("SELECT COUNT(*) FROM vector_staging", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(staged_left, 0, "stale staging must be cleared");
+    }
+
+    /// F6: a foreign marker for a different target is preserved when we
+    /// observe our completed target.
+    #[tokio::test]
+    async fn test_observe_completed_preserves_foreign_marker() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let fa = write_note(&tmp, "a.md", "# A\n\nRust a content.");
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        idx.reindex_file(&fa, "workspace").unwrap();
+        drop(idx);
+        let spec_a = stub_spec(dims, "a");
+        install_vectors_for(&db_path, &storage, dims, &spec_a, "a").await;
+        let spec_b = crate::fingerprint::EmbeddingSourceSpec {
+            model: "b".into(),
+            ..spec_a.clone()
+        };
+        let fp_b = fp_for(&spec_b);
+        // Install B (winner clears its marker).
+        {
+            let idx = open_index(&db_path, storage.clone(), dims);
+            let mut p = ensure_pending(&idx, &fp_b.hash, "test").unwrap();
+            assert!(try_claim_rebuild(&idx, &mut p, 60));
+            let mock = MockEmbeddingProvider { dimensions: dims };
+            let chunks = idx.chunks_not_staged(&p.id).unwrap();
+            for (cid, text) in &chunks {
+                let v = mock.embed_batch(&[text.as_str()]).await.unwrap();
+                let hash = crate::chunker::chunk_hash(text);
+                stage_vector(&idx, &p.id, &fp_b.hash, cid.as_str(), &hash, &v[0]).unwrap();
+            }
+            let payload_b = payload_for(&spec_b);
+            assert!(install_vectors(&idx, &p, &fp_b, &payload_b, dims).unwrap());
+        }
+        // A NEWER foreign attempt for a DIFFERENT target C leaves a marker +
+        // staging.
+        let spec_c = crate::fingerprint::EmbeddingSourceSpec {
+            model: "c".into(),
+            ..spec_a.clone()
+        };
+        let fp_c = fp_for(&spec_c);
+        {
+            let idx = open_index(&db_path, storage.clone(), dims);
+            let p = ensure_pending(&idx, &fp_c.hash, "foreign").unwrap();
+            let mock = MockEmbeddingProvider { dimensions: dims };
+            let v = mock.embed_batch(&["# A\n\nRust a content."]).await.unwrap();
+            stage_vector(
+                &idx,
+                &p.id,
+                &fp_c.hash,
+                &format!("{}:0", fa.to_string_lossy()),
+                "h",
+                &v[0],
+            )
+            .unwrap();
+        }
+        // A builder for B observes completion; the foreign C marker must
+        // survive.
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "b"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        let out = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec_b,
+            embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(out, VectorReadiness::Ready), "{out:?}");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        let raw = idx
+            .meta_get(schema::META_VECTOR_REBUILD_PENDING)
+            .unwrap_or_default();
+        let p = PendingRebuild::parse(&raw).expect("foreign marker must survive");
+        assert_eq!(
+            p.intended, fp_c.hash,
+            "foreign marker for a different target must be preserved"
+        );
+        let staged_left: i64 = idx
+            .db()
+            .query_row("SELECT COUNT(*) FROM vector_staging", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(staged_left, 1, "foreign staging must be preserved");
+    }
+
+    /// F3: a newer-schema DB is opened vec-disabled BEFORE any schema DDL —
+    /// sentinel objects/metadata are untouched and no migration runs.
+    #[test]
+    fn test_schema_newer_sentinel_untouched() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        // Manually build an old-schema DB with a NEWER schema_version.
+        {
+            std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let schema_version = schema::SCHEMA_VERSION + 100;
+            conn.execute_batch(&format!(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE chunks (rowid INTEGER PRIMARY KEY, id TEXT, path TEXT, start_line INTEGER, end_line INTEGER, text TEXT, hash TEXT, source TEXT, created_at INTEGER, updated_at INTEGER);
+                 CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='');
+                 CREATE TABLE vector_staging (pending_id TEXT, intended_fingerprint TEXT, chunk_id TEXT, embedding BLOB, PRIMARY KEY (pending_id, chunk_id));
+                 CREATE TABLE zz_sentinel (x INTEGER);
+                 INSERT INTO meta VALUES ('schema_version', '{schema_version}');
+                 INSERT INTO meta VALUES ('zz_sentinel_key', 'keep');"
+            ))
+            .unwrap();
+        }
+        let idx = open_index(&db_path, storage.clone(), 4);
+        assert!(
+            !idx.vec_available(),
+            "newer-schema DB must open vec-disabled"
+        );
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // ALTER migration did not run.
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(vector_staging)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !cols.iter().any(|c| c == "chunk_hash"),
+            "ALTER must not run on a newer-schema DB"
+        );
+        // schema_sql did not run (no new meta default keys).
+        let fp: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'vector_fingerprint_hash'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert!(fp.is_none(), "schema_sql defaults must not be written");
+        // Sentinel objects intact.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM zz_sentinel", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        let sentinel: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'zz_sentinel_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel, "keep");
+        // chunks table still queryable (FTS-only reads).
+        let c: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(c, 0);
     }
 }

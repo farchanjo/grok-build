@@ -157,6 +157,7 @@ impl SessionMemory {
             let _ = index.reindex_file(path, source);
             if let Some(ref params) = self.backend_params
                 && let Some(provider) = params.make_embedding_provider().await
+                && index.vectors_safe_to_backfill()
             {
                 crate::session::memory::embed_missing_chunks(&index, &provider).await;
             }

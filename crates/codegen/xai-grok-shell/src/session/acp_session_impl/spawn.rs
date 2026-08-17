@@ -1902,12 +1902,16 @@ pub(crate) async fn spawn_session_actor(
                     "MEMORY_REINDEX: background reindex complete"
                 );
                 let embedded_count = if let Some(api_key) = sampling_api_key {
-                    if let Some(provider) =
-                        crate::session::memory::embedding::ApiEmbeddingProvider::from_session(
-                            &embed_config,
-                            sampling_base_url,
-                            api_key,
-                        )
+                    // Gate legacy back-fill on a stable vector state: never
+                    // write into `chunks_vec` while a rebuild is pending or
+                    // before a fingerprint is installed (F7).
+                    if index.vectors_safe_to_backfill()
+                        && let Some(provider) =
+                            crate::session::memory::embedding::ApiEmbeddingProvider::from_session(
+                                &embed_config,
+                                sampling_base_url,
+                                api_key,
+                            )
                     {
                         crate::session::memory::embed_missing_chunks(&index, &provider).await
                     } else {

@@ -6,8 +6,9 @@
 //! last-known-good reload. Credentials are never stored in snapshots; each
 //! attempt resolves exact PR16 routes at call time.
 //!
-//! Out of scope: PR18 skill inventory/selection, PR19 injection, PR21 durable
-//! memory migration.
+//! Out of scope: PR18 skill inventory/selection, PR19 injection. PR21
+//! (memory durable migration) is in scope — the credential-free memory
+//! facade lives in `memory_facade.rs` and routes through this service.
 
 pub mod bounds;
 pub mod clients;

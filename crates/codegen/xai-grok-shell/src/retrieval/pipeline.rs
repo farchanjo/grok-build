@@ -430,6 +430,20 @@ pub async fn rerank_with_profile(
     cancel: CancellationToken,
     budget: &mut ProfileBudgetTracker,
 ) -> OrchestratorResult<RerankStageResult> {
+    // N-02: enforce the snapshot generation pin at the top of the rerank path
+    // too. A stale facade (mid-session reload) fails closed to the exact
+    // local pre-rerank order instead of reranking against the live snapshot.
+    if let Some(pin) = options.pin_snapshot_generation
+        && pin != ctx.snapshot.generation
+    {
+        return Ok(RerankStageResult {
+            route_model_id: None,
+            result: None,
+            preserved_pre_rerank_order: true,
+            degradation: None,
+        });
+    }
+
     let hard = options.hard_error_on_semantic_failure;
     let route_ids = &ctx.profile.reranker_route_ids;
     if route_ids.is_empty() {

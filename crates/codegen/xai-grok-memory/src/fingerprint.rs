@@ -22,6 +22,14 @@
 //! request text, the vectors themselves, and reranker-only / ranking settings
 //! (reranker config, MMR, source weights, decay, thresholds). Credential
 //! rotation and reranker-only changes therefore never trigger a rebuild.
+//!
+//! **Persisted metadata privacy:** the canonical payload stored in `meta`
+//! carries `provider_instance_id` and `origin_host` — endpoint/account
+//! identity labels, not credentials. They are persisted because they are
+//! vector-compatibility determinants; `Debug`/telemetry render them as
+//! identity strings only, and no credential/vector/text field is ever
+//! persisted or rendered. Fingerprint field bytes are length-framed and
+//! reject NUL/control characters, so crafted fields cannot collide.
 
 use blake3;
 
@@ -117,28 +125,39 @@ impl std::fmt::Display for EmbeddingSourceSpec {
 }
 
 /// Deterministic raw bytes that feed the canonical digest for a source spec.
+/// Reject NUL and C0 control characters in identity strings: they would make
+/// NUL-separated concatenation ambiguous and can hide in persisted labels.
+pub(crate) fn validate_identity_field(value: &str) -> Result<(), String> {
+    if value.chars().any(|c| (c as u32) < 0x20) {
+        return Err("embedding identity field must not contain NUL/control characters".into());
+    }
+    Ok(())
+}
+
 impl EmbeddingSourceSpec {
     fn phys_bytes(&self) -> Vec<u8> {
+        // Unambiguous length-framed encoding: every field is prefixed with its
+        // byte length (u64 LE) so crafted fields (e.g. embedded NULs) can
+        // never collide with a different field split. `build` validates the
+        // fields first, so framing is defense-in-depth.
         let mut b: Vec<u8> = Vec::new();
-        b.extend_from_slice(self.provider_instance_id.as_bytes());
-        b.push(0);
-        b.extend_from_slice(self.incarnation.as_deref().unwrap_or("").as_bytes());
-        b.push(0);
-        b.extend_from_slice(self.origin_host.as_bytes());
-        b.push(0);
-        b.extend_from_slice(self.embedding_path.as_bytes());
-        b.push(0);
-        b.extend_from_slice(self.protocol.as_bytes());
-        b.push(0);
-        b.extend_from_slice(self.model.as_bytes());
-        b.push(0);
+        frame_str(&mut b, &self.provider_instance_id);
+        frame_str(&mut b, self.incarnation.as_deref().unwrap_or(""));
+        frame_str(&mut b, &self.origin_host);
+        frame_str(&mut b, &self.embedding_path);
+        frame_str(&mut b, &self.protocol);
+        frame_str(&mut b, &self.model);
         b.extend_from_slice(&self.dimensions.to_le_bytes());
         b.push(0);
-        b.extend_from_slice(self.encoding.as_bytes());
-        b.push(0);
-        b.extend_from_slice(self.normalization.as_bytes());
+        frame_str(&mut b, &self.encoding);
+        frame_str(&mut b, &self.normalization);
         b
     }
+}
+
+fn frame_str(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -173,10 +192,8 @@ impl DocPreparationSpec {
 impl DocPreparationSpec {
     fn bytes(&self) -> Vec<u8> {
         let mut b: Vec<u8> = Vec::new();
-        b.extend_from_slice(self.version.as_bytes());
-        b.push(0);
-        b.extend_from_slice(self.chunker.as_bytes());
-        b.push(0);
+        frame_str(&mut b, &self.version);
+        frame_str(&mut b, &self.chunker);
         b.extend_from_slice(&self.max_chunk_chars.to_le_bytes());
         b.extend_from_slice(&self.chunk_overlap_chars.to_le_bytes());
         b
@@ -258,6 +275,22 @@ impl VectorFingerprint {
         document_preparation: DocPreparationSpec,
         vector_schema_version: u32,
     ) -> Result<(Self, String), String> {
+        // Reject NUL/control characters in identity fields so the length-
+        // framed encoding is never ambiguous and crafted fields cannot
+        // collide with a different field split.
+        validate_identity_field(&source.provider_instance_id)?;
+        if let Some(inc) = &source.incarnation {
+            validate_identity_field(inc)?;
+        }
+        validate_identity_field(&source.origin_host)?;
+        validate_identity_field(&source.embedding_path)?;
+        validate_identity_field(&source.protocol)?;
+        validate_identity_field(&source.model)?;
+        validate_identity_field(&source.encoding)?;
+        validate_identity_field(&source.normalization)?;
+        validate_identity_field(&document_preparation.version)?;
+        validate_identity_field(&document_preparation.chunker)?;
+
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"memvec/fp/v1\0");
         hasher.update(&FINGERPRINT_FORMAT_VERSION.to_le_bytes());
@@ -440,5 +473,69 @@ mod tests {
         assert_eq!(v["source"]["dimensions"], 1536);
         assert!(payload.contains("api.example.com"));
         assert!(!payload.contains("sk-"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21 re-review (F10): length-framed encoding + NUL/control rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fingerprint_rejects_control_chars_in_identity_fields() {
+        let setters: Vec<fn(String) -> EmbeddingSourceSpec> = vec![
+            |s| EmbeddingSourceSpec {
+                provider_instance_id: s,
+                ..spec("m")
+            },
+            |s| EmbeddingSourceSpec {
+                model: s,
+                ..spec("m")
+            },
+            |s| EmbeddingSourceSpec {
+                origin_host: s,
+                ..spec("m")
+            },
+            |s| EmbeddingSourceSpec {
+                embedding_path: s,
+                ..spec("m")
+            },
+            |s| EmbeddingSourceSpec {
+                encoding: s,
+                ..spec("m")
+            },
+        ];
+        for make in setters {
+            let s = make("ab\u{0}c".into());
+            assert!(
+                VectorFingerprint::build(
+                    s,
+                    DocPreparationSpec::from_index_config(&MemoryIndexConfig::default()),
+                    VECTOR_SCHEMA_VERSION,
+                )
+                .is_err(),
+                "NUL/control chars must be rejected in identity fields"
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_framing_is_unambiguous() {
+        // Field splits that would collide under NUL-separated concatenation
+        // hash differently under the length-framed encoding.
+        let a = build(&EmbeddingSourceSpec {
+            provider_instance_id: "ab".into(),
+            model: "c".into(),
+            ..spec("m")
+        });
+        let b = build(&EmbeddingSourceSpec {
+            provider_instance_id: "a".into(),
+            model: "bc".into(),
+            ..spec("m")
+        });
+        assert_ne!(
+            a.hash, b.hash,
+            "length-framed encoding must distinguish splits"
+        );
+        // Deterministic for identical inputs.
+        assert_eq!(a.hash, build(&a.source).hash);
     }
 }

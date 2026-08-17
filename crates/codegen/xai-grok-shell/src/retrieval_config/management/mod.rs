@@ -879,6 +879,14 @@ fn reorder_map<T: Clone>(
 /// doc-prep parameters that are **not** readable from the retrieval graph, so
 /// when memory uses a named profile this helper is conservative: it requires
 /// confirmation whenever it cannot prove "no rebuild".
+///
+/// **Known over-confirmation (N-03):** because the durable fingerprint cannot
+/// be fully verified from the retrieval graph, *any* graph save while a named
+/// memory profile is selected in either graph requires confirmation — including
+/// reranker-only or credential-rotation changes that can never trigger a
+/// durable rebuild. This is intentional and fail-closed (it never
+/// under-reports a real rebuild); a future refinement may compare only the
+/// profile's embedding-route config when the profile id is unchanged.
 pub fn compute_memory_reindex_impact(
     prior: &RetrievalGraphConfig,
     next: &RetrievalGraphConfig,

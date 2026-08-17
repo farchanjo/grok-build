@@ -469,5 +469,33 @@ mod tests {
             executor.embed_calls().is_empty(),
             "stale facade must not use the live changed routes"
         );
+
+        // N-02: rerank is generation-pinned too — a stale facade fails closed
+        // to the exact local pre-rerank order (Ok(None) ⇒ keep local order).
+        let rr = facade
+            .rerank("q", &["d0".to_owned()])
+            .await
+            .unwrap_or_else(|_| panic!("rerank must degrade, not error"));
+        assert!(
+            rr.is_none(),
+            "stale facade rerank must fail closed to local order"
+        );
+        assert!(
+            executor.rerank_calls().is_empty(),
+            "stale facade must not rerank against live changed routes"
+        );
+    }
+
+    /// A7 test gap: the named facade's embedding path equals the canonical
+    /// constant shared with the legacy synthesis route (no literal drift).
+    #[test]
+    fn facade_embedding_path_matches_canonical() {
+        let (service, _executor) = service_with_graph();
+        let facade = RetrievalServiceMemoryFacade::new(&service, "default").unwrap();
+        assert_eq!(
+            facade.source_spec().embedding_path,
+            xai_grok_inference::DEFAULT_EMBEDDINGS_PATH,
+            "named and legacy synthesis must share the canonical embedding path"
+        );
     }
 }

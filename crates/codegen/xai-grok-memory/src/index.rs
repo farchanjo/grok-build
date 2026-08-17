@@ -145,7 +145,39 @@ impl MemoryIndex {
                 }
             };
 
-        // Create schema
+        // Fail-closed gate BEFORE any schema DDL: a DB written by a **newer**
+        // reader must never be touched by this reader's `schema_sql` or the
+        // staging ALTER migration (they could error or mutate a schema we do
+        // not understand). Open as vec-disabled FTS-only with no writes at all.
+        let stored_schema: Option<u32> = db
+            .query_row(
+                schema::GET_META_SQL,
+                params![schema::META_SCHEMA_VERSION],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        if let Some(stored) = stored_schema
+            && stored > schema::SCHEMA_VERSION
+        {
+            static NEWER_SCHEMA_WARNED: std::sync::Once = std::sync::Once::new();
+            NEWER_SCHEMA_WARNED.call_once(|| {
+                tracing::warn!(
+                    stored,
+                    current = schema::SCHEMA_VERSION,
+                    "memory index written by a newer schema version; refusing all writes, FTS-only"
+                );
+            });
+            return Ok(Self {
+                db,
+                storage,
+                chunk_config: config,
+                vec_available: false,
+                embedding_dimensions: dimensions,
+            });
+        }
+
+        // Create schema (only for a current-or-legacy/fresh DB).
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
 
         // Additive migration: DBs that created `vector_staging` before the
@@ -167,37 +199,6 @@ impl MemoryIndex {
                     "ALTER TABLE vector_staging ADD COLUMN chunk_hash TEXT NOT NULL DEFAULT ''",
                 )?;
             }
-        }
-
-        // Fail-closed gate for a DB written by a **newer** reader: never run
-        // migrations or destructive writes against it. Open as FTS-only and
-        // skip everything fingerprint/vector related.
-        let stored_schema: Option<u32> = db
-            .query_row(
-                schema::GET_META_SQL,
-                params![schema::META_SCHEMA_VERSION],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-            .and_then(|s| s.trim().parse().ok());
-        if let Some(stored) = stored_schema
-            && stored > schema::SCHEMA_VERSION
-        {
-            static NEWER_SCHEMA_WARNED: std::sync::Once = std::sync::Once::new();
-            NEWER_SCHEMA_WARNED.call_once(|| {
-                tracing::warn!(
-                    stored,
-                    current = schema::SCHEMA_VERSION,
-                    "memory index written by a newer schema version; refusing writes, FTS-only"
-                );
-            });
-            return Ok(Self {
-                db,
-                storage,
-                chunk_config: config,
-                vec_available: false,
-                embedding_dimensions: dimensions,
-            });
         }
 
         // Store/verify embedding dimensions in meta table.
@@ -288,6 +289,23 @@ impl MemoryIndex {
         self.meta_get(schema::META_VECTOR_SCHEMA_VERSION)
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0)
+    }
+
+    /// Whether legacy back-fill (`embed_missing_chunks` on the `chunks_vec`
+    /// table) is safe right now.
+    ///
+    /// Returns `false` while a vector rebuild is pending (writes would be
+    /// redundant work against a table the atomic install is about to replace,
+    /// or could mix an incompatible space) or when no installed fingerprint
+    /// exists yet. Back-fill callers must gate on this (F7).
+    pub fn vectors_safe_to_backfill(&self) -> bool {
+        if !self.vec_available {
+            return false;
+        }
+        if super::rebuild::pending_marker_present(self) {
+            return false;
+        }
+        self.installed_vector_fingerprint_hash().is_some()
     }
 
     /// Number of rows currently in `chunks_vec` (vector rows installed).
