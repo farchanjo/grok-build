@@ -7,6 +7,7 @@ pub mod memory_state;
 pub mod merge;
 pub mod notifications;
 pub mod pending_interaction;
+pub mod prime;
 pub mod prompt_queue;
 pub(crate) mod rolling_compaction;
 pub mod two_pass;
