@@ -12,6 +12,15 @@ pub(crate) enum McpReminderMode {
     Full,
 }
 
+/// Credential store updated by a successful 401 recovery. Uncharged pacing
+/// waits on `AuthManager` only for session-token recovery, never for a
+/// provider-owned key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveredStore {
+    SessionToken,
+    AuthProvider,
+}
+
 /// Recovery decision returned by
 /// `SessionActor::handle_sampling_failure` for the sampler-based
 /// turn loop.
@@ -19,10 +28,12 @@ pub(crate) enum InferenceFailureRecovery {
     /// Compaction ran. The turn loop should rebuild the request from
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
-    /// Auth 401 recovery succeeded (devbox re-mint, OIDC refresh, or auth
-    /// provider re-mint). The turn loop should resubmit once with the
-    /// fresh token.
-    RefreshAuthAndResubmit,
+    /// Auth recovery succeeded; carry the rejected request's wire provenance
+    /// and the store that owns the recovered credential into retry accounting.
+    RefreshAuthAndResubmit {
+        credential: xai_grok_inference_types::SentCredential,
+        store: RecoveredStore,
+    },
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
@@ -36,8 +47,12 @@ pub(crate) enum InferenceTurnOutcome {
         Box<xai_grok_inference::InferenceLatencyStats>,
     ),
     CompactAndResubmit,
-    /// Auth recovery succeeded; the outer loop should retry once.
-    RefreshAuthAndResubmit,
+    /// Auth recovery succeeded; the outer loop applies credential-aware
+    /// accounting before resubmitting.
+    RefreshAuthAndResubmit {
+        credential: xai_grok_inference_types::SentCredential,
+        store: RecoveredStore,
+    },
 }
 
 /// Outcome of `process_conversation_turn`, distinguishing normal completion from cancellation.

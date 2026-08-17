@@ -22,7 +22,8 @@ use super::token_output::{expiry_after_seconds, parse_token_output};
 #[serde(default)]
 pub struct AuthProviderConfig {
     /// Command that prints a bearer token on stdout, bare or as JSON
-    /// `{access_token, expires_in}`. Without `args` it runs via `sh -c`.
+    /// `{access_token, expires_in}`. Without `args` it runs through the
+    /// platform shell.
     pub command: String,
     /// Arguments for `command`. When present (even empty), the command runs
     /// directly with no shell; `command` is a program name on `PATH`, or a path.
@@ -364,11 +365,7 @@ async fn mint_provider_token(
             cmd.args(args);
             cmd
         }
-        None => {
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.args(["-c", &config.command]);
-            cmd
-        }
+        None => crate::util::subprocess::shell_c(&config.command),
     };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())

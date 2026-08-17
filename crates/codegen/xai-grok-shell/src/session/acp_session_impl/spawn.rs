@@ -436,12 +436,19 @@ pub(crate) async fn spawn_session_actor(
         soft_trim_tail: session_pruning_config.soft_trim_tail,
         hard_clear_age_turns: session_pruning_config.hard_clear_age_turns,
     };
+    let initial_execution_backend = {
+        let models = models_manager.models();
+        crate::agent::config::find_model_by_id(&models, session_model_id.0.as_ref())
+            .map(|entry| entry.info.execution_backend)
+            .unwrap_or_default()
+    };
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
     let chat_state_cancellation = tokio_util::sync::CancellationToken::new();
-    let chat_state_handle = xai_chat_state::ChatStateActor::spawn_with_pruning(
+    let chat_state_handle = xai_chat_state::ChatStateActor::spawn_with_pruning_and_image_budget(
         conversation.clone(),
         chat_state_inference_settings,
         actor_pruning_config,
+        image_budget_for_route(&inference_config, initial_execution_backend),
         Box::new(super::chat_persistence::ChannelChatPersistence::new(
             persistence.tx.clone(),
         )),
@@ -918,6 +925,7 @@ pub(crate) async fn spawn_session_actor(
         attribution_callback: attribution_callback_for_spec,
         tool_params_json: tool_params_json.clone(),
         subagent_event_tx: tool_context.subagent_event_tx.clone(),
+        subagent_admission: tool_context.subagent_admission.clone(),
         monitor_event_buffer: tool_context.monitor_event_buffer.clone(),
         user_question_tx: user_question_tx.clone(),
         subagent_depth: tool_context.subagent_depth,
@@ -1451,6 +1459,7 @@ pub(crate) async fn spawn_session_actor(
     let resolved_tool_overrides: std::sync::Arc<
         arc_swap::ArcSwapOption<xai_grok_inference_types::ToolOverrides>,
     > = std::sync::Arc::new(arc_swap::ArcSwapOption::empty());
+    let compaction_cancel = super::compaction_config::CompactCancelGate::default();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         auth_method_id,
@@ -1497,6 +1506,7 @@ pub(crate) async fn spawn_session_actor(
             tool_choice: compaction_tool_choice,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: compaction_cancel.clone(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: super::memory_state::SessionMemory {
@@ -1645,6 +1655,8 @@ pub(crate) async fn spawn_session_actor(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(built_hook_registry),
+        turn_report: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: std::cell::RefCell::new(client_hooks),
         hook_resolved_workspace_root: resolved_workspace_root,
         vcs_kind: {
@@ -1670,6 +1682,7 @@ pub(crate) async fn spawn_session_actor(
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle,
         // Default native; callers restore from Summary / model switch.
         execution_backend: std::cell::Cell::new(
@@ -2022,6 +2035,7 @@ pub(crate) async fn spawn_session_actor(
             persistence_tx: persistence.tx.clone(),
             current_prompt_id,
             pending_interactions,
+            compaction_cancel,
             info: session_info,
             max_turns,
             resolved_tool_overrides,

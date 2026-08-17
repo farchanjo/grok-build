@@ -9,10 +9,37 @@ use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
 use tokio::sync::oneshot;
 use xai_grok_inference_types::parse_reasoning_effort_meta;
-/// Apply a model switch to a session (no gate — `set_session_model` gates first).
+/// Apply an interactive model switch using the target catalog row's execution backend.
 pub(crate) async fn apply(
     agent: &MvpAgent,
     args: acp::SetSessionModelRequest,
+) -> Result<acp::SetSessionModelResponse, acp::Error> {
+    apply_with_execution_backend(agent, args, None).await
+}
+
+/// Apply a load/resume model switch while preserving the authoritative backend
+/// already restored from the persisted session summary.
+pub(crate) async fn apply_for_load(
+    agent: &MvpAgent,
+    args: acp::SetSessionModelRequest,
+    persisted_execution_backend: crate::agent::execution_backend::ExecutionBackend,
+) -> Result<acp::SetSessionModelResponse, acp::Error> {
+    apply_with_execution_backend(agent, args, Some(persisted_execution_backend)).await
+}
+
+#[cfg(test)]
+pub(crate) async fn apply_with_execution_backend_for_test(
+    agent: &MvpAgent,
+    args: acp::SetSessionModelRequest,
+    execution_backend_override: Option<crate::agent::execution_backend::ExecutionBackend>,
+) -> Result<acp::SetSessionModelResponse, acp::Error> {
+    apply_with_execution_backend(agent, args, execution_backend_override).await
+}
+
+async fn apply_with_execution_backend(
+    agent: &MvpAgent,
+    args: acp::SetSessionModelRequest,
+    execution_backend_override: Option<crate::agent::execution_backend::ExecutionBackend>,
 ) -> Result<acp::SetSessionModelResponse, acp::Error> {
     tracing::info!("Received set session model request {args:?}");
     xai_grok_telemetry::unified_log::info(
@@ -33,7 +60,8 @@ pub(crate) async fn apply(
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let model = agent.resolve_model_id(&model_id)?;
     let use_concise = model.info().use_concise;
-    let target_execution_backend = model.info().execution_backend;
+    let target_execution_backend =
+        execution_backend_override.unwrap_or(model.info().execution_backend);
     let session_default = handle
         .session_default_agent_profile
         .as_deref()
@@ -243,18 +271,23 @@ pub(crate) async fn apply(
         )
     };
     let (tx, rx) = oneshot::channel();
-    let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
-        inference_config: model_sampling,
-        use_concise,
-        apply_prompt_override,
-        skip_prompt_rewrite: did_rebuild || model_unchanged,
-        auto_compact_threshold_percent: new_threshold,
-        execution_backend: target_execution_backend,
-        responds_to: tx,
-    });
+    handle
+        .cmd_tx
+        .send(SessionCommand::SetSessionModel {
+            inference_config: model_sampling,
+            use_concise,
+            apply_prompt_override,
+            skip_prompt_rewrite: did_rebuild || model_unchanged,
+            auto_compact_threshold_percent: new_threshold,
+            execution_backend: target_execution_backend,
+            responds_to: tx,
+        })
+        .map_err(|_| {
+            acp::Error::internal_error().data("set_session_model: session actor closed")
+        })?;
     let updated_model = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))?;
+        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
     if let Some(handle) = agent.sessions.borrow_mut().get_mut(&session_id) {
         handle.model_id = model_id.clone();
         handle.reasoning_effort = applied_effort;

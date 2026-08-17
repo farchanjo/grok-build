@@ -64,7 +64,7 @@ impl WebSearchClient {
             headers.insert(header_name, header_value);
         }
         let _ = alpha_test_key;
-        let http = reqwest::Client::builder()
+        let http = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
             .default_headers(headers)
             .build()
             .map_err(|e| {
@@ -366,18 +366,18 @@ mod tests {
         invocations: std::sync::Mutex<Vec<(ToolConsumer, Option<String>)>>,
     }
     impl crate::attribution::Auth401AttributionCallback for CountingCallback {
-        fn record_401(&self, consumer: ToolConsumer, sent_bearer_prefix: Option<&str>) {
+        fn record_401(&self, consumer: ToolConsumer, sent_bearer_tail: Option<&str>) {
             self.invocations
                 .lock()
                 .unwrap()
-                .push((consumer, sent_bearer_prefix.map(|s| s.to_string())));
+                .push((consumer, sent_bearer_tail.map(str::to_owned)));
         }
     }
     /// `record_401_attribution` invokes the wired callback with
-    /// `ToolConsumer::WebSearch` and the truncated bearer prefix.
+    /// `ToolConsumer::WebSearch` and the truncated bearer tail.
     /// The full bearer never crosses the trait boundary.
     #[test]
-    fn record_401_attribution_passes_truncated_prefix_to_callback() {
+    fn record_401_attribution_passes_truncated_tail_to_callback() {
         let cb = std::sync::Arc::new(CountingCallback::default());
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let config = WebSearchConfig::Enabled {
@@ -394,10 +394,10 @@ mod tests {
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, ToolConsumer::WebSearch);
-        assert_eq!(calls[0].1.as_deref(), Some("bearer-with-"));
+        assert_eq!(calls[0].1.as_deref(), Some("l-aaaaaaaaaa"));
         assert_eq!(
-            calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            calls[0].1.as_deref().map(str::chars).map(Iterator::count),
+            Some(crate::attribution::BEARER_TAIL_CHARS),
         );
     }
     /// `record_401_attribution` is a no-op when no callback is wired

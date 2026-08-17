@@ -340,6 +340,74 @@ async fn list_session_todos(
         })
         .collect()
 }
+
+/// Select the safe filesystem base for client-facing file references.
+///
+/// A bound session may rebase relative references only when its cwd is a
+/// non-empty, component-normal suffix of the workspace root and resolves to a
+/// directory within that root. Caller-supplied, missing, or otherwise unusable
+/// session cwd values fall back to the workspace root instead of breaking the
+/// whole request.
+async fn resolve_file_references_base(
+    workspace: &WorkspaceHandle,
+    bound_session: Option<&str>,
+) -> WorkspaceResult<std::path::PathBuf> {
+    let root = workspace.root_cwd()?;
+    let canonical_root = workspace.canonical_root().await?;
+    let suffix = bound_session
+        .and_then(|id| workspace.session(id))
+        .and_then(|session| {
+            let cwd = session.cwd();
+            cwd.strip_prefix(&root)
+                .or_else(|_| cwd.strip_prefix(&canonical_root))
+                .ok()
+                .filter(|suffix| {
+                    !suffix.as_os_str().is_empty()
+                        && suffix
+                            .components()
+                            .all(|component| matches!(component, std::path::Component::Normal(_)))
+                })
+                .map(std::path::Path::to_path_buf)
+        });
+    let Some(suffix) = suffix else {
+        return Ok(root);
+    };
+
+    let base = root.join(suffix);
+    #[allow(clippy::disallowed_methods)]
+    let canonical = match tokio::fs::canonicalize(&base).await {
+        Ok(canonical) => dunce::simplified(&canonical).to_path_buf(),
+        Err(error) => {
+            tracing::warn!(
+                session_id = ?bound_session,
+                base = %base.display(),
+                %error,
+                "file-reference base unusable; falling back to the workspace root"
+            );
+            return Ok(root);
+        }
+    };
+    let is_dir = tokio::fs::metadata(&canonical)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir());
+    if !canonical.starts_with(&canonical_root) || !is_dir {
+        tracing::warn!(
+            session_id = ?bound_session,
+            base = %base.display(),
+            canonical = %canonical.display(),
+            "file-reference base leaves the workspace root or is not a directory; falling back to the workspace root"
+        );
+        return Ok(root);
+    }
+
+    tracing::debug!(
+        session_id = ?bound_session,
+        base = %base.display(),
+        "file references rebased to the bound session cwd"
+    );
+    Ok(base)
+}
+
 /// Routes JSON-RPC `workspace.*` method calls to [`WorkspaceHandle`].
 pub(crate) struct WorkspaceRpcHandler {
     workspace: WorkspaceHandle,
@@ -522,14 +590,28 @@ impl WorkspaceRpcHandler {
                     .get("refs")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
-                let cwd = self.workspace.root_cwd()?;
+                let cwd = resolve_file_references_base(&self.workspace, bound_session).await?;
                 let mut results = Vec::new();
                 for ref_path in &refs {
-                    let full_path = if std::path::Path::new(ref_path).is_absolute() {
+                    let requested_path = if std::path::Path::new(ref_path).is_absolute() {
                         std::path::PathBuf::from(ref_path)
                     } else {
                         cwd.join(ref_path)
                     };
+                    let full_path =
+                        match self.workspace.confine_to_root(&requested_path, &cwd).await {
+                            Ok((confined, _)) => confined,
+                            Err(error) => {
+                                results.push(serde_json::json!({
+                                    "path": requested_path.to_string_lossy(),
+                                    "ref": ref_path,
+                                    "exists": false,
+                                    "content": Value::Null,
+                                    "error": error.to_string(),
+                                }));
+                                continue;
+                            }
+                        };
                     let exists = full_path.exists();
                     let content = if exists {
                         tokio::fs::read_to_string(&full_path).await.ok()
@@ -613,7 +695,7 @@ impl WorkspaceRpcHandler {
             }
             <LoadEnvrcReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let env = crate::envrc::load_envrc_or_empty(&cwd);
+                let env = crate::envrc::spawn_envrc_load(cwd, true).join().await;
                 serde_json::to_value(env).map_err(|e| WorkspaceError::HubError(e.to_string()))
             }
             <InstallPluginReq as WorkspaceRpc>::METHOD => {
@@ -1168,7 +1250,9 @@ impl ToolServerHandler for WorkspaceRpcHandler {
 mod tests {
     use super::*;
     use crate::capability::CapabilityMode;
-    use crate::handle::tests::{background_capable_cfg, make_handle, start_background_sleep};
+    use crate::handle::tests::{
+        background_capable_cfg, make_confining_handle, make_handle, start_background_sleep,
+    };
     use xai_grok_tools::implementations::grok_build::scheduler::types::{
         ScheduledTask, SchedulerState,
     };
@@ -2473,6 +2557,206 @@ mod tests {
             res.results[0].error
         );
     }
+    #[tokio::test]
+    async fn dispatch_resolve_file_references_rejects_outside_root_when_confined() {
+        let handle = make_confining_handle();
+        let root = handle.root_cwd().unwrap();
+        std::fs::write(root.join("inside.txt"), "INSIDE").unwrap();
+        let outside = tempfile::tempdir().expect("outside temp dir");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "OUTSIDE_SECRET").unwrap();
+        let handler = WorkspaceRpcHandler::new(handle);
+        let params = serde_json::json!({
+            "refs": [secret.to_string_lossy(), "../escape.txt", "inside.txt"]
+        });
+
+        let result = handler
+            .dispatch("workspace.resolve_file_references", params, None)
+            .await
+            .expect("dispatch itself should succeed");
+        let entries = result.as_array().expect("results array");
+        assert_eq!(entries.len(), 3);
+        for entry in &entries[..2] {
+            assert_eq!(entry["exists"], serde_json::Value::Bool(false));
+            assert_eq!(entry["content"], serde_json::Value::Null);
+            assert!(
+                entry["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("escapes workspace root"),
+                "escape should be rejected, not read: {entry:?}"
+            );
+        }
+        assert_eq!(entries[2]["content"], serde_json::json!("INSIDE"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_resolve_file_references_confines_to_session_base() {
+        let handle = make_confining_handle();
+        let root = handle.root_cwd().unwrap();
+        std::fs::create_dir(root.join("artifacts")).unwrap();
+        std::fs::write(root.join("rooted.txt"), "ROOT_ONLY").unwrap();
+        handle
+            .create_session_with_cwd("cwd-session", Some(root.join("artifacts")))
+            .unwrap();
+        let handler = WorkspaceRpcHandler::new(handle);
+
+        let result = handler
+            .dispatch(
+                "workspace.resolve_file_references",
+                serde_json::json!({ "refs": ["../rooted.txt"] }),
+                Some("cwd-session"),
+            )
+            .await
+            .expect("dispatch itself should succeed");
+        let entries = result.as_array().expect("results array");
+        assert_eq!(entries[0]["exists"], serde_json::Value::Bool(false));
+        assert_eq!(entries[0]["content"], serde_json::Value::Null);
+        assert!(
+            entries[0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("escapes workspace root"),
+            "escape above the session base should be rejected: {:?}",
+            entries[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_resolve_file_references_uses_each_bound_session_base() {
+        let handle = make_confining_handle();
+        let root = handle.root_cwd().unwrap();
+        for (session_id, dir, content) in [
+            ("cwd-session-a", "artifacts-a", "from-a"),
+            ("cwd-session-b", "artifacts-b", "from-b"),
+        ] {
+            let cwd = root.join(dir);
+            std::fs::create_dir(&cwd).unwrap();
+            std::fs::write(cwd.join("out.txt"), content).unwrap();
+            handle
+                .create_session_with_cwd(session_id, Some(cwd))
+                .unwrap();
+        }
+        let handler = WorkspaceRpcHandler::new(handle);
+
+        for (session_id, expected) in [("cwd-session-a", "from-a"), ("cwd-session-b", "from-b")] {
+            let result = handler
+                .dispatch(
+                    "workspace.resolve_file_references",
+                    serde_json::json!({ "refs": ["out.txt"] }),
+                    Some(session_id),
+                )
+                .await
+                .expect("dispatch should succeed");
+            let entries = result.as_array().expect("results array");
+            assert_eq!(entries[0]["exists"], serde_json::Value::Bool(true));
+            assert_eq!(entries[0]["content"], serde_json::json!(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_resolve_file_references_preserves_unconfined_access() {
+        let handle = make_handle();
+        let root = handle.root_cwd().unwrap();
+        let session_cwd = root.join("artifacts");
+        std::fs::create_dir(&session_cwd).unwrap();
+        handle
+            .create_session_with_cwd("cwd-session", Some(session_cwd))
+            .unwrap();
+        std::fs::write(root.join("rooted.txt"), "LEGACY_TRAVERSAL").unwrap();
+        let outside = tempfile::tempdir().expect("outside temp dir");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "LEGACY_ABSOLUTE").unwrap();
+        let handler = WorkspaceRpcHandler::new(handle);
+
+        let result = handler
+            .dispatch(
+                "workspace.resolve_file_references",
+                serde_json::json!({
+                    "refs": ["../rooted.txt", secret.to_string_lossy()]
+                }),
+                Some("cwd-session"),
+            )
+            .await
+            .expect("unconfined workspace should retain legacy access");
+        let entries = result.as_array().expect("results array");
+        assert_eq!(entries[0]["content"], serde_json::json!("LEGACY_TRAVERSAL"));
+        assert_eq!(entries[1]["content"], serde_json::json!("LEGACY_ABSOLUTE"));
+        assert!(entries.iter().all(|entry| entry.get("error").is_none()));
+    }
+
+    #[tokio::test]
+    async fn dispatch_resolve_file_references_falls_back_for_unusable_session_cwds() {
+        let handle = make_handle();
+        let root = handle.root_cwd().unwrap();
+        std::fs::write(root.join("rooted.txt"), "ROOT_FALLBACK").unwrap();
+
+        let missing = root.join("not-mounted-yet");
+        handle
+            .create_session_with_cwd("missing-cwd", Some(missing))
+            .unwrap();
+        let file_cwd = root.join("not-a-directory");
+        std::fs::write(&file_cwd, "file").unwrap();
+        handle
+            .create_session_with_cwd("file-cwd", Some(file_cwd))
+            .unwrap();
+        let outside = tempfile::tempdir().expect("outside cwd");
+        handle
+            .create_session_with_cwd("outside-cwd", Some(outside.path().to_path_buf()))
+            .unwrap();
+        let handler = WorkspaceRpcHandler::new(handle);
+
+        for session_id in ["unknown-session", "missing-cwd", "file-cwd", "outside-cwd"] {
+            let result = handler
+                .dispatch(
+                    "workspace.resolve_file_references",
+                    serde_json::json!({ "refs": ["rooted.txt"] }),
+                    Some(session_id),
+                )
+                .await
+                .expect("unusable session cwd should fall back safely");
+            let entries = result.as_array().expect("results array");
+            assert_eq!(entries[0]["exists"], serde_json::Value::Bool(true));
+            assert_eq!(
+                entries[0]["content"],
+                serde_json::json!("ROOT_FALLBACK"),
+                "{session_id} should resolve from the workspace root"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn dispatch_resolve_file_references_rejects_symlink_escape_when_confined() {
+        let handle = make_confining_handle();
+        let root = handle.root_cwd().unwrap();
+        let outside = tempfile::tempdir().expect("outside temp dir");
+        std::fs::write(outside.path().join("secret.txt"), "OUTSIDE_SECRET").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("escape-link"))
+            .expect("create escape symlink");
+        let handler = WorkspaceRpcHandler::new(handle);
+
+        let result = handler
+            .dispatch(
+                "workspace.resolve_file_references",
+                serde_json::json!({ "refs": ["escape-link/secret.txt"] }),
+                None,
+            )
+            .await
+            .expect("dispatch itself should succeed");
+        let entries = result.as_array().expect("results array");
+        assert_eq!(entries[0]["exists"], serde_json::Value::Bool(false));
+        assert_eq!(entries[0]["content"], serde_json::Value::Null);
+        assert!(
+            entries[0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("symlink escape"),
+            "symlink escape should be rejected: {:?}",
+            entries[0]
+        );
+    }
+
     #[tokio::test]
     async fn handle_hook_pause_resume_are_noops() {
         let handle = make_handle();

@@ -23,19 +23,30 @@ fn spawn_deny_responder(
     gateway_rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
     reason: &'static str,
 ) {
-    let mut gateway_rx = gateway_rx;
+    spawn_client_hook_responder(gateway_rx, move |_| {
+        serde_json::json!({
+            "decision": "deny",
+            "systemMessage": reason,
+        })
+    });
+}
+
+fn spawn_client_hook_responder(
+    mut gateway_rx: tokio::sync::mpsc::UnboundedReceiver<xai_acp_lib::AcpClientMessage>,
+    response: impl Fn(&str) -> serde_json::Value + 'static,
+) {
     tokio::task::spawn_local(async move {
         while let Some(msg) = gateway_rx.recv().await {
             match msg {
                 xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
-                    let deny: Arc<serde_json::value::RawValue> =
-                        serde_json::value::to_raw_value(&serde_json::json!({
-                            "decision": "deny",
-                            "systemMessage": reason,
-                        }))
-                        .unwrap()
-                        .into();
-                    let _ = args.response_tx.send(Ok(acp::ExtResponse::new(deny)));
+                    let params: serde_json::Value =
+                        serde_json::from_str(args.request.params.get()).unwrap();
+                    let callback_id = params["hookCallbackId"].as_str().unwrap_or_default();
+                    let body: Arc<serde_json::value::RawValue> =
+                        serde_json::value::to_raw_value(&response(callback_id))
+                            .unwrap()
+                            .into();
+                    let _ = args.response_tx.send(Ok(acp::ExtResponse::new(body)));
                 }
                 xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
                     let _ = args.response_tx.send(Ok(()));
@@ -44,6 +55,96 @@ fn spawn_deny_responder(
             }
         }
     });
+}
+
+async fn prepare(
+    actor: &SessionActor,
+    call: ToolCallResponse,
+) -> Result<PreparedToolCall, ToolLoop> {
+    let mut deferred = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        actor.prepare_tool_call(call, &mut deferred),
+    )
+    .await
+    .expect("prepare_tool_call must not hang")
+    .expect("prepare_tool_call must not error")
+}
+
+async fn tool_result_text(actor: &SessionActor, call_id: &str) -> String {
+    let conv = actor.chat_state_handle.get_conversation().await;
+    conv.iter()
+        .rev()
+        .find_map(|item| match item {
+            xai_grok_inference_types::ConversationItem::ToolResult(result)
+                if result.tool_call_id == call_id =>
+            {
+                Some(result.content.to_string())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no tool_result for {call_id}"))
+}
+
+fn search_replace_call(id: &str, path: &str) -> ToolCallResponse {
+    ToolCallResponse {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: crate::inference::types::ToolCallFunction::new(
+            "search_replace",
+            format!(r#"{{"file_path":"{path}","old_string":"a","new_string":"b"}}"#),
+        ),
+    }
+}
+
+async fn test_agent_with_search_replace() -> xai_grok_agent::Agent {
+    use xai_grok_tools::registry::types::ToolConfig;
+    test_agent_with_tools(vec![
+        ToolConfig::from_id("GrokBuild:read_file"),
+        ToolConfig::from_id("GrokBuild:search_replace"),
+    ])
+    .await
+}
+
+#[derive(Debug)]
+struct ReadOnlyMcpFixture;
+
+impl xai_grok_tools::types::tool_metadata::ToolMetadata for ReadOnlyMcpFixture {
+    fn kind(&self) -> xai_grok_tools::types::tool::ToolKind {
+        xai_grok_tools::types::tool::ToolKind::Read
+    }
+
+    fn tool_namespace(&self) -> xai_grok_tools::types::tool::ToolNamespace {
+        xai_grok_tools::types::tool::ToolNamespace::MCP
+    }
+
+    fn description_template(&self) -> &str {
+        "read-only MCP fixture"
+    }
+}
+
+impl xai_tool_runtime::Tool for ReadOnlyMcpFixture {
+    type Args = serde_json::Value;
+    type Output = String;
+
+    fn id(&self) -> xai_tool_protocol::ToolId {
+        xai_tool_protocol::ToolId::new("fixture__read").expect("valid tool id")
+    }
+
+    fn description(
+        &self,
+        _ctx: &xai_tool_runtime::ListToolsContext,
+    ) -> xai_tool_types::ToolDescription {
+        xai_tool_types::ToolDescription::new("fixture__read", "read-only MCP fixture")
+    }
+
+    async fn run(
+        &self,
+        _ctx: xai_tool_runtime::ToolCallContext,
+        _args: serde_json::Value,
+    ) -> Result<String, xai_tool_runtime::ToolError> {
+        Ok("ok".to_string())
+    }
 }
 
 /// Client hooks fire even with no on-disk hook registry: `notify_client_hooks`
@@ -159,6 +260,341 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
         .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn pre_tool_use_client_rewrite_updates_real_search_replace_input() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let temp = tempfile::tempdir().unwrap();
+            let original = temp.path().join("original.txt");
+            let rewritten = temp.path().join("rewritten.txt");
+            std::fs::write(&original, "original\n").unwrap();
+            std::fs::write(&rewritten, "a\n").unwrap();
+
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_search_replace().await;
+            actor
+                .workspace_ops
+                .bind_local_session(
+                    &actor.session_id_string(),
+                    actor.tool_context.cwd.as_path().to_path_buf(),
+                    actor.tool_context.hunk_tracker_handle.clone(),
+                    actor.agent.borrow().tool_bridge().toolset(),
+                    None,
+                )
+                .expect("workspace session binding succeeds");
+            install_client_hook(
+                &actor,
+                xai_grok_hooks::event::HookEventName::PreToolUse,
+                &["rewrite"],
+            );
+            let rewritten_wire = rewritten.to_string_lossy().into_owned();
+            spawn_client_hook_responder(gateway_rx, move |_| {
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "updatedInput": {
+                            "file_path": rewritten_wire,
+                            "old_string": "a",
+                            "new_string": "b",
+                        },
+                    },
+                })
+            });
+
+            let result = actor
+                .execute_tool_calls(vec![search_replace_call(
+                    "call_rewrite",
+                    original.to_str().unwrap(),
+                )])
+                .await
+                .expect("search_replace execution must not error");
+            assert!(matches!(result, ToolLoop::Continue));
+            assert_eq!(std::fs::read_to_string(&rewritten).unwrap(), "b\n");
+            assert_eq!(std::fs::read_to_string(&original).unwrap(), "original\n");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_tool_use_client_rewrites_follow_source_order_and_preserve_original_payload() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, mut gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_search_replace().await;
+            install_client_hook(
+                &actor,
+                xai_grok_hooks::event::HookEventName::PreToolUse,
+                &["first", "second"],
+            );
+
+            let seen_paths = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let captured = seen_paths.clone();
+            tokio::task::spawn_local(async move {
+                while let Some(msg) = gateway_rx.recv().await {
+                    match msg {
+                        xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
+                            let params: serde_json::Value =
+                                serde_json::from_str(args.request.params.get()).unwrap();
+                            captured.borrow_mut().push(
+                                params["toolInput"]["file_path"]
+                                    .as_str()
+                                    .unwrap()
+                                    .to_string(),
+                            );
+                            let is_first = params["hookCallbackId"] == "first";
+                            tokio::task::spawn_local(async move {
+                                if is_first {
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                }
+                                let path = if is_first {
+                                    "/tmp/from-first.rs"
+                                } else {
+                                    "/tmp/from-second.rs"
+                                };
+                                let body: Arc<serde_json::value::RawValue> =
+                                    serde_json::value::to_raw_value(&serde_json::json!({
+                                        "hookSpecificOutput": {
+                                            "updatedInput": {
+                                                "file_path": path,
+                                                "old_string": "a",
+                                                "new_string": "b",
+                                            },
+                                        },
+                                    }))
+                                    .unwrap()
+                                    .into();
+                                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(body)));
+                            });
+                        }
+                        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            let prepared = prepare(
+                &actor,
+                search_replace_call("call_order", "/tmp/original.rs"),
+            )
+            .await
+            .expect("valid client rewrites must prepare");
+            assert_eq!(prepared.parsed_args["file_path"], "/tmp/from-second.rs");
+            assert_eq!(
+                seen_paths.borrow().as_slice(),
+                ["/tmp/original.rs", "/tmp/original.rs"]
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn malformed_later_client_rewrite_preserves_prior_valid_rewrite() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_search_replace().await;
+            install_client_hook(
+                &actor,
+                xai_grok_hooks::event::HookEventName::PreToolUse,
+                &["valid", "malformed-response", "non-object", "null"],
+            );
+            spawn_client_hook_responder(gateway_rx, |callback_id| match callback_id {
+                "valid" => serde_json::json!({
+                    "hookSpecificOutput": {
+                        "updatedInput": {
+                            "file_path": "/tmp/valid.rs",
+                            "old_string": "a",
+                            "new_string": "b",
+                        },
+                    },
+                }),
+                "malformed-response" => serde_json::json!({ "decision": 123 }),
+                "non-object" => serde_json::json!({
+                    "hookSpecificOutput": { "updatedInput": "not-an-object" },
+                }),
+                _ => serde_json::json!({
+                    "hookSpecificOutput": { "updatedInput": null },
+                }),
+            });
+
+            let prepared = prepare(
+                &actor,
+                search_replace_call("call_preserve", "/tmp/original.rs"),
+            )
+            .await
+            .expect("malformed later rewrites must fail open");
+            assert_eq!(prepared.parsed_args["file_path"], "/tmp/valid.rs");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn client_deny_discards_prior_rewrite() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_search_replace().await;
+            install_client_hook(
+                &actor,
+                xai_grok_hooks::event::HookEventName::PreToolUse,
+                &["rewrite", "deny"],
+            );
+            spawn_client_hook_responder(gateway_rx, |callback_id| {
+                if callback_id == "deny" {
+                    serde_json::json!({
+                        "decision": "deny",
+                        "systemMessage": "client blocked the rewrite",
+                    })
+                } else {
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "updatedInput": {
+                                "file_path": "/tmp/should-not-run.rs",
+                                "old_string": "a",
+                                "new_string": "b",
+                            },
+                        },
+                    })
+                }
+            });
+
+            let result =
+                prepare(&actor, search_replace_call("call_deny", "/tmp/original.rs")).await;
+            assert!(matches!(result, Err(ToolLoop::HookDenied { .. })));
+            assert!(
+                tool_result_text(&actor, "call_deny")
+                    .await
+                    .contains("client blocked the rewrite")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_client_rewrite_fails_closed_without_original_fallback() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_search_replace().await;
+            install_client_hook(
+                &actor,
+                xai_grok_hooks::event::HookEventName::PreToolUse,
+                &["invalid"],
+            );
+            spawn_client_hook_responder(gateway_rx, |_| {
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "updatedInput": {
+                            "file_path": 123,
+                            "old_string": "a",
+                            "new_string": "b",
+                        },
+                    },
+                })
+            });
+
+            let result = prepare(
+                &actor,
+                search_replace_call("call_invalid", "/tmp/original.rs"),
+            )
+            .await;
+            assert!(matches!(result, Err(ToolLoop::ToolParsingError)));
+            let text = tool_result_text(&actor, "call_invalid").await;
+            assert!(text.contains("client:invalid"), "tool result: {text}");
+            assert!(text.contains("invalid updatedInput"), "tool result: {text}");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rewritten_use_tool_target_controls_read_only_classification() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                    xai_grok_tools::implementations::use_tool::UseTool,
+                >(),
+            ])
+            .await;
+            actor
+                .agent
+                .borrow()
+                .tool_bridge()
+                .register_mcp_tools(
+                    "fixture__read".to_string(),
+                    ReadOnlyMcpFixture,
+                    Some(serde_json::json!({"type": "object"})),
+                )
+                .await
+                .expect("fixture registration succeeds");
+            install_client_hook(
+                &actor,
+                xai_grok_hooks::event::HookEventName::PreToolUse,
+                &["rewrite-target"],
+            );
+            spawn_client_hook_responder(gateway_rx, |_| {
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "updatedInput": {
+                            "tool_name": "fixture__read",
+                            "tool_input": {},
+                        },
+                    },
+                })
+            });
+
+            let call = ToolCallResponse {
+                id: "call_dispatch_kind".to_string(),
+                kind: "function".to_string(),
+                function: crate::inference::types::ToolCallFunction::new(
+                    "use_tool",
+                    r#"{"tool_name":"fixture__write","tool_input":{}}"#,
+                ),
+            };
+            let prepared = prepare(&actor, call)
+                .await
+                .expect("rewritten use_tool call must prepare");
+            assert_eq!(prepared.hook_tool_name(), "fixture__read");
+            assert!(
+                prepared.is_read_only,
+                "the rewritten dispatch target, not use_tool or its original target, must classify access"
+            );
+        })
+        .await;
+}
+
 /// Reproduces the prod inheritance seam (subagent.rs `ctx.client_hooks.clone()`) by
 /// cloning the parent's hooks into a child `SessionActor`, so the subagent call hits
 /// the parent's PreToolUse gate carrying the `subagentType`.
@@ -249,7 +685,7 @@ async fn subagent_inherits_parent_pre_tool_use_client_hook() {
             .expect("the gate must not error");
 
             assert!(
-                matches!(result, Some(ToolLoop::HookDenied { .. })),
+                matches!(result.0, Some(ToolLoop::HookDenied { .. })),
                 "a subagent tool call must be blocked by the parent's inherited PreToolUse hook"
             );
             assert_eq!(
@@ -338,7 +774,7 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
             .await
             .expect("a deny must resolve without waiting on the hung callback")
             .expect("the gate must not error");
-            assert!(matches!(result, Some(ToolLoop::HookDenied { .. })));
+            assert!(matches!(result.0, Some(ToolLoop::HookDenied { .. })));
         })
         .await;
 }
@@ -692,7 +1128,7 @@ async fn run_stop_gate_keep_working_and_cap() {
         .await;
 }
 
-fn file_registry_with_stop_spec(
+pub(super) fn file_registry_with_stop_spec(
     event: xai_grok_hooks::event::HookEventName,
     script: &str,
 ) -> xai_grok_hooks::discovery::HookRegistry {

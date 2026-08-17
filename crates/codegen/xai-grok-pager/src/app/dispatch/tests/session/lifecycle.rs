@@ -1475,26 +1475,51 @@ fn login_mid_session_resets_welcome_announcement_expanded() {
         "mid-session login must reset the expanded announcement"
     );
 }
-/// After a successful mid-session re-auth, the stale `ReAuthRequired`
-/// prompt (pushed when the 401 surfaced) is stripped so the user
-/// returns to a clean session.
+/// After a successful provider-scoped mid-session re-auth, the matching
+/// credential CTA is stripped so the user returns to a clean session.
 #[test]
 fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
     use crate::scrollback::block::RenderBlock;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .scrollback
-        .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
-    dispatch(Action::Login, &mut app);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
+            provider_id: "xai".into(),
+            credential_generation: 1,
+            prompt: crate::app::agent::InFlightPrompt {
+                text: "retry me".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            },
+        });
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ProviderCredentialRequired {
+                provider_id: "xai".into(),
+                provider_name: "xAI".into(),
+                failed_model_id: None,
+                credential_kind: Some("oauth".into()),
+                credential_generation: Some(1),
+            },
+        ));
+    }
+    let login_effects = dispatch(Action::Login, &mut app);
+    let repair = login_effects.iter().find_map(|effect| match effect {
+        Effect::Authenticate { repair, .. } => repair.clone(),
+        _ => None,
+    });
+    assert!(
+        repair.is_some(),
+        "mid-session repair must be provider-scoped"
+    );
     let seq = authenticating_seq(&app);
     dispatch(
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
-            repair: None,
+            repair,
         }),
         &mut app,
     );
@@ -1503,7 +1528,12 @@ fn auth_complete_strips_reauth_prompt_after_mid_session_login() {
     let has_reauth = (0..sb.len()).any(|i| {
         matches!(
             sb.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(
+                    &ev.event,
+                    SessionEvent::ProviderCredentialRequired { provider_id, .. }
+                        if provider_id == "xai"
+                )
         )
     });
     assert!(
@@ -1520,12 +1550,18 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
-        agent
-            .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ProviderCredentialRequired {
+                provider_id: "xai".into(),
+                provider_name: "xAI".into(),
+                failed_model_id: None,
+                credential_kind: Some("oauth".into()),
+                credential_generation: Some(1),
+            },
+        ));
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
-            credential_generation: 0,
+            credential_generation: 1,
             prompt: crate::app::agent::InFlightPrompt {
                 text: "retry me".into(),
                 images: Vec::new(),
@@ -1535,13 +1571,21 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
             },
         });
     }
-    dispatch(Action::Login, &mut app);
+    let login_effects = dispatch(Action::Login, &mut app);
+    let repair = login_effects.iter().find_map(|effect| match effect {
+        Effect::Authenticate { repair, .. } => repair.clone(),
+        _ => None,
+    });
+    assert!(
+        repair.is_some(),
+        "mid-session repair must be provider-scoped"
+    );
     let seq = authenticating_seq(&app);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
-            repair: None,
+            repair,
         }),
         &mut app,
     );

@@ -188,6 +188,12 @@ impl<C: acp::Agent + 'static> AcpGatewayReceiver<acp::ClientSide, C> {
                 AcpAgentMessage::LoadSession(args) => {
                     handle!(args, self.tracing, conn, load_session, spawn, on_meta);
                 }
+                AcpAgentMessage::ResumeSession(args) => {
+                    handle!(args, self.tracing, conn, resume_session, spawn, on_meta);
+                }
+                AcpAgentMessage::CloseSession(args) => {
+                    handle!(args, self.tracing, conn, close_session, spawn, on_meta);
+                }
                 AcpAgentMessage::SetSessionMode(args) => {
                     handle!(args, self.tracing, conn, set_session_mode, spawn, on_meta);
                 }
@@ -494,6 +500,20 @@ impl acp::Agent for AcpGatewaySender<acp::ClientSide> {
         &self,
         args: acp::LoadSessionRequest,
     ) -> AcpResult<acp::LoadSessionResponse> {
+        self.forward(args).await
+    }
+
+    async fn resume_session(
+        &self,
+        args: acp::ResumeSessionRequest,
+    ) -> AcpResult<acp::ResumeSessionResponse> {
+        self.forward(args).await
+    }
+
+    async fn close_session(
+        &self,
+        args: acp::CloseSessionRequest,
+    ) -> AcpResult<acp::CloseSessionResponse> {
         self.forward(args).await
     }
 

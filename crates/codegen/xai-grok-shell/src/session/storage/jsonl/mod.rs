@@ -1,4 +1,4 @@
-use super::{PersistedData, SessionUpdateEnvelope, StorageAdapter, updates_truncate_for_prompt};
+use super::{PersistedData, SessionUpdateEnvelope, StorageAdapter};
 use crate::inference::types::ChatRequestMessage;
 use crate::inference::{
     ContentPart, ConversationItem, conversation_truncate_for_prompt, transform_conversation_cwd,
@@ -10,8 +10,9 @@ use agent_client_protocol as acp;
 use async_trait::async_trait;
 use fs2::FileExt;
 use std::fs::OpenOptions;
-use std::io::{self, Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
+use std::ops::ControlFlow;
+use std::path::{Component, Path, PathBuf};
 use xai_chat_state::StrictAppendAck;
 use xai_grok_workspace::session::file_state::RewindPoint;
 
@@ -98,12 +99,38 @@ impl JsonlStorageAdapter {
     }
     fn session_dir(&self, info: &Info) -> PathBuf {
         match &self.dir_mode {
-            SessionDirMode::FromRoot(root) => root
-                .join("sessions")
-                .join(crate::util::grok_home::encode_cwd_dirname(&info.cwd))
-                .join(info.id.to_string()),
+            SessionDirMode::FromRoot(root) => {
+                crate::util::grok_home::sessions_cwd_dir_in(root, &info.cwd)
+                    .join(info.id.to_string())
+            }
             SessionDirMode::Explicit(dir) => dir.clone(),
         }
+    }
+    fn confined_session_dir(&self, info: &Info) -> io::Result<PathBuf> {
+        validate_session_id_component(info.id.0.as_ref())?;
+        let dir = self.session_dir(info);
+        if let SessionDirMode::FromRoot(root) = &self.dir_mode {
+            let session_root = crate::util::grok_home::sessions_cwd_dir_in(root, &info.cwd);
+            if dir.parent() != Some(session_root.as_path())
+                || !dir.starts_with(root.join("sessions"))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "session path escaped its intended root",
+                ));
+            }
+        }
+        Ok(dir)
+    }
+    /// Create `info`'s session dir owner-only. `FromRoot` also ensures the
+    /// `<encoded-cwd>` shield + root; `Explicit` parents are caller-owned.
+    fn create_session_dir_owner_only(&self, info: &Info) -> io::Result<PathBuf> {
+        let dir = self.session_dir(info);
+        if let SessionDirMode::FromRoot(root) = &self.dir_mode {
+            let _ = crate::util::grok_home::ensure_sessions_cwd_dir_in(root, &info.cwd);
+        }
+        crate::util::grok_home::create_dir_all_owner_only(&dir)?;
+        Ok(dir)
     }
     pub(super) fn updates_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::UPDATES_FILE)
@@ -620,11 +647,79 @@ impl JsonlStorageAdapter {
     fn sync_parent_directory(path: &Path) -> io::Result<()> {
         super::sync_parent_directory(path)
     }
-    /// Write a full JSONL file (rewriting all items), crash-atomically: serialize
-    /// to a temp file then rename over the target, so a crash / `ENOSPC` mid-write
-    /// can't truncate the existing file (e.g. lose `rewind_points.jsonl` history).
+    fn backup_chat_history_locked(path: &Path) -> io::Result<()> {
+        let backup = path.with_extension("jsonl.pre-strip");
+        if !path.exists() {
+            return Ok(());
+        }
+        match std::fs::symlink_metadata(&backup) {
+            Ok(metadata) if metadata.file_type().is_file() => return Ok(()),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "pre-strip backup is not a regular file: {}",
+                        backup.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        let bytes = std::fs::read(path)?;
+        let staging = super::temp_sibling(&backup);
+        let write_result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&staging)?;
+            file.write_all(&bytes)?;
+            file.flush()?;
+            file.sync_all()?;
+            drop(file);
+
+            // Linking a fully synced staging inode creates the final name
+            // atomically without replace semantics. Even a writer that ignores
+            // our sidecar lock cannot overwrite the first backup.
+            match std::fs::hard_link(&staging, &backup) {
+                Ok(()) => Self::sync_parent_directory(&backup),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    match std::fs::symlink_metadata(&backup) {
+                        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+                        Ok(_) => Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "pre-strip backup is not a regular file: {}",
+                                backup.display()
+                            ),
+                        )),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        })();
+        let _ = std::fs::remove_file(&staging);
+        write_result
+    }
+    /// Write a full JSONL file crash-atomically while holding the same sidecar
+    /// lock used by appenders. This prevents a reconnecting writer from
+    /// appending between a pre-strip backup and an atomic history rewrite.
     async fn write_jsonl<T: serde::Serialize>(&self, path: PathBuf, items: &[T]) -> io::Result<()> {
-        super::write_jsonl_atomic_async(&path, items).await
+        let bytes = super::to_jsonl_bytes(items)?;
+        tokio::task::spawn_blocking(move || {
+            let lock = Self::lock_append(&path)?;
+            let result = super::write_bytes_atomic(&path, &bytes);
+            let _ = lock.unlock();
+            result
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     fn read_jsonl<T: serde::de::DeserializeOwned>(&self, path: PathBuf) -> io::Result<Vec<T>> {
         if !path.exists() {
@@ -964,10 +1059,21 @@ impl JsonlStorageAdapter {
         path: PathBuf,
         chat_format_version: u8,
     ) -> io::Result<Vec<ConversationItem>> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let contents = std::fs::read(&path)?;
+        let Some(mut file) = open_regular_file_nofollow(&path)? else {
+            return match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+                Ok(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "chat history is not a real regular file: {}",
+                        path.display()
+                    ),
+                )),
+                Err(error) => Err(error),
+            };
+        };
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
         let mut sibling_btc_ids_seen: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut upgraded_reasoning_count: usize = 0;
@@ -1099,24 +1205,23 @@ impl JsonlStorageAdapter {
         .map_err(io::Error::other)?
     }
 }
-/// Transform session ID in a SessionUpdate
-fn transform_session_id_in_update(
-    update: super::SessionUpdate,
-    new_id: &acp::SessionId,
-) -> super::SessionUpdate {
-    match update {
-        super::SessionUpdate::Acp(notification) => {
-            let mut inner = (*notification).clone();
-            inner.session_id = new_id.clone();
-            super::SessionUpdate::Acp(Box::new(inner))
-        }
-        super::SessionUpdate::Xai(notification) => {
-            let mut inner = (*notification).clone();
-            inner.session_id = new_id.clone();
-            super::SessionUpdate::Xai(Box::new(inner))
-        }
+fn validate_session_id_component(id: &str) -> io::Result<()> {
+    let mut components = Path::new(id).components();
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains('\0')
+        || !matches!(components.next(), Some(Component::Normal(component)) if component == id)
+        || components.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session id must be a non-empty single path component",
+        ));
     }
+    Ok(())
 }
+
 fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
     matches!(
         update,
@@ -1128,6 +1233,813 @@ fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
             )
     )
 }
+
+/// Longest `updates.jsonl` line retained while streaming a fork. A longer line
+/// is treated as corruption and drained without ever buffering the transcript.
+const MAX_FORK_UPDATE_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+fn for_each_fork_update_line<R: BufRead>(
+    reader: R,
+    f: impl FnMut(usize, &[u8]) -> io::Result<ControlFlow<()>>,
+) -> io::Result<()> {
+    for_each_fork_update_line_capped(reader, MAX_FORK_UPDATE_LINE_BYTES, f)
+}
+
+fn for_each_fork_update_line_capped<R: BufRead>(
+    mut reader: R,
+    cap: usize,
+    mut f: impl FnMut(usize, &[u8]) -> io::Result<ControlFlow<()>>,
+) -> io::Result<()> {
+    let mut buffer = Vec::new();
+    let mut index = 0usize;
+    let mut discarded = 0usize;
+    loop {
+        buffer.clear();
+        let read = reader
+            .by_ref()
+            .take(cap as u64 + 1)
+            .read_until(b'\n', &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if buffer.len() > cap && buffer.last() != Some(&b'\n') {
+            discarded += 1;
+            loop {
+                buffer.clear();
+                let read = reader
+                    .by_ref()
+                    .take(cap as u64)
+                    .read_until(b'\n', &mut buffer)?;
+                if read == 0 || buffer.last() == Some(&b'\n') {
+                    break;
+                }
+            }
+            continue;
+        }
+        let line = buffer.trim_ascii();
+        if line.is_empty() {
+            continue;
+        }
+        if f(index, line)?.is_break() {
+            break;
+        }
+        index += 1;
+    }
+    if discarded > 0 {
+        tracing::warn!(
+            discarded,
+            max_bytes = cap,
+            "discarded over-long updates.jsonl lines during fork copy"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ForkRewindStep {
+    Rewind { target: usize },
+    UserChunk { prompt_index: Option<usize> },
+    Other,
+}
+
+fn fork_rewind_step_for_line(line: &str) -> ForkRewindStep {
+    let (raw_params, is_xai) =
+        if let Ok(envelope) = serde_json::from_str::<super::RawLinePeek<'_>>(line) {
+            (
+                envelope.params.map(|params| params.get()).unwrap_or(line),
+                envelope.method == Some(super::XAI_SESSION_UPDATE_METHOD),
+            )
+        } else {
+            (line, false)
+        };
+    let Some(update) = serde_json::from_str::<super::RawParamsPeek<'_>>(raw_params)
+        .ok()
+        .and_then(|params| params.update)
+    else {
+        return ForkRewindStep::Other;
+    };
+    if is_xai
+        && update.session_update == *crate::session::wire_tags::REWIND_MARKER
+        && let Some(target) = update.target_prompt_index
+    {
+        return ForkRewindStep::Rewind { target };
+    }
+    let host_turn = update
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.host_turn)
+        .unwrap_or(false);
+    if !is_xai
+        && !host_turn
+        && update.session_update == *crate::session::wire_tags::USER_MESSAGE_CHUNK
+    {
+        return ForkRewindStep::UserChunk {
+            prompt_index: update
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.prompt_index.map(|value| value as usize)),
+        };
+    }
+    ForkRewindStep::Other
+}
+
+#[derive(serde::Deserialize)]
+struct RawSessionIdPeek<'a> {
+    #[serde(borrow, rename = "sessionId")]
+    session_id: &'a serde_json::value::RawValue,
+}
+
+fn raw_subslice_range(container: &str, subslice: &str) -> io::Result<std::ops::Range<usize>> {
+    let start = subslice.as_ptr() as usize;
+    let base = container.as_ptr() as usize;
+    let offset = start.checked_sub(base).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON raw value is outside its container",
+        )
+    })?;
+    let end = offset.checked_add(subslice.len()).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "JSON raw value range overflow")
+    })?;
+    if end > container.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON raw value is outside its container",
+        ));
+    }
+    Ok(offset..end)
+}
+
+fn write_params_with_session_id(
+    writer: &mut impl Write,
+    raw_params: &str,
+    target_session_id: &acp::SessionId,
+) -> io::Result<()> {
+    let params = serde_json::from_str::<RawSessionIdPeek<'_>>(raw_params)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let range = raw_subslice_range(raw_params, params.session_id.get())?;
+    writer.write_all(raw_params[..range.start].as_bytes())?;
+    serde_json::to_writer(writer.by_ref(), target_session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    writer.write_all(raw_params[range.end..].as_bytes())
+}
+
+#[derive(Default)]
+struct CopiedForkUpdates {
+    count: usize,
+    compaction_checkpoints_copied: usize,
+}
+
+struct ForkUpdateWriter<'a> {
+    writer: BufWriter<std::fs::File>,
+    source: &'a Path,
+    source_session_dir: &'a Path,
+    staging_dir: &'a Path,
+    target_session_id: &'a acp::SessionId,
+    copied: CopiedForkUpdates,
+    skipped: usize,
+}
+
+impl<'a> ForkUpdateWriter<'a> {
+    fn new(
+        target: &Path,
+        source: &'a Path,
+        source_session_dir: &'a Path,
+        staging_dir: &'a Path,
+        target_session_id: &'a acp::SessionId,
+    ) -> io::Result<Self> {
+        let file = open_private_new_file(target)?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+            source,
+            source_session_dir,
+            staging_dir,
+            target_session_id,
+            copied: CopiedForkUpdates::default(),
+            skipped: 0,
+        })
+    }
+
+    fn copy_line(&mut self, line: &[u8]) -> io::Result<()> {
+        let line = match std::str::from_utf8(line) {
+            Ok(line) => line,
+            Err(error) => return self.skip_line(error),
+        };
+        let update = match SessionUpdateEnvelope::from_str(line) {
+            Ok(update) => update,
+            Err(error) => return self.skip_line(error),
+        };
+        if is_orchestration_projection_update(&update) {
+            return Ok(());
+        }
+        if let super::SessionUpdate::Xai(notification) = &update
+            && let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) =
+                &notification.update
+        {
+            self.copied.compaction_checkpoints_copied += copy_referenced_checkpoint(
+                info,
+                self.source_session_dir,
+                self.staging_dir,
+                notification.session_id.0.as_ref(),
+            )?;
+        }
+
+        let envelope = serde_json::from_str::<super::RawLinePeek<'_>>(line).ok();
+        if let Some(raw_params) = envelope.as_ref().and_then(|value| value.params) {
+            let params_range = raw_subslice_range(line, raw_params.get())?;
+            self.writer
+                .write_all(line[..params_range.start].as_bytes())?;
+            write_params_with_session_id(
+                &mut self.writer,
+                raw_params.get(),
+                self.target_session_id,
+            )?;
+            self.writer.write_all(line[params_range.end..].as_bytes())?;
+        } else {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            write!(
+                self.writer,
+                "{{\"timestamp\":{timestamp},\"method\":\"session/update\",\"params\":"
+            )?;
+            write_params_with_session_id(&mut self.writer, line, self.target_session_id)?;
+            self.writer.write_all(b"}")?;
+        }
+        self.writer.write_all(b"\n")?;
+        self.copied.count += 1;
+        Ok(())
+    }
+
+    fn skip_line(&mut self, error: impl std::fmt::Display) -> io::Result<()> {
+        self.skipped += 1;
+        if self.skipped == 1 {
+            tracing::warn!(
+                error = %error,
+                path = %self.source.display(),
+                "skipping unparseable updates.jsonl line during fork copy"
+            );
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<CopiedForkUpdates> {
+        if self.skipped > 1 {
+            tracing::warn!(
+                skipped = self.skipped,
+                copied = self.copied.count,
+                path = %self.source.display(),
+                "skipped unparseable session update lines during fork copy"
+            );
+        }
+        self.writer.flush()?;
+        super::sync_file_durable(self.writer.get_ref())?;
+        Ok(self.copied)
+    }
+}
+
+fn read_prompt_offset(index: &mut std::fs::File, prompt: usize) -> io::Result<Option<u64>> {
+    let byte_offset = (prompt as u64).checked_mul(8).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "prompt index offset overflow")
+    })?;
+    if byte_offset.saturating_add(8) > index.metadata()?.len() {
+        return Ok(None);
+    }
+    index.seek(io::SeekFrom::Start(byte_offset))?;
+    let mut bytes = [0u8; 8];
+    index.read_exact(&mut bytes)?;
+    Ok(Some(u64::from_le_bytes(bytes)))
+}
+
+fn build_rewind_filtered_scratch(
+    source: &mut std::fs::File,
+    scratch_path: &Path,
+    index_path: &Path,
+) -> io::Result<std::fs::File> {
+    let mut scratch = open_private_new_read_write_file(scratch_path)?;
+    let mut prompt_offsets = open_private_new_read_write_file(index_path)?;
+    let mut tracker = super::UserRunTurnTracker::new();
+    for_each_fork_update_line(BufReader::new(source), |_, line| {
+        let step = std::str::from_utf8(line)
+            .map(fork_rewind_step_for_line)
+            .unwrap_or(ForkRewindStep::Other);
+        match step {
+            ForkRewindStep::Rewind { target } => {
+                let current_end = scratch.stream_position()?;
+                let truncate_to =
+                    read_prompt_offset(&mut prompt_offsets, target)?.unwrap_or(current_end);
+                scratch.set_len(truncate_to)?;
+                scratch.seek(io::SeekFrom::Start(truncate_to))?;
+                let retained_offsets = (target as u64)
+                    .checked_mul(8)
+                    .unwrap_or(u64::MAX)
+                    .min(prompt_offsets.metadata()?.len());
+                prompt_offsets.set_len(retained_offsets)?;
+                prompt_offsets.seek(io::SeekFrom::End(0))?;
+                tracker.on_non_user();
+                return Ok(ControlFlow::Continue(()));
+            }
+            ForkRewindStep::UserChunk { prompt_index } => {
+                if tracker.on_user_chunk(prompt_index) {
+                    prompt_offsets.seek(io::SeekFrom::End(0))?;
+                    prompt_offsets.write_all(&scratch.stream_position()?.to_le_bytes())?;
+                }
+            }
+            ForkRewindStep::Other => tracker.on_non_user(),
+        }
+        scratch.write_all(line)?;
+        scratch.write_all(b"\n")?;
+        Ok(ControlFlow::Continue(()))
+    })?;
+    scratch.flush()?;
+    scratch.seek(io::SeekFrom::Start(0))?;
+    Ok(scratch)
+}
+
+fn truncate_scratch_for_prompt(
+    scratch: &mut std::fs::File,
+    target_prompt_index: usize,
+) -> io::Result<()> {
+    scratch.seek(io::SeekFrom::Start(0))?;
+    let mut tracker = super::UserRunTurnTracker::new();
+    let mut turns = 0usize;
+    let mut byte_offset = 0u64;
+    let mut truncate_to = scratch.metadata()?.len();
+    for_each_fork_update_line(BufReader::new(&mut *scratch), |_, line| {
+        let step = std::str::from_utf8(line)
+            .map(fork_rewind_step_for_line)
+            .unwrap_or(ForkRewindStep::Other);
+        match step {
+            ForkRewindStep::UserChunk { prompt_index } => {
+                if tracker.on_user_chunk(prompt_index) {
+                    turns += 1;
+                    if turns > target_prompt_index + 1 {
+                        truncate_to = byte_offset;
+                        return Ok(ControlFlow::Break(()));
+                    }
+                }
+            }
+            ForkRewindStep::Rewind { .. } | ForkRewindStep::Other => tracker.on_non_user(),
+        }
+        byte_offset = byte_offset.saturating_add(line.len() as u64 + 1);
+        Ok(ControlFlow::Continue(()))
+    })?;
+    scratch.set_len(truncate_to)?;
+    scratch.seek(io::SeekFrom::Start(0))?;
+    Ok(())
+}
+
+fn copy_referenced_checkpoint(
+    info: &crate::extensions::notification::CompactionCheckpointInfo,
+    source_session_dir: &Path,
+    staging_dir: &Path,
+    source_session_id: &str,
+) -> io::Result<usize> {
+    if super::validate_compaction_checkpoint_id(&info.checkpoint_id).is_err() {
+        tracing::warn!(
+            checkpoint_id = %info.checkpoint_id,
+            session_id = source_session_id,
+            "skipping compaction checkpoint with invalid id during copy",
+        );
+        return Ok(0);
+    }
+    let relative = Path::new(&info.checkpoint_file);
+    let expected_name = format!("{}.json", info.checkpoint_id);
+    let mut components = relative.components();
+    let well_formed = matches!(
+        components.next(),
+        Some(Component::Normal(component)) if component == "compaction_checkpoints"
+    ) && matches!(
+        components.next(),
+        Some(Component::Normal(component)) if component == expected_name.as_str()
+    ) && components.next().is_none();
+    if !well_formed {
+        tracing::warn!(
+            checkpoint_file = %info.checkpoint_file,
+            session_id = source_session_id,
+            "skipping compaction checkpoint with unexpected path during copy",
+        );
+        return Ok(0);
+    }
+
+    let source_dir = source_session_dir.join("compaction_checkpoints");
+    match std::fs::symlink_metadata(&source_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata_is_link_like(&metadata) => {}
+        Ok(metadata) => {
+            tracing::warn!(
+                path = %source_dir.display(),
+                file_type = ?metadata.file_type(),
+                session_id = source_session_id,
+                "compaction_checkpoints is not a real directory; skipping checkpoint copy",
+            );
+            return Ok(0);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    }
+
+    let source = source_session_dir.join(relative);
+    let destination = staging_dir.join(relative);
+    if destination.try_exists()? {
+        return Ok(0);
+    }
+    Ok(usize::from(copy_regular_file_atomic(
+        &source,
+        &destination,
+    )?))
+}
+
+fn copy_updates_streaming(
+    source: &Path,
+    target: &Path,
+    source_session_dir: &Path,
+    staging_dir: &Path,
+    target_session_id: &acp::SessionId,
+    target_prompt_index: Option<usize>,
+) -> io::Result<CopiedForkUpdates> {
+    let mut writer = ForkUpdateWriter::new(
+        target,
+        source,
+        source_session_dir,
+        staging_dir,
+        target_session_id,
+    )?;
+    let Some(mut source_file) = open_regular_file_nofollow(source)? else {
+        return writer.finish();
+    };
+    match target_prompt_index {
+        None => for_each_fork_update_line(BufReader::new(source_file), |_, line| {
+            writer.copy_line(line)?;
+            Ok(ControlFlow::Continue(()))
+        })?,
+        Some(target_prompt_index) => {
+            let scratch_path = super::temp_sibling(target);
+            let index_path = super::temp_sibling(&scratch_path);
+            let copy_result = (|| {
+                let mut scratch =
+                    build_rewind_filtered_scratch(&mut source_file, &scratch_path, &index_path)?;
+                truncate_scratch_for_prompt(&mut scratch, target_prompt_index)?;
+                for_each_fork_update_line(BufReader::new(scratch), |_, line| {
+                    writer.copy_line(line)?;
+                    Ok(ControlFlow::Continue(()))
+                })
+            })();
+            let _ = std::fs::remove_file(&scratch_path);
+            let _ = std::fs::remove_file(&index_path);
+            copy_result?;
+        }
+    }
+    writer.finish()
+}
+
+struct SessionCopyStaging {
+    path: PathBuf,
+    published: bool,
+}
+
+impl SessionCopyStaging {
+    fn create(target_dir: &Path) -> io::Result<Self> {
+        let parent = target_dir.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "target session has no parent")
+        })?;
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata_is_link_like(&metadata) => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "target session parent is not a real directory: {}",
+                        parent.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                crate::util::grok_home::create_dir_all_owner_only(parent)?;
+            }
+            Err(error) => return Err(error),
+        }
+        let target_name = target_dir
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "target session has no file name",
+                )
+            })?
+            .to_string_lossy();
+        for _ in 0..16 {
+            let path = parent.join(format!(
+                ".{target_name}.copy-{}.tmp",
+                uuid::Uuid::now_v7().simple()
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        published: false,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not create a unique session copy staging directory",
+        ))
+    }
+
+    fn publish(mut self, target_dir: &Path) -> io::Result<()> {
+        atomic_rename_directory_noreplace(&self.path, target_dir)?;
+        self.published = true;
+        super::sync_parent_directory(target_dir)
+    }
+}
+
+impl Drop for SessionCopyStaging {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn atomic_rename_directory_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    // SAFETY: both pointers are valid NUL-terminated path strings for the
+    // duration of the call; AT_FDCWD makes each path relative to cwd as usual.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn atomic_rename_directory_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    // SAFETY: both pointers are valid NUL-terminated path strings for the
+    // duration of the call. RENAME_EXCL provides no-replace publication.
+    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn atomic_rename_directory_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    // Rust's Windows rename does not replace an existing directory.
+    std::fs::rename(source, target)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios", windows)))]
+fn atomic_rename_directory_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    // There is no portable no-replace rename primitive for directories. On
+    // residual targets, preserve fail-closed behavior with a preflight check;
+    // publication remains subject to the platform rename race.
+    if target.try_exists()? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("target session already exists: {}", target.display()),
+        ));
+    }
+    std::fs::rename(source, target)
+}
+
+fn open_private_new_file(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+fn open_private_new_read_write_file(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+fn open_regular_file_nofollow(path: &Path) -> io::Result<Option<std::fs::File>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW rejects a final symlink; O_NONBLOCK ensures a FIFO or
+        // device substituted before open cannot hang the fork worker.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(None);
+        }
+    }
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(file))
+}
+
+fn metadata_is_link_like(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn require_real_directory(path: &Path, description: &str) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata_is_link_like(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{description} is not a real directory: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_regular_file_atomic(source: &Path, destination: &Path) -> io::Result<bool> {
+    let Some(mut source_file) = open_regular_file_nofollow(source)? else {
+        return Ok(false);
+    };
+    let parent = destination.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "copy destination has no parent",
+        )
+    })?;
+    crate::util::grok_home::create_dir_all_owner_only(parent)?;
+    let staging = super::temp_sibling(destination);
+    let result = (|| {
+        let mut destination_file = open_private_new_file(&staging)?;
+        io::copy(&mut source_file, &mut destination_file)?;
+        destination_file.flush()?;
+        super::sync_file_durable(&destination_file)?;
+        drop(destination_file);
+        std::fs::rename(&staging, destination)?;
+        super::sync_parent_directory(destination)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result.map(|()| true)
+}
+
+fn read_regular_file_nofollow(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let Some(mut file) = open_regular_file_nofollow(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn wrap_fork_summary_json(source: &[u8], target: &Summary) -> io::Result<Vec<u8>> {
+    #[derive(serde::Deserialize)]
+    struct RawSummaryPeek<'a> {
+        #[serde(borrow, default)]
+        external_runtime: Option<&'a serde_json::value::RawValue>,
+    }
+
+    let raw_external_runtime = serde_json::from_slice::<RawSummaryPeek<'_>>(source)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        .external_runtime;
+    let mut source_value: serde_json::Value = serde_json::from_slice(source)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let source_object = source_value.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "source summary must be a JSON object",
+        )
+    })?;
+    let target_value = serde_json::to_value(target)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let target_object = target_value.as_object().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "target summary must be a JSON object",
+        )
+    })?;
+    for (key, value) in target_object {
+        source_object.insert(key.clone(), value.clone());
+    }
+
+    let mut bytes = Vec::new();
+    bytes.push(b'{');
+    for (index, (key, value)) in source_object.iter().enumerate() {
+        if index > 0 {
+            bytes.push(b',');
+        }
+        serde_json::to_writer(&mut bytes, key)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        bytes.push(b':');
+        if key == "external_runtime"
+            && let Some(raw_external_runtime) = raw_external_runtime
+        {
+            bytes.extend_from_slice(raw_external_runtime.get().as_bytes());
+        } else {
+            serde_json::to_writer(&mut bytes, value)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        }
+    }
+    bytes.push(b'}');
+    Ok(bytes)
+}
+
+fn open_bounded_media_descriptor(path: &Path) -> io::Result<Option<std::fs::File>> {
+    let Some(file) = open_regular_file_nofollow(path)? else {
+        tracing::warn!(
+            path = %path.display(),
+            "media descriptor sidecar is missing or not a real regular file; skipping copy"
+        );
+        return Ok(None);
+    };
+    let metadata = file.metadata()?;
+    if metadata.len() > crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES {
+        tracing::warn!(
+            path = %path.display(),
+            size_bytes = metadata.len(),
+            "media descriptor sidecar exceeds its copy limit; skipping"
+        );
+        return Ok(None);
+    }
+    Ok(Some(file))
+}
+
 /// Apply fork-safety filtering to chat history before copying.
 ///
 /// 1. Removes synthetic user messages (doom loop warnings, compaction metadata)
@@ -1199,59 +2111,84 @@ pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
 }
 impl JsonlStorageAdapter {
     /// Fully synchronous version of `copy_session_data` for use inside
-    /// `spawn_blocking`. Identical logic but uses `std::fs::write` instead
-    /// of `tokio::fs::write`, so the entire copy runs on a blocking thread
-    /// without nesting `spawn_blocking` calls.
+    /// `spawn_blocking`. Builds an owner-private sibling staging directory,
+    /// durably writes its core files, then atomically publishes it without
+    /// replacing an existing target.
     pub fn copy_session_data_sync(
         &self,
         source_info: &Info,
         target_info: &Info,
         options: super::CopySessionOptions,
     ) -> io::Result<super::CopySessionResult> {
-        let target_dir = self.session_dir(target_info);
-        std::fs::create_dir_all(&target_dir)?;
-        let source_summary = self.read_summary_sync(source_info)?;
+        validate_session_id_component(source_info.id.0.as_ref())?;
+        validate_session_id_component(target_info.id.0.as_ref())?;
+        let source_dir = self.confined_session_dir(source_info)?;
+        let target_dir = self.confined_session_dir(target_info)?;
+        if let SessionDirMode::FromRoot(root) = &self.dir_mode {
+            require_real_directory(&root.join("sessions"), "sessions root")?;
+            require_real_directory(
+                source_dir.parent().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "source session has no parent")
+                })?,
+                "source CWD session root",
+            )?;
+            require_real_directory(&source_dir, "source session directory")?;
+        }
+        if source_info.id == target_info.id || source_dir == target_dir {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source and target sessions must differ",
+            ));
+        }
+        if target_dir.try_exists()? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("target session already exists: {}", target_dir.display()),
+            ));
+        }
+        let source_summary_file = open_regular_file_nofollow(
+            &source_dir.join(super::SUMMARY_FILE),
+        )?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "source summary is not a regular file",
+            )
+        })?;
+        let source_summary: Summary = serde_json::from_reader(source_summary_file)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if target_dir.try_exists()? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("target session already exists: {}", target_dir.display()),
+            ));
+        }
+        if let SessionDirMode::FromRoot(root) = &self.dir_mode {
+            crate::util::grok_home::ensure_sessions_cwd_dir_in(root, &target_info.cwd)?;
+            require_real_directory(&root.join("sessions"), "sessions root")?;
+            require_real_directory(
+                target_dir.parent().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "target session has no parent")
+                })?,
+                "target CWD session root",
+            )?;
+        }
+        let staging = SessionCopyStaging::create(&target_dir)?;
+        let staging_adapter = JsonlStorageAdapter::with_explicit_session_dir(staging.path.clone());
         let chat_format_version = source_summary.chat_format_version;
-        let mut chat_to_copy: Vec<ConversationItem> =
-            self.read_chat_history_sync(self.chat_file(source_info), chat_format_version)?;
-        let mut updates_to_copy: Vec<super::SessionUpdate> =
-            self.read_updates_jsonl(self.updates_file(source_info))?;
+        let mut chat_to_copy: Vec<ConversationItem> = self.read_chat_history_sync(
+            source_dir.join(super::CHAT_HISTORY_FILE),
+            chat_format_version,
+        )?;
         if let Some(target_idx) = options.target_prompt_index {
-            chat_to_copy.truncate(conversation_truncate_for_prompt(&chat_to_copy, target_idx));
-            updates_to_copy.truncate(updates_truncate_for_prompt(&updates_to_copy, target_idx));
+            // The target prompt is inclusive.
+            chat_to_copy.truncate(conversation_truncate_for_prompt(
+                &chat_to_copy,
+                target_idx + 1,
+            ));
         }
         if options.fork_filter {
             fork_filter_chat(&mut chat_to_copy);
-            updates_to_copy.clear();
-        } else {
-            updates_to_copy.retain(|update| !is_orchestration_projection_update(update));
-        }
-        let checkpoint_files: std::collections::BTreeSet<String> = updates_to_copy
-            .iter()
-            .filter_map(|update| {
-                let super::SessionUpdate::Xai(notification) = update else {
-                    return None;
-                };
-                let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) =
-                    &notification.update
-                else {
-                    return None;
-                };
-                Some(info.checkpoint_file.clone())
-            })
-            .collect();
-        for target in [
-            self.workflows_dir(target_info),
-            self.goal_mode_state_file(target_info)
-                .parent()
-                .expect("goal state has a parent")
-                .to_path_buf(),
-        ] {
-            match std::fs::remove_dir_all(&target) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
         }
         let inherited_prefix_len = if options.fork_filter {
             Some(chat_to_copy.len())
@@ -1270,7 +2207,33 @@ impl JsonlStorageAdapter {
             .filter_map(ConversationItem::working_directory_switch_generation)
             .max()
             .unwrap_or(0);
-        let num_messages = updates_to_copy.len();
+        // Write and release the bounded chat view before touching the usually
+        // much larger update transcript.
+        super::write_jsonl_atomic(&staging_adapter.chat_file(target_info), &chat_to_copy)?;
+        drop(chat_to_copy);
+
+        let copied_updates = if options.fork_filter {
+            super::write_bytes_atomic(&staging_adapter.updates_file(target_info), b"")?;
+            CopiedForkUpdates::default()
+        } else {
+            copy_updates_streaming(
+                &source_dir.join(super::UPDATES_FILE),
+                &staging_adapter.updates_file(target_info),
+                &source_dir,
+                &staging.path,
+                &target_info.id,
+                options.target_prompt_index,
+            )?
+        };
+        let num_messages = copied_updates.count;
+        let compaction_checkpoints_copied = copied_updates.compaction_checkpoints_copied;
+        let source_summary_raw = read_regular_file_nofollow(&source_dir.join(super::SUMMARY_FILE))?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "source summary is not a regular file",
+                )
+            })?;
         let target_model_id = options
             .new_model_id
             .map(acp::ModelId::new)
@@ -1315,251 +2278,145 @@ impl JsonlStorageAdapter {
             execution_backend: source_summary.execution_backend,
             external_runtime: source_summary.external_runtime,
         };
-        let summary_bytes = serde_json::to_vec_pretty(&target_summary)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(self.summary_file(target_info), summary_bytes)?;
-        let mut chat_content = Vec::new();
-        for item in &chat_to_copy {
-            let mut line = serde_json::to_vec(item)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            line.push(b'\n');
-            chat_content.extend(line);
-        }
-        std::fs::write(self.chat_file(target_info), chat_content)?;
-        let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
-            .into_iter()
-            .map(|u| transform_session_id_in_update(u, &target_info.id))
-            .collect();
-        let mut updates_content = Vec::new();
-        for update in &transformed_updates {
-            let envelope = SessionUpdateEnvelope::from_update(update)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let mut line = serde_json::to_vec(&envelope)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            line.push(b'\n');
-            updates_content.extend(line);
-        }
-        std::fs::write(self.updates_file(target_info), updates_content)?;
-        let plan_copied = if options.copy_plan_state {
-            let plan_path = self.plan_file(source_info);
-            if plan_path.exists() {
-                std::fs::write(self.plan_file(target_info), std::fs::read(&plan_path)?)?;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        let signals_copied = if options.copy_signals {
-            let signals_path = self.signals_file(source_info);
-            if signals_path.exists() {
-                std::fs::write(
-                    self.signals_file(target_info),
-                    std::fs::read(&signals_path)?,
-                )?;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        let plan_mode_state_copied = if options.copy_plan_mode_state {
-            let plan_mode_path = self.plan_mode_state_file(source_info);
-            if plan_mode_path.exists() {
-                std::fs::write(
-                    self.plan_mode_state_file(target_info),
-                    std::fs::read(&plan_mode_path)?,
-                )?;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        let tool_state_copied = if options.copy_tool_state {
-            let tool_state_path = self.session_dir(source_info).join("tool_state.json");
-            if tool_state_path.is_file() {
-                std::fs::write(
-                    self.session_dir(target_info).join("tool_state.json"),
-                    std::fs::read(&tool_state_path)?,
-                )?;
-                true
-            } else {
-                if tool_state_path.is_dir() {
-                    tracing::warn!(
-                        ?tool_state_path,
-                        session_id = %source_info.id,
-                        "tool_state.json is a directory (not a file); skipping copy",
-                    );
+        let summary_bytes = wrap_fork_summary_json(&source_summary_raw, &target_summary)?;
+        super::write_bytes_atomic(&staging_adapter.summary_file(target_info), &summary_bytes)?;
+        let copy_optional_regular =
+            |enabled: bool, source: &Path, destination: &Path| -> io::Result<bool> {
+                if !enabled {
+                    return Ok(false);
                 }
-                false
-            }
-        } else {
-            false
-        };
-        let announcement_state_copied = if options.copy_announcement_state {
-            let ann_path = self.announcement_state_file(source_info);
-            if ann_path.exists() {
-                std::fs::write(
-                    self.announcement_state_file(target_info),
-                    std::fs::read(&ann_path)?,
-                )?;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        let compaction_segments_copied = if options.copy_compaction_segments {
-            let src_dir = self
-                .session_dir(source_info)
-                .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
-            let mut copied = 0usize;
-            if src_dir.is_dir() {
-                let dst_dir = self
+                match std::fs::symlink_metadata(source) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                    Err(error) => Err(error),
+                    Ok(metadata) if metadata.file_type().is_file() => {
+                        copy_regular_file_atomic(source, destination)
+                    }
+                    Ok(metadata) if metadata_is_link_like(&metadata) => Ok(false),
+                    Ok(_) => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "session sidecar is not a regular file: {}",
+                            source.display()
+                        ),
+                    )),
+                }
+            };
+        let plan_copied = copy_optional_regular(
+            options.copy_plan_state,
+            &source_dir.join(super::PLAN_FILE),
+            &staging_adapter.plan_file(target_info),
+        )?;
+        let signals_copied = copy_optional_regular(
+            options.copy_signals,
+            &source_dir.join(super::SIGNALS_FILE),
+            &staging_adapter.signals_file(target_info),
+        )?;
+        let plan_mode_state_copied = copy_optional_regular(
+            options.copy_plan_mode_state,
+            &source_dir.join(super::PLAN_MODE_FILE),
+            &staging_adapter.plan_mode_state_file(target_info),
+        )?;
+        let tool_state_path = source_dir.join("tool_state.json");
+        let tool_state_copied = options.copy_tool_state
+            && copy_regular_file_atomic(
+                &tool_state_path,
+                &staging_adapter
                     .session_dir(target_info)
-                    .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
-                std::fs::create_dir_all(&dst_dir)?;
-                for entry in std::fs::read_dir(&src_dir)? {
-                    let entry = entry?;
-                    if entry.file_type()?.is_file() {
-                        std::fs::copy(entry.path(), dst_dir.join(entry.file_name()))?;
-                        copied += 1;
-                    }
-                }
-            }
-            copied
-        } else {
-            0
-        };
-        let mut compaction_checkpoints_copied = 0usize;
-        let source_session_dir = self.session_dir(source_info);
-        let checkpoint_dir_usable = if checkpoint_files.is_empty() {
-            false
-        } else {
-            match std::fs::symlink_metadata(source_session_dir.join("compaction_checkpoints")) {
-                Ok(meta) if meta.file_type().is_dir() => true,
-                Ok(meta) => {
-                    tracing::warn!(
-                        file_type = ?meta.file_type(),
-                        session_id = %source_info.id,
-                        "compaction_checkpoints is not a real directory; skipping checkpoint copy",
-                    );
-                    false
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    tracing::warn!(
-                        session_id = %source_info.id,
-                        "compaction_checkpoints directory missing; skipping checkpoint copy",
-                    );
-                    false
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        if checkpoint_dir_usable {
-            for checkpoint_file in &checkpoint_files {
-                let relative = Path::new(checkpoint_file);
-                let well_formed = relative.parent() == Some(Path::new("compaction_checkpoints"))
-                    && relative.extension() == Some("json".as_ref());
-                if !well_formed {
-                    tracing::warn!(
-                        checkpoint_file = %checkpoint_file,
-                        session_id = %source_info.id,
-                        "skipping compaction checkpoint with unexpected path during copy",
-                    );
-                    continue;
-                }
-                let src = source_session_dir.join(relative);
-                match std::fs::symlink_metadata(&src) {
-                    Ok(meta) if meta.file_type().is_file() => {}
-                    Ok(meta) => {
-                        tracing::warn!(
-                            path = %src.display(),
-                            file_type = ?meta.file_type(),
-                            session_id = %source_info.id,
-                            "compaction checkpoint source is not a regular file; skipping copy",
-                        );
-                        continue;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        tracing::warn!(
-                            path = %src.display(),
-                            session_id = %source_info.id,
-                            "compaction checkpoint file missing from source; skipping copy",
-                        );
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
-                let dst = target_dir.join(relative);
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::copy(&src, &dst)?;
-                compaction_checkpoints_copied += 1;
-            }
+                    .join("tool_state.json"),
+            )?;
+        if options.copy_tool_state
+            && !tool_state_copied
+            && std::fs::symlink_metadata(&tool_state_path)
+                .is_ok_and(|metadata| !metadata.file_type().is_file())
+        {
+            tracing::warn!(
+                ?tool_state_path,
+                session_id = %source_info.id,
+                "tool_state.json is not a real regular file; skipping copy",
+            );
         }
-        let media_descriptor_files_copied = if options.copy_media_descriptors {
-            let source =
-                source_session_dir.join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
-            match std::fs::symlink_metadata(&source) {
-                Ok(metadata) if metadata.file_type().is_file() => {
-                    if metadata.len()
-                        > crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES
-                    {
-                        tracing::warn!(
-                            path = %source.display(),
-                            size_bytes = metadata.len(),
-                            session_id = %source_info.id,
-                            "media descriptor sidecar exceeds its copy limit; skipping",
-                        );
-                        0
-                    } else {
-                        let destination = target_dir
-                            .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
-                        let source_file = std::fs::File::open(&source)?;
-                        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-                        std::io::Read::take(
-                            source_file,
-                            crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES + 1,
-                        )
-                        .read_to_end(&mut bytes)?;
-                        if bytes.len() as u64
-                            > crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES
+        let announcement_state_copied = options.copy_announcement_state
+            && copy_regular_file_atomic(
+                &source_dir.join(super::ANNOUNCEMENT_STATE_FILE),
+                &staging_adapter.announcement_state_file(target_info),
+            )?;
+        let compaction_segments_copied = if options.copy_compaction_segments {
+            let src_dir = source_dir.join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
+            let mut copied = 0usize;
+            match std::fs::symlink_metadata(&src_dir) {
+                Ok(metadata)
+                    if metadata.file_type().is_dir() && !metadata_is_link_like(&metadata) =>
+                {
+                    let dst_dir = staging_adapter
+                        .session_dir(target_info)
+                        .join(xai_chat_state::compaction_transcript::COMPACTION_DIR);
+                    for entry in std::fs::read_dir(&src_dir)? {
+                        let entry = entry?;
+                        if entry.file_type()?.is_file()
+                            && copy_regular_file_atomic(
+                                &entry.path(),
+                                &dst_dir.join(entry.file_name()),
+                            )?
                         {
-                            tracing::warn!(
-                                path = %source.display(),
-                                session_id = %source_info.id,
-                                "media descriptor sidecar grew beyond its copy limit; skipping",
-                            );
-                            0
-                        } else {
-                            super::write_bytes_atomic(&destination, &bytes)?;
-                            1
+                            copied += 1;
                         }
                     }
                 }
                 Ok(metadata) => {
                     tracing::warn!(
-                        path = %source.display(),
+                        path = %src_dir.display(),
                         file_type = ?metadata.file_type(),
                         session_id = %source_info.id,
-                        "media descriptor sidecar is not a regular file; skipping copy",
+                        "compaction segment source is not a real directory; skipping copy",
+                    );
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            copied
+        } else {
+            0
+        };
+        let source_session_dir = source_dir;
+        let media_descriptor_files_copied = if options.copy_media_descriptors {
+            let source =
+                source_session_dir.join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
+            if let Some(source_file) = open_bounded_media_descriptor(&source)? {
+                let opened = source_file.metadata()?;
+                let destination = staging
+                    .path
+                    .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE);
+                let mut bytes = Vec::with_capacity(opened.len() as usize);
+                std::io::Read::take(
+                    source_file,
+                    crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES + 1,
+                )
+                .read_to_end(&mut bytes)?;
+                if bytes.len() as u64
+                    > crate::session::media_descriptors::MAX_MEDIA_DESCRIPTOR_FILE_BYTES
+                {
+                    tracing::warn!(
+                        path = %source.display(),
+                        session_id = %source_info.id,
+                        "media descriptor sidecar grew beyond its copy limit; skipping",
                     );
                     0
+                } else {
+                    super::write_bytes_atomic(&destination, &bytes)?;
+                    1
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-                Err(error) => return Err(error),
+            } else {
+                0
             }
         } else {
             0
         };
-        Ok(super::CopySessionResult {
+        // Forks intentionally do not inherit live workflow or goal projection
+        // state. A fresh staging directory makes those paths absent without
+        // deleting anything from an existing target.
+        debug_assert!(!staging_adapter.workflows_dir(target_info).exists());
+        debug_assert!(!staging_adapter.goal_mode_state_file(target_info).exists());
+        let result = super::CopySessionResult {
             chat_messages_copied: num_chat_messages,
             updates_copied: num_messages,
             plan_state_copied: plan_copied,
@@ -1570,7 +2427,10 @@ impl JsonlStorageAdapter {
             compaction_segments_copied,
             compaction_checkpoints_copied,
             media_descriptor_files_copied,
-        })
+        };
+        super::sync_parent_directory(&staging.path.join("staged-entry"))?;
+        staging.publish(&target_dir)?;
+        Ok(result)
     }
 }
 /// Next `segment_NNN` index in `compaction_dir`: one past the highest existing
@@ -1594,8 +2454,7 @@ async fn next_compaction_segment_index(compaction_dir: &std::path::Path) -> u64 
 #[async_trait]
 impl StorageAdapter for JsonlStorageAdapter {
     async fn init_session(&self, info: &Info, model_id: acp::ModelId) -> io::Result<Summary> {
-        let dir = self.session_dir(info);
-        std::fs::create_dir_all(&dir)?;
+        self.create_session_dir_owner_only(info)?;
         let summary_path = self.summary_file(info);
         if Path::new(&summary_path).exists() {
             tracing::info!("Loading existing session from JSONL");
@@ -2057,6 +2916,58 @@ impl StorageAdapter for JsonlStorageAdapter {
             info,
             super::summary_write::SummaryPatch {
                 chat_messages: Some(super::summary_write::CounterOp::Set(new_count)),
+                chat_format_version: Some(CHAT_FORMAT_VERSION),
+                cwd_switch_bookkeeping_generation: Some(cwd_switch_bookkeeping_generation),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn backup_chat_history_before_strip(&self, info: &Info) -> io::Result<()> {
+        let path = self.chat_file(info);
+        tokio::task::spawn_blocking(move || {
+            // A session can have metadata before its first chat record. Avoid
+            // creating a lock sidecar (or failing because its parent does not
+            // exist) when there is no history to preserve.
+            if !path.try_exists()? {
+                return Ok(());
+            }
+            let lock = Self::lock_append(&path)?;
+            let result = Self::backup_chat_history_locked(&path);
+            let _ = lock.unlock();
+            result
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+    async fn replace_chat_history_after_strip(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> io::Result<()> {
+        let path = self.chat_file(info);
+        let bytes = super::to_jsonl_bytes(messages)?;
+        tokio::task::spawn_blocking(move || {
+            let lock = Self::lock_append(&path)?;
+            let result = (|| {
+                Self::backup_chat_history_locked(&path)?;
+                super::write_bytes_atomic(&path, &bytes)
+            })();
+            let _ = lock.unlock();
+            result
+        })
+        .await
+        .map_err(io::Error::other)??;
+
+        let cwd_switch_bookkeeping_generation = messages
+            .iter()
+            .filter_map(ConversationItem::working_directory_switch_generation)
+            .max()
+            .unwrap_or(0);
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                chat_messages: Some(super::summary_write::CounterOp::Set(messages.len())),
                 chat_format_version: Some(CHAT_FORMAT_VERSION),
                 cwd_switch_bookkeeping_generation: Some(cwd_switch_bookkeeping_generation),
                 ..Default::default()

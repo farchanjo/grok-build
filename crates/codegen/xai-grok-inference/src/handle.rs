@@ -149,8 +149,8 @@ impl InferenceHandle {
                 request_id: cancel_id,
             });
         completion_rx.await.unwrap_or_else(|_| {
-            Err(InferenceError::Auth(
-                "sampler actor dropped before completion".to_string(),
+            Err(InferenceError::auth_unknown(
+                "sampler actor dropped before completion",
             ))
         })
     }

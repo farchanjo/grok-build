@@ -215,6 +215,7 @@ impl AnthropicClientError {
                 retry_after_secs: None,
                 should_retry: Some(false),
                 diagnostics: None,
+                error_code: None,
             },
             // Never 413: generic 413 triggers RetryWithImageStrip. Local size
             // preflight is permanent and unrelated to inline images.
@@ -228,6 +229,7 @@ impl AnthropicClientError {
                 retry_after_secs: None,
                 should_retry: Some(false),
                 diagnostics: None,
+                error_code: None,
             },
             Self::Http {
                 status,
@@ -256,7 +258,10 @@ fn bridge_http_to_inference(
 ) -> InferenceError {
     // Permanent auth stays on the Auth variant so session reauth can run.
     if class == ErrorClass::PermanentAuth || status == 401 {
-        return InferenceError::Auth(format!("Unauthorized ({status}) from anthropic: {message}"));
+        return InferenceError::Auth {
+            message: format!("Unauthorized ({status}) from anthropic: {message}"),
+            credential: xai_grok_inference_types::SentCredential::Sent,
+        };
     }
 
     // Anthropic HTTP 413 is PermanentActionable at this layer, but a literal
@@ -296,6 +301,7 @@ fn bridge_http_to_inference(
         retry_after_secs: meta.retry_after_secs,
         should_retry,
         diagnostics: meta.to_api_diagnostics(),
+        error_code: None,
     }
 }
 
@@ -306,9 +312,10 @@ fn bridge_stream_to_inference(
     meta: Box<AnthropicResponseMeta>,
 ) -> InferenceError {
     match class {
-        ErrorClass::PermanentAuth => InferenceError::Auth(format!(
-            "stream authentication_error from anthropic: {message}"
-        )),
+        ErrorClass::PermanentAuth => InferenceError::Auth {
+            message: format!("stream authentication_error from anthropic: {message}"),
+            credential: xai_grok_inference_types::SentCredential::Sent,
+        },
         ErrorClass::PermanentPermission => InferenceError::Api {
             status: reqwest::StatusCode::FORBIDDEN,
             message: format!("{error_type}: {message}"),
@@ -316,6 +323,7 @@ fn bridge_stream_to_inference(
             retry_after_secs: None,
             should_retry: Some(false),
             diagnostics: meta.to_api_diagnostics(),
+            error_code: None,
         },
         ErrorClass::PermanentActionable | ErrorClass::Local | ErrorClass::Decode => {
             InferenceError::Api {
@@ -325,6 +333,7 @@ fn bridge_stream_to_inference(
                 retry_after_secs: None,
                 should_retry: Some(false),
                 diagnostics: meta.to_api_diagnostics(),
+                error_code: None,
             }
         }
         ErrorClass::RetryableRateLimit => InferenceError::Api {
@@ -334,6 +343,7 @@ fn bridge_stream_to_inference(
             retry_after_secs: meta.retry_after_secs,
             should_retry: None,
             diagnostics: meta.to_api_diagnostics(),
+            error_code: None,
         },
         ErrorClass::RetryableOverload => InferenceError::Api {
             status: reqwest::StatusCode::from_u16(529)
@@ -343,6 +353,7 @@ fn bridge_stream_to_inference(
             retry_after_secs: meta.retry_after_secs,
             should_retry: None,
             diagnostics: meta.to_api_diagnostics(),
+            error_code: None,
         },
         ErrorClass::Transient => InferenceError::Api {
             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
@@ -351,11 +362,13 @@ fn bridge_stream_to_inference(
             retry_after_secs: meta.retry_after_secs,
             should_retry: None,
             diagnostics: meta.to_api_diagnostics(),
+            error_code: None,
         },
         // Generic stream errors remain StreamError (retryable transport-class).
         ErrorClass::StreamError | ErrorClass::Cancelled => InferenceError::StreamError {
             error_type: error_type.to_string(),
             message,
+            code: None,
         },
     }
 }

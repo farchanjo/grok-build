@@ -258,13 +258,21 @@ impl SessionActor {
     /// `x.ai/hooks/run` once per matching callback with the shared `envelope` (the
     /// same payload file hooks and observe events receive).
     ///
-    /// Returns `Some(ToolLoop::HookDenied)` on the first deny, else `None`.
+    /// Returns a deny, if any, plus the last valid rewrite in registration
+    /// order. Every callback sees the unchanged `envelope`; completion order
+    /// never decides which rewrite wins.
     pub(super) async fn run_pre_tool_use_client_hook(
         &self,
         call: &ToolCallResponse,
         tool_call_id: &acp::ToolCallId,
         envelope: &HookEventEnvelope,
-    ) -> Result<Option<ToolLoop>, acp::Error> {
+    ) -> Result<
+        (
+            Option<ToolLoop>,
+            Option<xai_grok_hooks::dispatcher::InputRewrite>,
+        ),
+        acp::Error,
+    > {
         // Clone the matched groups so we don't hold the `client_hooks` borrow across the
         // dispatch awaits below.
         let Some(groups) = self
@@ -273,7 +281,7 @@ impl SessionActor {
             .get(&HookEventName::PreToolUse)
             .cloned()
         else {
-            return Ok(None);
+            return Ok((None, None));
         };
         // Match on the resolved target (in the envelope) so a client deny matcher
         // keyed on the real MCP tool gates a meta-dispatch call, matching the
@@ -284,14 +292,15 @@ impl SessionActor {
             .unwrap_or(call.function.name.as_str());
 
         let mut pending = self.client_gate_responses(&groups, Some(tool_name), envelope);
+        let mut responses = std::collections::HashMap::new();
         while let Some((callback_id, response, _elapsed)) = pending.next().await {
             if response.decision == ClientHookDecision::Deny {
                 let reason = response
                     .system_message
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| "blocked by client hook".to_string());
-                return Ok(Some(
-                    self.deny_tool(
+                let denied = self
+                    .deny_tool(
                         &call.id,
                         tool_call_id,
                         tool_name.to_owned(),
@@ -300,11 +309,33 @@ impl SessionActor {
                         format!("client:{callback_id}"),
                         reason,
                     )
-                    .await?,
-                ));
+                    .await?;
+                return Ok((Some(denied), None));
+            }
+            responses.insert(callback_id, response);
+        }
+
+        let mut selected_rewrite = None;
+        let mut seen = std::collections::HashSet::new();
+        for callback_id in groups
+            .iter()
+            .filter(|group| {
+                xai_grok_hooks::matcher::matcher_allows(group.matcher.as_ref(), Some(tool_name))
+            })
+            .flat_map(|group| group.callback_ids.iter().map(String::as_str))
+            .filter(|callback_id| seen.insert(*callback_id))
+        {
+            let Some(response) = responses.remove(callback_id) else {
+                continue;
+            };
+            if let Some(input) = response.updated_input(callback_id) {
+                selected_rewrite = Some(xai_grok_hooks::dispatcher::InputRewrite {
+                    hook_name: format!("client:{callback_id}"),
+                    input,
+                });
             }
         }
-        Ok(None)
+        Ok((None, selected_rewrite))
     }
 
     /// Run the client `Stop`/`SubagentStop` gate for a turn-end envelope.

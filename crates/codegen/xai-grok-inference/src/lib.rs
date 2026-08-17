@@ -27,6 +27,7 @@ pub mod compatibility;
 pub mod config;
 pub mod doom_loop;
 pub mod events;
+pub mod extra_ca;
 pub mod handle;
 pub mod inference_log;
 pub mod metrics;
@@ -50,8 +51,7 @@ pub use anthropic::{
     parse_anthropic_rate_limit_headers,
 };
 pub use attribution::{
-    Auth401AttributionCallback, InferenceConsumer, SENT_BEARER_PREFIX_LEN,
-    SharedAttributionCallback,
+    Auth401AttributionCallback, BEARER_TAIL_CHARS, InferenceConsumer, SharedAttributionCallback,
 };
 pub use client::{ApiBackend, InferenceClient, user_agent_string_for};
 pub use compatibility::{
@@ -67,7 +67,9 @@ pub use config::{
     OriginClientInfo, RetryPolicy, SharedBearerResolver, SharedHeaderInjector,
 };
 pub use doom_loop::DoomLoopSignalCollector;
-pub use events::{InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent};
+pub use events::{
+    InferenceChannel, InferenceErrorInfo, InferenceErrorKind, InferenceEvent, StripReason,
+};
 pub use handle::InferenceHandle;
 pub use inference_log::AuthInfo;
 pub use metrics::{InferenceLatencyStats, compute_percentiles};

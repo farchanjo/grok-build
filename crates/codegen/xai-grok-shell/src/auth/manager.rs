@@ -29,12 +29,12 @@ use xai_grok_telemetry::events::ManualAuthSurface;
 use super::model::UserInfo;
 use super::model::{
     AuthMode, GrokAuth, early_invalidation, is_expired, is_expired_with_buffer, lookup_auth,
-    token_suffix,
 };
 use super::refresh::{RefreshOutcome, TokenRefresher, resolve_refresh_credential};
 use super::storage::{
     AuthFileLock, read_auth_json, read_auth_json_or_empty_recovering_corrupt, write_auth_json,
 };
+use xai_grok_auth::bearer_tail;
 
 #[cfg(test)]
 use super::storage::read_auth_json_or_empty;
@@ -62,8 +62,8 @@ pub(crate) enum RefreshReason {
 pub(crate) const AUTH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
 /// Lock timeout for `refresh_chain`, held across the IdP call to prevent
-/// refresh-token reuse. Must exceed the external-auth refresh timeout
-/// (`EXTERNAL_AUTH_REFRESH_TIMEOUT`, 5 s) so followers wait rather than retry.
+/// refresh-token reuse. Must exceed the external-auth refresh budget (one 7s
+/// run) so followers wait rather than retry.
 const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(45);
 
 /// Long poll interval used by the proactive refresh task when no
@@ -187,6 +187,10 @@ pub struct AuthManager {
     /// Per-process `manual_auth` KPI debounce, shared by all recoveries on this
     /// manager so repeated 401s on the most-recent dead credential emit once.
     manual_auth: crate::auth::recovery::ManualAuthTracker,
+    /// Whether initialize's selective first-party env-key probe still permits
+    /// API-key fallback. Owned by auth state so later fallthrough uses the same
+    /// verdict that shaped the advertised methods.
+    first_party_env_api_key_ok: std::sync::atomic::AtomicBool,
     /// When the current unbroken run of dark-wake refresh deferrals began, on
     /// two clocks (see [`GateRaise`]); `None` outside such a run. Bounds the
     /// deferral to [`sleep_gate::DARK_WAKE_DEFER_MAX`] so a machine stuck
@@ -333,7 +337,7 @@ impl AuthManager {
                     "found": found.is_some(),
                     "auth_mode": found.as_ref().map(|a| format!("{:?}", a.auth_mode)),
                     "is_expired": found.as_ref().map(is_expired),
-                    "key_prefix": found.as_ref().map(|a| token_suffix(&a.key).to_owned()),
+                    "key_prefix": found.as_ref().map(|a| bearer_tail(&a.key).to_owned()),
                 });
                 let state = if found.is_some() {
                     DiskAuthState::Ok
@@ -415,12 +419,26 @@ impl AuthManager {
             power_listener_started: std::sync::atomic::AtomicBool::new(false),
             power_listener: parking_lot::Mutex::new(None),
             manual_auth: Default::default(),
+            first_party_env_api_key_ok: std::sync::atomic::AtomicBool::new(true),
             dark_wake_defer_since: parking_lot::RwLock::new(None),
             #[cfg(test)]
             dark_wake_override: parking_lot::Mutex::new(None),
             #[cfg(test)]
             devbox_override: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Whether initialize's selective first-party environment-key probe still
+    /// allows that key to suppress interactive fallback.
+    pub(crate) fn first_party_env_api_key_ok(&self) -> bool {
+        self.first_party_env_api_key_ok
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Publish initialize's first-party environment-key probe verdict.
+    pub(crate) fn set_first_party_env_api_key_ok(&self, ok: bool) {
+        self.first_party_env_api_key_ok
+            .store(ok, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Clear the disk-loaded token if it violates the team pin (startup only;
@@ -574,7 +592,7 @@ impl AuthManager {
                 None,
                 Some(serde_json::json!({
                     "disk_state": format!("{last_state:?}"),
-                    "retained_key_prefix": token_suffix(&a.key),
+                    "retained_key_prefix": bearer_tail(&a.key),
                     "was_expired": is_expired(&a),
                 })),
             );
@@ -597,7 +615,7 @@ impl AuthManager {
                 None,
                 Some(serde_json::json!({
                     "reason": reason,
-                    "dropped_key_prefix": token_suffix(&d.key),
+                    "dropped_key_prefix": bearer_tail(&d.key),
                     "had_refresh_token": d.refresh_token.is_some(),
                     "was_expired": is_expired(&d),
                     "disk_state": (*self.disk_state.read()).map(|s| format!("{s:?}")),
@@ -833,8 +851,8 @@ impl AuthManager {
                 "auth update disk written",
                 None,
                 Some(serde_json::json!({
-                    "rt_prefix": auth.refresh_token.as_deref().map(token_suffix),
-                    "key_prefix": token_suffix(&auth.key),
+                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_tail),
+                    "key_prefix": bearer_tail(&auth.key),
                     "elapsed_ms": elapsed_ms,
                 })),
             ),
@@ -893,8 +911,8 @@ impl AuthManager {
                 "auth update disk written (no enrichment)",
                 None,
                 Some(serde_json::json!({
-                    "rt_prefix": auth.refresh_token.as_deref().map(token_suffix),
-                    "key_prefix": token_suffix(&auth.key),
+                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_tail),
+                    "key_prefix": bearer_tail(&auth.key),
                     "elapsed_ms": elapsed_ms,
                 })),
             ),
@@ -1005,8 +1023,8 @@ impl AuthManager {
     fn try_adopt_disk_token(&self, reason: RefreshReason, msg: &str) -> Option<GrokAuth> {
         let disk_auth = self.read_disk_auth();
         let refreshed = self.try_use_disk_token(disk_auth.as_ref(), reason)?;
-        let adopted = token_suffix(&refreshed.key);
-        let prev = self.expired_auth().map(|a| token_suffix(&a.key).to_owned());
+        let adopted = bearer_tail(&refreshed.key);
+        let prev = self.expired_auth().map(|a| bearer_tail(&a.key).to_owned());
         xai_grok_telemetry::unified_log::info(
             msg,
             None,
@@ -1161,7 +1179,7 @@ impl AuthManager {
             "path": self.path.display().to_string(),
             "scope": &self.scope,
             "error": err_detail,
-            "key_prefix": auth.map(|a| token_suffix(&a.key).to_owned()),
+            "key_prefix": auth.map(|a| bearer_tail(&a.key).to_owned()),
             "has_refresh_token": auth.map(|a| a.refresh_token.is_some()),
             "is_expired": auth.map(is_expired),
         });
@@ -1758,11 +1776,11 @@ impl AuthManager {
         attempted_key: Option<String>,
         _lock: &AuthFileLock,
     ) -> Result<GrokAuth, AuthError> {
-        let pre_key_prefix = attempted_key.as_deref().map(token_suffix);
+        let pre_key_prefix = attempted_key.as_deref().map(bearer_tail);
         match outcome {
             RefreshOutcome::Success(new_auth) => match self.update(*new_auth).await {
                 Ok(auth) => {
-                    let new_prefix = token_suffix(&auth.key);
+                    let new_prefix = bearer_tail(&auth.key);
                     xai_grok_telemetry::unified_log::info(
                         "auth.refresh.success",
                         None,
@@ -1847,9 +1865,9 @@ impl AuthManager {
                 "auth: pick_up_sibling_token adopted",
                 None,
                 Some(serde_json::json!({
-                    "adopted_key_prefix": token_suffix(&a.key),
+                    "adopted_key_prefix": bearer_tail(&a.key),
                     "expires_at": a.expires_at.map(|e| e.to_rfc3339()),
-                    "rt_prefix": a.refresh_token.as_deref().map(token_suffix),
+                    "rt_prefix": a.refresh_token.as_deref().map(bearer_tail),
                 })),
             );
             self.with_inner_write(|inner| *inner = Some(a.clone()));
@@ -2100,7 +2118,7 @@ impl AuthManager {
                 // refreshes; later processes adopt the result here.
                 this.pick_up_sibling_token();
                 if this.current().is_some() {
-                    let adopted = this.current().map(|a| token_suffix(&a.key).to_owned());
+                    let adopted = this.current().map(|a| bearer_tail(&a.key).to_owned());
                     let expires_at = this
                         .inner
                         .read()
@@ -2129,7 +2147,7 @@ impl AuthManager {
                             None,
                             Some(serde_json::json!({
                                 "result": "success",
-                                "key_prefix": token_suffix(&auth.key),
+                                "key_prefix": bearer_tail(&auth.key),
                                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
                             })),
                         );

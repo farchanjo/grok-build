@@ -368,12 +368,91 @@ fn protected_edit_path(path: &Path) -> bool {
         ".xprofile",
     ];
 
-    STARTUP_FILES.contains(&file)
-        || protected_git_hooks_path(&string_components)
-        || string_components.contains(&".ssh")
-        || string_components.ends_with(&[".grok", "config.toml"])
-        || path == Path::new("/etc")
-        || path.starts_with(Path::new("/etc"))
+    if protected_grok_hook_root(path, &string_components) {
+        return true;
+    }
+    if string_components.ends_with(&[".claude", "settings.json"])
+        || string_components.ends_with(&[".claude", "settings.local.json"])
+    {
+        return true;
+    }
+    if string_components.ends_with(&[".cursor", "hooks.json"]) {
+        return true;
+    }
+    if protected_git_hooks_path(&string_components) {
+        return true;
+    }
+    if string_components.contains(&".ssh") {
+        return true;
+    }
+    if STARTUP_FILES.contains(&file) {
+        return true;
+    }
+    if protected_grok_config_file(path, &string_components) {
+        return true;
+    }
+    path == Path::new("/etc") || path.starts_with(Path::new("/etc"))
+}
+
+/// Grok config files that alter permissions (`config.toml`, the
+/// `managed_config.toml` defaults tier, the user `requirements.toml` layer) or
+/// sandbox restrictions (`sandbox.toml`) in the running and later sessions; a
+/// silent edit would let the agent loosen its own guardrails. Matched directly
+/// inside any `.grok` dir (user-global default and workspace overlays) and
+/// directly under a custom `$GROK_HOME`, which the component match cannot see.
+fn protected_grok_config_file(path: &Path, components: &[&str]) -> bool {
+    protected_grok_config_file_with_home(
+        path,
+        components,
+        xai_grok_config::user_grok_home().as_deref(),
+    )
+}
+
+fn protected_grok_config_file_with_home(
+    path: &Path,
+    components: &[&str],
+    user_grok_home: Option<&Path>,
+) -> bool {
+    let is_protected_name = matches!(
+        components.last().copied(),
+        Some(
+            "config.toml"
+                | "sandbox.toml"
+                | xai_grok_config::MANAGED_CONFIG_FILENAME
+                | xai_grok_config::REQUIREMENTS_FILENAME
+        )
+    );
+    if !is_protected_name {
+        return false;
+    }
+    let in_dot_grok = components.len() >= 2 && components[components.len() - 2] == ".grok";
+    let in_grok_home = || grok_home_matches(user_grok_home, |home| path.parent() == Some(home));
+    in_dot_grok || in_grok_home()
+}
+
+/// True when `pred` holds for the user grok home in either its lexical or
+/// physically-resolved form. Both forms are checked because callers hold a
+/// lexical and a resolved candidate path, and the home itself may sit behind a
+/// symlink. The comparison is byte-exact (no case folding), like every other
+/// resolved-path check in this module.
+fn grok_home_matches(home: Option<&Path>, pred: impl Fn(&Path) -> bool) -> bool {
+    home.is_some_and(|home| {
+        let lexical = xai_grok_paths::normalize_lexically(home);
+        pred(&lexical)
+            || resolve_following_symlinks(&lexical, 0).is_some_and(|resolved| pred(&resolved))
+    })
+}
+
+fn path_is_under_user_grok_hook_root(path: &Path, grok_home: &Path) -> bool {
+    path.starts_with(grok_home.join("hooks")) || path == grok_home.join("hooks-paths")
+}
+
+fn protected_grok_hook_root(path: &Path, components: &[&str]) -> bool {
+    components.windows(2).any(|pair| pair == [".grok", "hooks"])
+        || components.ends_with(&[".grok", "hooks-paths"])
+        || grok_home_matches(xai_grok_config::user_grok_home().as_deref(), |home| {
+            path_is_under_user_grok_hook_root(path, home)
+        })
 }
 
 fn protected_git_hooks_path(components: &[&str]) -> bool {
@@ -1249,6 +1328,9 @@ mod tests {
             "/etc",
             "/etc/grok-test",
             "/work/subdir/../.git/hooks/pre-commit",
+            "/home/user/.grok/sandbox.toml",
+            "/work/project/.grok/sandbox.toml",
+            "/home/user/.grok/config.toml",
         ] {
             assert!(
                 edit_target_requires_prompt(Path::new(path)),
@@ -1258,6 +1340,9 @@ mod tests {
         for path in [
             "/work/src/main.rs",
             "/work/project/.grok/config.toml/backup",
+            "/work/project/sandbox.toml",
+            "/work/project/requirements.toml",
+            "/work/project/managed_config.toml",
         ] {
             assert!(
                 !edit_target_requires_prompt(Path::new(path)),
@@ -1294,6 +1379,65 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_edit_targets_include_hook_roots() {
+        for path in [
+            "/home/user/.grok/hooks/evil.json",
+            "/home/user/.grok/hooks/nested/deep.json",
+            "/home/user/.grok/hooks-paths",
+            "/home/user/.claude/settings.json",
+            "/home/user/.claude/settings.local.json",
+            "/home/user/.cursor/hooks.json",
+            "/work/project/.grok/hooks/local.json",
+            "/work/project/.grok/hooks-paths",
+        ] {
+            assert!(
+                edit_target_requires_prompt(Path::new(path)),
+                "hook root edit target must prompt: {path}"
+            );
+        }
+        for path in [
+            "/home/user/.grok/hooks-disabled/note.json",
+            "/home/user/.grok/hooks-evil/note.json",
+            "/home/user/project/src/hooks.json",
+            "/home/user/.claude/other.json",
+            "/home/user/.cursor/settings.json",
+        ] {
+            assert!(
+                !edit_target_requires_prompt(Path::new(path)),
+                "ordinary edit target should not prompt: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_is_under_user_grok_hook_root_matches_relocated_home() {
+        let home = Path::new("/custom/grok-home");
+        for path in [
+            "/custom/grok-home/hooks/x.json",
+            "/custom/grok-home/hooks/nested/deep.json",
+            "/custom/grok-home/hooks",
+            "/custom/grok-home/hooks-paths",
+        ] {
+            assert!(
+                path_is_under_user_grok_hook_root(Path::new(path), home),
+                "must match under custom grok home: {path}"
+            );
+        }
+        for path in [
+            "/custom/grok-home/hooks-disabled/note.json",
+            "/custom/grok-home/hooks-evil/note.json",
+            "/custom/grok-home/config.toml",
+            "/custom/other/hooks/x.json",
+            "/custom/grok-home-extra/hooks/x.json",
+        ] {
+            assert!(
+                !path_is_under_user_grok_hook_root(Path::new(path), home),
+                "must not match outside hook roots: {path}"
+            );
+        }
+    }
+
+    #[test]
     #[cfg(unix)]
     fn sensitive_edit_targets_follow_symlinks() {
         use std::os::unix::fs::symlink;
@@ -1314,17 +1458,92 @@ mod tests {
             ws.path().join("module-hooks-link"),
         )
         .unwrap();
+        let grok_hook = outside.path().join(".grok/hooks/evil.json");
+        std::fs::create_dir_all(grok_hook.parent().unwrap()).unwrap();
+        std::fs::write(&grok_hook, b"{}").unwrap();
+        symlink(&grok_hook, ws.path().join("grok-hook-link")).unwrap();
 
         for path in [
             ws.path().join("file-link"),
             ws.path().join("hooks-link/new-hook"),
             ws.path().join("module-hooks-link/new-hook"),
+            ws.path().join("grok-hook-link"),
         ] {
             assert!(
                 edit_target_requires_prompt(&path),
                 "symlinked protected edit target must prompt: {}",
                 path.display()
             );
+        }
+    }
+
+    /// A custom `$GROK_HOME` has no `.grok` path component, so the live
+    /// `config.toml` / `sandbox.toml` must be caught by the home-prefix branch.
+    #[test]
+    fn grok_config_files_under_custom_grok_home_are_protected() {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path();
+        for file in [
+            "config.toml",
+            "managed_config.toml",
+            "requirements.toml",
+            "sandbox.toml",
+        ] {
+            let path = home_path.join(file);
+            let components = [file];
+            assert!(
+                protected_grok_config_file_with_home(&path, &components, Some(home_path)),
+                "{file} directly under $GROK_HOME must be protected"
+            );
+        }
+        // Same file names elsewhere (or with no resolvable home) stay ordinary.
+        let elsewhere = home_path.join("sub").join("sandbox.toml");
+        assert!(!protected_grok_config_file_with_home(
+            &elsewhere,
+            &["sub", "sandbox.toml"],
+            Some(home_path)
+        ));
+        assert!(!protected_grok_config_file_with_home(
+            &home_path.join("sandbox.toml"),
+            &["sandbox.toml"],
+            None
+        ));
+    }
+
+    /// The resolved-symlink arm of the grok-home match must decide: `$GROK_HOME`
+    /// points at a symlink while the edit targets the physical home directory,
+    /// so the lexical parent-equality arm cannot fire.
+    #[test]
+    #[cfg(unix)]
+    fn grok_config_under_symlinked_grok_home_is_protected() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real_home = tmp.path().join("real-home");
+        std::fs::create_dir(&real_home).unwrap();
+        let link = tmp.path().join("home-link");
+        symlink(&real_home, &link).unwrap();
+        // tempdir paths can themselves contain symlinks (macOS /var -> /private/var);
+        // compare against the physical home the production resolver will produce.
+        let physical_home = resolve_following_symlinks(&real_home, 0).unwrap();
+        assert!(protected_grok_config_file_with_home(
+            &physical_home.join("sandbox.toml"),
+            &["sandbox.toml"],
+            Some(&link)
+        ));
+    }
+
+    /// `protected_edit_path` lowercases path components before matching, so
+    /// the canonical filename constants must stay lowercase or the const
+    /// patterns silently stop firing.
+    #[test]
+    fn protected_config_filename_constants_are_lowercase() {
+        for name in [
+            "config.toml",
+            xai_grok_config::MANAGED_CONFIG_FILENAME,
+            xai_grok_config::REQUIREMENTS_FILENAME,
+            "sandbox.toml",
+        ] {
+            assert_eq!(name, name.to_ascii_lowercase(), "{name}");
         }
     }
 

@@ -70,6 +70,31 @@ where
     !disable_api_key_auth
 }
 
+/// Apply initialize's selective first-party environment-key probe verdict to
+/// the ordinary unpinned advertisement policy. A known-unusable first-party
+/// env key suppresses `xai.api_key` only when no independent provider route can
+/// use that method; provider-scoped BYOK never depends on this verdict.
+pub fn should_advertise_xai_api_key_after_probe(
+    disable_api_key_auth: bool,
+    has_alternative_api_key_route: bool,
+    first_party_env_key_ok: bool,
+) -> bool {
+    !disable_api_key_auth && (has_alternative_api_key_route || first_party_env_key_ok)
+}
+
+/// `true` when a model has an API-key/provider route independent of the global
+/// first-party xAI environment key. This includes provider-scoped OpenRouter,
+/// OpenAI, Anthropic, Z.ai, and custom BYOK routes; none are sent to the xAI
+/// `/api-key` probe.
+pub fn has_alternative_api_key_route<'a, I>(models: I) -> bool
+where
+    I: IntoIterator<Item = &'a ModelEntry>,
+{
+    models
+        .into_iter()
+        .any(|model| model.has_own_credentials() || model.is_provider_scoped_byok())
+}
+
 /// `true` when a resolvable API-key credential already exists (global env or
 /// per-model static `api_key`/`env_key`). Used for fail-closed pins such as
 /// `preferred_method=api_key`, not for unpinned TUI startup.
@@ -964,6 +989,28 @@ mod tests {
              must lead so the pager requires interactive login",
         );
         assert!(built.default_auth_method_id.is_none());
+    }
+
+    /// Selective probe policy affects only a first-party env-key-only route.
+    /// Independent BYOK/provider routes still advertise, while the admin kill
+    /// switch remains authoritative.
+    #[test]
+    fn selective_probe_advertisement_matrix() {
+        let cases = [
+            ("probe usable", false, false, true, true),
+            ("probe unknown fails open", false, false, true, true),
+            ("probe known unusable", false, false, false, false),
+            ("provider BYOK ignores probe", false, true, false, true),
+            ("admin kill switch", true, true, true, false),
+        ];
+
+        for (name, disabled, alternative_route, probe_ok, expected) in cases {
+            assert_eq!(
+                should_advertise_xai_api_key_after_probe(disabled, alternative_route, probe_ok),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     /// Unpinned path always advertises `xai.api_key` when allowed, even with

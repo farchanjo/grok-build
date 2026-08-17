@@ -357,8 +357,8 @@ fn auth_complete_opens_deferred_dashboard() {
         "the deferred-dashboard flag must be consumed",
     );
 }
-/// Mid-session re-auth completed from the dashboard still consumes the
-/// stash on the agent that 401'd (auth is global, not per-view).
+/// Provider-scoped re-auth completed from the dashboard still consumes the
+/// exact stash bound to the failing agent.
 #[test]
 fn auth_complete_retries_stashed_prompt_from_dashboard() {
     let mut app = test_app_with_agent();
@@ -371,7 +371,7 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
     app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
         Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
-            credential_generation: 0,
+            credential_generation: 1,
             prompt: crate::app::agent::InFlightPrompt {
                 text: "retry me [Image #1]".into(),
                 images: vec![image],
@@ -385,13 +385,18 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
             },
         });
     app.active_view = ActiveView::AgentDashboard;
-    dispatch(Action::Login, &mut app);
+    let login_effects = dispatch(Action::Login, &mut app);
+    let repair = login_effects.iter().find_map(|effect| match effect {
+        Effect::Authenticate { repair, .. } => repair.clone(),
+        _ => None,
+    });
+    assert!(repair.is_some(), "dashboard repair must be provider-scoped");
     let seq = authenticating_seq(&app);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::AuthComplete {
             request_seq: seq,
             meta: None,
-            repair: None,
+            repair,
         }),
         &mut app,
     );
@@ -404,8 +409,8 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
         "stash must be retried even when login returns to the dashboard, got: {effects:?}"
     );
 }
-/// Cancelling a mid-session re-auth from the dashboard also drops the
-/// stash (auth is global, not per-view).
+/// Cancelling a provider-scoped re-auth from the dashboard drops the exact
+/// stash bound to that repair operation.
 #[test]
 fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
     let mut app = test_app_with_agent();
@@ -413,7 +418,7 @@ fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
     app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
         Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
-            credential_generation: 0,
+            credential_generation: 1,
             prompt: crate::app::agent::InFlightPrompt {
                 text: "stale".into(),
                 images: Vec::new(),
@@ -423,7 +428,12 @@ fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
             },
         });
     app.active_view = ActiveView::AgentDashboard;
-    dispatch(Action::Login, &mut app);
+    let effects = dispatch(Action::Login, &mut app);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Authenticate { repair: Some(scope), .. }
+            if scope.provider_id == "xai" && scope.credential_generation == 1
+    )));
     dispatch(Action::CancelLogin, &mut app);
     assert!(app.agents[&id].reauth_stashed_prompt.is_none());
 }

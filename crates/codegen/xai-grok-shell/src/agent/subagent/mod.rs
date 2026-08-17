@@ -170,6 +170,9 @@ pub(crate) struct SubagentSpawnContext {
     pub inherited_tool_overrides: Option<xai_grok_inference_types::ToolOverrides>,
     pub yolo_mode: bool,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
+    /// Same session-scoped admission pool used by parent and child Task backends.
+    pub subagent_admission:
+        Arc<xai_grok_tools::implementations::grok_build::task::admission::SubagentAdmission>,
     pub parent_depth: u32,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,

@@ -313,7 +313,10 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
     use crate::app::agent::{AgentState, InFlightPrompt};
     use crate::scrollback::EntryId;
     use crate::scrollback::block::RenderBlock;
-    use xai_grok_shell::extensions::notification::{RetryState, SessionUpdate as XaiSessionUpdate};
+    use xai_grok_shell::extensions::notification::{
+        PROVIDER_CREDENTIAL_ERROR_TYPE, ProviderCredentialFailure, ProviderCredentialKind,
+        RetryState, SessionUpdate as XaiSessionUpdate,
+    };
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -366,9 +369,21 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
 
         apply_session_event_for_test(
             &XaiSessionUpdate::RetryState(RetryState::Failed {
-                error_type: "auth".into(),
+                error_type: PROVIDER_CREDENTIAL_ERROR_TYPE.into(),
                 message: "Unauthorized (401): compaction failed".into(),
-                provider: None,
+                provider: Some(ProviderCredentialFailure {
+                    provider_id: "xai".into(),
+                    provider_name: "xAI".into(),
+                    failed_model_id: Some("grok-build".into()),
+                    credential_kind: ProviderCredentialKind::Oauth,
+                    recommended_action: Default::default(),
+                    credential_generation: 1,
+                    http_status: Some(401),
+                    request_id: None,
+                    generation_id: None,
+                    backend: None,
+                    error_category: Some(PROVIDER_CREDENTIAL_ERROR_TYPE.into()),
+                }),
             }),
             &mut agent.session,
             &mut agent.scrollback,
@@ -377,10 +392,20 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
             matches!(
                 agent.scrollback.entry(i).map(|e| &e.block),
                 Some(RenderBlock::SessionEvent(ev))
-                    if matches!(ev.event, SessionEvent::ReAuthRequired)
+                    if matches!(
+                        &ev.event,
+                        SessionEvent::ProviderCredentialRequired {
+                            provider_id,
+                            credential_generation: Some(1),
+                            ..
+                        } if provider_id == "xai"
+                    )
             )
         });
-        assert!(has_reauth, "RetryState auth must show ReAuthRequired");
+        assert!(
+            has_reauth,
+            "structured xAI failure must show provider repair"
+        );
     }
 
     dispatch(
@@ -430,6 +455,48 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
         )),
         "AuthComplete must resubmit the prompt so compact runs again with valid auth, got: {effects:?}"
     );
+}
+
+/// Generic 401 text without a structured provider credential event must not
+/// infer xAI ownership or create resumable repair state.
+#[test]
+fn generic_401_without_provider_scope_does_not_stash_for_reauth() {
+    use crate::app::agent::AgentState;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "do not infer ownership".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("Unauthorized (401)".into()),
+            http_status: Some(401),
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    let login_effects = dispatch(Action::Login, &mut app);
+    assert!(login_effects.iter().all(|effect| !matches!(
+        effect,
+        Effect::Authenticate {
+            repair: Some(_),
+            ..
+        }
+    )));
 }
 
 /// Without compact_held, clearing in_flight on compact start leaves reauth empty.
@@ -516,8 +583,8 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
     );
 }
 
-/// Cancelling a mid-session re-auth drops the stashed prompt so it is
-/// not silently resubmitted on a later, unrelated login.
+/// Cancelling a provider-scoped mid-session re-auth drops its exact stashed
+/// prompt so it is not silently resubmitted on a later, unrelated login.
 #[test]
 fn cancel_login_drops_reauth_stashed_prompt() {
     let mut app = test_app_with_agent();
@@ -525,7 +592,7 @@ fn cancel_login_drops_reauth_stashed_prompt() {
     app.agents.get_mut(&id).unwrap().reauth_stashed_prompt =
         Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
-            credential_generation: 0,
+            credential_generation: 1,
             prompt: crate::app::agent::InFlightPrompt {
                 text: "stale".into(),
                 images: Vec::new(),
@@ -535,7 +602,12 @@ fn cancel_login_drops_reauth_stashed_prompt() {
             },
         });
 
-    dispatch(Action::Login, &mut app);
+    let effects = dispatch(Action::Login, &mut app);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Authenticate { repair: Some(scope), .. }
+            if scope.provider_id == "xai" && scope.credential_generation == 1
+    )));
     dispatch(Action::CancelLogin, &mut app);
 
     assert!(
@@ -544,9 +616,9 @@ fn cancel_login_drops_reauth_stashed_prompt() {
     );
 }
 
-/// Cancelling a mid-session re-auth strips the stale `ReAuthRequired`
-/// prompt from scrollback so a later `PromptResponse` cannot re-detect
-/// it and re-stash the prompt for silent resubmission.
+/// Cancelling a provider-scoped mid-session re-auth strips its credential CTA
+/// from scrollback so a later `PromptResponse` cannot re-detect it and re-stash
+/// the prompt for silent resubmission.
 #[test]
 fn cancel_login_strips_reauth_prompt_from_scrollback() {
     use crate::scrollback::block::RenderBlock;
@@ -556,7 +628,7 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.reauth_stashed_prompt = Some(crate::app::agent::ProviderScopedStashedPrompt {
             provider_id: "xai".into(),
-            credential_generation: 0,
+            credential_generation: 1,
             prompt: crate::app::agent::InFlightPrompt {
                 text: "stale".into(),
                 images: Vec::new(),
@@ -565,19 +637,35 @@ fn cancel_login_strips_reauth_prompt_from_scrollback() {
                 chip_elements: Vec::new(),
             },
         });
-        agent
-            .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+        agent.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::ProviderCredentialRequired {
+                provider_id: "xai".into(),
+                provider_name: "xAI".into(),
+                failed_model_id: None,
+                credential_kind: Some("oauth".into()),
+                credential_generation: Some(1),
+            },
+        ));
     }
 
-    dispatch(Action::Login, &mut app);
+    let effects = dispatch(Action::Login, &mut app);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Authenticate { repair: Some(scope), .. }
+            if scope.provider_id == "xai" && scope.credential_generation == 1
+    )));
     dispatch(Action::CancelLogin, &mut app);
 
     let sb = &app.agents[&id].scrollback;
     let has_reauth = (0..sb.len()).any(|i| {
         matches!(
             sb.entry(i).map(|e| &e.block),
-            Some(RenderBlock::SessionEvent(ev)) if matches!(ev.event, SessionEvent::ReAuthRequired)
+            Some(RenderBlock::SessionEvent(ev))
+                if matches!(
+                    &ev.event,
+                    SessionEvent::ProviderCredentialRequired { provider_id, .. }
+                        if provider_id == "xai"
+                )
         )
     });
     assert!(

@@ -734,17 +734,23 @@ impl MvpAgent {
             xai_chat_state::AuthType::ApiKey
         }
     }
-    /// When `cached_token` cannot proceed, prefer non-interactive `xai.api_key`
-    /// iff `should_advertise_xai_api_key`; otherwise `grok.com`. Returns `None`
-    /// when `preferred_method` is pinned (fail-closed — no cross-method fallthrough).
+    /// When `cached_token` cannot proceed, honor initialize's selective
+    /// first-party environment-key probe verdict. Independent provider/BYOK
+    /// routes still fall through to `xai.api_key`; pins stay fail-closed.
     pub(super) fn cached_token_fallthrough_method_id(
         &self,
     ) -> Option<acp::AuthMethodId> {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
+        let models = self.models_manager.models();
+        let has_alternative_api_key_route =
+            auth_method::has_alternative_api_key_route(models.values());
+        let first_party_env_api_key_ok = self.auth_manager.first_party_env_api_key_ok()
+            || !auth_method::has_xai_api_key_env();
         let id = auth_method::method_id_after_cached_token_unavailable(
-            auth_method::should_advertise_xai_api_key(
+            auth_method::should_advertise_xai_api_key_after_probe(
                 self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
-                self.models_manager.models().values(),
+                has_alternative_api_key_route,
+                first_party_env_api_key_ok,
             ),
             preferred,
         )?;
@@ -838,9 +844,7 @@ impl MvpAgent {
             let mut cfg = self.cfg.borrow_mut();
             cfg.remote_settings = Some(settings);
             crate::util::config::sync_campaign_fields(&mut cfg);
-            crate::agent::config::apply_remote_settings_side_effects(
-                cfg.remote_settings.as_ref(),
-            );
+            crate::agent::config::apply_remote_settings_side_effects(&cfg);
             let telemetry_mode = cfg.resolve_telemetry_mode();
             let trace_upload = cfg.resolve_trace_upload();
             tracing::info!(
@@ -1812,11 +1816,9 @@ impl MvpAgent {
             .unwrap_or_default()
     }
 
-    /// Apply execution mode to the live actor and re-persist it on the Summary.
-    ///
-    /// Used on new-session seed (from catalog model) and on resume (summary is
-    /// authoritative — call **after** model_switch so catalog cannot win).
-    /// Envelope validation failures are returned (fail closed).
+    /// Restore the persisted execution mode into the live actor without
+    /// writing the session summary. The subsequent load-specific model switch
+    /// performs the single authoritative `CurrentModel` write.
     pub(crate) async fn restore_summary_execution_mode(
         &self,
         session_id: &acp::SessionId,
@@ -1837,7 +1839,7 @@ impl MvpAgent {
             .cmd_tx
             .send(crate::session::SessionCommand::RestoreExecutionMode {
                 execution_backend,
-                external_runtime: external_runtime.clone(),
+                external_runtime,
                 responds_to: tx,
             })
             .is_err()
@@ -1845,33 +1847,12 @@ impl MvpAgent {
             return Err(acp::Error::internal_error()
                 .data("restore_summary_execution_mode: session actor closed"));
         }
-        let restore_result = rx.await.map_err(|_| {
-            acp::Error::internal_error()
-                .data("restore_summary_execution_mode: no response from actor")
-        })?;
-        restore_result.map_err(|e| acp::Error::invalid_params().data(e))?;
-
-        // Re-persist Summary so a prior model_switch CurrentModel write cannot
-        // leave disk with the catalog's mode.
-        let (ptx, prx) = oneshot::channel();
-        if handle
-            .cmd_tx
-            .send(crate::session::SessionCommand::PersistExecutionMode {
-                execution_backend,
-                external_runtime,
-                responds_to: ptx,
-            })
-            .is_err()
-        {
-            return Err(acp::Error::internal_error()
-                .data("restore_summary_execution_mode: session actor closed (persist)"));
-        }
-        prx.await.map_err(|_| {
-            acp::Error::internal_error()
-                .data("restore_summary_execution_mode: no persist response")
-        })?
-        .map_err(|e| acp::Error::invalid_params().data(e))?;
-        Ok(())
+        rx.await
+            .map_err(|_| {
+                acp::Error::internal_error()
+                    .data("restore_summary_execution_mode: no response from actor")
+            })?
+            .map_err(|e| acp::Error::invalid_params().data(e))
     }
     /// If a `session/load` for `session_id` is in flight, wait (bounded) for
     /// it to finish. Returns immediately when no load is in flight.
@@ -2974,6 +2955,7 @@ impl MvpAgent {
         &self,
         init: &acp::InitializeRequest,
         spec: SessionSpawnOptions<'_>,
+        is_load: bool,
     ) -> Result<(), acp::Error> {
         let SessionSpawnOptions {
             session_info,
@@ -2990,7 +2972,7 @@ impl MvpAgent {
             client_terminal,
             client_fs_read,
             client_fs_write,
-            preloaded_envrc,
+            envrc,
             persisted_signals,
             persisted_plan_mode,
             persisted_goal_mode,
@@ -3012,6 +2994,14 @@ impl MvpAgent {
             spawn_remote_settings.as_ref(),
             false,
         );
+        let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
+        let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
+        let envrc = envrc.unwrap_or_else(|| {
+            xai_grok_workspace::envrc::spawn_envrc_load(
+                cwd.as_path().to_path_buf(),
+                load_envrc && project_env_trusted,
+            )
+        });
         let use_acp_fs = client_fs_read && client_fs_write;
         let fs_notify_config = init
             .client_capabilities
@@ -3077,7 +3067,6 @@ impl MvpAgent {
             );
             std::sync::Arc::new(TerminalRunner::new(notifier, session_info.id.clone()))
         };
-        let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
         let startup_hints = init
             .meta
             .as_ref()
@@ -3171,21 +3160,11 @@ impl MvpAgent {
             }
             _ => None,
         };
-        let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
         let mut session_env = xai_grok_workspace::permission::claude_settings::load_claude_env_with_project(
             cwd.as_path(),
             project_env_trusted,
         );
-        let envrc = match preloaded_envrc {
-            Some(env) => env,
-            None => {
-                xai_grok_workspace::envrc::load_envrc_or_empty_when_trusted(
-                    cwd.as_path(),
-                    load_envrc && project_env_trusted,
-                )
-            }
-        };
-        session_env.extend(envrc);
+        session_env.extend(envrc.join().await);
         if no_color {
             session_env.extend(crate::terminal::no_color_env());
         } else {
@@ -3599,31 +3578,31 @@ impl MvpAgent {
                     }
                     Some(std::sync::Arc::new(merged))
                 });
-            let initial_reasoning_effort = chat_history
-                .is_empty()
-                .then_some(inference_config.reasoning_effort);
-            // Seed durable execution mode from the selected catalog model so a
-            // new session does not require an explicit model switch to persist
-            // external backend / envelope (defaults native).
-            let seed_execution_backend =
-                self.execution_backend_for_model_id(&session_model_id);
-            let seed_external_runtime = seed_execution_backend.external_kind().map(|kind| {
-                crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind)
-            });
-            if let Some(ref env) = seed_external_runtime
-                && let Err(e) = env.validate()
-            {
-                return Err(acp::Error::invalid_params().data(e.to_string()));
-            }
-            let _ = persistence
-                .tx
-                .send(crate::session::persistence::PersistenceMsg::CurrentModel {
-                    model_id: session_model_id.clone(),
-                    agent_name: Some(agent_definition.name.clone()),
-                    reasoning_effort: initial_reasoning_effort,
-                    execution_backend: Some(seed_execution_backend),
-                    external_runtime: Some(seed_external_runtime.clone()),
+            let initial_reasoning_effort = (!is_load).then_some(inference_config.reasoning_effort);
+            // A loaded session's summary is already durable and authoritative;
+            // do not seed a catalog-derived execution mode before load restores
+            // it. New sessions still need their initial mode persisted here.
+            if !is_load {
+                let seed_execution_backend =
+                    self.execution_backend_for_model_id(&session_model_id);
+                let seed_external_runtime = seed_execution_backend.external_kind().map(|kind| {
+                    crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind)
                 });
+                if let Some(ref env) = seed_external_runtime
+                    && let Err(e) = env.validate()
+                {
+                    return Err(acp::Error::invalid_params().data(e.to_string()));
+                }
+                let _ = persistence
+                    .tx
+                    .send(crate::session::persistence::PersistenceMsg::CurrentModel {
+                        model_id: session_model_id.clone(),
+                        agent_name: Some(agent_definition.name.clone()),
+                        reasoning_effort: initial_reasoning_effort,
+                        execution_backend: Some(seed_execution_backend),
+                        external_runtime: Some(seed_external_runtime.clone()),
+                    });
+            }
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
                 session_meta,
             );
@@ -3776,37 +3755,38 @@ impl MvpAgent {
         self.ensure_session_supervisor();
         self.heap_profile_set_session_id(&session_info.id.0);
         self.push_roster_delta_upserted(&session_info.id);
-        // Seed live actor execution mode from the selected model (new sessions).
-        // Resume overwrites this later with summary-authoritative RestoreExecutionMode.
-        {
+        // New sessions seed their live actor from the selected catalog model.
+        // Loads leave the actor native until the persisted summary mode is
+        // validated and restored immediately before model application.
+        if !is_load {
             let backend = self.execution_backend_for_model_id(&handle.model_id);
             let envelope = backend.external_kind().map(|kind| {
                 crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind)
             });
             let (tx, rx) = oneshot::channel();
-            if handle
+            handle
                 .cmd_tx
                 .send(SessionCommand::RestoreExecutionMode {
                     execution_backend: backend,
                     external_runtime: envelope,
                     responds_to: tx,
                 })
-                .is_ok()
-            {
-                match rx.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        return Err(acp::Error::invalid_params().data(e));
-                    }
-                    Err(_) => {
-                        return Err(acp::Error::internal_error().data(
-                            "spawn: failed to seed execution backend on session actor",
-                        ));
-                    }
+                .map_err(|_| {
+                    acp::Error::internal_error()
+                        .data("spawn: session actor closed while seeding execution backend")
+                })?;
+            match rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return Err(acp::Error::invalid_params().data(e));
+                }
+                Err(_) => {
+                    return Err(acp::Error::internal_error()
+                        .data("spawn: failed to seed execution backend on session actor"));
                 }
             }
         }
-        if chat_history.is_empty() {
+        if !is_load {
             let _timer = crate::instrumentation_timer!("session.system_prompt_inject");
             let system_prompt = build_spawn_system_prompt(
                 session_meta,
@@ -3866,7 +3846,7 @@ impl MvpAgent {
         if handle_display_cwd.is_some() {
             handle.display_cwd = handle_display_cwd;
         }
-        let source = if chat_history.is_empty() { "new" } else { "load" };
+        let source = if is_load { "load" } else { "new" };
         let _ = handle
             .cmd_tx
             .send(SessionCommand::DispatchSessionStartHook {

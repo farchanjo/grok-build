@@ -631,6 +631,35 @@ async fn open_session(
     })
 }
 
+async fn resume_session(
+    acp_tx: &AcpAgentTx,
+    cwd: &Path,
+    session_id: &str,
+    standard_resume_available: bool,
+    restore_code: Option<bool>,
+) -> anyhow::Result<OpenedSession> {
+    if !standard_resume_available || restore_code == Some(true) {
+        return open_session(acp_tx, cwd, Some(session_id), restore_code).await;
+    }
+
+    let mcp_servers =
+        cli_config::load_mcp_servers(cwd, &xai_grok_tools::types::compat::CompatConfig::default());
+    let response: acp::ResumeSessionResponse = acp_send(
+        acp::ResumeSessionRequest::new(
+            acp::SessionId::new(session_id.to_string()),
+            cwd.to_path_buf(),
+        )
+        .mcp_servers(mcp_servers),
+        acp_tx,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Session does not exist"))?;
+    Ok(OpenedSession {
+        session_id: acp::SessionId::new(session_id.to_string()),
+        models: ModelState::from(response.models),
+    })
+}
+
 async fn open_session_with_id(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
@@ -938,6 +967,11 @@ pub async fn run_single_turn(
         elapsed_ms = t_spawn.elapsed().as_millis() as u64,
         "headless: spawn + initialize complete"
     );
+    let standard_resume_available = init_resp
+        .agent_capabilities
+        .session_capabilities
+        .resume
+        .is_some();
 
     // Authenticate using agent defaultAuthMethodId (preferred_method pin).
     let t_auth = Instant::now();
@@ -997,7 +1031,14 @@ pub async fn run_single_turn(
             ..
         } => {
             let load_cwd = original_cwd.as_deref().unwrap_or(cwd.as_path());
-            open_session(&acp_tx, load_cwd, Some(session_id.as_str()), restore_code).await
+            resume_session(
+                &acp_tx,
+                load_cwd,
+                session_id.as_str(),
+                standard_resume_available,
+                restore_code,
+            )
+            .await
         }
         MaterializedStartup::Fork {
             parent_session_id,

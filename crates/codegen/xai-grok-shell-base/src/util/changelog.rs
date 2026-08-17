@@ -232,9 +232,11 @@ pub fn bullets_from_entries(entries: &[ChangelogEntry], max: usize) -> Vec<Strin
 /// Blocking HTTP fetch. Callers (`std::thread::scope` threads) are already
 /// off the tokio runtime, so no extra thread spawn is needed.
 fn fetch_blocking(url: &str) -> anyhow::Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()?;
+    let client = xai_grok_shared::extra_ca::with_extra_root_certificates_blocking(
+        reqwest::blocking::Client::builder(),
+    )
+    .timeout(FETCH_TIMEOUT)
+    .build()?;
     let resp = client.get(url).send()?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {}", resp.status());

@@ -297,6 +297,12 @@ pub enum PersistenceMsg {
     },
     /// Replace the entire chat history (used for repair and rewind).
     ReplaceChatHistory(Vec<ConversationItem>),
+    /// Back up the original history, then replace it only if the backup
+    /// succeeds, acknowledging the combined disk result.
+    ReplaceChatHistoryForStripAndAck {
+        messages: Vec<ConversationItem>,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     /// Atomically persist one marker-last compaction transaction and acknowledge
     /// whether the durable marker committed.
     CommitCompactionAndAck {
@@ -784,12 +790,38 @@ fn resumed_session_sandbox_profile_in_root(
     None
 }
 
+/// Owner-only session dir + `<encoded-cwd>` shield, for writers that bypass
+/// a storage adapter's `init_session` (e.g. chat-kind sessions).
+pub(crate) fn ensure_owner_only_session_dir(info: &Info) -> std::io::Result<PathBuf> {
+    ensure_owner_only_session_dir_in(&grok_home(), info)
+}
+
+/// Inner implementation with an injectable grok home for tests.
+fn ensure_owner_only_session_dir_in(grok_home: &Path, info: &Info) -> std::io::Result<PathBuf> {
+    let _ = crate::util::grok_home::ensure_sessions_cwd_dir_in(grok_home, &info.cwd);
+    let dir = session_dir_in(grok_home, info);
+    crate::util::grok_home::create_dir_all_owner_only(&dir)?;
+    Ok(dir)
+}
+
+/// `session_dir` with an injectable grok home (pure path computation).
+fn session_dir_in(grok_home: &Path, info: &Info) -> PathBuf {
+    crate::util::grok_home::sessions_cwd_dir_in(grok_home, &info.cwd).join(info.id.to_string())
+}
+
 /// Get file path for storing a large prompt.
 /// Creates the prompts subdirectory if it doesn't exist.
 /// Path format: `{session_dir}/prompts/prompt_{prompt_index}.txt`
 pub fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
-    let prompts_dir = session_dir(info).join("prompts");
-    std::fs::create_dir_all(&prompts_dir).ok();
+    get_prompt_file_path_in(&grok_home(), info, prompt_index)
+}
+
+/// Inner implementation with an injectable grok home for tests.
+fn get_prompt_file_path_in(grok_home: &Path, info: &Info, prompt_index: usize) -> PathBuf {
+    // Best-effort; failures surface on the prompt-file write itself.
+    let _ = ensure_owner_only_session_dir_in(grok_home, info);
+    let prompts_dir = session_dir_in(grok_home, info).join("prompts");
+    let _ = crate::util::grok_home::create_dir_all_owner_only(&prompts_dir);
     prompts_dir.join(format!("prompt_{}.txt", prompt_index))
 }
 
@@ -2014,6 +2046,21 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to replace chat history");
                     }
                 }
+                PersistenceMsg::ReplaceChatHistoryForStripAndAck {
+                    messages,
+                    respond_to,
+                } => {
+                    let result = crate::session::storage::strip_rewrite_gated(
+                        self.storage.as_ref(),
+                        &self.info,
+                        &messages,
+                    )
+                    .await;
+                    if let Err(error) = &result {
+                        tracing::warn!(?error, "image-strip history rewrite failed");
+                    }
+                    let _ = respond_to.send(result);
+                }
                 PersistenceMsg::CommitCompactionAndAck {
                     request,
                     respond_to,
@@ -2975,24 +3022,27 @@ pub async fn delete_session_history(
         false
     };
 
-    let Some(info) = local_info else {
-        return Ok(SessionDeletion {
-            local_removed: false,
-            remote_removed,
-        });
+    let local_removed = if let Some(info) = local_info {
+        JsonlStorageAdapter::default()
+            .delete_session(&info)
+            .await
+            .map_err(DeleteSessionError::Local)?;
+        true
+    } else {
+        false
     };
 
-    JsonlStorageAdapter::default()
-        .delete_session(&info)
-        .await
-        .map_err(DeleteSessionError::Local)?;
-
-    // Evict from the search index: the indexer re-reads the (now
-    // missing) summary and drops the document.
-    crate::session::storage::search::notify_session_updated(&info.id.to_string(), &info.cwd);
+    // Evict by requested id even for a missing/remote-only local session.
+    // This path is allowed while indexing is disabled and does not create the
+    // search DB or its parent.
+    crate::session::storage::search::evict_session_if_index_exists(
+        &crate::util::grok_home::grok_home(),
+        session_id,
+    )
+    .await;
 
     Ok(SessionDeletion {
-        local_removed: true,
+        local_removed,
         remote_removed,
     })
 }

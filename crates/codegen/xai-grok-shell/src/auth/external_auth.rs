@@ -5,7 +5,7 @@ use crate::util::subprocess::CommandLog;
 use crate::util::subprocess::RunError;
 use crate::util::subprocess::RunOptions;
 use crate::util::subprocess::run_detached_with_timeout;
-use crate::util::subprocess::sh_c;
+use crate::util::subprocess::shell_c;
 use std::time::Duration;
 
 /// Parse stdout into a session-credential `GrokAuth`.
@@ -40,7 +40,8 @@ pub(crate) fn parse_output(output: &std::process::Output) -> anyhow::Result<Grok
 }
 
 /// Short timeout for a mid-session refresh: it must not hang the session.
-const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+/// The single external-provider run gets this entire budget.
+const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(7);
 
 /// Runs the external auth binary for a headless mid-session refresh. Initial,
 /// interactive sign-in takes a separate path (`flow::run_external_auth_provider`,
@@ -48,7 +49,7 @@ const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) async fn run_external_refresh(command: &str) -> Option<GrokAuth> {
     tracing::info!(cmd = %command, timeout_secs = EXTERNAL_AUTH_REFRESH_TIMEOUT.as_secs(), "auth: running external auth provider (headless refresh)");
 
-    let mut cmd = sh_c(command);
+    let mut cmd = shell_c(command);
     cmd.env("GROK_AUTH_EXPIRED", "1");
     // Route through the group-killing runner so a provider that spawns helpers
     // is torn down as a unit on timeout.
@@ -99,46 +100,45 @@ pub(crate) async fn refresh_with_command(command: &str, prev_auth: &GrokAuth) ->
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_output_nonzero_exit_is_err() {
-        let output = std::process::Output {
-            status: std::process::Command::new("false").status().unwrap(),
-            stdout: b"token".to_vec(),
-            stderr: vec![],
-        };
+    async fn command_output(command: &str, stdout: &[u8]) -> std::process::Output {
+        let mut output = shell_c(command).output().await.unwrap();
+        output.stdout = stdout.to_vec();
+        output.stderr.clear();
+        output
+    }
+
+    async fn successful_output(stdout: &str) -> std::process::Output {
+        command_output("exit 0", stdout.as_bytes()).await
+    }
+
+    #[tokio::test]
+    async fn parse_output_nonzero_exit_is_err() {
+        let output = command_output("exit 1", b"token").await;
         assert!(parse_output(&output).is_err());
     }
 
-    #[test]
-    fn parse_output_empty_stdout_is_err() {
-        let output = std::process::Output {
-            status: std::process::Command::new("true").status().unwrap(),
-            stdout: b"  \n".to_vec(),
-            stderr: vec![],
-        };
-        assert!(parse_output(&output).is_err());
+    #[tokio::test]
+    async fn parse_output_empty_stdout_is_err() {
+        assert!(parse_output(&successful_output("  \n").await).is_err());
     }
 
-    #[test]
-    fn parse_output_issuer_claim_enables_xai_auth() {
-        let ok = |stdout: &str| std::process::Output {
-            status: std::process::Command::new("true").status().unwrap(),
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: vec![],
-        };
-
+    #[tokio::test]
+    async fn parse_output_issuer_claim_enables_xai_auth() {
         // x.ai issuer claim → first-party session (relay-eligible).
-        let auth = parse_output(&ok(
-            r#"{"access_token":"t","expires_in":900,"issuer":"https://auth.x.ai"}"#,
-        ))
+        let auth = parse_output(
+            &successful_output(
+                r#"{"access_token":"t","expires_in":900,"issuer":"https://auth.x.ai"}"#,
+            )
+            .await,
+        )
         .unwrap();
         assert_eq!(auth.oidc_issuer.as_deref(), Some("https://auth.x.ai"));
         assert!(auth.is_xai_auth());
 
         // Non-x.ai issuer is stored but stays third-party.
-        let auth = parse_output(&ok(
-            r#"{"access_token":"t","issuer":"https://idp.acme.example"}"#,
-        ))
+        let auth = parse_output(
+            &successful_output(r#"{"access_token":"t","issuer":"https://idp.acme.example"}"#).await,
+        )
         .unwrap();
         assert_eq!(
             auth.oidc_issuer.as_deref(),
@@ -147,26 +147,22 @@ mod tests {
         assert!(!auth.is_xai_auth());
 
         // Missing / empty / whitespace issuer → None.
-        let auth = parse_output(&ok(r#"{"access_token":"t"}"#)).unwrap();
+        let auth = parse_output(&successful_output(r#"{"access_token":"t"}"#).await).unwrap();
         assert_eq!(auth.oidc_issuer, None);
         assert!(!auth.is_xai_auth());
-        let auth = parse_output(&ok(r#"{"access_token":"t","issuer":"  "}"#)).unwrap();
+        let auth = parse_output(&successful_output(r#"{"access_token":"t","issuer":"  "}"#).await)
+            .unwrap();
         assert_eq!(auth.oidc_issuer, None);
 
         // Bare-token output never carries an issuer.
-        let auth = parse_output(&ok("bare-token")).unwrap();
+        let auth = parse_output(&successful_output("bare-token").await).unwrap();
         assert_eq!(auth.oidc_issuer, None);
         assert!(!auth.is_xai_auth());
     }
 
-    #[test]
-    fn parse_output_json_shaped_but_invalid_is_err() {
-        let output = std::process::Output {
-            status: std::process::Command::new("true").status().unwrap(),
-            stdout: b"{not valid json}".to_vec(),
-            stderr: vec![],
-        };
-        assert!(parse_output(&output).is_err());
+    #[tokio::test]
+    async fn parse_output_json_shaped_but_invalid_is_err() {
+        assert!(parse_output(&successful_output("{not valid json}").await).is_err());
     }
 
     #[tokio::test]
@@ -176,9 +172,12 @@ mod tests {
 
     #[tokio::test]
     async fn sets_grok_auth_expired_env_on_refresh() {
-        let auth = run_external_refresh("echo $GROK_AUTH_EXPIRED")
-            .await
-            .unwrap();
+        let command = if cfg!(windows) {
+            "echo %GROK_AUTH_EXPIRED%"
+        } else {
+            "echo $GROK_AUTH_EXPIRED"
+        };
+        let auth = run_external_refresh(command).await.unwrap();
         assert_eq!(auth.key, "1");
     }
 
@@ -206,17 +205,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_interactive_times_out() {
-        // Binary writes a link to stderr then blocks; the 5s refresh timeout kills it.
-        let cmd = r#"echo 'Visit http://example.com/auth' >&2; sleep 20; echo token"#;
+    async fn refresh_interactive_times_out_after_one_seven_second_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let count_path = temp.path().join("external-auth-count.txt");
+        // Binary blocks for interaction; the 7s refresh timeout kills it. The
+        // marker proves the provider was launched exactly once.
+        let cmd = if cfg!(windows) {
+            let count = count_path.to_string_lossy();
+            format!(r#">"{count}" echo run & ping 127.0.0.1 -n 20 >NUL && echo token"#)
+        } else {
+            let count = count_path.to_string_lossy();
+            format!(
+                r#"echo run >> '{}'; echo 'Visit http://example.com/auth' >&2; sleep 20; echo token"#,
+                count.replace('\\', "\\\\").replace('\'', "'\\''")
+            )
+        };
         let start = std::time::Instant::now();
-        let result = run_external_refresh(cmd).await;
+        let result = run_external_refresh(&cmd).await;
         let elapsed = start.elapsed();
         assert!(result.is_none(), "should timeout and return None");
+        assert_eq!(
+            std::fs::read_to_string(&count_path)
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "the refresh provider must run exactly once"
+        );
         assert!(
-            elapsed.as_secs() < 10,
-            "refresh should use 5s timeout, not 60s (took {}s)",
-            elapsed.as_secs()
+            elapsed >= EXTERNAL_AUTH_REFRESH_TIMEOUT.saturating_sub(Duration::from_secs(1)),
+            "refresh returned before its 7s timeout budget (took {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "refresh should use one 7s attempt, not an interactive timeout (took {elapsed:?})"
         );
     }
 }

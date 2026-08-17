@@ -20,7 +20,7 @@ use crate::commands::{ChatStateCommand, StrictAppendAck};
 use crate::events::ChatStateEvent;
 use crate::handle::ChatStateHandle;
 use crate::persistence::ChatPersistence;
-use crate::types::{PruningConfig, TurnCapture};
+use crate::types::{ImageBudgetConfig, PruningConfig, TurnCapture};
 
 use state::ChatState;
 use xai_grok_inference_types::{ConversationItem, InferenceSettings};
@@ -32,6 +32,9 @@ pub struct ChatStateActor {
     state: ChatState,
     /// Pruning configuration for tool-result trimming.
     pruning_config: PruningConfig,
+    /// Ephemeral provider-derived proactive image budget. `None` is the
+    /// conservative default for unknown and non-xAI providers.
+    image_budget: Option<ImageBudgetConfig>,
     /// Persistence implementation — owned exclusively, called with `&mut self`.
     persistence: Box<dyn ChatPersistence>,
     /// Channel to receive commands from handles.
@@ -77,11 +80,34 @@ impl ChatStateActor {
         event_tx: mpsc::UnboundedSender<ChatStateEvent>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> ChatStateHandle {
+        Self::spawn_with_pruning_and_image_budget(
+            initial_conversation,
+            inference_settings,
+            pruning_config,
+            None,
+            persistence,
+            event_tx,
+            cancellation_token,
+        )
+    }
+
+    /// Spawn the actor with custom pruning and an ephemeral provider-derived
+    /// proactive image budget.
+    pub fn spawn_with_pruning_and_image_budget(
+        initial_conversation: Vec<ConversationItem>,
+        inference_settings: InferenceSettings,
+        pruning_config: PruningConfig,
+        image_budget: Option<ImageBudgetConfig>,
+        persistence: Box<dyn ChatPersistence>,
+        event_tx: mpsc::UnboundedSender<ChatStateEvent>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> ChatStateHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let actor = ChatStateActor {
             state: ChatState::new(initial_conversation, inference_settings),
             pruning_config,
+            image_budget,
             persistence,
             cmd_rx,
             event_tx,
@@ -206,6 +232,16 @@ impl ChatStateActor {
             ChatStateCommand::UpdateInferenceSettings { config } => {
                 self.state.inference_settings = config;
             }
+            ChatStateCommand::UpdateInferenceSettingsWithImageBudget {
+                config,
+                image_budget,
+            } => {
+                self.state.inference_settings = config;
+                self.image_budget = image_budget;
+            }
+            ChatStateCommand::UpdateImageBudget { image_budget } => {
+                self.image_budget = image_budget;
+            }
             ChatStateCommand::RecordAgentEditedPath { path } => {
                 self.state.agent_edited_paths.insert(path);
             }
@@ -239,6 +275,27 @@ impl ChatStateActor {
                     Ok(self.repair_history(dry_run))
                 };
                 let _ = reply.send(result);
+            }
+            ChatStateCommand::StripConversationImages { urls, reply } => {
+                match self.strip_conversation_images(&urls) {
+                    None => {
+                        let _ = reply.send(crate::StripOutcome::NoMatch);
+                    }
+                    Some((stripped, acknowledgement)) => {
+                        // Wait for disk off-actor so an fsync cannot stall
+                        // state queries; persistence-channel ordering still
+                        // places the rewrite before subsequent writes.
+                        tokio::spawn(async move {
+                            let outcome = match acknowledgement.await {
+                                Ok(Ok(())) => crate::StripOutcome::Applied { stripped },
+                                Ok(Err(_)) | Err(_) => {
+                                    crate::StripOutcome::WriteFailed { stripped }
+                                }
+                            };
+                            let _ = reply.send(outcome);
+                        });
+                    }
+                }
             }
             ChatStateCommand::ReplaceSystemHead { prompt, reply } => {
                 let changed = self.replace_system_head(&prompt);

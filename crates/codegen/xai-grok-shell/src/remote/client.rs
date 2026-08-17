@@ -290,7 +290,7 @@ impl Default for BackendClient {
 }
 impl BackendClient {
     fn build_default_client() -> reqwest::Client {
-        reqwest::Client::builder()
+        xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
             .connect_timeout(Duration::from_secs(10))
             .timeout(DEFAULT_TIMEOUT)
             .build()

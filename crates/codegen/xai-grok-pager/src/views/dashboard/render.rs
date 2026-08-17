@@ -1113,7 +1113,7 @@ fn render_location_picker(
             theme,
             " path: ",
             &modal.picker,
-            /* active */ false,
+            modal.picker.search_active,
             /* show_hint */ false,
             Some(theme.bg_base),
         );

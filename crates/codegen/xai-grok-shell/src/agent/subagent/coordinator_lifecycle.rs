@@ -635,6 +635,7 @@ impl SubagentCoordinator {
                 kill_background_tasks: true,
                 rewind_if_pristine: false,
                 trigger: None,
+                compaction_cancel_pending: false,
             });
         let _ = tracker.child_handle.cmd_tx.send(SessionCommand::Shutdown);
     }

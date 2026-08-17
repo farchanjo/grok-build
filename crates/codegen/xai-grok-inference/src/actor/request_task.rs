@@ -18,13 +18,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use xai_grok_inference_types::{
-    ConversationRequest, ConversationResponse, EmptyResponseContext, InferenceError,
+    ApiErrorCode, ConversationRequest, ConversationResponse, EmptyResponseContext, InferenceError,
     error::Result as InferenceResult,
 };
 
 use crate::client::{ApiBackend, InferenceClient};
 use crate::config::{InferenceConfig, RetryPolicy};
-use crate::events::{InferenceErrorInfo, InferenceErrorKind, InferenceEvent};
+use crate::events::{InferenceErrorInfo, InferenceErrorKind, InferenceEvent, StripReason};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
@@ -364,15 +364,28 @@ async fn apply_retry_decision(
     let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
 
     // Connection-reset / broken-pipe on body upload often means nginx
-    // rejected an oversized payload before responding 413. Strip
-    // images proactively before any retry of those errors so we don't
-    // burn budget re-uploading the same large body.
-    if err.is_likely_body_rejected() {
-        let stripped = request.strip_images();
-        if stripped > 0 {
+    // rejected an oversized payload before responding 413. Strip only if
+    // this decision will really retry: a fatal verdict must not mutate the
+    // request or claim images were omitted from a retry that never happens.
+    let will_retry = matches!(
+        decision,
+        RetryDecision::Retry { .. }
+            | RetryDecision::RetryWithBackoff { .. }
+            | RetryDecision::RetryWithClientRebuild { .. }
+    );
+    if will_retry && err.is_likely_body_rejected() {
+        let stripped_urls = request.strip_images();
+        if !stripped_urls.is_empty() {
             tracing::warn!(
-                stripped,
-                "stripped {stripped} image(s) before retry (likely nginx 413 via connection reset)"
+                stripped = stripped_urls.len(),
+                "stripped {} image(s) before retry (likely nginx 413 via connection reset)",
+                stripped_urls.len()
+            );
+            emit_images_stripped(
+                event_tx,
+                request_id,
+                stripped_urls,
+                StripReason::PayloadHeuristic,
             );
         }
     }
@@ -426,13 +439,42 @@ async fn apply_retry_decision(
             }
         }
         RetryDecision::RetryWithImageStrip => {
-            let stripped = request.strip_images();
-            if stripped == 0 {
+            let stripped_urls = request.strip_images();
+            if stripped_urls.is_empty() {
                 // Nothing left to strip; upgrade to fatal.
                 emit_failed(event_tx, request_id, err);
                 send_completion(completion_tx, Err(clone_error(err)));
                 return false;
             }
+            // Persistability is intentionally narrow. Only a typed HTTP 400
+            // identifies this exact payload deterministically; every other
+            // image-strip trigger remains request-local.
+            let reason = match err {
+                InferenceError::Api {
+                    status,
+                    error_code: Some(ApiErrorCode::InvalidImage),
+                    ..
+                } if status.as_u16() == 400 => StripReason::ServerRejected,
+                InferenceError::Api { .. }
+                | InferenceError::StreamError { .. }
+                | InferenceError::Auth { .. }
+                | InferenceError::InvalidConfiguration(_)
+                | InferenceError::Http(_)
+                | InferenceError::Serialization(_)
+                | InferenceError::EventStreamError(_)
+                | InferenceError::IdleTimeout { .. }
+                | InferenceError::EmptyResponse { .. }
+                | InferenceError::MaxTokensTruncation
+                | InferenceError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+            };
+            tracing::warn!(
+                stripped = stripped_urls.len(),
+                reason = reason.as_str(),
+                error = %err,
+                "stripped {} image(s) after an image-related error; retrying without them",
+                stripped_urls.len()
+            );
+            emit_images_stripped(event_tx, request_id, stripped_urls, reason);
             *retry_count += 1;
             emit_retrying(event_tx, request_id, *retry_count, max_retries, err, None);
             true
@@ -715,6 +757,7 @@ async fn drive_l2(
                             error: InferenceError::StreamError {
                                 error_type: "finish_reason_error".into(),
                                 message,
+                                code: None,
                             },
                         };
                     }
@@ -786,7 +829,10 @@ fn synthesize_from_info(info: &InferenceErrorInfo) -> InferenceError {
                 .find_map(|tok| tok.strip_suffix('s').and_then(|n| n.parse::<u64>().ok()))
                 .unwrap_or(0),
         },
-        InferenceErrorKind::Auth => InferenceError::Auth(info.message.clone()),
+        InferenceErrorKind::Auth => InferenceError::Auth {
+            message: info.message.clone(),
+            credential: info.credential,
+        },
         // Must stay Serialization: EventStreamError is retryable, and a
         // response-parse failure is deterministic on retry. `info.message`
         // is the variant's rendered Display, so rebuild via the constructor
@@ -807,6 +853,7 @@ fn synthesize_from_info(info: &InferenceErrorInfo) -> InferenceError {
                 retry_after_secs: info.retry_after_secs,
                 should_retry: None,
                 diagnostics: info.diagnostics.clone(),
+                error_code: info.error_code.clone(),
             }
         }
         InferenceErrorKind::EmptyResponse => {
@@ -906,6 +953,19 @@ fn emit_retrying(
     });
 }
 
+fn emit_images_stripped(
+    event_tx: &mpsc::UnboundedSender<InferenceEvent>,
+    request_id: &RequestId,
+    stripped_urls: Vec<Arc<str>>,
+    reason: StripReason,
+) {
+    let _ = event_tx.send(InferenceEvent::ImagesStripped {
+        request_id: request_id.clone(),
+        stripped_urls,
+        reason,
+    });
+}
+
 fn handle_cancellation(
     event_tx: &mpsc::UnboundedSender<InferenceEvent>,
     request_id: &RequestId,
@@ -922,9 +982,11 @@ fn handle_cancellation(
         retry_after_secs: None,
         model_metadata: None,
         diagnostics: None,
+        error_code: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_inference_types::SentCredential::Unknown,
     };
     let _ = event_tx.send(InferenceEvent::Failed {
         request_id: request_id.clone(),
@@ -932,7 +994,7 @@ fn handle_cancellation(
     });
     send_completion(
         completion_tx,
-        Err(InferenceError::Auth("request cancelled".to_string())),
+        Err(InferenceError::auth_unknown("request cancelled")),
     );
 }
 
@@ -960,9 +1022,11 @@ mod tests {
             retry_after_secs: None,
             model_metadata: None,
             diagnostics: None,
+            error_code: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_inference_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -981,9 +1045,11 @@ mod tests {
             retry_after_secs: None,
             model_metadata: None,
             diagnostics: None,
+            error_code: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_inference_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -998,6 +1064,46 @@ mod tests {
     }
 
     #[test]
+    fn synthesize_invalid_image_code_keeps_classification() {
+        let info = InferenceErrorInfo {
+            kind: InferenceErrorKind::Api,
+            status_code: Some(500),
+            message: "some future wording without the legacy phrase".to_string(),
+            is_retryable: true,
+            retry_after_secs: None,
+            model_metadata: None,
+            diagnostics: None,
+            error_code: Some(xai_grok_inference_types::ApiErrorCode::InvalidImage),
+            empty_response_context: None,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_inference_types::SentCredential::Unknown,
+        };
+        let err = synthesize_from_info(&info);
+        assert!(err.is_image_processing_error());
+
+        let stream_sourced = InferenceErrorInfo::from(&InferenceError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "could not decode image".into(),
+            code: Some(xai_grok_inference_types::ApiErrorCode::InvalidImage),
+        });
+        let synthesized = synthesize_from_info(&stream_sourced);
+        assert!(synthesized.is_image_processing_error());
+        match synthesized {
+            InferenceError::Api {
+                status, error_code, ..
+            } => {
+                assert_eq!(status.as_u16(), 500);
+                assert_eq!(
+                    error_code,
+                    Some(xai_grok_inference_types::ApiErrorCode::InvalidImage)
+                );
+            }
+            other => panic!("expected synthesized Api, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn synthesize_rate_limited_preserves_retry_after() {
         let info = InferenceErrorInfo {
             kind: InferenceErrorKind::RateLimited,
@@ -1007,9 +1113,11 @@ mod tests {
             retry_after_secs: Some(7),
             model_metadata: None,
             diagnostics: None,
+            error_code: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_inference_types::SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1044,6 +1152,112 @@ mod tests {
             info.message,
             "rebuilt Display must round-trip without double-prefixing"
         );
+    }
+
+    fn request_with_image(url: &str) -> ConversationRequest {
+        let mut user = xai_grok_inference_types::ConversationItem::user("look");
+        user.add_image(url);
+        ConversationRequest::from_items(vec![user])
+    }
+
+    async fn apply_image_decision(
+        error: InferenceError,
+    ) -> (bool, ConversationRequest, Vec<InferenceEvent>) {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut retry_count = 0;
+        let mut request = request_with_image("data:image/png;base64,bad");
+        let config = InferenceConfig {
+            base_url: "http://localhost".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        let mut client = InferenceClient::new(config.clone()).expect("test client");
+        let inference_pacer = InferencePacer::default();
+        let mut completion_tx = None;
+        let should_continue = apply_retry_decision(
+            &error,
+            &mut retry_count,
+            2,
+            &RetryPolicy::default(),
+            &event_tx,
+            &RequestId::from("images-stripped"),
+            &mut request,
+            &mut client,
+            &config,
+            &CancellationToken::new(),
+            &mut completion_tx,
+            &inference_pacer,
+        )
+        .await;
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        (should_continue, request, events)
+    }
+
+    #[tokio::test]
+    async fn invalid_image_400_emits_server_rejected_images_stripped() {
+        let error = InferenceError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            message: "bad image".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+            error_code: Some(ApiErrorCode::InvalidImage),
+        };
+        let (should_continue, mut request, events) = apply_image_decision(error).await;
+        assert!(should_continue);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                InferenceEvent::ImagesStripped {
+                    stripped_urls,
+                    reason: StripReason::ServerRejected,
+                    ..
+                },
+                InferenceEvent::Retrying { .. }
+            ] if stripped_urls.len() == 1
+        ));
+        assert!(request.strip_images().is_empty());
+    }
+
+    #[tokio::test]
+    async fn images_stripped_non_deterministic_signals_emit_payload_heuristic() {
+        let errors = [
+            InferenceError::Api {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                message: "bad image".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                diagnostics: None,
+                error_code: Some(ApiErrorCode::InvalidImage),
+            },
+            InferenceError::Api {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                message: "Could not process image".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                diagnostics: None,
+                error_code: None,
+            },
+            InferenceError::StreamError {
+                error_type: "invalid_request_error".into(),
+                message: "bad image".into(),
+                code: Some(ApiErrorCode::InvalidImage),
+            },
+        ];
+        for error in errors {
+            let (should_continue, _, events) = apply_image_decision(error).await;
+            assert!(should_continue);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                InferenceEvent::ImagesStripped {
+                    reason: StripReason::PayloadHeuristic,
+                    ..
+                }
+            )));
+        }
     }
 
     #[tokio::test(start_paused = true)]

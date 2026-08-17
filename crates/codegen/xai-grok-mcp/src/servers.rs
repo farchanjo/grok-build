@@ -3435,12 +3435,13 @@ impl McpClient {
                     }
                 }
                 ensure_figma_user_agent(&mut headers, name, &config.url);
-                let http_client = reqwest::Client::builder()
-                    .default_headers(headers)
-                    .build()
-                    .map_err(|e| {
-                        McpError::ClientError(format!("Failed to build HTTP client: {e}"))
-                    })?;
+                let http_client =
+                    crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+                        .default_headers(headers)
+                        .build()
+                        .map_err(|e| {
+                            McpError::ClientError(format!("Failed to build HTTP client: {e}"))
+                        })?;
                 // `AuthClient::new` wants an owned manager, but ours is shared
                 // (`Arc`) with the OAuth flow; the struct is non_exhaustive, so
                 // build with a throwaway manager and swap in the shared one.
@@ -3645,7 +3646,7 @@ impl McpClient {
             }
         }
         ensure_figma_user_agent(&mut headers, server_name, &config.url);
-        let client = reqwest::Client::builder()
+        let client = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
             .default_headers(headers)
             .build()
             .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;

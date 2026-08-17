@@ -8,6 +8,7 @@
 //! Local data collection: per-turn event tracking, upload queueing, and
 //! S3-compatible blob storage.
 pub(crate) mod circuit_breaker_observer;
+pub use xai_grok_auth::{BEARER_TAIL_CHARS, bearer_tail};
 /// Wrap a raw client with [`xai_grok_auth::AuthRetryMiddleware`] for automatic 401 retry.
 pub fn with_auth_retry(
     client: reqwest::Client,

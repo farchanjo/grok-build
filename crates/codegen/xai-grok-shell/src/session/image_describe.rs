@@ -389,7 +389,7 @@ pub fn persist_user_images(
         return Ok(Vec::new());
     }
     let assets_dir = session_dir.join("assets");
-    std::fs::create_dir_all(&assets_dir)?;
+    crate::util::grok_home::create_dir_all_owner_only(&assets_dir)?;
     let mut out = Vec::with_capacity(images.len());
     for img in images {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -829,6 +829,25 @@ mod tests {
         let out = persist_user_images(dir.path(), &[]).unwrap();
         assert!(out.is_empty());
         assert!(!dir.path().join("assets").exists());
+    }
+    /// User attachments can be a session's first write — the assets dir must
+    /// be born owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn persist_user_images_creates_owner_only_assets_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let img = ImageContent::new(
+            base64::engine::general_purpose::STANDARD.encode([0u8; 4]),
+            "image/png".to_owned(),
+        );
+        persist_user_images(dir.path(), &[img]).unwrap();
+        let mode = std::fs::metadata(dir.path().join("assets"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "assets dir must be 0700");
     }
     #[test]
     fn strip_template_tags_preserves_non_matching_content() {

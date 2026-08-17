@@ -76,6 +76,11 @@ pub fn resolve_rate_limit_threshold(
 /// 5-15 are flat at ~30s each (≈ 5.5 min).
 pub const DEFAULT_MAX_RETRIES: u32 = 15;
 
+/// Longest single wait on the generic transport/5xx retry path. The 429
+/// path intentionally keeps the server's rate-limit wait and uses its lower
+/// retry threshold instead.
+pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
 /// Resolve max API retries from an optional env override, model config,
 /// or default ([`DEFAULT_MAX_RETRIES`]).
 pub(crate) fn resolve_max_retries_with_env(
@@ -112,13 +117,20 @@ pub fn doom_loop_backoff(retry_count: u32) -> Duration {
 /// Exponential backoff (2s, 4s, 8s, ..., capped 30s) with +/-20% jitter
 /// to prevent thundering-herd retry storms.
 pub fn retry_backoff_with_jitter(retry_count: u32) -> Duration {
+    let shift = retry_count.saturating_sub(1);
+    let base_ms = 2000u64
+        .checked_shl(shift)
+        .unwrap_or(u64::MAX)
+        .min(MAX_RETRY_BACKOFF.as_millis() as u64);
+    jittered(Duration::from_millis(base_ms))
+}
+
+fn jittered(base: Duration) -> Duration {
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static JITTER_SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let shift = retry_count.saturating_sub(1);
-    let base_ms = 2000u64.checked_shl(shift).unwrap_or(u64::MAX).min(30_000);
+    let base_ms = base.as_millis() as u64;
     let jitter_range = base_ms / 5;
     let mut hasher = std::hash::DefaultHasher::new();
     JITTER_SEQ.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
@@ -281,7 +293,7 @@ pub fn classify_error(
         }
         let backoff = err
             .retry_after()
-            .map(Duration::from_secs)
+            .map(|seconds| jittered(Duration::from_secs(seconds).min(MAX_RETRY_BACKOFF)))
             .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
         if next_attempt == 1 {
             return RetryDecision::RetryWithClientRebuild { backoff };
@@ -306,10 +318,10 @@ pub fn format_inference_error(err: &InferenceError, retry_count: Option<u32>) ->
     };
 
     match err {
-        InferenceError::Auth(msg) => {
+        InferenceError::Auth { message, .. } => {
             format!(
                 "{}Authentication failed: {}. Please check your API key configuration.",
-                retry_prefix, msg
+                retry_prefix, message
             )
         }
         InferenceError::InvalidConfiguration(msg) => {
@@ -403,6 +415,7 @@ pub fn format_inference_error(err: &InferenceError, retry_count: Option<u32>) ->
         InferenceError::StreamError {
             error_type,
             message,
+            ..
         } => {
             format!(
                 "{}Server stream error ({}): {}. The server encountered an error while streaming the response.",
@@ -452,7 +465,13 @@ pub fn format_inference_error(err: &InferenceError, retry_count: Option<u32>) ->
 /// retry budget re-generating a response that fails the same way.
 pub(crate) fn clone_error(err: &InferenceError) -> InferenceError {
     match err {
-        InferenceError::Auth(msg) => InferenceError::Auth(msg.clone()),
+        InferenceError::Auth {
+            message,
+            credential,
+        } => InferenceError::Auth {
+            message: message.clone(),
+            credential: *credential,
+        },
         InferenceError::InvalidConfiguration(msg) => InferenceError::InvalidConfiguration(msg),
         InferenceError::Http(e) => {
             // reqwest::Error is not Clone; preserve the rendered message
@@ -472,6 +491,7 @@ pub(crate) fn clone_error(err: &InferenceError) -> InferenceError {
             retry_after_secs,
             should_retry,
             diagnostics,
+            error_code,
         } => InferenceError::Api {
             status: *status,
             message: message.clone(),
@@ -479,14 +499,17 @@ pub(crate) fn clone_error(err: &InferenceError) -> InferenceError {
             retry_after_secs: *retry_after_secs,
             should_retry: *should_retry,
             diagnostics: diagnostics.clone(),
+            error_code: error_code.clone(),
         },
         InferenceError::EventStreamError(msg) => InferenceError::EventStreamError(msg.clone()),
         InferenceError::StreamError {
             error_type,
             message,
+            code,
         } => InferenceError::StreamError {
             error_type: error_type.clone(),
             message: message.clone(),
+            code: code.clone(),
         },
         InferenceError::IdleTimeout { elapsed_secs } => InferenceError::IdleTimeout {
             elapsed_secs: *elapsed_secs,
@@ -518,6 +541,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         }
     }
 
@@ -529,6 +553,7 @@ mod tests {
             retry_after_secs: Some(retry_after),
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         }
     }
 
@@ -543,6 +568,7 @@ mod tests {
                 rate_limit_reset_secs: Some(reset_secs),
                 ..Default::default()
             }),
+            error_code: None,
         }
     }
 
@@ -561,6 +587,7 @@ mod tests {
                 rate_limit_reset_secs: Some(reset_secs),
                 ..Default::default()
             }),
+            error_code: None,
         }
     }
 
@@ -619,9 +646,9 @@ mod tests {
 
     #[test]
     fn classify_auth_error_emits_to_session() {
-        let err = InferenceError::Auth("bad token".into());
+        let err = InferenceError::auth_unknown("bad token");
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::EmitToSession(InferenceError::Auth(_)) => {}
+            RetryDecision::EmitToSession(InferenceError::Auth { .. }) => {}
             other => panic!("expected EmitToSession(Auth), got {other:?}"),
         }
     }
@@ -908,6 +935,41 @@ mod tests {
     }
 
     #[test]
+    fn transient_edge_5xx_retry_but_origin_tls_is_terminal() {
+        for code in [500, 501, 520, 521, 522, 523, 524, 529, 530] {
+            let err = api_err(StatusCode::from_u16(code).unwrap(), "edge failure");
+            assert!(err.is_retryable(), "{code} should retry");
+        }
+        for code in [525, 526] {
+            let err = api_err(StatusCode::from_u16(code).unwrap(), "origin TLS failure");
+            assert!(!err.is_retryable(), "{code} must be terminal");
+            assert!(matches!(
+                classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+                RetryDecision::Fatal(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn generic_retry_after_is_clamped_and_jittered_but_429_is_not() {
+        let generic = api_err_with_retry_after(StatusCode::BAD_GATEWAY, 120);
+        let backoff = match classify_error(&generic, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithClientRebuild { backoff } => backoff,
+            other => panic!("expected generic retry, got {other:?}"),
+        };
+        assert!(backoff >= Duration::from_secs(24));
+        assert!(backoff <= Duration::from_secs(36));
+
+        let limited = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 120);
+        match classify_error(&limited, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff { backoff, .. } => {
+                assert_eq!(backoff, Duration::from_secs(120));
+            }
+            other => panic!("expected rate-limit retry, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn classify_5xx_subsequent_retry_uses_plain_retry() {
         let err = api_err(StatusCode::BAD_GATEWAY, "boom");
         match classify_error(&err, 1, 5, RATE_LIMIT_RETRY_THRESHOLD) {
@@ -941,6 +1003,7 @@ mod tests {
         let err = InferenceError::StreamError {
             error_type: "transient".into(),
             message: "x".into(),
+            code: None,
         };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithClientRebuild { .. } => {}
@@ -996,6 +1059,25 @@ mod tests {
         );
     }
 
+    /// The tee cell captures mid-stream errors via `clone_error`; dropping
+    /// the code there would silently disable mid-stream strip recovery.
+    #[test]
+    fn clone_error_preserves_stream_error_code() {
+        let cloned = clone_error(&InferenceError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "bad image".into(),
+            code: Some(xai_grok_inference_types::ApiErrorCode::InvalidImage),
+        });
+        let InferenceError::StreamError { code, .. } = &cloned else {
+            panic!("expected StreamError, got {cloned:?}");
+        };
+        assert_eq!(
+            *code,
+            Some(xai_grok_inference_types::ApiErrorCode::InvalidImage)
+        );
+        assert!(cloned.is_image_processing_error());
+    }
+
     #[test]
     fn classify_serialization_is_fatal_on_first_attempt() {
         match classify_error(&serialization_err(), 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
@@ -1006,14 +1088,14 @@ mod tests {
 
     #[test]
     fn format_includes_retry_prefix_when_count_present() {
-        let err = InferenceError::Auth("bad".into());
+        let err = InferenceError::auth_unknown("bad");
         let s = format_inference_error(&err, Some(3));
         assert!(s.starts_with("Request failed after 3 retries."));
     }
 
     #[test]
     fn format_omits_retry_prefix_when_count_absent() {
-        let err = InferenceError::Auth("bad".into());
+        let err = InferenceError::auth_unknown("bad");
         let s = format_inference_error(&err, None);
         assert!(!s.starts_with("Request failed after"));
         assert!(s.starts_with("Authentication failed:"));
@@ -1043,6 +1125,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(false),
             diagnostics: None,
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1062,6 +1145,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1078,6 +1162,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(true),
             diagnostics: None,
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1094,6 +1179,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1130,6 +1216,7 @@ mod tests {
             retry_after_secs: Some(10),
             should_retry: Some(false),
             diagnostics: None,
+            error_code: None,
         };
         assert!(matches!(
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
@@ -1169,6 +1256,7 @@ mod tests {
                 provider_name: Some("OpenRouter".into()),
                 ..Default::default()
             }),
+            error_code: None,
         };
         let s = format_inference_error(&err, None);
         assert!(s.contains("OpenRouter account out of credits"));

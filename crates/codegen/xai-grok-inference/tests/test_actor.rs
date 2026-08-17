@@ -104,6 +104,10 @@ fn test_config(base_url: String, model: &str) -> InferenceConfig {
         supports_backend_search: false,
         supports_native_schema: None,
         supports_strict_tools: None,
+        // Explicit unknown: None means the model capability is not known.
+        supports_image_input: None,
+        supports_audio_input: None,
+        supports_video_input: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         doom_loop_recovery: None,

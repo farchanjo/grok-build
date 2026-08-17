@@ -11,6 +11,7 @@ use crate::session::storage::{CopySessionOptions, JsonlStorageAdapter};
 use crate::util::grok_home::grok_home;
 use agent_client_protocol as acp;
 use std::io;
+use std::path::{Component, Path};
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +69,23 @@ fn generate_fork_session_id(_source_id: &str) -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+fn validate_session_id_component(id: &str, field: &str) -> io::Result<()> {
+    let mut components = Path::new(id).components();
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains('\0')
+        || !matches!(components.next(), Some(Component::Normal(component)) if component == id)
+        || components.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{field} must be a non-empty single path component"),
+        ));
+    }
+    Ok(())
+}
+
 /// Fork a saved session to a new working directory.
 pub async fn fork_session(
     request: ForkSessionRequest,
@@ -75,6 +93,11 @@ pub async fn fork_session(
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) -> io::Result<ForkSessionResponse> {
     let t0 = std::time::Instant::now();
+
+    validate_session_id_component(&request.source_session_id, "source_session_id")?;
+    if let Some(new_session_id) = request.new_session_id.as_deref() {
+        validate_session_id_component(new_session_id, "new_session_id")?;
+    }
 
     let root_dir = grok_home();
     let storage = JsonlStorageAdapter::with_root(root_dir.clone());
@@ -214,6 +237,29 @@ async fn sync_forked_session_to_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_id_path_component_validation_rejects_traversal_forms() {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "a/b",
+            r"a\b",
+            "/absolute",
+            r"C:\absolute",
+            "nul\0byte",
+        ] {
+            assert!(
+                validate_session_id_component(id, "session_id").is_err(),
+                "unsafe session id must be rejected: {id:?}"
+            );
+        }
+        for id in ["abc123", "019c43b5-c4ae-7190-b058-693e24669ba9"] {
+            validate_session_id_component(id, "session_id").unwrap();
+        }
+    }
 
     #[test]
     fn test_generate_fork_session_id_format() {

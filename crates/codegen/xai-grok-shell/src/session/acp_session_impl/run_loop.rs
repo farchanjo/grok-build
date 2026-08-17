@@ -85,7 +85,236 @@ impl SessionActor {
         );
         Some(fallback)
     }
+
+    /// Transactionally restore execution mode and its ephemeral image policy.
+    ///
+    /// Every fallible envelope check happens before retained runtime, backend,
+    /// envelope, or chat-state policy changes. This keeps failed resume input a
+    /// true no-op across the independently owned actors.
+    pub(crate) async fn restore_execution_mode_and_image_budget(
+        &self,
+        execution_backend: crate::agent::execution_backend::ExecutionBackend,
+        external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+    ) -> Result<(), String> {
+        let validated_external_runtime = match external_runtime {
+            Some(env) => {
+                let expected_kind = execution_backend.external_kind().ok_or_else(|| {
+                    "RestoreExecutionMode: native backend cannot carry an external envelope"
+                        .to_string()
+                })?;
+                if env.kind != expected_kind {
+                    return Err(format!(
+                        "RestoreExecutionMode: envelope kind '{}' does not match backend '{}'",
+                        env.kind, expected_kind
+                    ));
+                }
+                match env.validated() {
+                    Ok(env) => Some(env),
+                    Err(error) => {
+                        tracing::error!(
+                            session_id = %self.session_info.id.0,
+                            error = %error,
+                            "RestoreExecutionMode: envelope validation failed"
+                        );
+                        return Err(error.to_string());
+                    }
+                }
+            }
+            None => None,
+        };
+
+        // Restore may change backend; drop any retained runtime only after all
+        // validation succeeds. Reconstructing the current route is read-only.
+        self.shutdown_external_agent_runtime().await;
+        let route = self.reconstruct_full_config().await;
+        let image_budget = image_budget_for_route(&route, execution_backend);
+        self.execution_backend.set(execution_backend);
+        *self.external_runtime.borrow_mut() = validated_external_runtime;
+        self.chat_state_handle.update_image_budget(image_budget);
+        Ok(())
+    }
 }
+
+#[cfg(test)]
+mod execution_mode_image_budget_tests {
+    use super::*;
+    use crate::session::acp_session::support::create_test_actor;
+    use xai_grok_inference_types::{ContentPart, ConversationItem};
+
+    async fn current_model_writes(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+    ) -> Vec<(
+        crate::agent::execution_backend::ExecutionBackend,
+        Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
+    )> {
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("model persistence must arrive")
+            .expect("persistence channel must stay open");
+        let mut messages = vec![first];
+        while let Ok(message) = receiver.try_recv() {
+            messages.push(message);
+        }
+        messages
+            .into_iter()
+            .map(|message| match message {
+                PersistenceMsg::CurrentModel {
+                    execution_backend: Some(backend),
+                    external_runtime: Some(envelope),
+                    ..
+                } => (backend, envelope),
+                other => panic!("unexpected persistence message: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_model_apply_persists_only_authoritative_external_mode() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 128_000, 85, gateway_tx, persistence_tx).await;
+                let backend = crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
+                    crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+                );
+                let mut envelope =
+                    crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(
+                        crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+                    );
+                envelope.session_pointer = Some("claude-session-original".into());
+                envelope.selected_model = Some("claude-opus".into());
+                actor
+                    .restore_execution_mode_and_image_budget(backend, Some(envelope.clone()))
+                    .await
+                    .expect("persisted external mode must restore");
+                let mut config = xai_grok_inference::InferenceConfig::default();
+                config.model = "catalog-native-resume-model".into();
+                config.base_url = "http://localhost".into();
+                config.context_window = 128_000;
+                actor
+                    .handle_set_session_model(config, false, false, true, 85, backend)
+                    .await
+                    .expect("load-specific model application must succeed");
+
+                let writes = current_model_writes(&mut persistence_rx).await;
+                assert_eq!(writes, vec![(backend, Some(envelope))]);
+                assert!(
+                    writes
+                        .iter()
+                        .all(|(written_backend, _)| !written_backend.is_native()),
+                    "no intermediate catalog-native CurrentModel write is allowed"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_load_restore_keeps_external_actor_and_emits_no_model_write() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 128_000, 85, gateway_tx, persistence_tx).await;
+                let backend = crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
+                    crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+                );
+                let mut original =
+                    crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(
+                        crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+                    );
+                original.session_pointer = Some("claude-session-original".into());
+                actor
+                    .restore_execution_mode_and_image_budget(backend, Some(original.clone()))
+                    .await
+                    .expect("valid original external mode must restore");
+                let mut invalid = original.clone();
+                invalid.session_pointer = Some("invalid\nclaude-pointer".into());
+
+                actor
+                    .restore_execution_mode_and_image_budget(backend, Some(invalid))
+                    .await
+                    .expect_err("invalid persisted envelope must abort load");
+                assert_eq!(actor.execution_backend.get(), backend);
+                assert_eq!(actor.external_runtime.borrow().as_ref(), Some(&original));
+                assert!(matches!(
+                    persistence_rx.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_execution_mode_restore_preserves_active_image_budget() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 128_000, 85, gateway_tx, persistence_tx).await;
+                let original_backend = actor.execution_backend.get();
+                assert!(original_backend.is_native());
+                assert!(actor.external_runtime.borrow().is_none());
+
+                actor
+                    .chat_state_handle
+                    .update_image_budget(Some(xai_chat_state::ImageBudgetConfig::new(1, 0)));
+                actor.chat_state_handle.replace_conversation(vec![
+                    ConversationItem::user_with_parts(vec![ContentPart::Image {
+                        url: "data:image/png;base64,AAAA".into(),
+                    }]),
+                ]);
+
+                let before = actor
+                    .chat_state_handle
+                    .build_request(vec![], None, false, None, "c".into(), "r1".into())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    &before.items[0],
+                    ConversationItem::User(user)
+                        if user.content.iter().all(|part| !matches!(part, ContentPart::Image { .. }))
+                ));
+
+                let mut invalid = crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(
+                    crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+                );
+                invalid.session_pointer = Some("line1\nline2".into());
+                let error = actor
+                    .restore_execution_mode_and_image_budget(
+                        crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
+                            crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+                        ),
+                        Some(invalid),
+                    )
+                    .await
+                    .expect_err("invalid envelope must fail closed");
+                assert!(error.contains("control"));
+                assert_eq!(actor.execution_backend.get(), original_backend);
+                assert!(actor.external_runtime.borrow().is_none());
+
+                let after = actor
+                    .chat_state_handle
+                    .build_request(vec![], None, false, None, "c".into(), "r2".into())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    &after.items[0],
+                    ConversationItem::User(user)
+                        if user.content.iter().all(|part| !matches!(part, ContentPart::Image { .. }))
+                ));
+            })
+            .await;
+    }
+}
+
 async fn maybe_schedule_rolling_compaction(
     session: &Arc<SessionActor>,
     rolling_job_tx: &mpsc::Sender<crate::session::rolling_compaction::RollingCompactionJob>,
@@ -94,9 +323,14 @@ async fn maybe_schedule_rolling_compaction(
     // External runtimes own their authoritative conversation context. Host-side
     // compaction would mutate only the mirrored transcript and could invoke an
     // unrelated native inference route without affecting the external agent.
-    if session.execution_backend.get().is_external() {
+    if session.execution_backend.get().is_external()
+        || session.compaction.cancel.cancel_command_pending()
+    {
         return;
     }
+    // Snapshot before planning awaits. A cancel that lands anywhere between
+    // planning and worker startup must invalidate this admission.
+    let cancel_sequence = session.compaction.cancel.cancel_sequence();
     let policy = session.agent.borrow().compaction_policy().clone();
     if matches!(
         policy.strategy,
@@ -117,28 +351,38 @@ async fn maybe_schedule_rolling_compaction(
     };
 
     match session.plan_rolling_compaction_job().await {
-        Ok(Some(job)) => match rolling_job_tx.try_send(job) {
-            Ok(()) => {
-                session
-                    .compaction
-                    .rolling_in_flight
-                    .store(true, std::sync::atomic::Ordering::Release);
-                session
-                    .send_xai_notification(
-                        crate::extensions::notification::SessionUpdate::AutoCompactStarted {
-                            tokens_used: trigger_info.tokens_used,
-                            context_window: trigger_info.context_window,
-                            percentage: trigger_info.percentage,
-                            reason: "Rolling compaction admitted at an idle safe point".to_string(),
-                        },
-                    )
-                    .await;
+        Ok(Some(mut job)) => {
+            if session.compaction.cancel.cancel_command_pending()
+                || session.compaction.cancel.cancel_sequence() != cancel_sequence
+            {
+                tracing::debug!("discarded rolling plan that overlapped user cancellation");
+                return;
             }
-            Err(error) => tracing::debug!(
-                %error,
-                "rolling compaction lane became unavailable before admission"
-            ),
-        },
+            job.cancel_sequence = cancel_sequence;
+            match rolling_job_tx.try_send(job) {
+                Ok(()) => {
+                    session
+                        .compaction
+                        .rolling_in_flight
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    session
+                        .send_xai_notification(
+                            crate::extensions::notification::SessionUpdate::AutoCompactStarted {
+                                tokens_used: trigger_info.tokens_used,
+                                context_window: trigger_info.context_window,
+                                percentage: trigger_info.percentage,
+                                reason: "Rolling compaction admitted at an idle safe point"
+                                    .to_string(),
+                            },
+                        )
+                        .await;
+                }
+                Err(error) => tracing::debug!(
+                    %error,
+                    "rolling compaction lane became unavailable before admission"
+                ),
+            }
+        }
         Ok(None) if matches!(policy.strategy, xai_grok_agent::CompactionStrategy::Auto) => {
             tracing::info!("rolling compaction is not eligible; using full replacement");
             if let Err(error) = session.run_compact_only(trigger_info).await {
@@ -215,6 +459,7 @@ pub(super) async fn run_session(
 ) {
     let (completion_tx, mut completion_rx) =
         mpsc::unbounded_channel::<(String, PromptTurnResult)>();
+    let mut turn_end_queue = super::turn_end_hooks::TurnEndQueue::spawn(session.clone());
     // Compaction-only lane. Capacity one bounds both pending work and completed
     // results without perturbing the session's existing command/completion lanes.
     let (rolling_job_tx, mut rolling_job_rx) =
@@ -534,8 +779,10 @@ pub(super) async fn run_session(
                 }
                 maybe_completion = completion_rx.recv() => {
                     let Some((prompt_id, result)) = maybe_completion else {
-                        // Channel closed - shutdown feedback sync loop
+                        // Bound the worker wait before teardown; no report can block this exit.
+                        turn_end_queue.flush().await;
                         shutdown_workflows(&session).await;
+                        turn_end_queue.drain().await;
                         if let Some(cancel) = &session.sync_loop_cancel {
                             cancel.cancel();
                         }
@@ -600,6 +847,8 @@ pub(super) async fn run_session(
                 }
                 maybe_cmd = cmd_rx.recv() => {
                     let Some(cmd) = maybe_cmd else {
+                        // Reports queued by an earlier turn must precede session-end hooks.
+                        turn_end_queue.flush().await;
                         // ── session_end hook (channel-closed path) ────
                         // Fires BEFORE memory auto-save per plan contract.
                         let envelope = session.fire_hook(
@@ -693,6 +942,7 @@ pub(super) async fn run_session(
                         // Tear down session-scoped external runtime (bridge/temp/child).
                         session.shutdown_external_agent_runtime().await;
                         shutdown_workflows(&session).await;
+                        turn_end_queue.drain().await;
                         if let Some(cancel) = &session.sync_loop_cancel {
                             cancel.cancel();
                         }
@@ -836,67 +1086,13 @@ pub(super) async fn run_session(
                             external_runtime,
                             responds_to,
                         } => {
-                            // Restore may change backend; drop any live retained runtime.
-                            session.shutdown_external_agent_runtime().await;
-                            let result = match external_runtime {
-                                Some(env) => match env.validated() {
-                                    Ok(env) => {
-                                        session.execution_backend.set(execution_backend);
-                                        *session.external_runtime.borrow_mut() = Some(env);
-                                        Ok(())
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            session_id = %session.session_info.id.0,
-                                            error = %e,
-                                            "RestoreExecutionMode: envelope validation failed"
-                                        );
-                                        Err(e.to_string())
-                                    }
-                                },
-                                None => {
-                                    session.execution_backend.set(execution_backend);
-                                    *session.external_runtime.borrow_mut() = None;
-                                    Ok(())
-                                }
-                            };
+                            let result = session
+                                .restore_execution_mode_and_image_budget(
+                                    execution_backend,
+                                    external_runtime,
+                                )
+                                .await;
                             let _ = responds_to.send(result);
-                        }
-                        SessionCommand::PersistExecutionMode {
-                            execution_backend,
-                            external_runtime,
-                            responds_to,
-                        } => {
-                            let outcome = async {
-                                if let Some(ref env) = external_runtime {
-                                    env.validate().map_err(|e| e.to_string())?;
-                                }
-                                let model = session
-                                    .chat_state_handle
-                                    .get_inference_settings()
-                                    .await
-                                    .map(|c| c.model)
-                                    .unwrap_or_default();
-                                let model_id = acp::ModelId::new(model);
-                                let agent_name = session.agent.borrow().definition().name.clone();
-                                session
-                                    .notifications
-                                    .persistence_tx
-                                    .send(PersistenceMsg::CurrentModel {
-                                        model_id,
-                                        agent_name: Some(agent_name),
-                                        reasoning_effort: None,
-                                        execution_backend: Some(execution_backend),
-                                        external_runtime: Some(external_runtime),
-                                    })
-                                    .map_err(|_| {
-                                        "PersistExecutionMode: persistence channel closed"
-                                            .to_string()
-                                    })?;
-                                Ok::<_, String>(())
-                            }
-                            .await;
-                            let _ = responds_to.send(outcome);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;
@@ -1193,6 +1389,7 @@ pub(super) async fn run_session(
                             kill_background_tasks,
                             rewind_if_pristine,
                             trigger,
+                            compaction_cancel_pending,
                         } => {
                             // Flush the actor-owned replay buffer before tearing
                             // down the running turn so any streamed chunks
@@ -1218,6 +1415,9 @@ pub(super) async fn run_session(
                                     trigger,
                                 )
                                 .await;
+                            if compaction_cancel_pending {
+                                session.compaction.cancel.clear_cancel_command_pending();
+                            }
 
                             // Auto-pause active goal on Ctrl+C so timers stop
                             // and the pager shows "paused" instead of "active".
@@ -2342,7 +2542,6 @@ pub(super) async fn run_session(
                             );
                         }
                         SessionCommand::Shutdown => {
-                            shutdown_workflows(&session).await;
                             // Flush the actor-owned replay buffer so any
                             // streamed chunks still pending at shutdown
                             // (e.g. reasoning text from a sampler stream
@@ -2364,6 +2563,8 @@ pub(super) async fn run_session(
                             // abort.
                             session.drop_pending_synthetic_items().await;
 
+                            // Reports queued by an earlier turn must precede session-end hooks.
+                            turn_end_queue.flush().await;
                             // ── session_end hook (shutdown path) ────────
                             // Fires BEFORE memory auto-save per plan contract.
                             let envelope = session.fire_hook(
@@ -2449,8 +2650,11 @@ pub(super) async fn run_session(
                             if !session.startup_hints.is_subagent {
                                 session.persist_background_task_manifest().await;
                             }
+                            // Persist any hook execution notifications before closing the worker.
+                            shutdown_workflows(&session).await;
                             // Clean up scratch directory (pre-edit file copies).
                             cleanup_session_scratch(&session);
+                            turn_end_queue.drain().await;
                             return;
                         }
                         SessionCommand::UpdateCompactionConfig { compaction } => {

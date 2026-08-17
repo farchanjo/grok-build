@@ -50,7 +50,7 @@ pub use handle::ChatStateHandle;
 pub use persistence::{
     ChatPersistence, CompactionPersistenceError, CompactionPersistenceMetadata,
     CompactionPersistenceRequest, MockChatPersistence, MockPersistenceReceiver,
-    NullChatPersistence, PersistenceRecord,
+    NullChatPersistence, PersistenceRecord, StripOutcome,
 };
 pub use types::*;
 pub use usage::{UsageLedger, UsageTotals};

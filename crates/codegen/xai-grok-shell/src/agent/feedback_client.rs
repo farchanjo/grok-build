@@ -439,19 +439,18 @@ impl FeedbackClient {
 
     fn record_401_attribution_if_needed(&self, response: &reqwest::Response, op: &str) {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
-            && let Some(am) = self.credentials.auth_manager()
+            && let Some(auth_manager) = self.credentials.auth_manager()
         {
-            let bearer_prefix = self
-                .credentials
-                .deployment_key
-                .as_deref()
-                .or(self.credentials.user_token.as_deref());
+            let sent_tail = response
+                .extensions()
+                .get::<xai_grok_auth::StampedBearerTail>()
+                .map(|stamp| stamp.0.as_str());
             crate::auth::attribution::record_consumer_401(
-                am.as_ref(),
+                auth_manager.as_ref(),
                 self.session_id.as_deref(),
                 crate::auth::attribution::ConsumerKind::FeedbackClient,
                 op,
-                bearer_prefix,
+                sent_tail,
             );
         }
     }

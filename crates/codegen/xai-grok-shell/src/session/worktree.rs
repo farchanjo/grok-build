@@ -92,7 +92,11 @@ async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path: &str) {
             }
         }
         if let Ok(root) = find_git_root_from_path(std::path::Path::new(source_cwd)) {
-            let _ = xai_grok_workspace::session::git::git_cli(&root, &["worktree", "prune"]).await;
+            let wt_path = wt.to_path_buf();
+            let _ = tokio::task::spawn_blocking(move || {
+                xai_fast_worktree::remove_stale_worktree_registration(&root, &wt_path)
+            })
+            .await;
         }
     }
 }
@@ -1043,6 +1047,105 @@ mod tests {
         assert!(
             !wt_path.exists(),
             "worktree directory should be removed after cleanup",
+        );
+        assert!(repo_path.join("file.txt").exists());
+    }
+    /// Locate the `.git/worktrees/<id>` directory whose `gitdir` backlink
+    /// names `worktree_path/.git`. Used by the hidden-sibling regression.
+    fn git_worktree_registration_dir(
+        repo: &std::path::Path,
+        worktree_path: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
+        let git_worktrees = repo.join(".git").join("worktrees");
+        let entries = std::fs::read_dir(&git_worktrees).ok()?;
+        let target_git = worktree_path.join(".git");
+        let target_canon = target_git.canonicalize().ok();
+        for entry in entries.flatten() {
+            let registration = entry.path();
+            let Ok(backlink) = std::fs::read_to_string(registration.join("gitdir")) else {
+                continue;
+            };
+            let backlink_path = std::path::Path::new(backlink.trim());
+            let backlink_abs = if backlink_path.is_relative() {
+                registration.join(backlink_path)
+            } else {
+                backlink_path.to_path_buf()
+            };
+            if backlink_abs == target_git
+                || target_canon
+                    .as_ref()
+                    .is_some_and(|canon| backlink_abs == *canon)
+                || target_canon.as_ref() == backlink_abs.canonicalize().ok().as_ref()
+            {
+                return Some(registration);
+            }
+        }
+        None
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_worktree_on_failure_preserves_unrelated_hidden_registration() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("file.txt"), "original").unwrap();
+        git_commit_all(&repo_path, "initial");
+        let source_cwd = repo_path.to_string_lossy().to_string();
+        let wt_resp = create_worktree_for_resume(
+            &source_cwd,
+            WorktreeCopyMode::Clean,
+            ShellWorktreeType::Linked,
+            None,
+        )
+        .await
+        .expect("worktree creation should succeed");
+        let wt_path = std::path::Path::new(&wt_resp.worktree_path);
+        assert!(
+            wt_path.exists(),
+            "target worktree should exist before cleanup"
+        );
+        let target_reg = git_worktree_registration_dir(&repo_path, wt_path)
+            .expect("target worktree should have a .git/worktrees registration");
+
+        let hidden_wt = tmp.path().join("hidden-wt");
+        let add = std::process::Command::new("git")
+            .current_dir(&repo_path)
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                hidden_wt.to_str().unwrap(),
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "git worktree add hidden-wt failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let hidden_reg = git_worktree_registration_dir(&repo_path, &hidden_wt)
+            .expect("hidden worktree should have a .git/worktrees registration");
+        std::fs::rename(&hidden_wt, tmp.path().join("hidden-wt-moved")).unwrap();
+        assert!(
+            hidden_reg.exists(),
+            "hidden registration must still exist after its directory is renamed"
+        );
+
+        cleanup_worktree_on_failure(&source_cwd, &wt_resp.worktree_path).await;
+
+        assert!(
+            !wt_path.exists(),
+            "target worktree directory should be removed after cleanup",
+        );
+        assert!(
+            !target_reg.exists(),
+            "target worktree registration should be removed after cleanup",
+        );
+        assert!(
+            hidden_reg.exists(),
+            "unrelated hidden registration must survive path-scoped cleanup"
         );
         assert!(repo_path.join("file.txt").exists());
     }

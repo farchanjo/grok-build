@@ -289,6 +289,7 @@ pub(crate) async fn create_test_actor_ex(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: crate::session::memory_state::SessionMemory {
@@ -392,6 +393,8 @@ pub(crate) async fn create_test_actor_ex(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        turn_report: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
         vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -407,6 +410,7 @@ pub(crate) async fn create_test_actor_ex(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         execution_backend: std::cell::Cell::new(
             crate::agent::execution_backend::ExecutionBackend::NativeInference,

@@ -2023,7 +2023,7 @@ fn defaults_round_trip_through_registry() {
             "media_audio_model" => SettingValue::String(String::new()),
             "media_video_model" => SettingValue::String(String::new()),
             "media_status" => SettingValue::String(
-                "Auto · image: Session model · audio: Unset · video: Unset".to_string(),
+                "Auto · image: Session model · audio: Automatic xAI STT · video: Unset".to_string(),
             ),
             "show_thinking_blocks" => SettingValue::Bool(true),
             "prompt_suggestions" => SettingValue::Bool(true),

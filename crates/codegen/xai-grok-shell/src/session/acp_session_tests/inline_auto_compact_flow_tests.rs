@@ -128,6 +128,7 @@ async fn create_test_actor(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: crate::session::memory_state::SessionMemory {
@@ -231,6 +232,8 @@ async fn create_test_actor(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        turn_report: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
         vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -246,6 +249,7 @@ async fn create_test_actor(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         execution_backend: std::cell::Cell::new(
             crate::agent::execution_backend::ExecutionBackend::NativeInference,
@@ -660,6 +664,7 @@ async fn create_test_actor_with_memory(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            cancel: Default::default(),
             rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
         },
         memory: crate::session::memory_state::SessionMemory {
@@ -776,6 +781,8 @@ async fn create_test_actor_with_memory(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        turn_report: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
         vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -791,6 +798,7 @@ async fn create_test_actor_with_memory(
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_inference::InferenceHandle::noop(),
         execution_backend: std::cell::Cell::new(
             crate::agent::execution_backend::ExecutionBackend::NativeInference,
@@ -1269,9 +1277,11 @@ fn api_error_with_context_window(context_window: u64) -> xai_grok_inference::Inf
             models_etag: None,
         }),
         diagnostics: None,
+        error_code: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_inference_types::SentCredential::Unknown,
     }
 }
 /// Primary scenario: remote settings shrinks the context window mid-session.
@@ -1467,6 +1477,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
@@ -1576,6 +1587,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                turn_report: Default::default(),
+                turn_end_tx: Default::default(),
                 client_hooks: Default::default(),
                 hook_resolved_workspace_root: String::new(),
                 vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -1591,6 +1604,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                pending_image_strip: parking_lot::Mutex::new(None),
                 attribution_callback: None,
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 execution_backend: std::cell::Cell::new(
@@ -1697,9 +1711,11 @@ async fn test_compact_on_error_triggers_without_model_metadata() {
                 retry_after_secs: None,
                 model_metadata: None,
                 diagnostics: None,
+                error_code: None,
                 empty_response_context: None,
                 doom_loop_triggers: None,
                 doom_loop_aborted_at_chunk: None,
+                credential: xai_grok_inference_types::SentCredential::Unknown,
             };
             assert!(actor.should_compact_on_error(&err).await);
         })

@@ -16,7 +16,10 @@ fn model_with_support(id: &str, supports: bool) -> (acp::ModelId, acp::ModelInfo
             ],
         }))
     } else {
-        Some(serde_json::json!({ "reasoningEffort": "medium" }))
+        Some(serde_json::json!({
+            "supportsReasoningEffort": false,
+            "reasoningEffort": "medium",
+        }))
     };
     let info = acp::ModelInfo::new(id.clone(), id.0.to_string())
         .meta(meta.and_then(|v| v.as_object().cloned()));

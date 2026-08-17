@@ -116,6 +116,10 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
+        if self.compaction.cancel.cancel_command_pending() {
+            tracing::debug!("prompt promotion paused for pending user cancellation");
+            return;
+        }
         if self
             .compaction
             .rolling_in_flight
@@ -228,12 +232,10 @@ impl SessionActor {
             SessionActor::combine_front_pending_inputs(&mut state.pending_inputs, &skip);
         }
 
-        // Start the next pending user prompt. Pull all needed fields from the
-        // queue head in one `front_mut` scope so we can mutate `state` again
-        // (e.g. `rewindable`) without overlapping borrows.
+        // Clone the immutable launch fields first. The one-shot senders and
+        // tool-override update remain on the queue item until the final,
+        // cancellation-linearized promotion point.
         let (
-            persist_ack,
-            parsed_prompt_tx,
             prompt_id,
             prompt_blocks,
             prompt_mode,
@@ -245,15 +247,11 @@ impl SessionActor {
             json_schema,
             origin,
             running_display,
-            tool_overrides_update,
         ) = {
-            let Some(front) = state.pending_inputs.front_mut() else {
+            let Some(front) = state.pending_inputs.front() else {
                 return;
             };
-            let running_display = SessionActor::running_display_from_item(front);
             (
-                front.persist_ack.take(),
-                front.parsed_prompt_tx.take(),
                 front.prompt_id.clone(),
                 front.prompt_blocks.clone(),
                 front.prompt_mode,
@@ -264,30 +262,9 @@ impl SessionActor {
                 front.verbatim,
                 front.json_schema.clone(),
                 front.origin.clone(),
-                running_display,
-                front.tool_overrides_update.take(),
+                SessionActor::running_display_from_item(front),
             )
         };
-        self.apply_tool_overrides_update(tool_overrides_update);
-        if matches!(origin, super::PromptOrigin::User) {
-            if let Some(gate) = &self.tool_context.task_wake_suppressed {
-                gate.set(false);
-            }
-            state.notifications_suppressed = false;
-            xai_grok_telemetry::unified_log::info(
-                "shell.task_wake.gate_cleared",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "reason": "queued_user_promotion" })),
-            );
-        }
-        {
-            let mut current_prompt_id = self
-                .current_prompt_id
-                .lock()
-                .expect("current_prompt_id mutex poisoned");
-            *current_prompt_id = Some(prompt_id.clone());
-        }
-        state.rewindable = true;
         self.agent
             .borrow()
             .tool_bridge()
@@ -298,39 +275,91 @@ impl SessionActor {
             )
             .await;
 
-        tracing::debug!(
-            target: "qtrace",
-            pid = std::process::id(),
-            event = "server_promote",
-            prompt_id = %prompt_id,
-            combined_segs = running_display
-                .combined_texts
-                .as_ref()
-                .map(|v| v.len())
-                .unwrap_or(0),
-            remaining_queued = state.pending_inputs.len().saturating_sub(1),
-            session = self.session_info.id.0.as_ref(),
-            "promoting front of pending_inputs to the running turn",
-        );
-        // Promote broadcast before spawn so clients paint (and arm echo-skip)
-        // before the user-message chunk can race in.
-        self.broadcast_queue_changed_promoting(&state, running_display);
+        if self
+            .compaction
+            .rolling_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let promotion_sequence = self.compaction.cancel.cancel_sequence();
+        let promoted = self
+            .compaction
+            .cancel
+            .run_if_sequence_current(promotion_sequence, || {
+                let front = state
+                    .pending_inputs
+                    .front_mut()
+                    .expect("queued prompt disappeared while state lock was held");
+                let persist_ack = front.persist_ack.take();
+                let parsed_prompt_tx = front.parsed_prompt_tx.take();
+                let tool_overrides_update = front.tool_overrides_update.take();
 
-        state.running_task = Some(AgentTask::new_prompt(
-            self.clone(),
-            prompt_id,
-            prompt_blocks,
-            prompt_mode,
-            trace_gcs_config,
-            artifact_tracker,
-            client_identifier,
-            screen_mode,
-            verbatim,
-            json_schema,
-            completion_tx,
-            persist_ack,
-            parsed_prompt_tx,
-        ));
+                self.apply_tool_overrides_update(tool_overrides_update);
+                if matches!(origin, super::PromptOrigin::User) {
+                    if let Some(gate) = &self.tool_context.task_wake_suppressed {
+                        gate.set(false);
+                    }
+                    state.notifications_suppressed = false;
+                    xai_grok_telemetry::unified_log::info(
+                        "shell.task_wake.gate_cleared",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({ "reason": "queued_user_promotion" })),
+                    );
+                }
+                *self
+                    .current_prompt_id
+                    .lock()
+                    .expect("current_prompt_id mutex poisoned") = Some(prompt_id.clone());
+                state.rewindable = true;
+
+                tracing::debug!(
+                    target: "qtrace",
+                    pid = std::process::id(),
+                    event = "server_promote",
+                    prompt_id = %prompt_id,
+                    combined_segs = running_display
+                        .combined_texts
+                        .as_ref()
+                        .map(|v| v.len())
+                        .unwrap_or(0),
+                    remaining_queued = state.pending_inputs.len().saturating_sub(1),
+                    session = self.session_info.id.0.as_ref(),
+                    "promoting front of pending_inputs to the running turn",
+                );
+                // Promote broadcast before spawn so clients paint (and arm
+                // echo-skip) before the user-message chunk can race in.
+                self.broadcast_queue_changed_promoting(&state, running_display);
+                // Bump before installing the task: cancellation reads this epoch with that task.
+                self.turn_report.start_next_turn();
+                state.running_task = Some(AgentTask::new_prompt(
+                    self.clone(),
+                    prompt_id,
+                    prompt_blocks,
+                    prompt_mode,
+                    trace_gcs_config,
+                    artifact_tracker,
+                    client_identifier,
+                    screen_mode,
+                    verbatim,
+                    json_schema,
+                    completion_tx,
+                    persist_ack,
+                    parsed_prompt_tx,
+                ));
+            });
+        if promoted.is_none() {
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .update_resource(
+                    xai_grok_tools::implementations::grok_build::task::types::CurrentPromptIdResource(
+                        String::new(),
+                    ),
+                )
+                .await;
+            tracing::debug!("prompt promotion lost race with user cancellation");
+        }
     }
 
     /// Drain pending notifications into a single batched turn, if idle and not suppressed.

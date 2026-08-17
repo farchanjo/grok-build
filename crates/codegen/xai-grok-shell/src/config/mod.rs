@@ -1097,6 +1097,12 @@ fn apply_managed_settings_features_inner(
     }
     enforced
 }
+/// Apply the process-wide session-search gate after all config tiers have
+/// resolved. Safe to repeat; closing is one-way for the process lifetime.
+pub fn apply_session_search_gate(config: &crate::agent::config::Config) {
+    crate::session::storage::search_gate::apply(&config.resolve_session_search());
+}
+
 /// Clamp `AgentConfig` fields per `requirements.toml`. No-op if absent.
 /// System pins win over user pins on conflict.
 pub fn apply_requirements(config: &mut crate::agent::config::Config) -> Vec<EnforcedField> {
@@ -1191,6 +1197,7 @@ fn apply_requirements_inner(
     pin_requirement_only!(image_edit);
     pin_feature!(video_gen);
     pin_feature!(write_file);
+    pin_feature!(session_search);
     pin_feature!(voice_mode);
     pin_requirement_only!(remote_fetch);
     if let Some(val) = req_bool(req, "telemetry", "trace_upload") {

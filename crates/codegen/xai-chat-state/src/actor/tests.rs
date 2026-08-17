@@ -66,6 +66,20 @@ impl TestHarness {
         Self::with_persistence(items, config, mock, persistence_rx)
     }
 
+    fn with_image_budget(
+        items: Vec<ConversationItem>,
+        image_budget: crate::ImageBudgetConfig,
+    ) -> Self {
+        let (mock, persistence_rx) = MockChatPersistence::new();
+        Self::with_persistence_and_image_budget(
+            items,
+            test_config(),
+            Some(image_budget),
+            mock,
+            persistence_rx,
+        )
+    }
+
     fn with_manual_persistence_ack(items: Vec<ConversationItem>) -> Self {
         let (mock, persistence_rx) = MockChatPersistence::new_with_manual_persistence_ack();
         Self::with_persistence(items, test_config(), mock, persistence_rx)
@@ -77,9 +91,27 @@ impl TestHarness {
         mock: MockChatPersistence,
         persistence_rx: MockPersistenceReceiver,
     ) -> Self {
+        Self::with_persistence_and_image_budget(items, config, None, mock, persistence_rx)
+    }
+
+    fn with_persistence_and_image_budget(
+        items: Vec<ConversationItem>,
+        config: InferenceSettings,
+        image_budget: Option<crate::ImageBudgetConfig>,
+        mock: MockChatPersistence,
+        persistence_rx: MockPersistenceReceiver,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let token = tokio_util::sync::CancellationToken::new();
-        let handle = ChatStateActor::spawn(items, config, Box::new(mock), event_tx, token.clone());
+        let handle = ChatStateActor::spawn_with_pruning_and_image_budget(
+            items,
+            config,
+            crate::PruningConfig::default(),
+            image_budget,
+            Box::new(mock),
+            event_tx,
+            token.clone(),
+        );
         Self {
             handle,
             event_rx,
@@ -1409,6 +1441,220 @@ async fn with_initial_conversation_preserves_items() {
 // ============================================================================
 // BuildConversationRequest tests
 // ============================================================================
+
+#[tokio::test]
+async fn proactive_image_budget_is_disabled_by_default() {
+    use xai_grok_inference_types::ContentPart;
+
+    let mut h = TestHarness::with_conversation(vec![ConversationItem::user_with_parts(vec![
+        ContentPart::Text {
+            text: "keep this image".into(),
+        },
+        ContentPart::Image {
+            url: "data:image/png;base64,AAAA".into(),
+        },
+    ])]);
+
+    let request = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r".into())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        &request.items[0],
+        ConversationItem::User(user)
+            if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. }))
+    ));
+    assert!(
+        h.drain_events()
+            .iter()
+            .all(|event| !matches!(event, ChatStateEvent::ImageBudget { .. })),
+        "disabled policy must neither measure nor report an xAI-specific budget"
+    );
+}
+
+#[tokio::test]
+async fn configured_image_budget_reports_under_trigger_without_eviction() {
+    use xai_grok_inference_types::ContentPart;
+
+    let source = vec![ConversationItem::user_with_parts(vec![
+        ContentPart::Image {
+            url: "data:image/png;base64,AAAA".into(),
+        },
+    ])];
+    let exact_bytes = serde_json::to_vec(&source).unwrap().len();
+    let mut h = TestHarness::with_image_budget(
+        source.clone(),
+        crate::ImageBudgetConfig::new(exact_bytes + 1, exact_bytes),
+    );
+
+    let request = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&request.items).unwrap(),
+        serde_json::to_value(source).unwrap()
+    );
+    assert!(matches!(
+        h.next_event().await,
+        ChatStateEvent::ImageBudget {
+            body_bytes,
+            body_bytes_after,
+            trigger_bytes,
+            reclaim_target_bytes,
+            inline_images: 1,
+            needs_image_compaction: false,
+            evicted: 0,
+        } if body_bytes == exact_bytes
+            && body_bytes_after == exact_bytes
+            && trigger_bytes == exact_bytes + 1
+            && reclaim_target_bytes == exact_bytes
+    ));
+}
+
+#[tokio::test]
+async fn configured_image_budget_evicts_user_and_tool_result_images_on_request_copy() {
+    use xai_grok_inference_types::{ContentPart, ToolCall};
+
+    let source = vec![
+        ConversationItem::user_with_parts(vec![ContentPart::Image {
+            url: "data:image/png;base64,AAAA".into(),
+        }]),
+        ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"target_file":"image.png"}"#.into(),
+        }]),
+        ConversationItem::tool_result_with_images(
+            "call-1",
+            "tool text",
+            vec![ContentPart::Image {
+                url: "https://example.com/image.png".into(),
+            }],
+        ),
+    ];
+    let mut h = TestHarness::with_image_budget(source.clone(), crate::ImageBudgetConfig::new(1, 0));
+
+    let request = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r".into())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        &request.items[0],
+        ConversationItem::User(user)
+            if user.content.iter().all(|part| !matches!(part, ContentPart::Image { .. }))
+                && user.content.iter().any(|part| matches!(part, ContentPart::Text { text }
+                    if text.contains("earlier image was removed")))
+    ));
+    assert!(matches!(
+        &request.items[2],
+        ConversationItem::ToolResult(result)
+            if result.images.is_empty()
+                && result.content.contains("images from this tool result were removed")
+    ));
+
+    let event = h.next_event().await;
+    let ChatStateEvent::ImageBudget {
+        trigger_bytes,
+        reclaim_target_bytes,
+        inline_images,
+        needs_image_compaction,
+        evicted,
+        body_bytes,
+        body_bytes_after,
+    } = event
+    else {
+        panic!("expected image-budget event, got {event:?}")
+    };
+    assert_eq!(trigger_bytes, 1);
+    assert_eq!(reclaim_target_bytes, 0);
+    assert_eq!(inline_images, 2);
+    assert!(needs_image_compaction);
+    assert_eq!(evicted, 2);
+    assert_eq!(body_bytes, serde_json::to_vec(&source).unwrap().len());
+    assert_eq!(
+        body_bytes_after,
+        serde_json::to_vec(&request.items).unwrap().len(),
+        "event accounting must equal the exact request-copy history"
+    );
+
+    let stored = h.handle.get_conversation().await;
+    assert_eq!(
+        serde_json::to_value(stored).unwrap(),
+        serde_json::to_value(source).unwrap(),
+        "proactive eviction must remain request-local"
+    );
+}
+
+#[tokio::test]
+async fn inference_settings_update_changes_image_budget_atomically() {
+    use xai_grok_inference_types::ContentPart;
+
+    let source = vec![ConversationItem::user_with_parts(vec![
+        ContentPart::Image {
+            url: "data:image/png;base64,AAAA".into(),
+        },
+    ])];
+    let mut h = TestHarness::with_conversation(source);
+    h.handle.update_inference_settings_with_image_budget(
+        test_config(),
+        Some(crate::ImageBudgetConfig::new(1, 0)),
+    );
+
+    let evicted = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r1".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        &evicted.items[0],
+        ConversationItem::User(user)
+            if user.content.iter().all(|part| !matches!(part, ContentPart::Image { .. }))
+    ));
+    assert!(matches!(
+        h.next_event().await,
+        ChatStateEvent::ImageBudget { evicted: 1, .. }
+    ));
+
+    h.handle.update_inference_settings(test_config());
+    let still_evicted = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r2".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        &still_evicted.items[0],
+        ConversationItem::User(user)
+            if user.content.iter().all(|part| !matches!(part, ContentPart::Image { .. }))
+    ));
+    assert!(matches!(
+        h.next_event().await,
+        ChatStateEvent::ImageBudget { evicted: 1, .. }
+    ));
+
+    h.handle
+        .update_inference_settings_with_image_budget(test_config(), None);
+    let preserved = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r3".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        &preserved.items[0],
+        ConversationItem::User(user)
+            if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. }))
+    ));
+    assert!(
+        h.drain_events()
+            .iter()
+            .all(|event| !matches!(event, ChatStateEvent::ImageBudget { .. }))
+    );
+}
 
 #[tokio::test]
 async fn build_request_includes_all_messages() {
@@ -4343,23 +4589,26 @@ async fn prefix_stable_after_image_pruning() {
         "A".repeat(crate::actor::request_builder::IMAGE_COMPACT_TRIGGER_BYTES)
     );
 
-    let h = TestHarness::with_conversation(vec![
-        ConversationItem::system("sys"),
-        ConversationItem::User(xai_grok_inference_types::UserItem {
-            content: vec![
-                ContentPart::Text {
-                    text: "look at this image".into(),
-                },
-                ContentPart::Image {
-                    url: big_image_url.into(),
-                },
-            ],
-            synthetic_reason: None,
-            ..Default::default()
-        }),
-        ConversationItem::assistant("I see it"),
-        ConversationItem::user("u2"),
-    ]);
+    let h = TestHarness::with_image_budget(
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::User(xai_grok_inference_types::UserItem {
+                content: vec![
+                    ContentPart::Text {
+                        text: "look at this image".into(),
+                    },
+                    ContentPart::Image {
+                        url: big_image_url.into(),
+                    },
+                ],
+                synthetic_reason: None,
+                ..Default::default()
+            }),
+            ConversationItem::assistant("I see it"),
+            ConversationItem::user("u2"),
+        ],
+        crate::XAI_IMAGE_BUDGET,
+    );
 
     let req1 = h
         .handle
@@ -4899,6 +5148,83 @@ async fn non_structural_mutations_do_not_increment_epoch() {
 
     h.handle.record_agent_edited_path("src/main.rs".to_string());
     assert_eq!(h.handle.get_structural_epoch().await, 0);
+}
+
+#[tokio::test]
+async fn strip_conversation_images_is_scoped_acked_and_invalidates_stale_cas() {
+    let listed: std::sync::Arc<str> = "data:image/png;base64,listed".into();
+    let unlisted: std::sync::Arc<str> = "data:image/png;base64,unlisted".into();
+    let mut user = ConversationItem::user("look");
+    user.add_image(listed.to_string());
+    user.add_image(unlisted.to_string());
+    let mut h = TestHarness::with_conversation(vec![user]);
+    h.handle.record_token_usage(100_000);
+    let conversation = h.handle.get_conversation().await;
+    let epoch = h.handle.get_structural_epoch().await;
+    let identity = source_identity(epoch, 0, 1, &conversation);
+
+    let outcome = h.handle.strip_conversation_images(vec![listed]).await;
+    assert_eq!(outcome, crate::StripOutcome::Applied { stripped: 1 });
+    assert_eq!(h.handle.get_total_tokens().await, 100_000);
+    assert_eq!(h.handle.get_structural_epoch().await, epoch + 1);
+
+    let conversation = h.handle.get_conversation().await;
+    assert_eq!(conversation.len(), 1, "strip must preserve item offsets");
+    let ConversationItem::User(user) = &conversation[0] else {
+        panic!("expected user item");
+    };
+    assert_eq!(
+        user.content
+            .iter()
+            .filter(|part| matches!(part, xai_grok_inference_types::ContentPart::Image { .. }))
+            .count(),
+        1,
+        "unlisted image must survive"
+    );
+    let records = h.drain_persistence();
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, PersistenceRecord::ReplaceHistoryForStrip(_)))
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record, PersistenceRecord::ReplaceHistory(_)))
+    );
+
+    assert_eq!(
+        h.handle
+            .cas_splice_conversation(identity, vec![ConversationItem::user("stale")])
+            .await,
+        crate::CasSpliceResult::Stale,
+        "the strip must invalidate a pre-strip rolling-compaction identity"
+    );
+}
+
+#[tokio::test]
+async fn strip_conversation_images_reports_no_match_and_write_failure() {
+    let mut plain = TestHarness::with_conversation(vec![ConversationItem::user("plain")]);
+    assert_eq!(
+        plain
+            .handle
+            .strip_conversation_images(vec!["data:image/png;base64,missing".into()])
+            .await,
+        crate::StripOutcome::NoMatch
+    );
+    assert!(plain.drain_persistence().is_empty());
+
+    let mut user = ConversationItem::user("look");
+    user.add_image("data:image/png;base64,bad");
+    let (mock, receiver) = MockChatPersistence::new_failing_strip_writes();
+    let failing = TestHarness::with_persistence(vec![user], test_config(), mock, receiver);
+    assert_eq!(
+        failing
+            .handle
+            .strip_conversation_images(vec!["data:image/png;base64,bad".into()])
+            .await,
+        crate::StripOutcome::WriteFailed { stripped: 1 }
+    );
 }
 
 /// CAS splice with matching epoch, range, and fingerprint succeeds.

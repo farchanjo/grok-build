@@ -658,37 +658,71 @@ pub struct ConversationRequest {
 }
 
 impl ConversationRequest {
-    /// Strip all inline image data from the conversation to reduce payload size.
-    ///
-    /// Replaces `ContentPart::Image` entries with a text placeholder so the
-    /// model knows an image was there but the base64 blob is gone. This is
-    /// used as a recovery strategy when the downstream API returns 413
-    /// "Request Entity Too Large".
-    pub fn strip_images(&mut self) -> usize {
-        let mut stripped = 0usize;
-        for item in &mut self.items {
-            match item {
-                ConversationItem::User(user) => {
-                    for part in &mut user.content {
-                        if matches!(part, ContentPart::Image { .. }) {
+    /// Strip every inline image from this request, returning the exact URLs
+    /// that were removed. The caller can use those URLs to make a later,
+    /// deliberately scoped history repair.
+    pub fn strip_images(&mut self) -> Vec<Arc<str>> {
+        strip_images_where(&mut self.items, |_| true)
+    }
+}
+
+/// Replace only image parts whose URL appears in `urls`.
+///
+/// Returns the number of stripped occurrences. A URL attached twice counts
+/// twice. The slice-based API guarantees that conversation items are neither
+/// inserted nor removed, so turn-capture offsets remain valid.
+pub fn strip_images_by_url(items: &mut [ConversationItem], urls: &[Arc<str>]) -> usize {
+    strip_images_where(items, |url| {
+        urls.iter().any(|candidate| candidate.as_ref() == url)
+    })
+    .len()
+}
+
+/// Text substituted for a user image that the server could not process.
+/// The explicit wording avoids encouraging the model to hallucinate content.
+pub const IMAGE_STRIP_PLACEHOLDER: &str = "[image removed — the server could not process it; \
+     its contents are unavailable. Ask the user to re-attach the image if it is still needed.]";
+
+/// User images become [`IMAGE_STRIP_PLACEHOLDER`]. Tool-result images are
+/// removed because their conversion layers do not render a text placeholder.
+fn strip_images_where(
+    items: &mut [ConversationItem],
+    mut should_strip: impl FnMut(&str) -> bool,
+) -> Vec<Arc<str>> {
+    let mut stripped = Vec::new();
+    for item in items {
+        match item {
+            ConversationItem::User(user) => {
+                for part in &mut user.content {
+                    match part {
+                        ContentPart::Image { url } if should_strip(url) => {
+                            stripped.push(Arc::clone(url));
                             *part = ContentPart::Text {
-                                text: Arc::<str>::from("[image removed — conversation too large]"),
+                                text: Arc::<str>::from(IMAGE_STRIP_PLACEHOLDER),
                             };
-                            stripped += 1;
                         }
+                        ContentPart::Image { .. } | ContentPart::Text { .. } => {}
                     }
                 }
-                ConversationItem::ToolResult(t) => {
-                    // Drop inline images from tool results (e.g. read_file on
-                    // images/PDFs). On 413 retry these are the largest payloads.
-                    stripped += t.images.len();
-                    t.images.clear();
-                }
-                _ => {}
             }
+            ConversationItem::ToolResult(result) => {
+                result.images.retain(|part| match part {
+                    ContentPart::Image { url } if should_strip(url) => {
+                        stripped.push(Arc::clone(url));
+                        false
+                    }
+                    ContentPart::Image { .. } | ContentPart::Text { .. } => true,
+                });
+            }
+            // Exhaustive by design: a future image-bearing item must choose
+            // its behavior here instead of silently escaping recovery.
+            ConversationItem::System(_)
+            | ConversationItem::Assistant(_)
+            | ConversationItem::BackendToolCall(_)
+            | ConversationItem::Reasoning(_) => {}
         }
-        stripped
     }
+    stripped
 }
 
 /// Tool choice options
@@ -8887,7 +8921,7 @@ mod tests {
         req.items.push(user);
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 1);
+        assert_eq!(stripped.len(), 1);
 
         // Verify image was replaced with placeholder text
         if let ConversationItem::User(user) = &req.items[0] {
@@ -8908,7 +8942,7 @@ mod tests {
         req.items.push(ConversationItem::assistant("response"));
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 0);
+        assert!(stripped.is_empty());
     }
 
     #[test]
@@ -8937,7 +8971,7 @@ mod tests {
             .push(ConversationItem::tool_result("call-1", "result text"));
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 0);
+        assert!(stripped.is_empty());
 
         // Verify nothing was modified
         assert_matches!(&req.items[0], ConversationItem::System(s) => {
@@ -8991,7 +9025,7 @@ mod tests {
         req.items.push(user2);
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 3);
+        assert_eq!(stripped.len(), 3);
     }
 
     // ── Tool result with images tests ──────────────────────────────────────────
@@ -9198,7 +9232,7 @@ mod tests {
         ));
 
         let stripped = req.strip_images();
-        assert_eq!(stripped, 2);
+        assert_eq!(stripped.len(), 2);
 
         // Images should be cleared
         if let ConversationItem::ToolResult(t) = &req.items[0] {
@@ -9211,6 +9245,73 @@ mod tests {
         } else {
             panic!("Expected ToolResult");
         }
+    }
+
+    #[test]
+    fn strip_images_by_url_strips_only_listed_urls() {
+        let listed: Arc<str> = "data:image/png;base64,listed".into();
+        let unlisted: Arc<str> = "data:image/png;base64,unlisted".into();
+        let mut user = ConversationItem::user("look");
+        user.add_image(listed.to_string());
+        user.add_image(unlisted.to_string());
+        let mut items = vec![
+            user,
+            ConversationItem::tool_result_with_images(
+                "call_1",
+                "read photo.png",
+                vec![
+                    ContentPart::Image {
+                        url: Arc::clone(&listed),
+                    },
+                    ContentPart::Image {
+                        url: Arc::clone(&unlisted),
+                    },
+                ],
+            ),
+        ];
+
+        assert_eq!(strip_images_by_url(&mut items, &[listed]), 2);
+        assert_eq!(items.len(), 2, "strip must preserve item offsets");
+
+        let ConversationItem::User(user) = &items[0] else {
+            panic!("expected user item");
+        };
+        assert!(user.content.iter().any(|part| matches!(
+            part,
+            ContentPart::Text { text } if text.as_ref() == IMAGE_STRIP_PLACEHOLDER
+        )));
+        assert!(user.content.iter().any(|part| matches!(
+            part,
+            ContentPart::Image { url } if url.as_ref() == unlisted.as_ref()
+        )));
+
+        let ConversationItem::ToolResult(result) = &items[1] else {
+            panic!("expected tool result");
+        };
+        assert!(matches!(
+            result.images.as_slice(),
+            [ContentPart::Image { url }] if url.as_ref() == unlisted.as_ref()
+        ));
+    }
+
+    #[test]
+    fn strip_images_returns_exact_urls_in_occurrence_order() {
+        let duplicate: Arc<str> = "data:image/png;base64,duplicate".into();
+        let mut user = ConversationItem::user("look");
+        user.add_image(duplicate.to_string());
+        let mut request = ConversationRequest::from_items(vec![
+            user,
+            ConversationItem::tool_result_with_images(
+                "call_1",
+                "image",
+                vec![ContentPart::Image {
+                    url: Arc::clone(&duplicate),
+                }],
+            ),
+        ]);
+
+        let stripped = request.strip_images();
+        assert_eq!(stripped, vec![Arc::clone(&duplicate), duplicate]);
     }
 
     #[test]

@@ -30,7 +30,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use super::capability_mode::{ClaudeCapabilityMode, is_write_or_shell_tool};
+use super::capability_mode::{ClaudeCapabilityMode, READ_SEARCH_TOOLS};
 use crate::agent::execution_backend::ExternalAgentKind;
 use crate::agent::external_runtime::{ExternalRuntimeError, ExternalRuntimeErrorKind};
 
@@ -273,12 +273,26 @@ pub fn capability_precheck(
 ) -> Option<ClaudePermissionResponse> {
     match mode {
         ClaudeCapabilityMode::ReadOnly => {
-            if is_write_or_shell_tool(tool_name) {
+            let name = tool_name.trim();
+            let is_known_read_only = !name.starts_with("mcp__")
+                && (READ_SEARCH_TOOLS
+                    .iter()
+                    .any(|known| name.eq_ignore_ascii_case(known))
+                    || [
+                        "read_file",
+                        "LSDir",
+                        "SemanticSearch",
+                        "web_fetch",
+                        "web_search",
+                    ]
+                    .iter()
+                    .any(|known| name.eq_ignore_ascii_case(known)));
+            if is_known_read_only {
+                None
+            } else {
                 Some(ClaudePermissionResponse::deny(format!(
                     "Claude tool '{tool_name}' denied by Grok read-only capability mode"
                 )))
-            } else {
-                None
             }
         }
         ClaudeCapabilityMode::ReadWrite
@@ -1440,10 +1454,46 @@ mod tests {
     }
 
     #[test]
-    fn read_only_precheck_denies_edit_and_bash() {
-        assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Edit").is_some());
-        assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Bash").is_some());
-        assert!(capability_precheck(ClaudeCapabilityMode::ReadOnly, "Read").is_none());
+    fn read_only_precheck_allows_known_reads_and_denies_mutations() {
+        for tool in [
+            "Read",
+            "read_file",
+            "Grep",
+            "Glob",
+            "LS",
+            "LSDir",
+            "SemanticSearch",
+            "WebSearch",
+            "web_search",
+            "WebFetch",
+            "web_fetch",
+        ] {
+            assert!(
+                capability_precheck(ClaudeCapabilityMode::ReadOnly, tool).is_none(),
+                "known read-only tool {tool} must remain brokered"
+            );
+        }
+        for tool in ["Edit", "Write", "Bash", "run_terminal_cmd"] {
+            assert!(
+                capability_precheck(ClaudeCapabilityMode::ReadOnly, tool).is_some(),
+                "mutating tool {tool} must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_precheck_fails_closed_for_unknown_and_mcp_tools() {
+        for tool in [
+            "FutureReadLikeTool",
+            "mcp__filesystem__read_file",
+            "mcp__server__Read",
+            "mcp__server__unknown",
+        ] {
+            assert!(
+                capability_precheck(ClaudeCapabilityMode::ReadOnly, tool).is_some(),
+                "unclassified tool {tool} must be denied"
+            );
+        }
     }
 
     #[test]

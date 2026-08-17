@@ -119,6 +119,8 @@ pub(crate) struct AgentRebuildSpec {
     pub attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
+    pub subagent_admission:
+        Arc<xai_grok_tools::implementations::grok_build::task::admission::SubagentAdmission>,
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,
@@ -218,6 +220,7 @@ impl AgentRebuildSpec {
             attribution_callback,
             tool_params_json,
             subagent_event_tx,
+            subagent_admission,
             monitor_event_buffer,
             user_question_tx,
             subagent_depth,
@@ -327,13 +330,17 @@ impl AgentRebuildSpec {
             }))
             .await;
         if let Some(event_tx) = subagent_event_tx.clone() {
+            use xai_grok_tools::implementations::grok_build::task::admission::LimitedBackend;
             use xai_grok_tools::implementations::grok_build::task::backend::{
                 ChannelBackend, SubagentBackendResource,
             };
             use xai_grok_tools::implementations::grok_build::task::types::{
                 SessionIdResource, SubagentDepthCounter, SubagentEventSender,
             };
-            let backend = SubagentBackendResource(Arc::new(ChannelBackend::new(event_tx.clone())));
+            let backend = SubagentBackendResource(Arc::new(LimitedBackend::new(
+                ChannelBackend::new(event_tx.clone()),
+                subagent_admission.clone(),
+            )));
             agent.tool_bridge().update_resource(backend).await;
             agent
                 .tool_bridge()
@@ -432,6 +439,11 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         attribution_callback: None,
         tool_params_json: ResolvedToolParamsJson::default(),
         subagent_event_tx: None,
+        subagent_admission: Arc::new(
+            xai_grok_tools::implementations::grok_build::task::admission::SubagentAdmission::new(
+                xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits::default(),
+            ),
+        ),
         monitor_event_buffer: None,
         user_question_tx: uq_tx,
         subagent_depth: 0,

@@ -199,7 +199,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub client_terminal: bool,
     pub client_fs_read: bool,
     pub client_fs_write: bool,
-    pub preloaded_envrc: Option<std::collections::HashMap<String, String>>,
+    /// In-flight `.envrc` load; `None` lets session spawn start one after trust resolves.
+    pub envrc: Option<xai_grok_workspace::envrc::EnvrcLoad>,
     pub persisted_signals: Option<crate::session::signals::SessionSignals>,
     pub persisted_plan_mode: Option<crate::session::plan_mode::PlanModeSnapshot>,
     pub persisted_goal_mode: Option<crate::session::goal_tracker::GoalOrchestration>,
@@ -340,7 +341,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         client_terminal: false,
         client_fs_read: false,
         client_fs_write: false,
-        preloaded_envrc: None,
+        envrc: None,
         persisted_signals: None,
         persisted_plan_mode: None,
         persisted_goal_mode: None,
@@ -1836,9 +1837,7 @@ impl MvpAgent {
                 {
                     let mut cfg = self.cfg.borrow_mut();
                     cfg.remote_settings = Some(settings);
-                    crate::agent::config::apply_remote_settings_side_effects(
-                        cfg.remote_settings.as_ref(),
-                    );
+                    crate::agent::config::apply_remote_settings_side_effects(&cfg);
                 }
                 self.sync_collection_config_gate();
                 self.emit_announcements(AnnouncementsPushMode::IfChanged);
@@ -2039,9 +2038,7 @@ impl MvpAgent {
         {
             let mut cfg = self.cfg.borrow_mut();
             cfg.remote_settings = Some(settings);
-            crate::agent::config::apply_remote_settings_side_effects(
-                cfg.remote_settings.as_ref(),
-            );
+            crate::agent::config::apply_remote_settings_side_effects(&cfg);
             if cfg.storage_mode == StorageMode::Local
                 && cfg.mode != crate::agent::config::AgentMode::Generic
             {

@@ -23,7 +23,9 @@ use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
-use super::search_fts::{SessionDoc, SessionSearchIndex, SessionSearchRow};
+use super::search_fts::{
+    BootstrapClaim, ClaimedUpsert, SessionDoc, SessionSearchIndex, SessionSearchRow,
+};
 use super::search_remote_sync;
 use super::{
     ContentPeek, PromptExtractEvent, RawLinePeek, RawParamsPeek, StorageAdapter,
@@ -38,6 +40,10 @@ const SEARCH_INDEX_DEBOUNCE_MS: u64 = 500;
 const SEARCH_CONTENT_CHAR_LIMIT: usize = 200_000;
 const BOOTSTRAP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const BOOTSTRAP_LEASE: Duration = Duration::from_secs(300);
+const BOOTSTRAP_LEASE_REFRESH: Duration = Duration::from_secs(30);
+const BOOTSTRAP_PEER_WAIT: Duration = Duration::from_secs(60);
+const BOOTSTRAP_PEER_POLL: Duration = Duration::from_secs(1);
 
 /// Configuration for bootstrap resource limits.
 ///
@@ -99,6 +105,15 @@ pub struct SessionSearchResponse {
     /// should re-query after a delay to get results from newly indexed
     /// sessions.
     pub bootstrapping: bool,
+}
+
+fn empty_search_response() -> SessionSearchResponse {
+    SessionSearchResponse {
+        results: Vec::new(),
+        next_offset: None,
+        total_estimate: Some(0),
+        bootstrapping: false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -218,6 +233,9 @@ impl SearchIndexManager {
     /// Sets `bootstrapping` eagerly so callers polling the flag see `true`
     /// before the background task even starts processing.
     pub fn bootstrap_once(&self, root: PathBuf) {
+        if !super::search_gate::is_enabled() {
+            return;
+        }
         self.progress.bootstrapping.store(true, Ordering::Release);
         let _ = self.tx.send(SearchManagerCmd::BootstrapOnce { root });
     }
@@ -235,6 +253,9 @@ impl SearchIndexManager {
 
     /// Queue an index update for a single session.
     pub fn enqueue(&self, root: PathBuf, session_id: String, cwd: String) {
+        if !super::search_gate::is_enabled() {
+            return;
+        }
         let key = SessionSearchKey { session_id, cwd };
         let _ = self.tx.send(SearchManagerCmd::Enqueue {
             root,
@@ -269,10 +290,41 @@ pub fn notify_session_updated(session_id: &str, cwd: &str) {
     SEARCH_INDEX_MANAGER.enqueue(root, session_id.to_string(), cwd.to_string());
 }
 
+/// Best-effort deletion from an index that already exists. The kill switch
+/// does not suppress eviction, but deletion never creates an index.
+pub async fn evict_session_if_index_exists(root_dir: &Path, session_id: &str) {
+    let db_path = search_db_path_without_creating_parent(root_dir);
+    let effective_db_path =
+        xai_sqlite_journal::JournalMode::for_db_path(&db_path).effective_db_path(&db_path);
+    if !effective_db_path.exists() {
+        return;
+    }
+    let session_id = session_id.to_owned();
+    let evicted_id = session_id.clone();
+    let result =
+        tokio::task::spawn_blocking(move || match SessionSearchIndex::open_existing(&db_path) {
+            Ok(index) => index.delete_doc(&evicted_id).map_err(sqlite_to_io_error),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::CannotOpen =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(sqlite_to_io_error(error)),
+        })
+        .await;
+    if let Err(error) = result.map_err(io::Error::other).and_then(|result| result) {
+        tracing::warn!(%error, %session_id, "failed to evict deleted session from search index");
+    }
+}
+
+fn search_db_path_without_creating_parent(root_dir: &Path) -> PathBuf {
+    root_dir.join("sessions").join("session_search.sqlite")
+}
+
 fn search_db_path(root_dir: &Path) -> PathBuf {
     let sessions = root_dir.join("sessions");
     // Best-effort: the journal-mode classifier statfs's the parent dir.
-    let _ = std::fs::create_dir_all(&sessions);
+    let _ = crate::util::grok_home::create_dir_all_owner_only(&sessions);
     let path = sessions.join("session_search.sqlite");
     // Pre-resolve the per-host sibling (network mounts) so search_remote_sync's
     // raw file ops (exists/compress/replace) target the same file the index
@@ -294,14 +346,12 @@ pub async fn execute_search(
     root_dir: &Path,
     req: &SessionSearchRequest,
 ) -> io::Result<SessionSearchResponse> {
+    if !super::search_gate::is_enabled() {
+        return Ok(empty_search_response());
+    }
     let query = req.query.trim();
     if query.is_empty() {
-        return Ok(SessionSearchResponse {
-            results: Vec::new(),
-            next_offset: None,
-            total_estimate: Some(0),
-            bootstrapping: false,
-        });
+        return Ok(empty_search_response());
     }
 
     SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
@@ -316,6 +366,9 @@ pub async fn execute_search(
             break;
         }
         tokio::time::sleep(BOOTSTRAP_POLL_INTERVAL).await;
+    }
+    if !super::search_gate::is_enabled() {
+        return Ok(empty_search_response());
     }
     let db_path = search_db_path(root_dir);
     let cwd = req.cwd.clone();
@@ -391,16 +444,23 @@ async fn handle_job(
     job: SearchIndexJob,
     debounce: std::time::Duration,
 ) {
+    if !super::search_gate::is_enabled() {
+        pending.clear();
+        clear_bootstrapping_flag();
+        return;
+    }
     match job {
         SearchIndexJob::Upsert(key) => {
             pending.insert(key, Instant::now() + debounce);
         }
-        SearchIndexJob::BootstrapAll => {
-            if let Err(e) = reindex_all(root_dir, storage).await {
+        SearchIndexJob::BootstrapAll => match bootstrap_with_lease(root_dir, storage, true).await {
+            Ok(BootstrapLeaseOutcome::Complete) => clear_bootstrapping_flag(),
+            Ok(BootstrapLeaseOutcome::PeerStillRunning) => {}
+            Err(e) => {
                 tracing::warn!(error = %e, "session search bootstrap failed");
                 clear_bootstrapping_flag();
             }
-        }
+        },
         SearchIndexJob::RecheckBootstrap => match has_completed_bootstrap_marker(root_dir).await {
             Some(true) => clear_bootstrapping_flag(),
             Some(false) => {
@@ -411,9 +471,13 @@ async fn handle_job(
                 tracing::info!(
                     "session search index missing completed-bootstrap marker; re-running bootstrap"
                 );
-                if let Err(e) = reindex_all(root_dir, storage).await {
-                    tracing::warn!(error = %e, "session search re-bootstrap failed");
-                    clear_bootstrapping_flag();
+                match bootstrap_with_lease(root_dir, storage, false).await {
+                    Ok(BootstrapLeaseOutcome::Complete) => clear_bootstrapping_flag(),
+                    Ok(BootstrapLeaseOutcome::PeerStillRunning) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "session search re-bootstrap failed");
+                        clear_bootstrapping_flag();
+                    }
                 }
             }
             None => {
@@ -457,6 +521,10 @@ async fn flush_ready(
     storage: &dyn StorageAdapter,
     pending: &mut HashMap<SessionSearchKey, Instant>,
 ) {
+    if !super::search_gate::is_enabled() {
+        pending.clear();
+        return;
+    }
     let now = Instant::now();
     let ready: Vec<SessionSearchKey> = pending
         .iter()
@@ -526,21 +594,26 @@ async fn upsert_session(
         // Storage backend doesn't expose file paths — no content to index
         return Ok(UpsertOutcome::NoContent);
     };
+    if !super::search_gate::is_enabled() {
+        return Ok(UpsertOutcome::NoContent);
+    }
     let doc = build_session_doc(summary, content, bytes_read);
     let db_path = search_db_path(root_dir);
 
     tokio::task::spawn_blocking(move || {
-        let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
+        super::search_gate::with_mutation_gate(|| {
+            let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
 
-        // Skip if content hasn't changed
-        if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
-            && existing_hash == doc.content_hash
-        {
-            return Ok(UpsertOutcome::Unchanged { bytes_read });
-        }
-
-        index.upsert_doc(&doc).map_err(sqlite_to_io_error)?;
-        Ok(UpsertOutcome::Indexed { bytes_read })
+            if index
+                .upsert_doc_incremental(&doc)
+                .map_err(sqlite_to_io_error)?
+            {
+                Ok(UpsertOutcome::Indexed { bytes_read })
+            } else {
+                Ok(UpsertOutcome::Unchanged { bytes_read })
+            }
+        })
+        .unwrap_or(Ok(UpsertOutcome::NoContent))
     })
     .await
     .map_err(io::Error::other)?
@@ -550,14 +623,169 @@ async fn delete_session(root_dir: &Path, session_id: &str) -> io::Result<()> {
     let db_path = search_db_path(root_dir);
     let session_id = session_id.to_string();
     tokio::task::spawn_blocking(move || {
-        let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
-        index.delete_doc(&session_id).map_err(sqlite_to_io_error)
+        super::search_gate::with_mutation_gate(|| {
+            let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
+            index.delete_doc(&session_id).map_err(sqlite_to_io_error)
+        })
+        .unwrap_or(Ok(()))
     })
     .await
     .map_err(io::Error::other)?
 }
 
-async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Result<()> {
+struct ClaimRefresher {
+    task: tokio::task::JoinHandle<()>,
+    lost: Arc<AtomicBool>,
+}
+
+impl Drop for ClaimRefresher {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn spawn_claim_refresher(db_path: PathBuf, token: String) -> ClaimRefresher {
+    let lost = Arc::new(AtomicBool::new(false));
+    let lost_for_task = lost.clone();
+    let task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(BOOTSTRAP_LEASE_REFRESH);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let db_path = db_path.clone();
+            let token = token.clone();
+            let refreshed = tokio::task::spawn_blocking(move || {
+                SessionSearchIndex::open_or_create(&db_path)
+                    .and_then(|index| {
+                        index.refresh_bootstrap_claim(
+                            chrono::Utc::now().timestamp(),
+                            BOOTSTRAP_LEASE,
+                            &token,
+                        )
+                    })
+                    .map_err(sqlite_to_io_error)
+            })
+            .await;
+            match refreshed {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    lost_for_task.store(true, Ordering::Release);
+                    return;
+                }
+                Ok(Err(error)) => {
+                    lost_for_task.store(true, Ordering::Release);
+                    tracing::warn!(%error, "failed to refresh session-search bootstrap claim");
+                    return;
+                }
+                Err(error) => {
+                    lost_for_task.store(true, Ordering::Release);
+                    tracing::warn!(%error, "session-search claim refresher panicked");
+                    return;
+                }
+            }
+        }
+    });
+    ClaimRefresher { task, lost }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootstrapLeaseOutcome {
+    Complete,
+    PeerStillRunning,
+}
+
+async fn bootstrap_with_lease(
+    root_dir: &Path,
+    storage: &dyn StorageAdapter,
+    wait_for_peer: bool,
+) -> io::Result<BootstrapLeaseOutcome> {
+    if !super::search_gate::is_enabled() {
+        return Ok(BootstrapLeaseOutcome::Complete);
+    }
+    let db_path = search_db_path(root_dir);
+    let token = uuid::Uuid::now_v7().to_string();
+    let wait_budget = if wait_for_peer {
+        BOOTSTRAP_PEER_WAIT
+    } else {
+        Duration::ZERO
+    };
+    bootstrap_with_lease_until(
+        root_dir,
+        storage,
+        &db_path,
+        &token,
+        Instant::now() + wait_budget,
+    )
+    .await
+}
+
+async fn bootstrap_with_lease_until(
+    root_dir: &Path,
+    storage: &dyn StorageAdapter,
+    db_path: &Path,
+    token: &str,
+    deadline: Instant,
+) -> io::Result<BootstrapLeaseOutcome> {
+    loop {
+        if !super::search_gate::is_enabled() {
+            return Ok(BootstrapLeaseOutcome::Complete);
+        }
+        let claim_path = db_path.to_path_buf();
+        let claim_token = token.to_owned();
+        let claimed = tokio::task::spawn_blocking(move || {
+            SessionSearchIndex::open_or_create(&claim_path)
+                .and_then(|index| {
+                    index.try_claim_bootstrap(
+                        chrono::Utc::now().timestamp(),
+                        BOOTSTRAP_LEASE,
+                        &claim_token,
+                    )
+                })
+                .map_err(sqlite_to_io_error)
+        })
+        .await
+        .map_err(io::Error::other)??;
+        if let Some(claim) = claimed {
+            let refresher = spawn_claim_refresher(db_path.to_path_buf(), token.to_owned());
+            let result = reindex_all(root_dir, storage, token, claim, refresher.lost.clone()).await;
+            drop(refresher);
+            let release_path = db_path.to_path_buf();
+            let release_token = token.to_owned();
+            let _ = tokio::task::spawn_blocking(move || {
+                SessionSearchIndex::open_or_create(&release_path)
+                    .and_then(|index| index.release_bootstrap_claim(&release_token))
+            })
+            .await;
+            result?;
+            if super::search_gate::is_enabled()
+                && has_completed_bootstrap_marker(root_dir).await != Some(true)
+            {
+                return Ok(BootstrapLeaseOutcome::PeerStillRunning);
+            }
+            return Ok(BootstrapLeaseOutcome::Complete);
+        }
+        if has_completed_bootstrap_marker(root_dir).await == Some(true) {
+            return Ok(BootstrapLeaseOutcome::Complete);
+        }
+        if Instant::now() >= deadline {
+            // Keep the public status eager while a live peer owns the lease.
+            // The next search queues a recheck, which can observe completion
+            // or take over after expiry without a long-running test/runtime wait.
+            tracing::debug!("peer process owns the session-search bootstrap lease");
+            return Ok(BootstrapLeaseOutcome::PeerStillRunning);
+        }
+        tokio::time::sleep(BOOTSTRAP_PEER_POLL).await;
+    }
+}
+
+async fn reindex_all(
+    root_dir: &Path,
+    storage: &dyn StorageAdapter,
+    claim_token: &str,
+    claim: BootstrapClaim,
+    claim_lost: Arc<AtomicBool>,
+) -> io::Result<()> {
     let config = BootstrapConfig::default();
     let progress = &SEARCH_INDEX_MANAGER.progress;
 
@@ -617,7 +845,9 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
         let root = root_owned.clone();
         let timeout_dur = config.per_session_timeout;
         let max_file_size = config.max_file_size;
-
+        let claim_token = claim_token.to_owned();
+        let bootstrap_generation = claim.mutation_generation;
+        let claim_lost = claim_lost.clone();
         join_set.spawn(async move {
             // Acquire semaphore permit — this provides backpressure,
             // limiting concurrency to max_concurrent (default 4).
@@ -625,6 +855,9 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
             // shared only by tasks spawned in this loop, all of which
             // complete before the Arc is dropped.
             let _permit = sem.acquire().await.expect("semaphore is never closed");
+            if claim_lost.load(Ordering::Acquire) || !super::search_gate::is_enabled() {
+                return;
+            }
 
             let session_id = summary.info.id.to_string();
 
@@ -643,93 +876,123 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
                 // insert-if-absent so an existing (fuller) row is never touched.
                 let doc = build_session_doc(&summary, String::new(), 0);
                 let db_path = search_db_path(&root);
+                let claim_token = claim_token.to_owned();
                 let title_only = tokio::task::spawn_blocking(move || {
-                    SessionSearchIndex::open_or_create(&db_path)
-                        .and_then(|index| index.insert_doc_if_absent(&doc))
-                        .map_err(sqlite_to_io_error)
+                    super::search_gate::with_mutation_gate(|| {
+                        SessionSearchIndex::open_or_create(&db_path)
+                            .and_then(|index| {
+                                index.insert_doc_if_absent_if_claim_owner(
+                                    &doc,
+                                    chrono::Utc::now().timestamp(),
+                                    BOOTSTRAP_LEASE,
+                                    &claim_token,
+                                    bootstrap_generation,
+                                )
+                            })
+                            .map_err(sqlite_to_io_error)
+                    })
+                    .unwrap_or(Ok(false))
                 })
                 .await;
-                if let Err(e) = title_only.map_err(io::Error::other).and_then(|r| r) {
-                    tracing::warn!(
-                        error = %e,
-                        session_id = %session_id,
-                        "failed to write title-only index row for large session"
-                    );
+                match title_only.map_err(io::Error::other).and_then(|r| r) {
+                    Ok(true) => {}
+                    Ok(false) => claim_lost.store(true, Ordering::Release),
+                    Err(e) => {
+                        claim_lost.store(true, Ordering::Release);
+                        tracing::warn!(
+                            error = %e,
+                            session_id = %session_id,
+                            "failed to write title-only index row for large session"
+                        );
+                    }
                 }
                 progress.skipped.fetch_add(1, Ordering::Relaxed);
                 return;
             }
 
-            // Wrap with per-session timeout to prevent pipeline stalls.
-            // The inner block is `async move` to own summary, updates_path,
-            // and root — the outer block retains session_id and progress
-            // for post-timeout error reporting.
-            match tokio::time::timeout(timeout_dur, async move {
-                // Collect content via spawn_blocking (single-pass I/O)
-                let (content, bytes_read) = if let Some(path) = updates_path {
-                    match tokio::task::spawn_blocking(move || {
-                        collect_all_indexable_content_single_pass(&path)
-                    })
-                    .await
-                    {
-                        Ok(Ok(result)) => result,
-                        Ok(Err(e)) => return Err(e),
-                        Err(e) => return Err(io::Error::other(e)),
-                    }
-                } else {
-                    return Ok(UpsertOutcome::NoContent);
-                };
-
-                let doc = build_session_doc(&summary, content, bytes_read);
-                let db_path = search_db_path(&root);
-
-                // Each task opens its own SessionSearchIndex connection.
-                // SQLite WAL mode handles concurrent readers + serialized writers.
-                match tokio::task::spawn_blocking(move || {
-                    let index =
-                        SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
-                    if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
-                        && existing_hash == doc.content_hash
-                    {
-                        return Ok(UpsertOutcome::Unchanged { bytes_read });
-                    }
-                    index.upsert_doc(&doc).map_err(sqlite_to_io_error)?;
-                    Ok(UpsertOutcome::Indexed { bytes_read })
-                })
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => Err(io::Error::other(e)),
+            // Only content collection is timed. The blocking collector is
+            // still joined after a timeout so no detached work can outlive the
+            // bootstrap, and the fenced database mutation is always awaited.
+            let Some(path) = updates_path else {
+                return;
+            };
+            let mut collection = tokio::task::spawn_blocking(move || {
+                collect_all_indexable_content_single_pass(&path)
+            });
+            let collected = match tokio::time::timeout(timeout_dur, &mut collection).await {
+                Ok(joined) => joined.map_err(io::Error::other).and_then(|result| result),
+                Err(_) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        timeout_secs = timeout_dur.as_secs(),
+                        "session content collection timed out during bootstrap"
+                    );
+                    let _ = collection.await;
+                    progress.skipped.fetch_add(1, Ordering::Relaxed);
+                    return;
                 }
-            })
-            .await
-            {
-                Ok(Ok(outcome)) => match outcome {
-                    UpsertOutcome::Indexed { bytes_read } => {
-                        progress.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
-                    }
-                    UpsertOutcome::Unchanged { bytes_read } => {
-                        progress.unchanged.fetch_add(1, Ordering::Relaxed);
-                        progress.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
-                    }
-                    UpsertOutcome::NoContent => {}
-                },
-                Ok(Err(e)) => {
+            };
+            let (content, bytes_read) = match collected {
+                Ok(result) => result,
+                Err(e) => {
                     tracing::warn!(
                         error = %e,
                         session_id = %session_id,
-                        "failed to index session for search"
+                        "failed to collect session content for search"
                     );
                     progress.skipped.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-                Err(_) => {
-                    // Timeout expired — the spawn_blocking task continues to
-                    // completion but the pipeline moves on to the next session.
+            };
+
+            let doc = build_session_doc(&summary, content, bytes_read);
+            let db_path = search_db_path(&root);
+            let claim_token = claim_token.to_owned();
+            let outcome = tokio::task::spawn_blocking(move || {
+                super::search_gate::with_mutation_gate(|| {
+                    let index =
+                        SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
+                    index
+                        .upsert_doc_if_claim_owner(
+                            &doc,
+                            chrono::Utc::now().timestamp(),
+                            BOOTSTRAP_LEASE,
+                            &claim_token,
+                            bootstrap_generation,
+                        )
+                        .map_err(sqlite_to_io_error)
+                })
+                .unwrap_or(Ok(ClaimedUpsert::Lost))
+            })
+            .await
+            .map_err(io::Error::other)
+            .and_then(|result| result);
+
+            match outcome {
+                Ok(ClaimedUpsert::Indexed) => {
+                    progress.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
+                }
+                Ok(ClaimedUpsert::Stale) => {
+                    // An incremental mutation after the claim already owns the
+                    // fresher row (or tombstone). Skipping it is successful
+                    // bootstrap progress, not lease loss.
+                    progress.unchanged.fetch_add(1, Ordering::Relaxed);
+                    progress.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
+                }
+                Ok(ClaimedUpsert::Unchanged) => {
+                    progress.unchanged.fetch_add(1, Ordering::Relaxed);
+                    progress.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
+                }
+                Ok(ClaimedUpsert::Lost) => {
+                    claim_lost.store(true, Ordering::Release);
+                    return;
+                }
+                Err(e) => {
+                    claim_lost.store(true, Ordering::Release);
                     tracing::warn!(
+                        error = %e,
                         session_id = %session_id,
-                        timeout_secs = timeout_dur.as_secs(),
-                        "session indexing timed out during bootstrap"
+                        "failed to index session for search"
                     );
                     progress.skipped.fetch_add(1, Ordering::Relaxed);
                     return;
@@ -742,27 +1005,42 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
     // Drain the JoinSet — wait for all tasks to complete
     while let Some(result) = join_set.join_next().await {
         if let Err(e) = result {
+            claim_lost.store(true, Ordering::Release);
             tracing::warn!(error = %e, "session indexing task panicked");
         }
     }
 
-    // Prune orphaned entries
-    let db_path = search_db_path(root_dir);
-    tokio::task::spawn_blocking(move || -> io::Result<()> {
-        let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
-        let indexed_ids = index
-            .all_indexed_session_ids()
-            .map_err(sqlite_to_io_error)?;
+    if !super::search_gate::is_enabled() || claim_lost.load(Ordering::Acquire) {
+        tracing::warn!(
+            "session-search bootstrap lost ownership or was disabled; withholding marker"
+        );
+        return Ok(());
+    }
 
-        for id in indexed_ids {
-            if !expected_ids.contains(&id) {
-                let _ = index.delete_doc(&id);
-            }
-        }
-        Ok(())
+    // Prune orphaned entries only while still owning the lease.
+    let db_path = search_db_path(root_dir);
+    let prune_token = claim_token.to_owned();
+    let still_owner = tokio::task::spawn_blocking(move || {
+        super::search_gate::with_mutation_gate(|| {
+            let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
+            index
+                .prune_missing_if_claim_owner(
+                    chrono::Utc::now().timestamp(),
+                    BOOTSTRAP_LEASE,
+                    &prune_token,
+                    claim.mutation_generation,
+                    &expected_ids,
+                )
+                .map_err(sqlite_to_io_error)
+        })
+        .unwrap_or(Ok(false))
     })
     .await
     .map_err(io::Error::other)??;
+    if !still_owner {
+        tracing::warn!("session-search bootstrap claim lost before prune; withholding marker");
+        return Ok(());
+    }
 
     let elapsed = start.elapsed();
     tracing::info!(
@@ -774,13 +1052,30 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
         "session search bootstrap complete"
     );
 
-    progress.bootstrapping.store(false, Ordering::Release);
-
-    // Record bootstrap completion timestamp in the meta table.
-    // Used by remote sync to determine local index staleness.
+    // Record completion only while the same owner token still holds the claim.
     let db_path_meta = search_db_path(root_dir);
-    if let Err(e) = search_remote_sync::write_last_bootstrap_at(&db_path_meta) {
-        tracing::warn!(error = %e, "failed to write last_bootstrap_at metadata");
+    let marker_token = claim_token.to_owned();
+    let marker_written = tokio::task::spawn_blocking(move || {
+        super::search_gate::with_mutation_gate(|| {
+            let index =
+                SessionSearchIndex::open_or_create(&db_path_meta).map_err(sqlite_to_io_error)?;
+            let now = chrono::Utc::now().timestamp();
+            index
+                .set_meta_if_claim_owner(
+                    super::search_fts::META_KEY_LAST_BOOTSTRAP,
+                    &now.to_string(),
+                    now,
+                    BOOTSTRAP_LEASE,
+                    &marker_token,
+                )
+                .map_err(sqlite_to_io_error)
+        })
+        .unwrap_or(Ok(false))
+    })
+    .await
+    .map_err(io::Error::other)??;
+    if !marker_written {
+        tracing::warn!("session-search bootstrap claim lost; completion marker withheld");
     }
 
     Ok(())
@@ -1296,6 +1591,7 @@ fn build_session_doc(summary: &Summary, content: String, last_indexed_offset: u6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
     async fn test_execute_search_empty_query() {
@@ -2086,4 +2382,130 @@ mod tests {
     // fallback, rewind fallback, no-new-bytes skip) are deferred until
     // the delta indexing is wired into upsert_session. The delta content
     // collection function (collect_delta_content) is tested above.
+
+    #[tokio::test]
+    async fn late_created_session_survives_full_bootstrap_prune() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let db_path = search_db_path(root);
+        let index = SessionSearchIndex::open_or_create(&db_path).unwrap();
+        let lease = Duration::from_secs(300);
+        let claim = index
+            .try_claim_bootstrap(1_000, lease, "bootstrap")
+            .unwrap()
+            .unwrap();
+
+        let late = build_session_doc(
+            &test_summary("late", "/new/workspace", "Late session"),
+            "created during bootstrap".to_string(),
+            42,
+        );
+        assert!(index.upsert_doc_incremental(&late).unwrap());
+        assert!(
+            index
+                .prune_missing_if_claim_owner(
+                    1_001,
+                    lease,
+                    "bootstrap",
+                    claim.mutation_generation,
+                    &HashSet::new(),
+                )
+                .unwrap()
+        );
+
+        let result = index.query("created", None, 10, 0, false).unwrap();
+        assert_eq!(result.results[0].session_id, "late");
+        assert_eq!(result.results[0].cwd, "/new/workspace");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn peer_wait_timeout_keeps_bootstrapping_true_without_marker() {
+        let _gate = super::super::search_gate::TestGateGuard::force_open();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let db_path = search_db_path(root);
+        assert!(
+            SessionSearchIndex::open_or_create(&db_path)
+                .unwrap()
+                .try_claim_bootstrap(chrono::Utc::now().timestamp(), BOOTSTRAP_LEASE, "peer")
+                .unwrap()
+                .is_some()
+        );
+        SEARCH_INDEX_MANAGER
+            .progress
+            .bootstrapping
+            .store(true, Ordering::Release);
+        let storage: Box<dyn StorageAdapter> = Box::new(
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.to_path_buf()),
+        );
+
+        let outcome =
+            bootstrap_with_lease_until(root, storage.as_ref(), &db_path, "waiter", Instant::now())
+                .await
+                .unwrap();
+        assert_eq!(outcome, BootstrapLeaseOutcome::PeerStillRunning);
+        assert!(
+            SEARCH_INDEX_MANAGER
+                .progress
+                .bootstrapping
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(has_completed_bootstrap_marker(root).await, Some(false));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn eviction_while_gate_off_does_not_create_missing_index_or_parent() {
+        let _gate = super::super::search_gate::TestGateGuard::force_open();
+        let tmp = tempfile::TempDir::new().unwrap();
+        super::super::search_gate::apply(&xai_grok_config_types::Resolved::new(
+            false,
+            xai_grok_config_types::ConfigSource::Default,
+        ));
+
+        evict_session_if_index_exists(tmp.path(), "missing").await;
+        assert!(!tmp.path().join("sessions").exists());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn eviction_while_gate_off_removes_existing_row() {
+        let _gate = super::super::search_gate::TestGateGuard::force_open();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = search_db_path(tmp.path());
+        let index = SessionSearchIndex::open_or_create(&db_path).unwrap();
+        index
+            .upsert_doc(&SessionDoc {
+                session_id: "stale".to_string(),
+                cwd: "/workspace".to_string(),
+                updated_at_unix: 1,
+                title: "Stale".to_string(),
+                content: "content".to_string(),
+                content_hash: "hash".to_string(),
+                last_indexed_offset: 0,
+            })
+            .unwrap();
+        drop(index);
+        super::super::search_gate::apply(&xai_grok_config_types::Resolved::new(
+            false,
+            xai_grok_config_types::ConfigSource::Default,
+        ));
+
+        evict_session_if_index_exists(tmp.path(), "stale").await;
+        let index = SessionSearchIndex::open_existing(&db_path).unwrap();
+        assert_eq!(index.get_content_hash("stale").unwrap(), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn search_db_path_creates_owner_only_sessions_parent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _ = search_db_path(tmp.path());
+        assert_eq!(
+            crate::test_support::unix_mode(&tmp.path().join("sessions")),
+            0o700,
+            "sessions parent created by search_db_path must be 0700"
+        );
+    }
 }

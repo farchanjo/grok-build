@@ -188,6 +188,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
@@ -294,6 +295,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                turn_report: Default::default(),
+                turn_end_tx: Default::default(),
                 client_hooks: Default::default(),
                 hook_resolved_workspace_root: String::new(),
                 vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -309,6 +312,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 execution_backend: std::cell::Cell::new(
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
@@ -702,6 +706,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
@@ -811,6 +816,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                turn_report: Default::default(),
+                turn_end_tx: Default::default(),
                 client_hooks: Default::default(),
                 hook_resolved_workspace_root: String::new(),
                 vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -826,6 +833,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 execution_backend: std::cell::Cell::new(
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
@@ -1005,6 +1013,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
@@ -1124,6 +1133,8 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                turn_report: Default::default(),
+                turn_end_tx: Default::default(),
                 client_hooks: Default::default(),
                 hook_resolved_workspace_root: String::new(),
                 vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -1145,6 +1156,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     StreamingTurnCapture::default(),
                 ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
                 execution_backend: std::cell::Cell::new(
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,
@@ -1933,6 +1945,41 @@ async fn ctrl_c_clears_turn_active_before_background_completion_routes() {
         .await;
 }
 #[tokio::test(flavor = "current_thread")]
+async fn explicit_cancel_stops_compaction_but_send_now_and_teardown_do_not() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let (token, scope) = actor.compaction.cancel.enter();
+
+            actor
+                .cancel_running_task(false, false, false, Some("send_now".to_string()))
+                .await;
+            assert!(!token.is_cancelled(), "send-now must preserve compaction");
+
+            actor.cancel_running_task(false, false, false, None).await;
+            assert!(
+                !token.is_cancelled(),
+                "teardown/legacy None must preserve compaction"
+            );
+
+            actor
+                .cancel_running_task(false, false, false, Some("esc".to_string()))
+                .await;
+            assert!(
+                token.is_cancelled(),
+                "explicit user stop must cancel compaction"
+            );
+            drop(scope);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn non_ctrl_c_cancel_preserves_queued_task_wakes_and_does_not_arm_barrier() {
     let local = tokio::task::LocalSet::new();
     local
@@ -2290,6 +2337,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     tool_choice: crate::util::config::CompactionToolChoice::Auto,
                     prefire: crate::session::compaction_config::PrefireState::default(),
                     prefix_released: std::sync::atomic::AtomicBool::new(false),
+                    cancel: Default::default(),
                     rolling_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 memory: crate::session::memory_state::SessionMemory {
@@ -2409,6 +2457,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                turn_report: Default::default(),
+                turn_end_tx: Default::default(),
                 client_hooks: Default::default(),
                 hook_resolved_workspace_root: String::new(),
                 vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
@@ -2430,6 +2480,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     StreamingTurnCapture::default(),
                 ),
                 turn_stream_drained: parking_lot::Mutex::new(None),
+                pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: sampler_handle.clone(),
                 execution_backend: std::cell::Cell::new(
                     crate::agent::execution_backend::ExecutionBackend::NativeInference,

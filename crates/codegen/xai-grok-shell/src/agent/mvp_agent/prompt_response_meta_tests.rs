@@ -125,8 +125,11 @@ fn tool_overrides_land_as_camelcase_meta_key() {
     let overrides = xai_grok_inference_types::ToolOverrides {
         x_search: Some(xai_grok_inference_types::XSearchOptions {
             date_bound: Some(
-                xai_grok_inference_types::SearchDateBound::new(None, Some("2024-03-15".to_string()))
-                    .unwrap(),
+                xai_grok_inference_types::SearchDateBound::new(
+                    None,
+                    Some("2024-03-15".to_string()),
+                )
+                .unwrap(),
             ),
         }),
         web_search: None,

@@ -53,6 +53,9 @@ pub struct SessionHandle {
     /// resolve. The roster reads this synchronously to surface `NeedsInput`
     /// Never persisted.
     pub pending_interactions: crate::session::pending_interaction::PendingInteractions,
+    /// Out-of-band compaction cancellation so a blocked actor-loop compaction
+    /// can be interrupted before it dequeues the normal cancel command.
+    pub(crate) compaction_cancel: crate::session::compaction_config::CompactCancelGate,
     /// Session info (id, cwd) - cached for quick access without querying persistence
     pub info: crate::session::info::Info,
     /// Resolved turn limit for this session; lets a spawned subagent inherit

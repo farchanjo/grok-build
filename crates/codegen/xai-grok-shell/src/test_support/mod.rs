@@ -2,6 +2,20 @@ pub(crate) mod lsp_runtime;
 
 pub(crate) const TEST_MODEL: &str = "test-model";
 
+/// Permission bits (`mode & 0o777`) of `path`, for owner-only assertions.
+#[cfg(unix)]
+pub(crate) fn unix_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Set `path`'s permission bits, e.g. to simulate umask-default dirs.
+#[cfg(unix)]
+pub(crate) fn set_unix_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
 /// Prepend the hermetic git binary (via `GIT_BIN_PATH`) to `PATH` so that
 /// `Command::new("git")` in test helpers resolves to the Bazel-provided
 /// static binary instead of relying on system-installed git.

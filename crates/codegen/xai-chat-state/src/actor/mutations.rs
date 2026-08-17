@@ -121,6 +121,31 @@ impl ChatStateActor {
         report
     }
 
+    /// Strip matching image URLs in place and request a backup-gated disk
+    /// rewrite. Token totals and turn-capture offsets remain valid because no
+    /// conversation item is inserted or removed. The structural epoch is
+    /// bumped on a real mutation so stale rolling-compaction CAS identities
+    /// cannot apply against the pre-strip content.
+    pub(super) fn strip_conversation_images(
+        &mut self,
+        urls: &[std::sync::Arc<str>],
+    ) -> Option<(usize, tokio::sync::oneshot::Receiver<std::io::Result<()>>)> {
+        let stripped =
+            xai_grok_inference_types::strip_images_by_url(&mut self.state.conversation, urls);
+        if stripped == 0 {
+            return None;
+        }
+        tracing::warn!(
+            stripped,
+            "stripped server-rejected image(s) from stored conversation"
+        );
+        self.bump_structural_epoch();
+        let acknowledgement = self
+            .persistence
+            .replace_history_for_strip_and_ack(&self.state.conversation);
+        Some((stripped, acknowledgement))
+    }
+
     /// Make memory match the disk-authoritative switch for one generation.
     pub(super) fn converge_working_directory_switch(
         &mut self,

@@ -54,7 +54,7 @@ impl HttpClient {
     }
 
     fn build(params: &WebFetchParams) -> Result<reqwest::Client, WebFetchError> {
-        let mut builder = reqwest::Client::builder()
+        let mut builder = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
             .timeout(params.timeout_secs())
             .connect_timeout(std::time::Duration::from_secs(10))
             // We manage redirects for SSRF.
@@ -90,7 +90,8 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_forces_rebuild() {
+    fn invalidate_forces_rebuild_and_reapplies_extra_roots() {
+        let before = crate::extra_ca::async_adapter_invocations();
         let client = HttpClient::new(&WebFetchParams::default()).unwrap();
         let first = client.get_or_rebuild().unwrap();
         let first_ptr = Arc::as_ptr(&first);
@@ -100,8 +101,10 @@ mod tests {
         let second = client.get_or_rebuild().unwrap();
         let second_ptr = Arc::as_ptr(&second);
 
-        // After invalidation, we should get a different client instance.
+        // After invalidation, we should get a different client instance and
+        // route the rebuild through the extra-root adapter again.
         assert_ne!(first_ptr, second_ptr);
+        assert_eq!(crate::extra_ca::async_adapter_invocations(), before + 2);
     }
 
     #[test]

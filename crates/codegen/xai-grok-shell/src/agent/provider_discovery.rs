@@ -47,7 +47,7 @@ pub async fn discover_provider_models(
         ));
     };
 
-    let client = reqwest::Client::builder()
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(
             provider.request_timeout_secs.unwrap_or(30),
         ))

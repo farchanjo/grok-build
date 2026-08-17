@@ -41,7 +41,8 @@ use xai_chat_state::compaction_utils::{
 
 use crate::inference::Client as OaiCompatClient;
 use crate::session::helpers::session_compact::{
-    CompactFailure, CompactOutput, build_compaction_chat_history, generate_session_compact,
+    CompactFailure, CompactOutput, build_compaction_chat_history,
+    generate_session_compact_cancellable,
 };
 
 /// Wraps `generate_session_compact` as the shared engine's
@@ -83,6 +84,8 @@ pub(crate) struct ShellCompactionSampler {
     /// reasoning-runaway backstop; `0` disables it.
     wall_clock_budget_secs: u64,
     tool_choice: crate::util::config::CompactionToolChoice,
+    cancel: tokio_util::sync::CancellationToken,
+    cancelled: std::sync::atomic::AtomicBool,
     /// Full output of the most recent successful sample (for L5 telemetry).
     last_success: Mutex<Option<CompactOutput>>,
 }
@@ -114,8 +117,16 @@ impl ShellCompactionSampler {
             idle_timeout,
             wall_clock_budget_secs,
             tool_choice,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
             last_success: Mutex::new(None),
         }
+    }
+
+    /// Attach the session-owned cancellation token for an in-flight compact.
+    pub(crate) fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// Make this sampler honor the [`CompactionPrompt`] supplied to each call.
@@ -136,6 +147,10 @@ impl ShellCompactionSampler {
         self.routes
             .get(self.route_index.load(Ordering::Acquire))
             .map(|route| route.inference_config.model.as_str())
+    }
+
+    pub(crate) fn was_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -181,7 +196,7 @@ impl CompactionSampler for ShellCompactionSampler {
             let route = self.routes.get(route_index).ok_or_else(|| {
                 CompactionSampleError::Build("no usable compaction route configured".to_owned())
             })?;
-            match generate_session_compact(
+            match generate_session_compact_cancellable(
                 recovery_history
                     .as_ref()
                     .unwrap_or(&text_only_history)
@@ -202,6 +217,7 @@ impl CompactionSampler for ShellCompactionSampler {
                 self.idle_timeout,
                 self.wall_clock_budget_secs,
                 self.tool_choice,
+                &self.cancel,
             )
             .await
             {
@@ -254,6 +270,10 @@ impl CompactionSampler for ShellCompactionSampler {
                     route_index += 1;
                     self.route_index.store(route_index, Ordering::Release);
                 }
+                Err(CompactFailure::Cancelled) => {
+                    self.cancelled.store(true, Ordering::Release);
+                    return Err(compact_failure_to_sample_error(CompactFailure::Cancelled));
+                }
                 Err(failure) => return Err(compact_failure_to_sample_error(failure)),
             }
         }
@@ -274,6 +294,7 @@ fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleE
     let (deterministic, err) = match failure {
         CompactFailure::ImageSanitization(err) | CompactFailure::Deterministic(err) => (true, err),
         CompactFailure::Transient(err) => (false, err),
+        CompactFailure::Cancelled => (true, CompactFailure::cancelled_error()),
     };
     let message = acp_error_message(&err);
     if deterministic {
@@ -1552,6 +1573,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(
@@ -1579,6 +1601,7 @@ mod compaction_route_tests {
                     retry_after_secs: None,
                     should_retry: None,
                     diagnostics: None,
+                    error_code: None,
                 },
             );
             assert!(
@@ -1601,6 +1624,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(matches!(result, CompactFailure::ImageSanitization(_)));
@@ -1617,6 +1641,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(
@@ -1736,6 +1761,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(
@@ -1755,6 +1781,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(
@@ -1774,6 +1801,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(
@@ -1793,6 +1821,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(
@@ -1813,6 +1842,7 @@ mod compaction_route_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             },
         );
         assert!(
@@ -1848,6 +1878,7 @@ mod compaction_route_tests {
                     retry_after_secs: None,
                     should_retry: None,
                     diagnostics: None,
+                    error_code: None,
                 },
             );
             assert!(

@@ -2603,14 +2603,19 @@ mod tests {
                 let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
                 let transport = fake_hub(serde_json::json!({ "outcome": "always_approve" }));
                 let (mgr, _e) = test_manager_with_hub(&cwd, transport.clone());
-                for path in ["src/first.rs", "src/second.rs", "~/.zshrc"] {
+                for path in [
+                    "src/first.rs",
+                    "src/second.rs",
+                    "~/.zshrc",
+                    "/home/user/.grok/hooks/evil.json",
+                ] {
                     assert_eq!(
                         mgr.request(AccessKind::Edit(path.into()), tool_call(), None, None, None)
                             .await,
                         Decision::Allow
                     );
                 }
-                assert_eq!(transport.seen.lock().unwrap().len(), 2);
+                assert_eq!(transport.seen.lock().unwrap().len(), 3);
             })
             .await;
     }
@@ -5123,46 +5128,50 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let mut auto = crate::permission::types::PermissionConfig::new(vec![]);
-                auto.prompt_policy = PromptPolicy::Auto;
-                let allow = crate::permission::types::PermissionConfig::new(vec![PermissionRule {
-                    action: RuleAction::Allow,
-                    tool: ToolFilter::Edit,
-                    pattern: None,
-                    pattern_mode: Default::default(),
-                }]);
-                let mut deny = crate::permission::types::PermissionConfig::new(vec![]);
-                deny.prompt_policy = PromptPolicy::Deny;
-
-                for (name, config, expected_prompts, policy_deny) in [
-                    ("auto", auto, 1, false),
-                    ("configured allow", allow, 1, false),
-                    ("dontAsk", deny, 0, true),
+                for path in [
+                    "/etc/hosts",
+                    "/home/user/.grok/hooks/evil.json",
+                    "/home/user/.grok/sandbox.toml",
+                    "/home/user/.grok/config.toml",
+                    "/home/user/.claude/settings.json",
+                    "/home/user/.cursor/hooks.json",
                 ] {
-                    let tmp = tempfile::tempdir().unwrap();
-                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                    let client = RecordingClient::default();
-                    let prompts = client.prompts.clone();
-                    let (mgr, _events) = manager_with_recording_client(
-                        &cwd,
-                        Some(config),
-                        client,
-                        ClientType::Generic,
-                    );
-                    let decision = mgr
-                        .request(
-                            AccessKind::Edit("/etc/hosts".into()),
-                            tool_call(),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                    assert_eq!(prompts.borrow().len(), expected_prompts, "{name}");
-                    if policy_deny {
-                        assert!(matches!(decision, Decision::PolicyDeny(_)), "{name}");
-                    } else {
-                        assert!(matches!(decision, Decision::Reject(_)), "{name}");
+                    let mut auto = crate::permission::types::PermissionConfig::new(vec![]);
+                    auto.prompt_policy = PromptPolicy::Auto;
+                    let allow =
+                        crate::permission::types::PermissionConfig::new(vec![PermissionRule {
+                            action: RuleAction::Allow,
+                            tool: ToolFilter::Edit,
+                            pattern: None,
+                            pattern_mode: Default::default(),
+                        }]);
+                    let mut deny = crate::permission::types::PermissionConfig::new(vec![]);
+                    deny.prompt_policy = PromptPolicy::Deny;
+
+                    for (name, config, expected_prompts, policy_deny) in [
+                        ("auto", auto, 1, false),
+                        ("configured allow", allow, 1, false),
+                        ("dontAsk", deny, 0, true),
+                    ] {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let client = RecordingClient::default();
+                        let prompts = client.prompts.clone();
+                        let (mgr, _events) = manager_with_recording_client(
+                            &cwd,
+                            Some(config),
+                            client,
+                            ClientType::Generic,
+                        );
+                        let decision = mgr
+                            .request(AccessKind::Edit(path.into()), tool_call(), None, None, None)
+                            .await;
+                        assert_eq!(prompts.borrow().len(), expected_prompts, "{name} {path}");
+                        if policy_deny {
+                            assert!(matches!(decision, Decision::PolicyDeny(_)), "{name} {path}");
+                        } else {
+                            assert!(matches!(decision, Decision::Reject(_)), "{name} {path}");
+                        }
                     }
                 }
             })

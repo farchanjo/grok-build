@@ -235,6 +235,15 @@ impl SessionActor {
         trigger: Option<String>,
     ) {
         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
+        let cancel_reason = super::turn_end_hooks::cancel_reason_for_trigger(trigger.as_deref());
+        // Only trigger-bearing interactive cancellation stops compaction.
+        // `send_now`, legacy/teardown `None`, and internal fail-stop triggers
+        // preserve their existing semantics.
+        if crate::session::compaction_config::is_explicit_compaction_cancel_trigger(
+            trigger.as_deref(),
+        ) {
+            self.compaction.cancel.request_cancel();
+        }
         if suppress_task_wakes {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(true);
@@ -329,6 +338,14 @@ impl SessionActor {
                 .await;
         }
 
+        // Snapshot hook input only for reportable interactive cancellation. This await happens
+        // before the state mutation; the captured epoch below still prevents successor theft.
+        let last_assistant_message = if cancel_reason.is_some() {
+            self.last_assistant_message_for_cancel().await
+        } else {
+            None
+        };
+
         if kill_background_tasks {
             if self.startup_hints.is_subagent {
                 // Subagent teardown: only kill tasks owned by this session,
@@ -348,8 +365,9 @@ impl SessionActor {
         }
 
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
-        let (running_task, pending_inputs, rewound_input, had_queued_user_prompt) = {
+        let (running_task, pending_inputs, rewound_input, had_queued_user_prompt, turn_epoch) = {
             let mut state = self.state.lock().await;
+            let turn_epoch = self.turn_report.epoch();
             debug_assert!(
                 pinned_prompt_id.is_none()
                     || state.running_prompt_id().is_none()
@@ -374,6 +392,7 @@ impl SessionActor {
             let rewound_input = if rewind_if_pristine && state.rewindable {
                 if let Some(task) = state.running_task.take() {
                     task.abort();
+                    self.turn_report.release_aborted(turn_epoch);
                 }
                 if let Some(gate) = &self.tool_context.task_wake_suppressed {
                     gate.set(false);
@@ -394,6 +413,12 @@ impl SessionActor {
             } else {
                 state.running_task.take()
             };
+            if let Some(task) = &running_task {
+                // Abort first, then release only this turn's in-flight gate claim so the
+                // cancellation report can claim the same epoch.
+                task.abort();
+                self.turn_report.release_aborted(turn_epoch);
+            }
 
             // Decide which queued inputs get resolved with `Cancelled` now vs.
             // preserved for the post-cancel drain:
@@ -475,6 +500,7 @@ impl SessionActor {
                 pending_inputs,
                 rewound_input,
                 had_queued_user_prompt,
+                turn_epoch,
             )
         };
         // Authoritative cancel identity: the task actually torn down. The pin
@@ -484,6 +510,22 @@ impl SessionActor {
             .as_ref()
             .map(|t| t.prompt_id.clone())
             .or(pinned_prompt_id);
+
+        if rewound_input.is_none()
+            && let Some(prompt_id) = cancelled_prompt_id.as_deref()
+            && let Some(reason) = cancel_reason
+        {
+            self.claim_and_queue(
+                prompt_id,
+                turn_epoch,
+                TurnEnd::Cancelled {
+                    reason,
+                    trigger: trigger.clone(),
+                    reason_details: None,
+                    last_assistant_message,
+                },
+            );
+        }
 
         self.agent
             .borrow()
@@ -546,9 +588,6 @@ impl SessionActor {
                 });
         }
 
-        if let Some(running_task) = running_task {
-            running_task.abort();
-        }
         if let Some(is_turn_active) = &self.tool_context.is_turn_active {
             is_turn_active.store(false, std::sync::atomic::Ordering::Relaxed);
         }

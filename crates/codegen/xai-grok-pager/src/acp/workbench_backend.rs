@@ -275,9 +275,9 @@ pub async fn spawn_workbench_agent(
     let handle = thread::Builder::new()
         .name("acp-workbench-agent".into())
         .spawn(move || -> Result<()> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
+            let mut runtime_builder = tokio::runtime::Builder::new_current_thread();
+            runtime_builder.enable_all();
+            let rt = xai_tty_utils::runtime::apply_blocking_pool(&mut runtime_builder).build()?;
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let mut child = tokio::process::Command::new(&executable)
@@ -307,14 +307,10 @@ pub async fn spawn_workbench_agent(
 
                 let gw_tx = AcpGatewaySender::new(acp_agent.tx).with_tracing(true);
                 let incoming = LineBufferedRead::spawn_local(stdout.compat());
-                let (conn, handle_io) = acp::ClientSideConnection::new(
-                    gw_tx,
-                    stdin.compat_write(),
-                    incoming,
-                    |fut| {
+                let (conn, handle_io) =
+                    acp::ClientSideConnection::new(gw_tx, stdin.compat_write(), incoming, |fut| {
                         tokio::task::spawn_local(fut);
-                    },
-                );
+                    });
                 let gw_rx = AcpGatewayReceiver::new(acp_agent.rx, conn).with_tracing(true);
                 tokio::task::spawn_local(handle_io);
                 tokio::task::spawn_local(gw_rx.run());
@@ -341,7 +337,8 @@ pub async fn spawn_workbench_agent(
 
     // Workbench owns provider auth; pager only needs a local AuthManager for
     // optional voice channels (same non-refreshing pattern as leader mode).
-    let auth_manager = std::sync::Arc::new(AuthManager::new(&grok_home(), GrokComConfig::default()));
+    let auth_manager =
+        std::sync::Arc::new(AuthManager::new(&grok_home(), GrokComConfig::default()));
 
     Ok(SpawnedAgent {
         _thread_handle: handle,
@@ -418,12 +415,7 @@ mod tests {
         );
         let env: Vec<(String, String)> = program
             .get_envs()
-            .filter_map(|(k, v)| {
-                Some((
-                    k.to_str()?.to_owned(),
-                    v?.to_str()?.to_owned(),
-                ))
-            })
+            .filter_map(|(k, v)| Some((k.to_str()?.to_owned(), v?.to_str()?.to_owned())))
             .collect();
         assert!(
             env.iter()
@@ -455,8 +447,8 @@ mod tests {
             std::env::remove_var(ENV_WORKBENCH_EXECUTABLE);
         }
         let exe = Path::new("/usr/local/bin/workbench");
-        let (kind, plan) = resolve_agent_backend(Some(exe), Some(Path::new("/workspace")))
-            .expect("resolve");
+        let (kind, plan) =
+            resolve_agent_backend(Some(exe), Some(Path::new("/workspace"))).expect("resolve");
         assert_eq!(kind, AgentBackendKind::Workbench);
         let plan = plan.expect("plan");
         assert_eq!(plan.executable(), exe);
@@ -474,8 +466,7 @@ mod tests {
             std::env::set_var(ENV_GROK_AGENT_BACKEND, "workbench");
             std::env::set_var(ENV_WORKBENCH_EXECUTABLE, "/opt/workbench");
         }
-        let (kind, plan) =
-            resolve_agent_backend(None, Some(Path::new("/ws"))).expect("resolve");
+        let (kind, plan) = resolve_agent_backend(None, Some(Path::new("/ws"))).expect("resolve");
         assert_eq!(kind, AgentBackendKind::Workbench);
         assert_eq!(
             plan.expect("plan").executable(),
@@ -507,11 +498,8 @@ mod tests {
         unsafe {
             std::env::set_var(ENV_WORKBENCH_TERMINAL_BACKEND, "1");
         }
-        let err = resolve_agent_backend(
-            Some(Path::new("workbench")),
-            Some(Path::new("/ws")),
-        )
-        .expect_err("relative");
+        let err = resolve_agent_backend(Some(Path::new("workbench")), Some(Path::new("/ws")))
+            .expect_err("relative");
         assert_eq!(err, WorkbenchBackendError::RelativeExecutable);
         unsafe {
             std::env::remove_var(ENV_WORKBENCH_TERMINAL_BACKEND);
@@ -530,12 +518,9 @@ mod tests {
         let ws = std::env::current_dir().expect("cwd");
         let plan = WorkbenchBackend::new(exe, ws).expect("plan");
         let cancel = CancellationToken::new();
-        let spawned = spawn_workbench_agent(&plan, &cancel)
-            .await
-            .expect("spawn");
+        let spawned = spawn_workbench_agent(&plan, &cancel).await.expect("spawn");
         // Soft check: channel is live (caller would run initialize).
         let _ = &spawned.channel;
         cancel.cancel();
     }
-
 }

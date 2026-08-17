@@ -48,7 +48,20 @@ pub(crate) enum CompactFailure {
     /// Failure may resolve on retry. The caller follows its existing
     /// N-attempt + backoff loop.
     Transient(acp::Error),
+    /// An explicit user stop cancelled the in-flight compaction. Never retry
+    /// it, suppress future auto-compaction, or report it as a model failure.
+    Cancelled,
 }
+
+/// Stable error payload used across the sampler and session layers.
+pub(crate) const COMPACT_CANCELLED_MSG: &str = "compact cancelled";
+
+impl CompactFailure {
+    pub(crate) fn cancelled_error() -> acp::Error {
+        acp::Error::internal_error().data(COMPACT_CANCELLED_MSG)
+    }
+}
+
 pub(crate) use xai_grok_inference_types::is_context_length_error;
 /// Classify an upstream `InferenceError` for the compaction retry loop.
 ///
@@ -59,7 +72,7 @@ pub(crate) use xai_grok_inference_types::is_context_length_error;
 pub(super) fn classify_sampling_error(err: InferenceError) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(format!("compact failed: {err}"));
     let retryable = match &err {
-        InferenceError::Auth(_)
+        InferenceError::Auth { .. }
         | InferenceError::InvalidConfiguration(_)
         | InferenceError::Serialization(_)
         | InferenceError::MaxTokensTruncation => false,
@@ -79,6 +92,7 @@ pub(super) fn classify_sampling_error(err: InferenceError) -> CompactFailure {
         InferenceError::StreamError {
             error_type,
             message,
+            ..
         } => response_event_error_is_retryable(Some(error_type), message),
     };
     if err.is_payload_too_large() || err.is_image_processing_error() {
@@ -130,7 +144,10 @@ fn response_event_error_is_retryable(code: Option<&str>, message: &str) -> bool 
 /// normalized allowlist specific to image processing rather than treating all
 /// 4xx errors as recoverable.
 fn response_event_is_image_rejection(code: Option<&str>, message: &str) -> bool {
-    if code.is_some_and(|code| code.trim() == "413") {
+    if code.is_some_and(|code| {
+        let code = code.trim();
+        code == "413" || code == xai_grok_inference_types::INVALID_IMAGE_ERROR_CODE
+    }) {
         return true;
     }
     let message = message.trim().to_ascii_lowercase();
@@ -359,16 +376,75 @@ enum StreamStep<T> {
     Ended,
     IdleTimeout,
 }
-async fn next_stream_step<S, T>(stream: &mut S, idle_timeout: std::time::Duration) -> StreamStep<T>
+async fn next_stream_step<S, T>(
+    stream: &mut S,
+    idle_timeout: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<StreamStep<T>, CompactFailure>
 where
     S: futures_util::Stream<Item = T> + Unpin,
 {
-    match tokio::time::timeout(idle_timeout, stream.next()).await {
-        Ok(Some(item)) => StreamStep::Item(item),
-        Ok(None) => StreamStep::Ended,
-        Err(_) => StreamStep::IdleTimeout,
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(CompactFailure::Cancelled),
+        step = tokio::time::timeout(idle_timeout, stream.next()) => Ok(match step {
+            Ok(Some(item)) => StreamStep::Item(item),
+            Ok(None) => StreamStep::Ended,
+            Err(_) => StreamStep::IdleTimeout,
+        }),
     }
 }
+
+/// Abort `future` if the user stop wins while an HTTP stream is opening.
+async fn await_unless_cancelled<F, T>(
+    cancel: &tokio_util::sync::CancellationToken,
+    future: F,
+) -> Result<T, CompactFailure>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(CompactFailure::Cancelled),
+        result = future => Ok(result),
+    }
+}
+#[cfg(test)]
+mod compact_cancel_await_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pre_cancelled_token_skips_future() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let error = await_unless_cancelled(&cancel, async {
+            panic!("future must not run when already cancelled");
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CompactFailure::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_pending_open() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_worker = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_worker.cancel();
+        });
+        let started = std::time::Instant::now();
+        let error = await_unless_cancelled(&cancel, async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            0u8
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CompactFailure::Cancelled));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+}
+
 /// Generates a summary of the conversation for compaction.
 /// Accepts `Vec<ConversationItem>` so each backend can retain the native
 /// conversation shape. Callers strip provider-specific reasoning artifacts
@@ -391,6 +467,34 @@ where
 /// network blips, rate limits).
 pub(crate) async fn generate_session_compact(
     chat_history: Vec<ConversationItem>,
+    tools: Vec<ToolSpec>,
+    hosted_tools: Vec<HostedTool>,
+    client: OaiCompatClient,
+    session_id: acp::SessionId,
+    inference_config: &InferenceConfig,
+    idle_timeout: std::time::Duration,
+    wall_clock_budget_secs: u64,
+    tool_choice: crate::util::config::CompactionToolChoice,
+) -> Result<CompactOutput, CompactFailure> {
+    generate_session_compact_cancellable(
+        chat_history,
+        tools,
+        hosted_tools,
+        client,
+        session_id,
+        inference_config,
+        idle_timeout,
+        wall_clock_budget_secs,
+        tool_choice,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+/// Cancellation-aware compaction generator used by session-owned compaction
+/// paths. The wrapper above preserves the existing test/helper API.
+pub(crate) async fn generate_session_compact_cancellable(
+    chat_history: Vec<ConversationItem>,
     mut tools: Vec<ToolSpec>,
     mut hosted_tools: Vec<HostedTool>,
     client: OaiCompatClient,
@@ -399,7 +503,11 @@ pub(crate) async fn generate_session_compact(
     idle_timeout: std::time::Duration,
     wall_clock_budget_secs: u64,
     tool_choice: crate::util::config::CompactionToolChoice,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CompactOutput, CompactFailure> {
+    if cancel.is_cancelled() {
+        return Err(CompactFailure::Cancelled);
+    }
     let num_messages = chat_history.len();
     // Tool-enabled compaction is a first-party xAI cache optimization, not a
     // portable model capability. Third-party routes always omit tool metadata,
@@ -441,7 +549,8 @@ pub(crate) async fn generate_session_compact(
                 num_messages = num_messages,
                 "Sending compact request (streaming)"
             );
-            let stream_result = client.chat_completion_stream(message).await;
+            let stream_result =
+                await_unless_cancelled(cancel, client.chat_completion_stream(message)).await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata)) => s,
                 Err(e) => return Err(classify_sampling_error(e)),
@@ -453,7 +562,9 @@ pub(crate) async fn generate_session_compact(
             let mut last_progress_at = std::time::Instant::now();
             loop {
                 let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
-                let chunk_result = match next_stream_step(&mut stream, idle_remaining).await {
+                let chunk_result = match next_stream_step(&mut stream, idle_remaining, cancel)
+                    .await?
+                {
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
@@ -535,7 +646,9 @@ pub(crate) async fn generate_session_compact(
                 x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
                 ..Default::default()
             };
-            let stream_result = client.conversation_stream_responses(request).await;
+            let stream_result =
+                await_unless_cancelled(cancel, client.conversation_stream_responses(request))
+                    .await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata, _doom_loop)) => s,
                 Err(e) => return Err(classify_sampling_error(e)),
@@ -547,7 +660,9 @@ pub(crate) async fn generate_session_compact(
             let mut last_progress_at = std::time::Instant::now();
             loop {
                 let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
-                let chunk_result = match next_stream_step(&mut stream, idle_remaining).await {
+                let chunk_result = match next_stream_step(&mut stream, idle_remaining, cancel)
+                    .await?
+                {
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
@@ -672,7 +787,9 @@ pub(crate) async fn generate_session_compact(
                 x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
                 ..Default::default()
             };
-            let stream_result = client.conversation_stream_messages(request).await;
+            let stream_result =
+                await_unless_cancelled(cancel, client.conversation_stream_messages(request))
+                    .await?;
             let mut stream = match stream_result {
                 Ok((s, _metadata)) => s,
                 Err(e) => return Err(classify_sampling_error(e)),
@@ -684,7 +801,9 @@ pub(crate) async fn generate_session_compact(
             let mut last_progress_at = std::time::Instant::now();
             loop {
                 let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
-                let chunk_result = match next_stream_step(&mut stream, idle_remaining).await {
+                let chunk_result = match next_stream_step(&mut stream, idle_remaining, cancel)
+                    .await?
+                {
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
@@ -834,6 +953,7 @@ mod classify_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             }))
         };
         assert!(det(StatusCode::BAD_REQUEST));
@@ -848,6 +968,7 @@ mod classify_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             }),
             CompactFailure::ImageSanitization(_)
         ));
@@ -877,6 +998,7 @@ mod classify_tests {
                     retry_after_secs: None,
                     should_retry: None,
                     diagnostics: None,
+                    error_code: None,
                 }),
                 CompactFailure::ImageSanitization(_)
             ));
@@ -889,15 +1011,16 @@ mod classify_tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             }),
             CompactFailure::Deterministic(_)
         ));
     }
     #[test]
     fn sampling_non_api_variants_classify_correctly() {
-        assert!(is_det(&classify_sampling_error(InferenceError::Auth(
-            "expired".into()
-        ))));
+        assert!(is_det(&classify_sampling_error(
+            InferenceError::auth_unknown("expired")
+        )));
         assert!(is_det(&classify_sampling_error(
             InferenceError::InvalidConfiguration("missing key")
         )));
@@ -911,18 +1034,21 @@ mod classify_tests {
             InferenceError::StreamError {
                 error_type: "overloaded_error".into(),
                 message: "try again".into(),
+                code: None,
             }
         )));
         assert!(is_det(&classify_sampling_error(
             InferenceError::StreamError {
                 error_type: "invalid_request_error".into(),
                 message: "request schema rejected".into(),
+                code: None,
             }
         )));
         assert!(is_det(&classify_sampling_error(
             InferenceError::StreamError {
                 error_type: "error".into(),
                 message: "The prompt is too long for this model's context window.".into(),
+                code: None,
             }
         )));
     }
@@ -958,6 +1084,13 @@ mod classify_tests {
         assert!(is_image_recovery(&classify_response_event_error(
             Some("500"),
             "Could not process image: proxy rejection"
+        )));
+    }
+    #[test]
+    fn response_event_invalid_image_code_uses_image_recovery() {
+        assert!(is_image_recovery(&classify_response_event_error(
+            Some(xai_grok_inference_types::INVALID_IMAGE_ERROR_CODE),
+            "could not decode image"
         )));
     }
     #[test]
@@ -1019,6 +1152,7 @@ mod classify_tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         })));
     }
     #[test]
@@ -1053,6 +1187,7 @@ mod classify_tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         }) else {
             panic!("expected Deterministic for 400");
         };
@@ -1066,6 +1201,7 @@ mod classify_tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         }) else {
             panic!("expected Transient for 500");
         };
@@ -2637,8 +2773,12 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::ImageSanitization(_)) | Err(CompactFailure::Deterministic(_)) => {
-                panic!("a stalled stream must be retryable (Transient), not deterministic")
+            Err(CompactFailure::ImageSanitization(_))
+            | Err(CompactFailure::Deterministic(_))
+            | Err(CompactFailure::Cancelled) => {
+                panic!(
+                    "a stalled stream must be retryable (Transient), not deterministic/cancelled"
+                )
             }
             Ok(_) => panic!("a stalled stream must not produce a summary"),
         }
@@ -2716,8 +2856,12 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::ImageSanitization(_)) | Err(CompactFailure::Deterministic(_)) => {
-                panic!("a stalled stream must be retryable (Transient), not deterministic")
+            Err(CompactFailure::ImageSanitization(_))
+            | Err(CompactFailure::Deterministic(_))
+            | Err(CompactFailure::Cancelled) => {
+                panic!(
+                    "a stalled stream must be retryable (Transient), not deterministic/cancelled"
+                )
             }
             Ok(_) => {
                 panic!(
@@ -2794,8 +2938,12 @@ mod reasoning_compaction_regression_tests {
                     "expected an idle-timeout transient failure, got: {data}"
                 );
             }
-            Err(CompactFailure::ImageSanitization(_)) | Err(CompactFailure::Deterministic(_)) => {
-                panic!("a stalled stream must be retryable (Transient), not deterministic")
+            Err(CompactFailure::ImageSanitization(_))
+            | Err(CompactFailure::Deterministic(_))
+            | Err(CompactFailure::Cancelled) => {
+                panic!(
+                    "a stalled stream must be retryable (Transient), not deterministic/cancelled"
+                )
             }
             Ok(_) => {
                 panic!("salvage removed: a substantial partial must error, not be returned")

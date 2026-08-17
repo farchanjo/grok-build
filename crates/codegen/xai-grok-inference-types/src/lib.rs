@@ -7,9 +7,16 @@
 //! (e.g., `xai-chat-state`) without pulling in the full `xai-grok-shell`.
 
 pub mod anthropic;
+pub mod bearer_fragment {
+    pub use xai_grok_tools::attribution::{BEARER_TAIL_CHARS, bearer_tail};
+}
 pub mod codex_wire;
 pub mod conversation;
 pub mod doom_loop;
+pub mod extra_ca {
+    //! Provider-neutral extra TLS root support shared through inference types.
+    pub use xai_grok_tools::extra_ca::*;
+}
 pub mod error;
 pub mod messages;
 pub mod serde_helpers;
@@ -33,9 +40,10 @@ pub use self::doom_loop::{
     DoomLoopSignal, DoomLoopSignalKind, is_check_event, peek_doom_loop,
 };
 pub use self::error::{
-    ApiErrorDiagnostics, EmptyReason, EmptyResponseContext, InferenceError, ResponseModelMetadata,
-    Result, is_context_length_error, status_user_message, status_user_message_for,
-    user_facing_api_error_message, user_facing_api_error_message_for,
+    ApiErrorCode, ApiErrorDiagnostics, EmptyReason, EmptyResponseContext, INVALID_IMAGE_ERROR_CODE,
+    InferenceError, ResponseModelMetadata, Result, SentCredential, is_context_length_error,
+    parse_error_code, status_user_message, status_user_message_for, user_facing_api_error_message,
+    user_facing_api_error_message_for,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

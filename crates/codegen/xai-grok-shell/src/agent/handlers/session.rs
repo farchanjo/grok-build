@@ -171,8 +171,9 @@ async fn handle_session_close(
     let sid = acp::SessionId::new(req.session_id.clone());
     let existed = agent.sessions.borrow().contains_key(&sid);
     if existed {
-        // Explicit terminal close: shut the actor down and finalize the cloud
-        // replica (genuine session end). Distinct from a mere client disconnect,
+        // Compatibility spelling for the explicit terminal close: shut the
+        // actor down and finalize the cloud replica (genuine session end).
+        // Distinct from a mere client disconnect,
         // which detaches but keeps the session resumable and never finalizes
         // (see `MvpAgent::handle_evict_sessions` / `close_session_explicit`).
         agent.request_session_shutdown(&sid);

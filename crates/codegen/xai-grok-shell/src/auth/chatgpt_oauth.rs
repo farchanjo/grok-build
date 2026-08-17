@@ -234,7 +234,9 @@ async fn exchange_code(
     .map(|(k, v)| format!("{}={}", k, urlencoding_encode(v)))
     .collect::<Vec<_>>()
     .join("&");
-    let client = reqwest::Client::new();
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+        .build()
+        .map_err(|e| ChatGptOAuthError::Http(e.to_string()))?;
     let response = client
         .post(format!("{ISSUER}/oauth/token"))
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -276,7 +278,9 @@ async fn refresh_with_token(refresh_token: &str) -> Result<ChatGptOAuthTokens, C
         urlencoding_encode(refresh_token),
         urlencoding_encode(CLIENT_ID)
     );
-    let client = reqwest::Client::new();
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+        .build()
+        .map_err(|e| ChatGptOAuthError::Http(e.to_string()))?;
     let response = client
         .post(format!("{ISSUER}/oauth/token"))
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -603,7 +607,9 @@ pub struct DeviceLoginStart {
 }
 
 pub async fn start_device_login() -> Result<DeviceLoginStart, ChatGptOAuthError> {
-    let client = reqwest::Client::new();
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+        .build()
+        .map_err(|e| ChatGptOAuthError::Http(e.to_string()))?;
     let response = client
         .post(format!("{ISSUER}/api/accounts/deviceauth/usercode"))
         .header("Content-Type", "application/json")
@@ -643,7 +649,9 @@ pub async fn complete_device_login(
     grok_home: &Path,
     start: &DeviceLoginStart,
 ) -> Result<ChatGptOAuthTokens, ChatGptOAuthError> {
-    let client = reqwest::Client::new();
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+        .build()
+        .map_err(|e| ChatGptOAuthError::Http(e.to_string()))?;
     let deadline = tokio::time::Instant::now() + BROWSER_TIMEOUT;
     loop {
         if tokio::time::Instant::now() > deadline {

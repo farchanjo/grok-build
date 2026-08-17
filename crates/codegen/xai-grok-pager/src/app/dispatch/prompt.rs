@@ -1264,16 +1264,11 @@ pub(super) fn handle_prompt_response(
                 .as_ref()
                 .err()
                 .is_some_and(|e| is_credit_limit_error(http_status, e));
-        // A 401/auth failure already surfaced an actionable
-        // `ReAuthRequired` prompt via the RetryState handler (which
-        // runs before this PromptResponse). Suppress the redundant
-        // "Turn failed" block + error toast so only the prompt shows.
-        let reauth_prompted = scrollback_has_recent_reauth_prompt(&agent.scrollback)
-            || (http_status == Some(401)
-                && result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|e| e.contains("Unauthorized (401)")));
+        // A credential failure already surfaced an actionable provider-scoped
+        // prompt via the RetryState handler (which runs before this
+        // PromptResponse). Generic 401 text is not enough to identify which
+        // provider or credential generation owns the failure.
+        let reauth_prompted = scrollback_has_recent_reauth_prompt(&agent.scrollback);
         let elapsed = agent.turn_elapsed();
 
         {

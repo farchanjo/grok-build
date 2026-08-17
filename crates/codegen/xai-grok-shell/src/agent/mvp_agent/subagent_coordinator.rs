@@ -219,12 +219,32 @@ impl MvpAgent {
                                     let mut coord = this.subagent_coordinator.borrow_mut();
                                     match target {
                                         SubagentCancelTarget::SubagentId(ref subagent_id) => {
+                                            let queued_cancelled =
+                                                this.sessions.borrow().values().any(|handle| {
+                                                    handle
+                                                        .tool_context
+                                                        .subagent_admission
+                                                        .cancel_id(subagent_id)
+                                                });
                                             coord.mark_explicitly_killed(subagent_id);
-                                            coord.cancel_with_outcome(subagent_id)
+                                            match coord.cancel_with_outcome(subagent_id) {
+                                                SubagentCancelOutcome::NotFound
+                                                    if queued_cancelled =>
+                                                {
+                                                    SubagentCancelOutcome::Cancelled
+                                                }
+                                                outcome => outcome,
+                                            }
                                         }
                                         SubagentCancelTarget::ParentPromptId(
                                             ref parent_prompt_id,
                                         ) => {
+                                            for handle in this.sessions.borrow().values() {
+                                                handle
+                                                    .tool_context
+                                                    .subagent_admission
+                                                    .cancel_prompt(parent_prompt_id);
+                                            }
                                             coord.cancel_by_parent_prompt_id(parent_prompt_id);
                                             SubagentCancelOutcome::Cancelled
                                         }
@@ -572,6 +592,19 @@ impl MvpAgent {
             inherited_tool_overrides,
             yolo_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
+            subagent_admission: {
+                let sessions = self.sessions.borrow();
+                sessions
+                    .get(&parent_sid)
+                    .map(|handle| handle.tool_context.subagent_admission.clone())
+                    .unwrap_or_else(|| {
+                        std::sync::Arc::new(
+                            xai_grok_tools::implementations::grok_build::task::admission::SubagentAdmission::new(
+                                xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits::from_env(),
+                            ),
+                        )
+                    })
+            },
             parent_depth,
             inference_idle_timeout_secs,
             auto_compact_threshold_tiers:

@@ -491,7 +491,7 @@ impl SessionActor {
         }
         impl xai_grok_inference::BearerResolver for AuthManagerBearerResolver {
             fn current_bearer(&self) -> Option<String> {
-                self.0.current_or_expired().map(|a| a.key)
+                self.0.current_wire_valid().map(|a| a.key)
             }
         }
         let cfg = self
@@ -524,6 +524,13 @@ impl SessionActor {
         let gate = self.auth_gate(cfg.model.as_str(), &cfg.base_url);
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
+        let api_key = if use_bearer_resolver {
+            self.auth_manager
+                .as_ref()
+                .and_then(|am| am.current_wire_valid().map(|auth| auth.key))
+        } else {
+            creds.api_key
+        };
         let auth_scheme = model_facts.auth_scheme;
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
@@ -620,7 +627,7 @@ impl SessionActor {
         let zai_thinking =
             is_zai.then(|| serde_json::json!({"type": "enabled", "clear_thinking": false}));
         InferenceConfig {
-            api_key: creds.api_key,
+            api_key,
             base_url: cfg.base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
@@ -1480,6 +1487,7 @@ impl SessionActor {
             .unwrap_or_default();
         let is_auth_401 =
             matches!(error.kind, InferenceErrorKind::Auth) || error.status_code == Some(401);
+        let credential = error.credential;
         let error_type = if xai_grok_inference_types::is_context_length_error(&error.message) {
             "context_length"
         } else {
@@ -1509,7 +1517,10 @@ impl SessionActor {
                     && self.try_provider_401_recovery(&auth_provider).await
                 {
                     self.prepare_sampler_for_turn().await;
-                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
+                        credential,
+                        store: RecoveredStore::AuthProvider,
+                    });
                 }
                 return self
                     .surface_provider_credential_failure(
@@ -1582,7 +1593,10 @@ impl SessionActor {
                         "auth recovery: sampler 401, devbox re-mint, retrying"
                     );
                     self.prepare_sampler_for_turn().await;
-                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
+                        credential,
+                        store: RecoveredStore::SessionToken,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1610,7 +1624,10 @@ impl SessionActor {
                     None,
                 );
                 self.prepare_sampler_for_turn().await;
-                return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
+                    credential,
+                    store: RecoveredStore::SessionToken,
+                });
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
             xai_grok_telemetry::unified_log::warn(
@@ -1623,7 +1640,10 @@ impl SessionActor {
             && self.try_provider_401_recovery(provider).await
         {
             self.prepare_sampler_for_turn().await;
-            return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+            return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit {
+                credential,
+                store: RecoveredStore::AuthProvider,
+            });
         }
         if matches!(error.kind, InferenceErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
@@ -1849,8 +1869,8 @@ impl SessionActor {
                     InferenceFailureRecovery::CompactAndResubmit => {
                         Ok(InferenceTurnOutcome::CompactAndResubmit)
                     }
-                    InferenceFailureRecovery::RefreshAuthAndResubmit => {
-                        Ok(InferenceTurnOutcome::RefreshAuthAndResubmit)
+                    InferenceFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
+                        Ok(InferenceTurnOutcome::RefreshAuthAndResubmit { credential, store })
                     }
                 }
             }

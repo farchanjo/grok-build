@@ -30,6 +30,7 @@ pub fn hook_spec_to_info(spec: &xai_grok_hooks::config::HookSpec) -> HookInfo {
         HookEventName::SessionEnd => HookEvent::SessionEnd,
         HookEventName::Stop => HookEvent::Stop,
         HookEventName::StopFailure => HookEvent::StopFailure,
+        HookEventName::StopCancelled => HookEvent::StopCancelled,
         // Tool events
         HookEventName::PreToolUse => HookEvent::PreToolUse,
         HookEventName::PostToolUse => HookEvent::PostToolUse,
@@ -117,6 +118,8 @@ pub(crate) const ADVERTISED_DECISIONS: &[&str] = &["deny", "block"];
 pub(crate) const ADVERTISED_STOP_SIGNALS: &[&str] =
     &["continue", "stopReason", "additionalContext"];
 
+pub(crate) const ADVERTISED_PRE_TOOL_USE_SIGNALS: &[&str] = &["updatedInput"];
+
 /// Only `Deny` blocks; every other value proceeds (fail-open).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,6 +147,31 @@ pub(crate) struct ClientHookResponse {
     pub stop_reason: Option<String>,
     #[serde(default)]
     pub additional_context: Option<String>,
+    #[serde(default)]
+    hook_specific_output: Option<ClientHookSpecificOutput>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientHookSpecificOutput {
+    #[serde(default)]
+    updated_input: Option<serde_json::Value>,
+}
+
+impl ClientHookResponse {
+    /// Return a valid object rewrite. Missing, `null`, and non-object values
+    /// fail open and therefore do not replace a rewrite selected earlier.
+    pub(crate) fn updated_input(&self, callback_id: &str) -> Option<serde_json::Value> {
+        let value = self.hook_specific_output.as_ref()?.updated_input.as_ref()?;
+        if value.is_object() {
+            return Some(value.clone());
+        }
+        tracing::warn!(
+            callback_id,
+            "ignoring non-object `updatedInput` from client hook"
+        );
+        None
+    }
 }
 
 /// Parse client hooks from `session/new` `_meta["x.ai/hooks"]`, shaped
@@ -475,6 +503,19 @@ mod tests {
             serde_json::from_str(r#"{"decision":"block","reason":"run the tests"}"#).unwrap();
         assert_eq!(blocked.decision, ClientHookDecision::Deny);
         assert_eq!(blocked.system_message.as_deref(), Some("run the tests"));
+
+        let rewrite: ClientHookResponse =
+            serde_json::from_str(r#"{"hookSpecificOutput":{"updatedInput":{"command":"pwd"}}}"#)
+                .unwrap();
+        assert_eq!(rewrite.updated_input("cb").unwrap()["command"], "pwd");
+        for ignored in [
+            r#"{"hookSpecificOutput":{"updatedInput":null}}"#,
+            r#"{"hookSpecificOutput":{"updatedInput":"pwd"}}"#,
+            r#"{"hookSpecificOutput":{"updatedInput":42}}"#,
+        ] {
+            let response: ClientHookResponse = serde_json::from_str(ignored).unwrap();
+            assert!(response.updated_input("cb").is_none());
+        }
     }
 
     #[test]
@@ -518,6 +559,17 @@ mod tests {
                 other => panic!("unknown advertised stop signal {other:?}"),
             };
             assert!(captured, "advertised stop signal {signal:?} was not parsed");
+        }
+
+        for signal in ADVERTISED_PRE_TOOL_USE_SIGNALS {
+            let response: ClientHookResponse = serde_json::from_value(serde_json::json!({
+                "hookSpecificOutput": { *signal: { "command": "pwd" } },
+            }))
+            .unwrap();
+            assert!(
+                response.updated_input("cb").is_some(),
+                "advertised PreToolUse signal {signal:?} was not parsed"
+            );
         }
     }
 

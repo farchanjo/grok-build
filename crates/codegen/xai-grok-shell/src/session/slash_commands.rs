@@ -475,6 +475,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "debug",
             "docs",
             "doctor",
+            "edit-prompt",
             "effort",
             "exit",
             "expand",
@@ -514,6 +515,8 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "preferences",
             "prefs",
             "privacy",
+            "provider",
+            "providers",
             "queue",
             "quit",
             "recap",
@@ -2171,18 +2174,28 @@ mod tests {
 
     #[test]
     fn available_commands_qualifies_builtin_colliding_skill() {
-        // A skill named "compact" collides with the builtin /compact.
+        // Skills that collide with shell or pager built-ins must use qualified names.
         let skills = vec![
             make_scoped_skill("compact", SkillScope::Local),
+            make_scoped_skill("edit-prompt", SkillScope::Local),
+            make_scoped_skill("provider", SkillScope::Local),
+            make_scoped_skill("providers", SkillScope::Local),
             make_skill("deploy", true),
         ];
         let commands = available_commands(&skills, all_gated(), &[]);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
-        // The skill should be advertised under its qualified name.
-        assert!(
-            names.contains(&"local:compact"),
-            "builtin-colliding skill should use qualified name, got: {names:?}"
-        );
+        for name in ["compact", "edit-prompt", "provider", "providers"] {
+            let qualified = format!("local:{name}");
+            assert!(
+                names.contains(&qualified.as_str()),
+                "pager-colliding skill must use {qualified}, got: {names:?}"
+            );
+            assert_eq!(
+                names.iter().filter(|candidate| **candidate == name).count(),
+                usize::from(name == "compact"),
+                "only the shell-owned compact builtin may keep a bare collision: {names:?}"
+            );
+        }
         // The bare "compact" entry should be the builtin, not the skill.
         let compact_cmd = commands.iter().find(|c| c.name == "compact").unwrap();
         assert!(

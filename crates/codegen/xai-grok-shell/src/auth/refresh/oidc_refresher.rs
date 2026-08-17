@@ -106,8 +106,8 @@ impl OidcRefresher {
                 "oidc refresh: disk has valid AT, adopting instead of consuming RT",
                 None,
                 Some(serde_json::json!({
-                    "disk_key_prefix": crate::auth::token_suffix(&disk_now.key),
-                    "tried_key_prefix": crate::auth::token_suffix(&tried.key),
+                    "disk_key_prefix": xai_grok_auth::bearer_tail(&disk_now.key),
+                    "tried_key_prefix": xai_grok_auth::bearer_tail(&tried.key),
                 })),
             );
             self.note_refresh_progress();
@@ -127,11 +127,11 @@ impl OidcRefresher {
                 "tried_rt_prefix": tried
                     .refresh_token
                     .as_deref()
-                    .map(crate::auth::token_suffix),
+                    .map(xai_grok_auth::bearer_tail),
                 "disk_rt_prefix": disk_now
                     .refresh_token
                     .as_deref()
-                    .map(crate::auth::token_suffix),
+                    .map(xai_grok_auth::bearer_tail),
             })),
         );
 
@@ -185,7 +185,7 @@ impl TokenRefresher for OidcRefresher {
                 "oidc refresh: sibling refreshed, adopting valid disk AT",
                 None,
                 Some(serde_json::json!({
-                    "disk_key_prefix": crate::auth::token_suffix(&d.key),
+                    "disk_key_prefix": xai_grok_auth::bearer_tail(&d.key),
                 })),
             );
             self.note_refresh_progress();
@@ -215,7 +215,7 @@ impl TokenRefresher for OidcRefresher {
         );
 
         // Snapshot for diagnostic upload on failure (user id, never email).
-        let pre_token = crate::auth::model::token_suffix(&auth.key).to_owned();
+        let pre_token = xai_grok_auth::bearer_tail(&auth.key).to_owned();
         let pre_user_id = if auth.user_id.is_empty() {
             "unknown".into()
         } else {

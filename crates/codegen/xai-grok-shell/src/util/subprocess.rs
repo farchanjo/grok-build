@@ -51,11 +51,21 @@ pub(crate) fn git_bin() -> OsString {
     }
 }
 
-/// A `sh -c <script>` command: the portable shell escape hatch shared by the
-/// identity and auth providers.
-pub(crate) fn sh_c(script: &str) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.args(["-c", script]);
+/// Run a config-provided command string through the platform shell: `sh -c`
+/// on Unix and `cmd /C` on Windows. This is the shell escape hatch shared by
+/// the identity and auth providers.
+///
+/// Windows does not provide `sh` by default, and a POSIX shell can reinterpret
+/// backslashes in native Windows paths. `cmd /C` runs native executables and
+/// scripts while preserving the exit status required by auth providers.
+pub(crate) fn shell_c(script: &str) -> Command {
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut cmd = Command::new(shell);
+    cmd.args([flag, script]);
     cmd
 }
 
@@ -243,7 +253,7 @@ mod tests {
     use super::*;
 
     fn sh(script: &str) -> Command {
-        sh_c(script)
+        shell_c(script)
     }
 
     fn opts(label: &str) -> RunOptions<'_> {
@@ -254,6 +264,17 @@ mod tests {
     }
 
     const TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// The command-string escape hatch must spawn on the host platform. A
+    /// hardcoded `sh` fails on a default Windows installation.
+    #[tokio::test]
+    async fn shell_c_spawns_on_this_platform() {
+        let out = run_detached_with_timeout(shell_c("echo hi"), TIMEOUT, opts("test shell_c"))
+            .await
+            .expect("the platform shell must be spawnable");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
 
     #[tokio::test]
     async fn large_stderr_is_streamed_and_capped() {

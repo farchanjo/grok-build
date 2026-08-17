@@ -34,6 +34,35 @@ fn create_test_notification() -> acp::SessionNotification {
 fn create_test_plan_state() -> TodoState {
     TodoState::default()
 }
+
+#[test]
+fn fork_line_reader_caps_memory_and_keeps_indexes_stable() {
+    fn collect(input: &[u8], cap: usize) -> Vec<(usize, Vec<u8>)> {
+        let mut seen = Vec::new();
+        super::for_each_fork_update_line_capped(std::io::Cursor::new(input), cap, |index, line| {
+            seen.push((index, line.to_vec()));
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .unwrap();
+        seen
+    }
+
+    assert_eq!(collect(b"abcd\n", 4), vec![(0, b"abcd".to_vec())]);
+    assert_eq!(
+        collect(b"aa\nxxxxx\nbb\n", 4),
+        vec![(0, b"aa".to_vec()), (1, b"bb".to_vec())]
+    );
+    assert_eq!(
+        collect(b"xxxxxxxxxxxxxxxxxxxxx\ncc\n", 4),
+        vec![(0, b"cc".to_vec())]
+    );
+    assert_eq!(collect(b"aa\nxxxxxxxx", 4), vec![(0, b"aa".to_vec())]);
+    assert_eq!(
+        collect(b"aa\nbb", 4),
+        vec![(0, b"aa".to_vec()), (1, b"bb".to_vec())]
+    );
+}
+
 #[tokio::test]
 async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
     use crate::extensions::notification::CompactionSegmentFile;
@@ -952,6 +981,177 @@ async fn fork_filter_copy_skips_compaction_checkpoints() {
         );
 }
 #[tokio::test]
+async fn streaming_copy_parses_modern_and_legacy_and_skips_corrupt_update_lines() {
+    use std::io::Write as _;
+
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("streaming-torn-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    adapter
+        .append_update(&source_info, &prompt_user_chunk("P0", 0))
+        .await
+        .unwrap();
+    let mut source = std::fs::OpenOptions::new()
+        .append(true)
+        .open(adapter.updates_file(&source_info))
+        .unwrap();
+    let legacy = serde_json::to_vec(&create_test_notification()).unwrap();
+    source.write_all(&legacy).unwrap();
+    source.write_all(b"\n").unwrap();
+    source
+        .write_all(b"{\"method\":\"session/update\",\"params\":{torn\n")
+        .unwrap();
+    source.write_all(&[0xff, 0xfe, b'\n']).unwrap();
+    drop(source);
+
+    let target_info = Info {
+        id: acp::SessionId::new("streaming-torn-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    let result = adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(result.updates_copied, 2);
+    let loaded = adapter.load_session(&target_info).await.unwrap();
+    assert_eq!(loaded.updates.len(), 2);
+    for update in loaded.updates {
+        match update {
+            SessionUpdate::Acp(notification) => assert_eq!(notification.session_id, target_info.id),
+            SessionUpdate::Xai(notification) => assert_eq!(notification.session_id, target_info.id),
+        }
+    }
+}
+
+#[tokio::test]
+async fn streaming_copy_preserves_raw_envelope_and_wraps_legacy_lines() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("raw-envelope-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let raw_envelope = r#"{ "futureEnvelope" : [ 1, 2 ], "timestamp" : 7, "method" : "session/update", "params" : { "sessionId" : "raw-envelope-src", "update" : { "sessionUpdate" : "agent_message_chunk", "content" : { "type" : "text", "text" : "kept" } }, "futureParams" : { "spaced" : true } } }"#;
+    let legacy = r#"{ "sessionId" : "raw-envelope-src", "update" : { "sessionUpdate" : "agent_message_chunk", "content" : { "type" : "text", "text" : "legacy" } } }"#;
+    std::fs::write(
+        adapter.updates_file(&source_info),
+        format!("{raw_envelope}\n{legacy}\n"),
+    )
+    .unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("raw-envelope-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    let result = adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(result.updates_copied, 2);
+
+    let copied = std::fs::read_to_string(adapter.updates_file(&target_info)).unwrap();
+    let lines: Vec<_> = copied.lines().collect();
+    assert_eq!(lines.len(), 2);
+    let expected_envelope =
+        raw_envelope.replacen(r#""raw-envelope-src""#, r#""raw-envelope-dst""#, 1);
+    assert_eq!(
+        lines[0], expected_envelope,
+        "an existing envelope must remain byte-for-byte stable outside sessionId"
+    );
+    assert!(lines[1].starts_with(r#"{"timestamp":"#));
+    let legacy_wrapped: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(legacy_wrapped["method"], "session/update");
+    assert_eq!(legacy_wrapped["params"]["sessionId"], "raw-envelope-dst");
+}
+
+#[tokio::test]
+async fn fork_summary_wrap_preserves_raw_external_runtime_envelope() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("raw-summary-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let summary_path = adapter.summary_file(&source_info);
+    let mut summary = std::fs::read_to_string(&summary_path).unwrap();
+    let raw_external = r#"{ "kind" : "claude_cli", "futureField" : [ 1, { "x" : true } ] }"#;
+    summary.pop();
+    summary.push_str(&format!(
+        ",\n  \"external_runtime\": {raw_external},\n  \"futureSummaryField\": \"kept\"\n}}",
+    ));
+    std::fs::write(&summary_path, summary).unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("raw-summary-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let copied = std::fs::read_to_string(adapter.summary_file(&target_info)).unwrap();
+    assert!(copied.contains(&format!(r#""external_runtime":{raw_external}"#)));
+    assert!(copied.contains(r#""futureSummaryField":"kept""#));
+}
+
+#[tokio::test]
+async fn copy_session_data_rejects_unsafe_session_id_components() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let safe_source = Info {
+        id: acp::SessionId::new("safe-source"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&safe_source, default_model_id())
+        .await
+        .unwrap();
+
+    for unsafe_id in ["../escape", "a/b", r"a\b", "/absolute", ".", ".."] {
+        let target = Info {
+            id: acp::SessionId::new(unsafe_id),
+            cwd: "/target/workspace".to_string(),
+        };
+        let error = adapter
+            .copy_session_data(&safe_source, &target, CopySessionOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+    let unsafe_source = Info {
+        id: acp::SessionId::new("../safe-source"),
+        cwd: safe_source.cwd.clone(),
+    };
+    let target = Info {
+        id: acp::SessionId::new("safe-target"),
+        cwd: "/target/workspace".to_string(),
+    };
+    assert_eq!(
+        adapter
+            .copy_session_data(&unsafe_source, &target, CopySessionOptions::default())
+            .await
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
 async fn target_prompt_index_truncation_gates_checkpoint_copy() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -1157,6 +1357,266 @@ async fn duplicate_checkpoint_records_copy_the_file_once() {
                 .is_file()
         );
 }
+fn assert_no_copy_staging(adapter: &JsonlStorageAdapter, target_info: &Info) {
+    let target_dir = adapter.session_dir(target_info);
+    let prefix = format!(".{}.copy-", target_info.id);
+    let leftovers: Vec<_> = std::fs::read_dir(target_dir.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect();
+    assert!(leftovers.is_empty(), "copy staging must be cleaned: {leftovers:?}");
+}
+
+#[tokio::test]
+async fn copy_session_data_refuses_same_source_without_modifying_it() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = Info {
+        id: acp::SessionId::new("same-source-target"),
+        cwd: "/same/workspace".to_string(),
+    };
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .append_chat_message(&info, &ConversationItem::user("keep me"))
+        .await
+        .unwrap();
+    adapter
+        .append_update(&info, &prompt_user_chunk("keep update", 0))
+        .await
+        .unwrap();
+    let summary_before = std::fs::read(adapter.summary_file(&info)).unwrap();
+    let chat_before = std::fs::read(adapter.chat_file(&info)).unwrap();
+    let updates_before = std::fs::read(adapter.updates_file(&info)).unwrap();
+
+    let error = adapter
+        .copy_session_data(&info, &info, CopySessionOptions::default())
+        .await
+        .unwrap_err();
+    let same_id_other_cwd = Info {
+        id: info.id.clone(),
+        cwd: "/different/workspace".to_string(),
+    };
+    let same_id_error = adapter
+        .copy_session_data(&info, &same_id_other_cwd, CopySessionOptions::default())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(same_id_error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!adapter.session_dir(&same_id_other_cwd).exists());
+    assert_eq!(std::fs::read(adapter.summary_file(&info)).unwrap(), summary_before);
+    assert_eq!(std::fs::read(adapter.chat_file(&info)).unwrap(), chat_before);
+    assert_eq!(std::fs::read(adapter.updates_file(&info)).unwrap(), updates_before);
+    assert_no_copy_staging(&adapter, &info);
+}
+
+#[tokio::test]
+async fn copy_session_data_refuses_existing_target_without_modifying_it() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("existing-source"),
+        cwd: "/source/workspace".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("existing-target"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    adapter.init_session(&target_info, default_model_id()).await.unwrap();
+    adapter
+        .append_chat_message(&target_info, &ConversationItem::user("original target"))
+        .await
+        .unwrap();
+    let sentinel = adapter.session_dir(&target_info).join("sentinel");
+    std::fs::write(&sentinel, b"do not overwrite").unwrap();
+    let summary_before = std::fs::read(adapter.summary_file(&target_info)).unwrap();
+    let chat_before = std::fs::read(adapter.chat_file(&target_info)).unwrap();
+
+    let error = adapter
+        .copy_session_data(
+            &source_info,
+            &target_info,
+            CopySessionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(adapter.summary_file(&target_info)).unwrap(),
+        summary_before
+    );
+    assert_eq!(std::fs::read(adapter.chat_file(&target_info)).unwrap(), chat_before);
+    assert_eq!(std::fs::read(sentinel).unwrap(), b"do not overwrite");
+    assert_no_copy_staging(&adapter, &target_info);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_copy_publish_refuses_target_that_appears_after_staging() {
+    let temp_dir = TempDir::new().unwrap();
+    let target = temp_dir.path().join("race-target");
+    let staging = super::SessionCopyStaging::create(&target).unwrap();
+    std::fs::write(staging.path.join("summary.json"), b"staged").unwrap();
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("sentinel"), b"winner").unwrap();
+
+    let error = staging.publish(&target).unwrap_err();
+
+    assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+    assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"winner");
+    let leftovers: Vec<_> = std::fs::read_dir(temp_dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".race-target.copy-")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "losing staging must be cleaned");
+}
+
+#[tokio::test]
+async fn copy_session_data_mid_copy_failure_leaves_no_final_target() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("failure-source"),
+        cwd: "/source/workspace".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("failure-target"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    adapter
+        .append_chat_message(&source_info, &ConversationItem::user("copied before failure"))
+        .await
+        .unwrap();
+    std::fs::create_dir(adapter.plan_file(&source_info)).unwrap();
+
+    let result = adapter
+        .copy_session_data(
+            &source_info,
+            &target_info,
+            CopySessionOptions::default(),
+        )
+        .await;
+
+    assert!(result.is_err(), "directory-shaped plan file must fail the copy");
+    assert!(!adapter.session_dir(&target_info).exists());
+    assert_no_copy_staging(&adapter, &target_info);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn copy_session_data_refuses_symlinked_media_descriptor() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("media-symlink-source"),
+        cwd: "/source/workspace".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("media-symlink-target"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    let outside = temp_dir.path().join("outside-media-descriptors.jsonl");
+    std::fs::write(&outside, b"outside secret").unwrap();
+    std::os::unix::fs::symlink(
+        &outside,
+        adapter
+            .session_dir(&source_info)
+            .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE),
+    )
+    .unwrap();
+
+    let result = adapter
+        .copy_session_data(
+            &source_info,
+            &target_info,
+            CopySessionOptions {
+                copy_media_descriptors: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.media_descriptor_files_copied, 0);
+    assert!(adapter.summary_file(&target_info).is_file());
+    assert!(
+        !adapter
+            .session_dir(&target_info)
+            .join(crate::session::media_descriptors::MEDIA_DESCRIPTORS_FILE)
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn copy_session_data_refuses_symlinked_regular_sidecars() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("sidecar-symlink-source"),
+        cwd: "/source/workspace".to_string(),
+    };
+    let target_info = Info {
+        id: acp::SessionId::new("sidecar-symlink-target"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let outside = temp_dir.path().join("outside-plan.json");
+    std::fs::write(&outside, b"outside secret").unwrap();
+    std::os::unix::fs::symlink(&outside, adapter.plan_file(&source_info)).unwrap();
+
+    let result = adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    assert!(!result.plan_state_copied);
+    assert!(!adapter.plan_file(&target_info).exists());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside secret");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn copy_session_data_refuses_symlinked_source_session_root() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("linked-source"),
+        cwd: "/source/workspace".to_string(),
+    };
+    let source_dir = adapter.session_dir(&source_info);
+    std::fs::create_dir_all(source_dir.parent().unwrap()).unwrap();
+    let outside = temp_dir.path().join("outside-session");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("summary.json"), b"{}").unwrap();
+    std::os::unix::fs::symlink(&outside, &source_dir).unwrap();
+    let target_info = Info {
+        id: acp::SessionId::new("linked-target"),
+        cwd: "/target/workspace".to_string(),
+    };
+
+    let error = adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(!adapter.session_dir(&target_info).exists());
+}
+
 #[tokio::test]
 async fn test_copy_session_data_basic() {
     let temp_dir = TempDir::new().unwrap();
@@ -1195,12 +1655,18 @@ async fn test_copy_session_data_basic() {
     assert_eq!(result.updates_copied, 1);
     assert!(result.plan_state_copied);
     let loaded = adapter.load_session(&target_info).await.unwrap();
-    assert_eq!(loaded.summary.info.id, target_info.id);
-    assert_eq!(loaded.summary.info.cwd, "/target/workspace");
     assert_eq!(
-            loaded.summary.parent_session_id,
-            Some("source-session-123".to_string())
-        );
+        loaded.summary.info.id, target_info.id,
+        "published summary must keep the requested target session ID, not staging identity"
+    );
+    assert_eq!(
+        loaded.summary.info.cwd, target_info.cwd,
+        "published summary must keep the requested target working directory"
+    );
+    assert_eq!(
+        loaded.summary.parent_session_id,
+        Some("source-session-123".to_string())
+    );
     assert!(loaded.summary.forked_at.is_some());
     assert_eq!(loaded.chat_history.len(), 3);
     assert_eq!(loaded.updates.len(), 1);
@@ -1307,6 +1773,11 @@ async fn test_copy_session_data_source_not_found() {
         .copy_session_data(&source_info, &target_info, Default::default())
         .await;
     assert!(result.is_err());
+    assert!(
+        !adapter.session_dir(&target_info).exists(),
+        "a missing source must not leave a discoverable target"
+    );
+    assert_no_copy_staging(&adapter, &target_info);
 }
 #[tokio::test]
 async fn test_copy_session_data_with_model_override() {
@@ -2361,7 +2832,10 @@ async fn init_session_stamps_configured_profile_on_new_session() {
     assert_eq!(on_disk.sandbox_profile, expected);
 }
 #[tokio::test]
-async fn fork_inherits_sandbox_profile() {
+async fn fork_inherits_sandbox_and_external_runtime_summary_fields() {
+    use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
+    use crate::agent::external_runtime::ExternalRuntimeEnvelope;
+
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
     let source = Info {
@@ -2375,6 +2849,10 @@ async fn fork_inherits_sandbox_profile() {
     adapter.init_session(&source, default_model_id()).await.unwrap();
     let mut src_summary = adapter.read_summary_sync(&source).unwrap();
     src_summary.sandbox_profile = Some("workspace".to_string());
+    src_summary.execution_backend = ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli);
+    let mut envelope = ExternalRuntimeEnvelope::for_kind(ExternalAgentKind::ClaudeCli);
+    envelope.session_pointer = Some("runtime-session".to_string());
+    src_summary.external_runtime = Some(envelope.clone());
     adapter.write_summary_sync(&source, &src_summary).unwrap();
     adapter
         .copy_session_data(&source, &target, CopySessionOptions::default())
@@ -2382,6 +2860,11 @@ async fn fork_inherits_sandbox_profile() {
         .unwrap();
     let tgt_summary = adapter.read_summary_sync(&target).unwrap();
     assert_eq!(tgt_summary.sandbox_profile.as_deref(), Some("workspace"));
+    assert_eq!(
+        tgt_summary.execution_backend,
+        ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli)
+    );
+    assert_eq!(tgt_summary.external_runtime, Some(envelope));
 }
 #[test]
 fn fork_filter_empty_input_produces_empty() {
@@ -3338,6 +3821,65 @@ fn read_chat_history_quarantines_original_on_image_strip() {
             "pre-strip original must be preserved for recovery"
         );
 }
+
+#[tokio::test]
+async fn backup_chat_history_before_strip_is_first_backup_wins() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    let chat_path = adapter.chat_file(&info);
+    std::fs::create_dir_all(chat_path.parent().unwrap()).unwrap();
+    std::fs::write(&chat_path, "original\n").unwrap();
+
+    adapter
+        .backup_chat_history_before_strip(&info)
+        .await
+        .unwrap();
+    std::fs::write(&chat_path, "already stripped\n").unwrap();
+    adapter
+        .backup_chat_history_before_strip(&info)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(chat_path.with_extension("jsonl.pre-strip")).unwrap(),
+        "original\n"
+    );
+}
+
+#[tokio::test]
+async fn strip_rewrite_gated_does_not_rewrite_when_backup_path_is_invalid() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    let chat_path = adapter.chat_file(&info);
+    std::fs::create_dir_all(chat_path.parent().unwrap()).unwrap();
+    let original = r#"{"type":"user","content":[{"type":"text","text":"with image"}]}\n"#;
+    std::fs::write(&chat_path, original).unwrap();
+    std::fs::create_dir(chat_path.with_extension("jsonl.pre-strip")).unwrap();
+
+    let result = crate::session::storage::strip_rewrite_gated(
+        &adapter,
+        &info,
+        &[ConversationItem::user("stripped")],
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_to_string(chat_path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn backup_chat_history_before_strip_noops_without_chat_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter
+        .backup_chat_history_before_strip(&info)
+        .await
+        .unwrap();
+    assert!(!adapter.chat_file(&info).with_extension("jsonl.pre-strip").exists());
+}
+
 /// The exact incident shape: a partial record with the next record
 /// appended straight onto it (no newline in between — the log-and-continue
 /// append path pre-heal). The merged line fails with "expected `,` or `}`"
@@ -3718,5 +4260,89 @@ async fn load_session_without_updates_survives_merged_chat_line() {
             user_text(&loaded.chat_history),
             vec!["real turn"],
             "resume succeeds; only the merged record is dropped"
+        );
+}
+#[cfg(unix)]
+use crate::test_support::{set_unix_mode, unix_mode};
+#[tokio::test]
+#[cfg(unix)]
+async fn init_session_creates_owner_only_session_and_parent_dirs() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let session_dir = temp_dir
+        .path()
+        .join("sessions")
+        .join(crate::util::grok_home::encode_cwd_dirname(&info.cwd))
+        .join(info.id.to_string());
+    assert_eq!(unix_mode(&session_dir), 0o700, "session dir must be 0700");
+    assert_eq!(
+            unix_mode(session_dir.parent().unwrap()),
+            0o700,
+            "<encoded-cwd> parent must be 0700"
+        );
+    assert_eq!(
+            unix_mode(&temp_dir.path().join("sessions")),
+            0o700,
+            "sessions root must be 0700"
+        );
+}
+/// Dirs loosened on disk (e.g. by an older grok) re-tighten on next touch.
+#[tokio::test]
+#[cfg(unix)]
+async fn init_session_retightens_loosened_existing_owner_only_dirs() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let session_dir = temp_dir
+        .path()
+        .join("sessions")
+        .join(crate::util::grok_home::encode_cwd_dirname(&info.cwd))
+        .join(info.id.to_string());
+    set_unix_mode(&session_dir, 0o755);
+    set_unix_mode(session_dir.parent().unwrap(), 0o755);
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    assert_eq!(unix_mode(&session_dir), 0o700);
+    assert_eq!(unix_mode(session_dir.parent().unwrap()), 0o700);
+}
+#[tokio::test]
+#[cfg(unix)]
+async fn copy_session_data_sync_creates_owner_only_target_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = create_test_info();
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    let target = Info {
+        id: acp::SessionId::new("forked-session-456"),
+        cwd: source.cwd.clone(),
+    };
+    adapter
+        .copy_session_data_sync(&source, &target, CopySessionOptions::default())
+        .unwrap();
+    let target_dir = temp_dir
+        .path()
+        .join("sessions")
+        .join(crate::util::grok_home::encode_cwd_dirname(&target.cwd))
+        .join(target.id.to_string());
+    assert_eq!(unix_mode(&target_dir), 0o700);
+}
+/// Explicit-mode parents are caller-owned (temp roots in tests): never chmod'd.
+#[tokio::test]
+#[cfg(unix)]
+async fn explicit_session_dir_does_not_tighten_owner_only_parent() {
+    let temp_dir = TempDir::new().unwrap();
+    let parent = temp_dir.path().join("caller-owned");
+    std::fs::create_dir(&parent).unwrap();
+    set_unix_mode(&parent, 0o755);
+    let child = parent.join("child-session");
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(child.clone());
+    adapter.init_session(&create_test_info(), default_model_id()).await.unwrap();
+    assert_eq!(unix_mode(&child), 0o700, "explicit dir must be tightened");
+    assert_eq!(
+            unix_mode(&parent),
+            0o755,
+            "caller-owned parent must not be chmod'd in Explicit mode"
         );
 }

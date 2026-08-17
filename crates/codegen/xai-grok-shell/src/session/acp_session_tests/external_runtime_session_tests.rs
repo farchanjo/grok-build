@@ -30,6 +30,8 @@ struct RecordingExternalRuntime {
     /// When set, `turn` fails with this error kind and carries partial events.
     fail_kind: Mutex<Option<ExternalRuntimeErrorKind>>,
     partial_events: Mutex<Vec<ExternalRuntimeTurnEvent>>,
+    invalid_start_envelope: bool,
+    invalid_outcome_envelope: bool,
 }
 
 impl RecordingExternalRuntime {
@@ -43,6 +45,8 @@ impl RecordingExternalRuntime {
             turn_text: turn_text.into(),
             fail_kind: Mutex::new(None),
             partial_events: Mutex::new(Vec::new()),
+            invalid_start_envelope: false,
+            invalid_outcome_envelope: false,
         })
     }
 
@@ -54,6 +58,36 @@ impl RecordingExternalRuntime {
         *r.fail_kind.lock().unwrap() = Some(fail_kind);
         *r.partial_events.lock().unwrap() = partial;
         r
+    }
+
+    fn with_invalid_outcome_envelope(turn_text: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            kind: ExternalAgentKind::ClaudeCli,
+            probe_count: AtomicUsize::new(0),
+            turn_count: AtomicUsize::new(0),
+            shutdown_count: AtomicUsize::new(0),
+            cancel_count: AtomicUsize::new(0),
+            turn_text: turn_text.into(),
+            fail_kind: Mutex::new(None),
+            partial_events: Mutex::new(Vec::new()),
+            invalid_start_envelope: false,
+            invalid_outcome_envelope: true,
+        })
+    }
+
+    fn with_invalid_start_envelope(turn_text: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            kind: ExternalAgentKind::ClaudeCli,
+            probe_count: AtomicUsize::new(0),
+            turn_count: AtomicUsize::new(0),
+            shutdown_count: AtomicUsize::new(0),
+            cancel_count: AtomicUsize::new(0),
+            turn_text: turn_text.into(),
+            fail_kind: Mutex::new(None),
+            partial_events: Mutex::new(Vec::new()),
+            invalid_start_envelope: true,
+            invalid_outcome_envelope: true,
+        })
     }
 }
 
@@ -81,6 +115,10 @@ impl ExternalAgentRuntime for RecordingExternalRuntime {
         env.selected_model = request.selected_model;
         env.reasoning_effort = request.reasoning_effort;
         env.token_budget = request.token_budget;
+        if self.invalid_start_envelope {
+            env.session_pointer = Some("bad\nstart-pointer".into());
+            return Ok(env);
+        }
         env.validated().map_err(|e| {
             ExternalRuntimeError::new(
                 ExternalRuntimeErrorKind::InvalidRequest,
@@ -115,7 +153,9 @@ impl ExternalAgentRuntime for RecordingExternalRuntime {
             return Err(err);
         }
         let mut env = envelope.clone();
-        if env.session_pointer.is_none() {
+        if self.invalid_outcome_envelope {
+            env.session_pointer = Some("bad\nresume-pointer".into());
+        } else if env.session_pointer.is_none() {
             env.session_pointer = Some("fake-sess".into());
         }
         Ok(ExternalTurnOutcome {
@@ -370,6 +410,95 @@ async fn external_assistant_text_lands_in_chat_state_without_tool_calls() {
                 assistant.tool_calls.is_empty(),
                 "Claude tools must not become Grok tool_calls: {:?}",
                 assistant.tool_calls
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_outcome_envelope_retains_prior_valid_envelope() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+            actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                ExternalAgentKind::ClaudeCli,
+            ));
+
+            let mut prior = ExternalRuntimeEnvelope::for_kind(ExternalAgentKind::ClaudeCli);
+            prior.cwd = Some(actor.tool_context.cwd.as_str().to_owned());
+            prior.selected_model = Some(actor.current_model_id().await);
+            prior.session_pointer = Some("known-valid-session".into());
+            let prior = prior.validated().expect("valid prior envelope");
+            *actor.external_runtime.borrow_mut() = Some(prior.clone());
+
+            let fake = RecordingExternalRuntime::with_invalid_outcome_envelope("reply");
+            *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
+                ExternalAgentKind::ClaudeCli,
+                actor.external_effective_mode_key(),
+                fake as Arc<dyn ExternalAgentRuntime>,
+            ));
+
+            actor
+                .run_external_agent_turn("ext-invalid-envelope", "hi")
+                .await
+                .expect("prior valid envelope permits safe completion");
+
+            assert_eq!(actor.external_runtime.borrow().as_ref(), Some(&prior));
+            let persisted = std::iter::from_fn(|| persistence_rx.try_recv().ok()).find_map(|msg| {
+                if let crate::session::persistence::PersistenceMsg::CurrentModel {
+                    external_runtime: Some(Some(envelope)),
+                    ..
+                } = msg
+                {
+                    Some(envelope)
+                } else {
+                    None
+                }
+            });
+            assert_eq!(persisted.as_ref(), Some(&prior));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_outcome_envelope_without_prior_valid_envelope_fails_safely() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor =
+                Arc::new(create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await);
+            actor.execution_backend.set(ExecutionBackend::ExternalAgent(
+                ExternalAgentKind::ClaudeCli,
+            ));
+
+            let fake = RecordingExternalRuntime::with_invalid_start_envelope("reply");
+            *actor.external_agent_runtime.borrow_mut() = Some(RetainedExternalAgentRuntime::new(
+                ExternalAgentKind::ClaudeCli,
+                actor.external_effective_mode_key(),
+                fake as Arc<dyn ExternalAgentRuntime>,
+            ));
+
+            actor
+                .run_external_agent_turn("ext-invalid-envelope-no-prior", "hi")
+                .await
+                .expect_err("invalid envelope without prior valid state must fail");
+
+            assert!(actor.external_runtime.borrow().is_none());
+            assert!(
+                std::iter::from_fn(|| persistence_rx.try_recv().ok()).all(|msg| !matches!(
+                    msg,
+                    crate::session::persistence::PersistenceMsg::CurrentModel {
+                        external_runtime: Some(Some(_)),
+                        ..
+                    }
+                )),
+                "invalid envelope must never reach persistence"
             );
         })
         .await;

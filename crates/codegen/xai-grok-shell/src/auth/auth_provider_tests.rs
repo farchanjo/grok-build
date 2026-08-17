@@ -345,6 +345,10 @@ async fn provider_concurrent_mints_single_flight() {
 /// distant one serves from cache.
 #[tokio::test]
 async fn provider_expiry_source_precedence() {
+    // jsonwebtoken needs a process-level CryptoProvider; tests that encode
+    // JWTs can't rely on another test having installed it first.
+    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+
     fn short_jwt() -> String {
         // exp within the skew window: stale immediately if consumed.
         jwt_with_exp(chrono::Utc::now().timestamp() + 30)
@@ -441,6 +445,25 @@ async fn provider_unusable_expiry_still_mints() {
         provider.ensure_fresh_token(Some("t")).await,
         ProviderRefreshOutcome::Unchanged,
         "no expiry source: never proactively re-minted"
+    );
+}
+
+#[tokio::test]
+async fn provider_string_command_uses_the_platform_shell() {
+    let provider = AuthProviderRef::new(
+        "test-platform-shell".to_owned(),
+        AuthProviderConfig {
+            // `echo` is built into both `sh` and `cmd`, so this verifies that
+            // string-form commands spawn through the host platform's shell.
+            command: "echo platform-token".to_owned(),
+            args: None,
+            token_ttl_secs: Some(3600),
+            timeout_secs: None,
+        },
+    );
+    assert_eq!(
+        provider.ensure_fresh_token(None).await.rotated().as_deref(),
+        Some("platform-token")
     );
 }
 

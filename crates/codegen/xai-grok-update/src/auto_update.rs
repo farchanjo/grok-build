@@ -836,7 +836,7 @@ async fn try_parallel_download(
     dest: &std::path::Path,
     with_progress: bool,
 ) -> Result<()> {
-    let client = reqwest::Client::builder()
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .timeout(DOWNLOAD_REQUEST_TIMEOUT)
         .build()?;
 
@@ -974,7 +974,7 @@ pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result
         }
     }
 
-    let client = reqwest::Client::builder()
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .timeout(DOWNLOAD_REQUEST_TIMEOUT)
         .build()?;
     let resp = client.get(url).send().await?;
@@ -1034,7 +1034,7 @@ pub async fn download_silent(url: &str, dest: &std::path::Path) -> Result<()> {
         }
     }
 
-    let client = reqwest::Client::builder()
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .timeout(DOWNLOAD_REQUEST_TIMEOUT)
         .build()?;
     let resp = client.get(url).send().await?;

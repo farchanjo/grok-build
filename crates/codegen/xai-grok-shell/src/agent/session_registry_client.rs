@@ -211,30 +211,27 @@ impl SessionRegistryClient {
 
     fn check_response(&self, response: reqwest::Response, op: &str) -> anyhow::Error {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(op);
+            self.record_401_attribution(op, &response);
             anyhow::anyhow!("{op}: {}", self.credentials.auth_error_hint())
         } else {
             anyhow::anyhow!("{op} failed: {}", response.status())
         }
     }
 
-    /// Emit a single `auth 401 attribution` log entry tagged with
-    /// `consumer = "SessionRegistryClient.<op>"`. The op string is the
-    /// operation name passed to `check_response` (e.g.,
-    /// `"session register"`).
-    fn record_401_attribution(&self, op: &str) {
+    /// Emit a single `auth 401 attribution` log entry from the middleware's
+    /// response-local attempt stamp. A missing stamp remains `None`.
+    fn record_401_attribution(&self, op: &str, response: &reqwest::Response) {
         if let Some(manager) = self.credentials.auth_manager() {
-            let resolved = self.credentials.resolve();
-            let sent = resolved
-                .deployment_key
-                .clone()
-                .or(resolved.user_token.clone());
+            let sent_tail = response
+                .extensions()
+                .get::<xai_grok_auth::StampedBearerTail>()
+                .map(|stamp| stamp.0.as_str());
             crate::auth::attribution::record_consumer_401(
                 manager.as_ref(),
                 self.session_id.as_deref(),
                 crate::auth::attribution::ConsumerKind::SessionRegistryClient,
                 op,
-                sent.as_deref(),
+                sent_tail,
             );
         }
     }

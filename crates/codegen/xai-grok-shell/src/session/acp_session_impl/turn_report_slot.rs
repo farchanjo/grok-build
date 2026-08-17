@@ -1,0 +1,144 @@
+//! Epoch-aware ownership for the one turn-end hook report.
+
+use std::cell::RefCell;
+
+/// Bumped whenever a queued prompt is promoted to the running turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct TurnEpoch(u64);
+
+/// A gate claim may cross awaits and therefore may be released when its task is aborted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClaimKind {
+    Gate,
+    Report,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TurnReportState {
+    #[default]
+    Free,
+    Held {
+        claim: u64,
+        kind: ClaimKind,
+    },
+    Reported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a lost claim means another reporter already reported this turn"]
+pub(super) enum CommitOutcome {
+    Reported,
+    LostToAnotherReporter,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TurnReportSlot {
+    inner: RefCell<Inner>,
+}
+
+#[derive(Debug, Default)]
+struct Inner {
+    state: TurnReportState,
+    epoch: TurnEpoch,
+    /// Never reset, so a released stale claimant cannot commit over a successor.
+    next_claim: u64,
+}
+
+pub(super) struct TurnReportClaim<'a> {
+    slot: &'a TurnReportSlot,
+    claim: u64,
+    committed: bool,
+}
+
+impl TurnReportClaim<'_> {
+    pub(super) fn commit(mut self) -> CommitOutcome {
+        self.committed = true;
+        if self.slot.finish(self.claim, TurnReportState::Reported) {
+            CommitOutcome::Reported
+        } else {
+            CommitOutcome::LostToAnotherReporter
+        }
+    }
+}
+
+impl Drop for TurnReportClaim<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.slot.finish(self.claim, TurnReportState::Free);
+        }
+    }
+}
+
+impl TurnReportSlot {
+    pub(super) fn epoch(&self) -> TurnEpoch {
+        self.inner.borrow().epoch
+    }
+
+    pub(super) fn claim_for_gate(&self) -> Option<TurnReportClaim<'_>> {
+        self.try_claim(self.epoch(), ClaimKind::Gate)
+    }
+
+    pub(super) fn claim_at(&self, epoch: TurnEpoch) -> Option<TurnReportClaim<'_>> {
+        self.try_claim(epoch, ClaimKind::Report)
+    }
+
+    fn try_claim(&self, epoch: TurnEpoch, kind: ClaimKind) -> Option<TurnReportClaim<'_>> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.epoch != epoch || inner.state != TurnReportState::Free {
+            return None;
+        }
+        inner.next_claim += 1;
+        let claim = inner.next_claim;
+        inner.state = TurnReportState::Held { claim, kind };
+        Some(TurnReportClaim {
+            slot: self,
+            claim,
+            committed: false,
+        })
+    }
+
+    /// A cancellation may release only the in-flight gate claim for the same turn.
+    pub(super) fn release_aborted(&self, epoch: TurnEpoch) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.epoch == epoch
+            && matches!(
+                inner.state,
+                TurnReportState::Held {
+                    kind: ClaimKind::Gate,
+                    ..
+                }
+            )
+        {
+            inner.state = TurnReportState::Free;
+        }
+    }
+
+    pub(super) fn start_next_turn(&self) {
+        let mut inner = self.inner.borrow_mut();
+        if matches!(inner.state, TurnReportState::Held { .. }) {
+            let message = "a turn started while the previous turn's report claim was still held";
+            tracing::error!(message);
+            debug_assert!(false, "{message}");
+        }
+        inner.epoch.0 += 1;
+        inner.state = TurnReportState::Free;
+    }
+
+    #[cfg(test)]
+    pub(super) fn state(&self) -> TurnReportState {
+        self.inner.borrow().state
+    }
+
+    fn finish(&self, claim: u64, next: TurnReportState) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        if !matches!(inner.state, TurnReportState::Held { claim: held, .. } if held == claim) {
+            return false;
+        }
+        inner.state = next;
+        true
+    }
+}
+
+#[cfg(test)]
+#[path = "turn_report_slot_tests.rs"]
+mod tests;

@@ -155,8 +155,22 @@ pub enum ChatStateCommand {
     /// Increment prompt_index (called at start of each user turn).
     IncrementPromptIndex,
 
-    /// Update the sampling config (e.g., model switch).
+    /// Update sampling settings without changing the active ephemeral request
+    /// policy (e.g., a context-window refresh within the same provider).
     UpdateInferenceSettings { config: InferenceSettings },
+
+    /// Update sampling settings and replace the ephemeral provider-derived
+    /// request policy atomically (e.g., on a model/provider switch).
+    UpdateInferenceSettingsWithImageBudget {
+        config: InferenceSettings,
+        image_budget: Option<crate::types::ImageBudgetConfig>,
+    },
+
+    /// Replace only the ephemeral proactive image budget. Used when execution
+    /// mode changes without changing the sampling configuration.
+    UpdateImageBudget {
+        image_budget: Option<crate::types::ImageBudgetConfig>,
+    },
 
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },
@@ -188,6 +202,13 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<
             Result<crate::compaction_utils::HistoryRepairReport, RepairHistoryBlocked>,
         >,
+    },
+
+    /// Apply a URL-scoped image strip inside the actor and reply only after
+    /// the backup-gated disk rewrite is acknowledged.
+    StripConversationImages {
+        urls: Vec<std::sync::Arc<str>>,
+        reply: oneshot::Sender<crate::StripOutcome>,
     },
 
     /// Atomically align the leading `System` message with `prompt` (inserting
@@ -467,25 +488,31 @@ mod tests {
         };
         let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
         let _ = ChatStateCommand::IncrementPromptIndex;
-        let _ = ChatStateCommand::UpdateInferenceSettings {
-            config: InferenceSettings {
-                base_url: String::new(),
-                model: String::new(),
-                max_completion_tokens: None,
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                extra_headers: Default::default(),
-                context_window: std::num::NonZeroU64::new(128_000).unwrap(),
-                reasoning_effort: None,
-                stream_tool_calls: None,
-                supports_native_schema: None,
-                supports_strict_tools: None,
-                supports_image_input: None,
-                supports_audio_input: None,
-                supports_video_input: None,
-            },
+        let config = InferenceSettings {
+            base_url: String::new(),
+            model: String::new(),
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            api_backend: Default::default(),
+            extra_headers: Default::default(),
+            context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+            reasoning_effort: None,
+            stream_tool_calls: None,
+            supports_native_schema: None,
+            supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
         };
+        let _ = ChatStateCommand::UpdateInferenceSettings {
+            config: config.clone(),
+        };
+        let _ = ChatStateCommand::UpdateInferenceSettingsWithImageBudget {
+            config,
+            image_budget: None,
+        };
+        let _ = ChatStateCommand::UpdateImageBudget { image_budget: None };
         let _ = ChatStateCommand::RecordAgentEditedPath {
             path: "src/main.rs".to_string(),
         };

@@ -2537,7 +2537,7 @@ fn rollback_to_always_approve_blocked_by_policy_pin() {
 /// A degraded conversations lane surfaces an actionable notice instead of
 /// the misleading "No sessions found" toast.
 #[test]
-fn session_list_partial_no_oauth_surfaces_login_hint() {
+fn session_list_partial_no_oauth_surfaces_xai_provider_hint() {
     let mut app = test_app_with_agent();
     open_session_picker_with(&mut app, vec![]);
     let _ = dispatch(
@@ -2550,9 +2550,15 @@ fn session_list_partial_no_oauth_surfaces_login_hint() {
         }),
         &mut app,
     );
+    let toast = read_toast(&app);
+    assert!(toast.contains("xAI"), "no_oauth must identify xAI: {toast}");
     assert!(
-        read_toast(&app).contains("/login"),
-        "no_oauth must point at /login"
+        toast.contains("/providers"),
+        "no_oauth must point at provider-scoped repair: {toast}"
+    );
+    assert!(
+        !toast.contains("/login"),
+        "no_oauth must not advertise removed global auth: {toast}"
     );
 }
 

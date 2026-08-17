@@ -57,14 +57,29 @@ impl TokenRefresher for ExternalBinaryRefresher {
 mod tests {
     use super::*;
     use crate::auth::GrokAuth;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Minimal runner whose external command returns a fixed result.
     struct FakeRunner {
         external_result: Option<GrokAuth>,
+        calls: AtomicU32,
+    }
+    impl FakeRunner {
+        fn new(external_result: Option<GrokAuth>) -> Self {
+            Self {
+                external_result,
+                calls: AtomicU32::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            self.calls.load(Ordering::SeqCst)
+        }
     }
     #[async_trait::async_trait]
     impl ExternalCommandRunner for FakeRunner {
         async fn run_external_command(&self, _command: &str) -> Option<GrokAuth> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             self.external_result.clone()
         }
     }
@@ -75,12 +90,8 @@ mod tests {
     /// lockout regression.)
     #[tokio::test]
     async fn external_binary_failure_is_single_strike_non_sticky_permanent() {
-        let refresher = ExternalBinaryRefresher::new(
-            Arc::new(FakeRunner {
-                external_result: None,
-            }),
-            "auth-binary".into(),
-        );
+        let runner = Arc::new(FakeRunner::new(None));
+        let refresher = ExternalBinaryRefresher::new(runner.clone(), "auth-binary".into());
         match refresher.refresh(RefreshReason::ServerRejected).await {
             RefreshOutcome::PermanentFailure { error, .. } => {
                 assert_eq!(error.reason, RefreshTokenFailedReason::Other);
@@ -91,6 +102,7 @@ mod tests {
             }
             other => panic!("a failed binary run must be a permanent Other failure, got {other:?}"),
         }
+        assert_eq!(runner.calls(), 1, "refresh runs the external provider once");
     }
 
     #[tokio::test]
@@ -99,15 +111,12 @@ mod tests {
             key: "ext-fresh".into(),
             ..GrokAuth::test_default()
         };
-        let refresher = ExternalBinaryRefresher::new(
-            Arc::new(FakeRunner {
-                external_result: Some(token),
-            }),
-            "auth-binary".into(),
-        );
+        let runner = Arc::new(FakeRunner::new(Some(token)));
+        let refresher = ExternalBinaryRefresher::new(runner.clone(), "auth-binary".into());
         match refresher.refresh(RefreshReason::ServerRejected).await {
             RefreshOutcome::Success(auth) => assert_eq!(auth.key, "ext-fresh"),
             other => panic!("a successful binary run must return Success, got {other:?}"),
         }
+        assert_eq!(runner.calls(), 1, "refresh runs the external provider once");
     }
 }

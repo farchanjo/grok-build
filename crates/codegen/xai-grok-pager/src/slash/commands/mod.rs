@@ -299,6 +299,8 @@ mod tests {
             "preferences",
             "prefs",
             "privacy",
+            "provider",
+            "providers",
             "queue",
             "quit",
             "recap",

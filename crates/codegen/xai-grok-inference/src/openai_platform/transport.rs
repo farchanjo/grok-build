@@ -277,7 +277,7 @@ impl PlatformTransport {
     ) -> PlatformResult<Self> {
         let base = NormalizedBaseUrl::parse(base_url)?;
         validate_extra_headers(&extra_headers)?;
-        let http = reqwest::Client::builder()
+        let http = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
             .connect_timeout(policy.connect_timeout)
             .timeout(policy.request_timeout)
             .redirect(reqwest::redirect::Policy::none())

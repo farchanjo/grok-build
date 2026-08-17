@@ -12,11 +12,13 @@ pub const MAX_PAYLOAD_SIZE: usize = 128 * 1024;
 pub enum HookEventName {
     SessionStart,
     SessionEnd,
-    /// Fires on a genuine turn-end with stop decision control (a hook can block);
-    /// not on user interrupts (API-error turns fire `StopFailure`); observe-only at session end.
+    /// Blocking at a genuine turn-end, observe-only at session end. An interrupt fires
+    /// `StopCancelled` instead, and an API error fires `StopFailure`.
     Stop,
     /// Fires when the turn ends due to an API error. Output and exit code are ignored.
     StopFailure,
+    /// Fires instead of `Stop` when a promoted turn ends without completing. Observe-only.
+    StopCancelled,
 
     PreToolUse,
     PostToolUse,
@@ -66,6 +68,7 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
             "SessionEnd" | "session_end" | "sessionEnd" => Ok(Self::SessionEnd),
             "Stop" | "stop" => Ok(Self::Stop),
             "StopFailure" | "stop_failure" | "stopFailure" => Ok(Self::StopFailure),
+            "StopCancelled" | "stop_cancelled" | "stopCancelled" => Ok(Self::StopCancelled),
             "Notification" | "notification" => Ok(Self::Notification),
             "UserPromptSubmit" | "user_prompt_submit" | "beforeSubmitPrompt" => {
                 Ok(Self::UserPromptSubmit)
@@ -81,7 +84,7 @@ impl<'de> serde::Deserialize<'de> for HookEventName {
             other => Err(serde::de::Error::custom(format!(
                 "unknown hook event: '{other}'. Expected one of: \
                  SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, \
-                 SessionEnd, Stop, StopFailure, Notification, UserPromptSubmit, \
+                 SessionEnd, Stop, StopFailure, StopCancelled, Notification, UserPromptSubmit, \
                  PermissionDenied, SubagentStart, SubagentStop, \
                  PreCompact, PostCompact (camelCase and per-operation aliases \
                  such as beforeShellExecution are also accepted)"
@@ -100,6 +103,7 @@ impl std::fmt::Display for HookEventName {
             Self::SessionEnd => write!(f, "session_end"),
             Self::Stop => write!(f, "stop"),
             Self::StopFailure => write!(f, "stop_failure"),
+            Self::StopCancelled => write!(f, "stop_cancelled"),
             Self::Notification => write!(f, "notification"),
             Self::UserPromptSubmit => write!(f, "user_prompt_submit"),
             Self::PermissionDenied => write!(f, "permission_denied"),
@@ -162,6 +166,7 @@ impl HookEventName {
             Self::SessionEnd => t(Observe, Tested, true),
             Self::Stop => t(Stop, Ignored, true),
             Self::StopFailure => t(Observe, Tested, true),
+            Self::StopCancelled => t(Observe, Tested, true),
             Self::PreToolUse => t(Tool, Tested, false),
             Self::PostToolUse => t(Observe, Tested, true),
             Self::PostToolUseFailure => t(Observe, Tested, true),
@@ -177,8 +182,19 @@ impl HookEventName {
     }
 }
 
-/// Max characters for free-text fields in `StopBackgroundTask`/`StopSessionCron` entries.
+/// Max characters for `StopBackgroundTask`/`StopSessionCron` entries, `StopFailure`'s
+/// `errorDetails`, and `StopCancelled`'s `reasonDetails`.
 pub const MAX_STOP_ENTRY_TEXT_CHARS: usize = 1000;
+
+/// Cancel triggers are short tokens.
+pub const MAX_CANCEL_TRIGGER_CHARS: usize = 64;
+
+/// Chars, not bytes. Nothing truncates a hook envelope, so this field needs its own ceiling.
+pub const MAX_ASSISTANT_MESSAGE_CHARS: usize = MAX_PAYLOAD_SIZE / 4;
+
+pub fn clip_assistant_message(text: &str) -> String {
+    clip_text(text, MAX_ASSISTANT_MESSAGE_CHARS)
+}
 
 /// Clip `text` to `max` chars (on a char boundary) with a `… [+N chars]` marker.
 pub fn clip_text(text: &str, max: usize) -> String {
@@ -263,6 +279,50 @@ impl StopFailureKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopCancelledReason {
+    UserInterrupt,
+    PermissionRejected,
+    PermissionCancelled,
+    MaxTurns,
+    NoProgress,
+    /// A cancel the runtime could not classify. New causes land here until named.
+    Unknown,
+}
+
+/// Derived from `reason` and serialized so hook hosts do not need to re-derive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelledBy {
+    User,
+    Runtime,
+    Unknown,
+}
+
+impl StopCancelledReason {
+    pub fn cancelled_by(self) -> CancelledBy {
+        match self {
+            Self::UserInterrupt | Self::PermissionRejected | Self::PermissionCancelled => {
+                CancelledBy::User
+            }
+            Self::MaxTurns | Self::NoProgress => CancelledBy::Runtime,
+            Self::Unknown => CancelledBy::Unknown,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserInterrupt => "user_interrupt",
+            Self::PermissionRejected => "permission_rejected",
+            Self::PermissionCancelled => "permission_cancelled",
+            Self::MaxTurns => "max_turns",
+            Self::NoProgress => "no_progress",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// The normalized event envelope sent to hook commands on stdin as JSON:
 /// common metadata plus an event-specific payload.
 #[derive(Debug, Clone, Serialize)]
@@ -334,6 +394,22 @@ pub enum HookPayload {
             skip_serializing_if = "Option::is_none"
         )]
         last_assistant_message: Option<String>,
+    },
+    StopCancelled {
+        reason: StopCancelledReason,
+        #[serde(rename = "cancelledBy")]
+        cancelled_by: CancelledBy,
+        #[serde(rename = "cancelTrigger", skip_serializing_if = "Option::is_none")]
+        cancel_trigger: Option<String>,
+        #[serde(rename = "reasonDetails", skip_serializing_if = "Option::is_none")]
+        reason_details: Option<String>,
+        #[serde(
+            rename = "lastAssistantMessage",
+            skip_serializing_if = "Option::is_none"
+        )]
+        last_assistant_message: Option<String>,
+        #[serde(rename = "subagentType", skip_serializing_if = "Option::is_none")]
+        subagent_type: Option<String>,
     },
 
     PreToolUse {
@@ -470,6 +546,7 @@ impl HookPayload {
             Self::SessionEnd { reason, .. } => reason,
             // Always a non-empty name, unlike the free-text arms above.
             Self::StopFailure { error, .. } => return Some(error.as_str()),
+            Self::StopCancelled { reason, .. } => return Some(reason.as_str()),
             // Ignored events listed explicitly so a new Tested event can't silently return None.
             Self::Stop { .. } | Self::UserPromptSubmit { .. } => return None,
         };
@@ -515,6 +592,11 @@ mod tests {
             ("SessionEnd", "session_end", HookEventName::SessionEnd),
             ("Stop", "stop", HookEventName::Stop),
             ("StopFailure", "stop_failure", HookEventName::StopFailure),
+            (
+                "StopCancelled",
+                "stop_cancelled",
+                HookEventName::StopCancelled,
+            ),
             ("Notification", "notification", HookEventName::Notification),
             (
                 "UserPromptSubmit",
@@ -560,6 +642,7 @@ mod tests {
             (HookEventName::SessionEnd, "session_end"),
             (HookEventName::Stop, "stop"),
             (HookEventName::StopFailure, "stop_failure"),
+            (HookEventName::StopCancelled, "stop_cancelled"),
             (HookEventName::Notification, "notification"),
             (HookEventName::UserPromptSubmit, "user_prompt_submit"),
             (HookEventName::PermissionDenied, "permission_denied"),
@@ -593,6 +676,7 @@ mod tests {
             ("subagentEnd", HookEventName::SubagentEnd),
             ("preCompact", HookEventName::PreCompact),
             ("stopFailure", HookEventName::StopFailure),
+            ("stopCancelled", HookEventName::StopCancelled),
         ];
         for (spelling, expected) in cases {
             let parsed: HookEventName = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
@@ -619,8 +703,16 @@ mod tests {
             "alias resolves through canonical()"
         );
         assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::Observe);
+        assert_eq!(
+            HookEventName::StopCancelled.traits().gate,
+            GateKind::Observe
+        );
 
         assert_eq!(HookEventName::Stop.traits().matcher, MatcherPolicy::Ignored);
+        assert_eq!(
+            HookEventName::StopCancelled.traits().matcher,
+            MatcherPolicy::Tested
+        );
         assert_eq!(
             HookEventName::UserPromptSubmit.traits().matcher,
             MatcherPolicy::Ignored
@@ -737,6 +829,49 @@ mod tests {
                 "{kind:?} serialization drifted from as_str"
             );
         }
+    }
+
+    #[test]
+    fn stop_cancelled_wire_shape_and_bounds() {
+        let cases = [
+            (StopCancelledReason::UserInterrupt, "user_interrupt", "user"),
+            (
+                StopCancelledReason::PermissionRejected,
+                "permission_rejected",
+                "user",
+            ),
+            (
+                StopCancelledReason::PermissionCancelled,
+                "permission_cancelled",
+                "user",
+            ),
+            (StopCancelledReason::MaxTurns, "max_turns", "runtime"),
+            (StopCancelledReason::NoProgress, "no_progress", "runtime"),
+            (StopCancelledReason::Unknown, "unknown", "unknown"),
+        ];
+        for (reason, wire, cancelled_by) in cases {
+            let payload = HookPayload::StopCancelled {
+                reason,
+                cancelled_by: reason.cancelled_by(),
+                cancel_trigger: None,
+                reason_details: None,
+                last_assistant_message: None,
+                subagent_type: None,
+            };
+            assert_eq!(payload.match_value(), Some(wire));
+            let value = serde_json::to_value(&payload).unwrap();
+            assert_eq!(value["reason"], wire);
+            assert_eq!(value["cancelledBy"], cancelled_by);
+            assert!(value.get("cancelTrigger").is_none());
+        }
+
+        let trigger = clip_text(
+            &"x".repeat(MAX_CANCEL_TRIGGER_CHARS + 5),
+            MAX_CANCEL_TRIGGER_CHARS,
+        );
+        assert!(trigger.ends_with("… [+5 chars]"));
+        let assistant = clip_assistant_message(&"x".repeat(MAX_ASSISTANT_MESSAGE_CHARS + 7));
+        assert!(assistant.ends_with("… [+7 chars]"));
     }
 
     #[test]

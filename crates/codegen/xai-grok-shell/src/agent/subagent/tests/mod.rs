@@ -1403,6 +1403,7 @@ fn dummy_tracker(
         pending_interactions: Arc::new(
             std::sync::Mutex::new(std::collections::HashMap::new()),
         ),
+        compaction_cancel: Default::default(),
         info: Info {
             id: acp::SessionId::new(subagent_id),
             cwd: "/tmp".into(),

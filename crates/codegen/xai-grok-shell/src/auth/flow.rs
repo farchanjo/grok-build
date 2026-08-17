@@ -201,23 +201,24 @@ pub struct AuthChannels {
     pub code_rx: mpsc::Receiver<String>,
 }
 
+/// Sets no `GROK_AUTH_EXPIRED`: external-provider sign-in is interactive,
+/// including when it replaces a stale credential.
 async fn run_external_auth_provider(
     command: &str,
     auth_manager: &Arc<AuthManager>,
-    is_refresh: bool,
+    over_stale_credential: bool,
     on_stderr: Option<StderrCallback>,
 ) -> anyhow::Result<(GrokAuth, bool)> {
     let inherit_stderr = on_stderr.is_none();
     tracing::info!(
         cmd = %command,
-        is_refresh,
+        over_stale_credential,
         inherit_stderr,
-        "auth: running external auth provider"
+        "auth: running external auth provider (interactive login)"
     );
 
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.args(["-c", command])
-        .stdin(std::process::Stdio::null())
+    let mut cmd = crate::util::subprocess::shell_c(command);
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true);
 
@@ -230,12 +231,11 @@ async fn run_external_auth_provider(
         cmd.stderr(std::process::Stdio::piped());
     }
 
-    if is_refresh {
-        cmd.env("GROK_AUTH_EXPIRED", "1");
-    }
-
     xai_grok_tools::util::detach_command(&mut cmd);
     cmd.envs(xai_grok_tools::util::pager_env());
+    // Apply last so neither the ambient process environment nor pager
+    // normalization can mark an interactive sign-in as headless refresh.
+    cmd.env_remove("GROK_AUTH_EXPIRED");
 
     let mut child = cmd
         .spawn()
@@ -291,7 +291,7 @@ async fn run_external_auth_provider(
     )?;
 
     // Token output has no profile; carry it forward, or fetch it when reauth cleared prev.
-    match (is_refresh, auth_manager.current_or_expired()) {
+    match (over_stale_credential, auth_manager.current_or_expired()) {
         (true, Some(prev)) => auth.carry_user_profile_from(&prev),
         _ => auth_manager.enrich_auth_inline(&mut auth).await,
     }
@@ -566,8 +566,9 @@ async fn run_auth_flow_inner(
     }
 
     if let Some(ref cmd) = grok_com_config.auth_provider_command {
-        let is_refresh = reauth || auth_manager.is_expired();
-        match run_external_auth_provider(cmd, auth_manager, is_refresh, on_stderr).await {
+        let over_stale_credential = reauth || auth_manager.is_expired();
+        match run_external_auth_provider(cmd, auth_manager, over_stale_credential, on_stderr).await
+        {
             Ok(result) => return Ok(result),
             Err(e) => {
                 tracing::warn!(
@@ -1162,6 +1163,33 @@ mod tests {
         assert_eq!(auth.map(|a| a.key), Some("xai-ext-token".to_string()));
     }
 
+    #[tokio::test]
+    async fn interactive_login_carries_no_expired_flag_over_stale_credentials() {
+        let _guard = EnvVarGuard::set("GROK_AUTH_EXPIRED", "inherited");
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(
+            AuthManager::new(dir.path(), GrokComConfig::default())
+                .with_proxy_base_url(&dead_proxy_url()),
+        );
+        mgr.hot_swap(GrokAuth {
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            ..oidc_session("stale-token", None)
+        });
+
+        let command = if cfg!(windows) {
+            "if defined GROK_AUTH_EXPIRED (echo set) else (echo unset)"
+        } else {
+            "printf '%s' \"${GROK_AUTH_EXPIRED-unset}\""
+        };
+        let (auth, _) = run_external_auth_provider(command, &mgr, true, None)
+            .await
+            .expect("provider output must parse");
+        assert_eq!(
+            auth.key, "unset",
+            "interactive sign-in must clear even an inherited expired flag"
+        );
+    }
+
     /// External-provider output is team-pinned before persist (parity with OIDC
     /// / device-code): a wrong-team token is rejected and nothing is written.
     #[tokio::test]
@@ -1208,8 +1236,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn external_reauth_without_prev_auth_enriches_inline() {
-        // Regression: reauth clears the manager before the provider runs with
-        // is_refresh=true; flags must then come from /user, not default empty.
+        // Regression: reauth clears the manager before the provider runs over
+        // a stale credential; flags must then come from /user, not default empty.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().route(

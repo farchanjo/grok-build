@@ -209,10 +209,12 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(args, cwd))
+    let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+    runtime_builder
+        .worker_threads(xai_tty_utils::runtime::capped_worker_threads().get())
+        .enable_all();
+    let runtime = xai_tty_utils::runtime::build_with_blocking_pool(&mut runtime_builder)?;
+    runtime.block_on(run(args, cwd))
 }
 async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();

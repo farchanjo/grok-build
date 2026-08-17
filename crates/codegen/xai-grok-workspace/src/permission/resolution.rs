@@ -4201,15 +4201,58 @@ allow = ["Bash(evil *)"]
     }
 
     #[test]
-    fn parse_notebook_read_tool_prefix() {
-        let rule = parse_permission_rule("NotebookRead(*.ipynb)", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Read);
-    }
+    fn notebook_tools_are_unsupported_and_skipped_with_warning() {
+        for rule in [
+            "NotebookRead(*.ipynb)",
+            "NotebookEdit(*.ipynb)",
+            "NotebookRead",
+            "NotebookEdit",
+        ] {
+            let err = parse_permission_rule(rule, RuleAction::Allow).unwrap_err();
+            assert!(
+                matches!(err, RuleParseError::UnsupportedToolPrefix { .. }),
+                "{rule}: {err:?}"
+            );
+        }
 
-    #[test]
-    fn parse_notebook_edit_tool_prefix() {
-        let rule = parse_permission_rule("NotebookEdit(*.ipynb)", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Edit);
+        // Bare unknown names remain glob patterns. Only the parenthesized
+        // EnterWorktree rule was unsupported before this selective port.
+        let enter_worktree = parse_permission_rule("EnterWorktree", RuleAction::Allow).unwrap();
+        assert_eq!(enter_worktree.tool, ToolFilter::Any);
+        assert_eq!(enter_worktree.pattern.as_deref(), Some("EnterWorktree"));
+
+        let read = parse_permission_rule("Read(*.rs)", RuleAction::Allow).unwrap();
+        assert_eq!(read.tool, ToolFilter::Read);
+        assert_eq!(read.pattern.as_deref(), Some("*.rs"));
+
+        let edit = parse_permission_rule("Edit(src/**/*.rs)", RuleAction::Allow).unwrap();
+        assert_eq!(edit.tool, ToolFilter::Edit);
+        assert_eq!(edit.pattern.as_deref(), Some("src/**/*.rs"));
+
+        let perms = ParsedPermissions {
+            allow: vec![
+                "NotebookRead(*.ipynb)".to_string(),
+                "NotebookEdit".to_string(),
+                "Read(*.rs)".to_string(),
+                "Edit(src/**/*.rs)".to_string(),
+            ],
+            ..Default::default()
+        };
+        let (cfg, warnings) = perms.into_permission_config();
+        assert_eq!(cfg.rules.len(), 2, "rules: {:?}", cfg.rules);
+        assert_eq!(cfg.rules[0].tool, ToolFilter::Read);
+        assert_eq!(cfg.rules[1].tool, ToolFilter::Edit);
+        assert_eq!(warnings.len(), 2, "warnings: {warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("NotebookRead"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("NotebookEdit"))
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -4309,20 +4352,6 @@ allow = ["Bash(evil *)"]
     fn parse_bare_web_search_tool_name() {
         let rule = parse_permission_rule("WebSearch", RuleAction::Allow).unwrap();
         assert_eq!(rule.tool, ToolFilter::WebSearch);
-        assert!(rule.pattern.is_none());
-    }
-
-    #[test]
-    fn parse_bare_notebook_read_tool_name() {
-        let rule = parse_permission_rule("NotebookRead", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Read);
-        assert!(rule.pattern.is_none());
-    }
-
-    #[test]
-    fn parse_bare_notebook_edit_tool_name() {
-        let rule = parse_permission_rule("NotebookEdit", RuleAction::Allow).unwrap();
-        assert_eq!(rule.tool, ToolFilter::Edit);
         assert!(rule.pattern.is_none());
     }
 

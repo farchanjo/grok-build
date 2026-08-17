@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use xai_grok_inference_types::{
-    ApiErrorDiagnostics, ConversationResponse, EmptyResponseContext, InferenceError,
-    ResponseModelMetadata,
+    ApiErrorCode, ApiErrorDiagnostics, ConversationResponse, EmptyResponseContext, InferenceError,
+    ResponseModelMetadata, SentCredential,
 };
 
 use crate::metrics::InferenceLatencyStats;
@@ -19,6 +19,27 @@ use crate::types::RequestId;
 pub enum InferenceChannel {
     Text,
     Reasoning,
+}
+
+/// Why inline images were stripped from an in-flight request.
+/// Consumers decide whether the strip is safe to persist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripReason {
+    /// The server deterministically rejected this payload with HTTP 400 and
+    /// the typed `invalid_image` code.
+    ServerRejected,
+    /// A size or transport heuristic, proxy-wrapped failure, phrase-only
+    /// match, or mid-stream error. These strips must remain request-local.
+    PayloadHeuristic,
+}
+
+impl StripReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServerRejected => "server_rejected",
+            Self::PayloadHeuristic => "payload_heuristic",
+        }
+    }
 }
 
 /// Events emitted by the sampler for a single in-flight request.
@@ -62,6 +83,14 @@ pub enum InferenceEvent {
         request_id: RequestId,
         response: Box<ConversationResponse>,
         metrics: InferenceLatencyStats,
+    },
+
+    /// Inline images were removed before retrying this request.
+    ImagesStripped {
+        request_id: RequestId,
+        /// Exact URLs actually removed, including duplicate occurrences.
+        stripped_urls: Vec<std::sync::Arc<str>>,
+        reason: StripReason,
     },
 
     /// Request is being retried.
@@ -135,6 +164,11 @@ pub struct InferenceErrorInfo {
     /// Safe router/provider and rate-limit metadata attached to API failures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<ApiErrorDiagnostics>,
+    /// The server error envelope's `code` slot (e.g. `invalid_image`).
+    /// Serializes as the plain wire string; `None` when absent or from an
+    /// older peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<ApiErrorCode>,
     /// Present only when `kind == EmptyResponse`. Carries the structured
     /// context from the L2 stream so downstream consumers can distinguish
     /// reasoning-only completions from transport failures.
@@ -149,6 +183,10 @@ pub struct InferenceErrorInfo {
     /// Telemetry only; `None` for terminal-response detections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doom_loop_aborted_at_chunk: Option<u64>,
+    /// Meaningful for auth failures: whether the rejected request actually
+    /// carried a credential. Older payloads default to fail-closed `Unknown`.
+    #[serde(default, skip_serializing_if = "SentCredential::is_unknown")]
+    pub credential: SentCredential,
 }
 
 /// Coarse-grained classification of a sampling failure.
@@ -197,7 +235,7 @@ impl From<&InferenceError> for InferenceErrorInfo {
         let message = err.to_string();
 
         let (kind, status_code, retry_after_secs, model_metadata, diagnostics) = match err {
-            InferenceError::Auth(_) => (InferenceErrorKind::Auth, None, None, None, None),
+            InferenceError::Auth { .. } => (InferenceErrorKind::Auth, None, None, None, None),
             InferenceError::InvalidConfiguration(_) => {
                 (InferenceErrorKind::Api, None, None, None, None)
             }
@@ -258,6 +296,15 @@ impl From<&InferenceError> for InferenceErrorInfo {
             } => (Some(triggers.clone()), *aborted_at_chunk),
             _ => (None, None),
         };
+        let error_code = match err {
+            InferenceError::Api { error_code, .. } => error_code.clone(),
+            InferenceError::StreamError { code, .. } => code.clone(),
+            _ => None,
+        };
+        let credential = match err {
+            InferenceError::Auth { credential, .. } => *credential,
+            _ => SentCredential::Unknown,
+        };
 
         Self {
             kind,
@@ -267,9 +314,11 @@ impl From<&InferenceError> for InferenceErrorInfo {
             retry_after_secs,
             model_metadata,
             diagnostics,
+            error_code,
             empty_response_context,
             doom_loop_triggers,
             doom_loop_aborted_at_chunk,
+            credential,
         }
     }
 }
@@ -281,7 +330,7 @@ mod tests {
 
     #[test]
     fn auth_variant_classified_as_auth() {
-        let err = InferenceError::Auth("bad token".into());
+        let err = InferenceError::auth_unknown("bad token");
         let info = InferenceErrorInfo::from(&err);
         assert_eq!(info.kind, InferenceErrorKind::Auth);
         assert_eq!(info.status_code, None);
@@ -289,6 +338,26 @@ mod tests {
         assert_eq!(info.retry_after_secs, None);
         assert!(info.model_metadata.is_none());
         assert!(info.message.contains("bad token"));
+        assert_eq!(info.credential, SentCredential::Unknown);
+    }
+
+    #[test]
+    fn auth_info_preserves_credential_provenance_and_legacy_defaults_unknown() {
+        let sent = InferenceError::Auth {
+            message: "rejected".into(),
+            credential: SentCredential::Sent,
+        };
+        assert_eq!(
+            InferenceErrorInfo::from(&sent).credential,
+            SentCredential::Sent
+        );
+
+        let legacy: InferenceErrorInfo = serde_json::from_str(
+            r#"{"kind":"Auth","status_code":401,"message":"x","is_retryable":false,
+                "retry_after_secs":null,"model_metadata":null}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.credential, SentCredential::Unknown);
     }
 
     #[test]
@@ -318,6 +387,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let info = InferenceErrorInfo::from(&err);
         assert_eq!(info.kind, InferenceErrorKind::Api);
@@ -334,6 +404,7 @@ mod tests {
             retry_after_secs: Some(15),
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let info = InferenceErrorInfo::from(&err);
         assert_eq!(info.kind, InferenceErrorKind::RateLimited);
@@ -356,6 +427,7 @@ mod tests {
                 rate_limit_remaining: Some("0".into()),
                 ..Default::default()
             }),
+            error_code: None,
         };
         let info = InferenceErrorInfo::from(&err);
         let diagnostics = info.diagnostics.expect("diagnostics preserved");
@@ -379,6 +451,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let info = InferenceErrorInfo::from(&err);
         assert_eq!(info.kind, InferenceErrorKind::Api);
@@ -401,6 +474,7 @@ mod tests {
         let err = InferenceError::StreamError {
             error_type: "server_error".into(),
             message: "transient".into(),
+            code: None,
         };
         let info = InferenceErrorInfo::from(&err);
         assert_eq!(info.kind, InferenceErrorKind::Api);
@@ -415,5 +489,49 @@ mod tests {
         assert_eq!(info.kind, InferenceErrorKind::IdleTimeout);
         assert!(!info.is_retryable);
         assert!(info.message.contains("300s"));
+    }
+
+    #[test]
+    fn from_inference_error_carries_error_code() {
+        let api = InferenceError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "bad image".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            diagnostics: None,
+            error_code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert_eq!(
+            InferenceErrorInfo::from(&api).error_code,
+            Some(ApiErrorCode::InvalidImage)
+        );
+
+        let stream = InferenceError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "bad image".into(),
+            code: Some(ApiErrorCode::InvalidImage),
+        };
+        assert_eq!(
+            InferenceErrorInfo::from(&stream).error_code,
+            Some(ApiErrorCode::InvalidImage)
+        );
+
+        assert_eq!(
+            InferenceErrorInfo::from(&InferenceError::auth_unknown("x")).error_code,
+            None
+        );
+    }
+
+    /// Older persisted/wire payloads that omit `error_code` keep deserializing.
+    #[test]
+    fn inference_error_info_legacy_payload_deserializes_without_error_code() {
+        let info: InferenceErrorInfo = serde_json::from_str(
+            r#"{"kind":"Api","status_code":400,"message":"x","is_retryable":false,
+                "retry_after_secs":null,"model_metadata":null}"#,
+        )
+        .unwrap();
+        assert_eq!(info.error_code, None);
+        assert_eq!(info.kind, InferenceErrorKind::Api);
     }
 }

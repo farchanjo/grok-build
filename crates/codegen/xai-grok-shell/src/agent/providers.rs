@@ -1122,14 +1122,15 @@ impl ProviderManager {
             ProviderId::OpenRouter => &self.openrouter_models_url,
             ProviderId::Anthropic => unreachable!("handled above"),
         };
-        let response = reqwest::Client::builder()
-            .timeout(CONNECTION_TIMEOUT)
-            .build()
-            .map_err(|_| ProviderError::CredentialStore)?
-            .get(url)
-            .bearer_auth(key)
-            .send()
-            .await;
+        let response =
+            xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+                .timeout(CONNECTION_TIMEOUT)
+                .build()
+                .map_err(|_| ProviderError::CredentialStore)?
+                .get(url)
+                .bearer_auth(key)
+                .send()
+                .await;
         match response {
             Ok(response) if response.status().is_success() => {
                 // For OpenRouter, the same `/key` probe that validates the
@@ -1242,14 +1243,15 @@ impl ProviderManager {
         let Some(key) = self.api_key(ProviderId::OpenRouter)? else {
             return Err(ProviderError::OpenRouterCatalogUnavailable);
         };
-        let response = reqwest::Client::builder()
-            .timeout(CONNECTION_TIMEOUT)
-            .build()
-            .map_err(|_| ProviderError::OpenRouterCatalogUnavailable)?
-            .get(&self.openrouter_catalog_url)
-            .bearer_auth(key)
-            .send()
-            .await;
+        let response =
+            xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+                .timeout(CONNECTION_TIMEOUT)
+                .build()
+                .map_err(|_| ProviderError::OpenRouterCatalogUnavailable)?
+                .get(&self.openrouter_catalog_url)
+                .bearer_auth(key)
+                .send()
+                .await;
         let live = match response {
             Ok(response) if response.status().is_success() => response
                 .bytes()
@@ -1279,14 +1281,15 @@ impl ProviderManager {
         let Some(key) = self.api_key(ProviderId::OpenAi)? else {
             return Err(ProviderError::OpenAiCatalogUnavailable);
         };
-        let response = reqwest::Client::builder()
-            .timeout(CONNECTION_TIMEOUT)
-            .build()
-            .map_err(|_| ProviderError::OpenAiCatalogUnavailable)?
-            .get(&self.openai_models_url)
-            .bearer_auth(key)
-            .send()
-            .await;
+        let response =
+            xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+                .timeout(CONNECTION_TIMEOUT)
+                .build()
+                .map_err(|_| ProviderError::OpenAiCatalogUnavailable)?
+                .get(&self.openai_models_url)
+                .bearer_auth(key)
+                .send()
+                .await;
         let live = match response {
             Ok(response) if response.status().is_success() => response
                 .bytes()
@@ -1458,12 +1461,13 @@ impl ProviderManager {
                 chatgpt_oauth::CODEX_RESPONSES_BASE_URL,
                 xai_grok_version::VERSION
             );
-            let mut request = reqwest::Client::builder()
-                .timeout(CONNECTION_TIMEOUT)
-                .build()
-                .ok()?
-                .get(url)
-                .bearer_auth(token);
+            let mut request =
+                xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
+                    .timeout(CONNECTION_TIMEOUT)
+                    .build()
+                    .ok()?
+                    .get(url)
+                    .bearer_auth(token);
             for (name, value) in chatgpt_oauth::oauth_extra_headers(account_id.as_deref()) {
                 request = request.header(name, value);
             }

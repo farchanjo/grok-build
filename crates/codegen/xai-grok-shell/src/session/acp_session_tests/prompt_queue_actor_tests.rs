@@ -1826,6 +1826,39 @@ async fn rolling_compaction_pauses_and_then_resumes_prompt_promotion() {
 }
 
 #[tokio::test]
+async fn pending_compaction_cancel_pauses_and_then_resumes_prompt_promotion() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("p1", "alice"));
+            }
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let pending = actor.compaction.cancel.begin_cancel_command();
+            actor
+                .clone()
+                .maybe_start_running_task(completion_tx.clone())
+                .await;
+            {
+                let state = actor.state.lock().await;
+                assert!(state.running_task.is_none());
+                assert_eq!(state.pending_inputs.len(), 1);
+            }
+
+            pending.commit();
+            actor.compaction.cancel.clear_cancel_command_pending();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+            let state = actor.state.lock().await;
+            assert!(state.running_task.is_some());
+            assert_eq!(state.pending_inputs.front().unwrap().prompt_id, "p1");
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn tool_overrides_update_applies_at_promotion_never_at_enqueue() {
     let local = tokio::task::LocalSet::new();
     local

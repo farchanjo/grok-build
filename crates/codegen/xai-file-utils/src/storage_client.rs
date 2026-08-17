@@ -55,12 +55,10 @@ fn storage_breaker_config() -> BreakerConfig {
 /// a bridge implementation that wires into
 /// `crate::auth::attribution::record_consumer_401`.
 ///
-/// `sent_bearer_prefix` is the first-N characters of the bearer that was
-/// actually sent on the wire (extracted at the trait boundary so the full
-/// bearer never escapes `StorageClient`). `None` indicates no bearer was
-/// configured (the unauthenticated test/CI path).
+/// `sent_bearer_tail` is the shared trailing fragment of the bearer actually
+/// used for the response's HTTP attempt. `None` indicates no bearer was sent.
 pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
-    fn record_401(&self, operation: &str, sent_bearer_prefix: Option<&str>);
+    fn record_401(&self, operation: &str, sent_bearer_tail: Option<&str>);
 }
 
 // ============================================================================
@@ -428,10 +426,6 @@ pub struct StorageClient {
     /// can record auth-attribution telemetry. Shell installs a bridge here;
     /// bins/tests typically leave it `None`.
     attribution: Option<Arc<dyn Auth401AttributionCallback>>,
-    /// Credential provider used to snapshot the bearer prefix at 401 sites
-    /// for attribution telemetry.
-    credentials: Arc<dyn AuthCredentialProvider>,
-
     /// Client identity forwarded to cli-chat-proxy (for logging + metrics).
     /// Set via `with_client_identity` / `with_client_mode`.
     client_version: Option<String>,
@@ -473,7 +467,7 @@ impl StorageClient {
         http_client: Client,
         credentials: Arc<dyn AuthCredentialProvider>,
     ) -> Self {
-        let middleware_client = crate::with_auth_retry(http_client.clone(), credentials.clone());
+        let middleware_client = crate::with_auth_retry(http_client.clone(), credentials);
         let breaker = CircuitBreaker::new(storage_breaker_config())
             .with_observer(TracingObserver::new(STORAGE_BREAKER_NAME));
         Self {
@@ -482,7 +476,6 @@ impl StorageClient {
             base_url: proxy_base_url.to_owned(),
             retry_config: RetryConfig::default(),
             attribution: None,
-            credentials,
             client_version: None,
             client_identifier: None,
             client_mode: None,
@@ -602,6 +595,9 @@ impl StorageClient {
         let response = request.send().await.context("Fetching upload limits")?;
         if !response.status().is_success() {
             let status = response.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.fire_401_attribution("get_upload_limits", &response);
+            }
             let body = response
                 .text()
                 .await
@@ -627,13 +623,15 @@ impl StorageClient {
     /// `"StorageClient."` to produce the final consumer string in analytics
     /// events (e.g. `"StorageClient.check_exists"`).
     ///
-    /// Reads the bearer from the credential provider's current snapshot
-    /// (not the exact wire bearer — a refresh may have occurred between
-    /// send and 401 response, though in practice this is rare).
-    fn fire_401_attribution(&self, operation: &str) {
-        if let Some(ref cb) = self.attribution {
-            let bearer_prefix = self.credentials.snapshot().token;
-            cb.record_401(operation, bearer_prefix.as_deref());
+    /// Record attribution from the response's attempt-local middleware stamp.
+    /// A generic 401 without a stamp cannot infer credential ownership.
+    fn fire_401_attribution(&self, operation: &str, response: &reqwest::Response) {
+        if let Some(callback) = self.attribution.as_ref() {
+            let sent_tail = response
+                .extensions()
+                .get::<xai_grok_auth::StampedBearerTail>()
+                .map(|stamp| stamp.0.as_str());
+            callback.record_401(operation, sent_tail);
         }
     }
 
@@ -667,15 +665,14 @@ impl StorageClient {
                 }
             }
             Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                self.fire_401_attribution("check_exists");
+                self.fire_401_attribution("check_exists", &resp);
                 self.breaker.record(Outcome::Failure);
                 ExistsResult::Unauthorized
             }
             Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => ExistsResult::NotFound,
-            // 403 fires attribution but, per the breaker contract, does
-            // NOT count toward the 401 counter.
+            // 403 preserves the Unauthorized policy result but is neither a
+            // credential-rejection attribution event nor a breaker failure.
             Ok(resp) if resp.status() == reqwest::StatusCode::FORBIDDEN => {
-                self.fire_401_attribution("check_exists");
                 ExistsResult::Unauthorized
             }
             Ok(resp) => {
@@ -721,14 +718,14 @@ impl StorageClient {
 
         match request.send().await {
             Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                self.fire_401_attribution("batch_check_exists");
+                self.fire_401_attribution("batch_check_exists", &resp);
                 self.breaker.record(Outcome::Failure);
                 ExistsResult::Unauthorized
             }
             Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => ExistsResult::NotFound,
-            // 403 fires attribution; does NOT count toward the breaker.
+            // 403 preserves the Unauthorized policy result but is neither a
+            // credential-rejection attribution event nor a breaker failure.
             Ok(resp) if resp.status() == reqwest::StatusCode::FORBIDDEN => {
-                self.fire_401_attribution("batch_check_exists");
                 ExistsResult::Unauthorized
             }
             Ok(resp) if resp.status().is_success() => {
@@ -803,7 +800,7 @@ impl StorageClient {
 
             match request.send().await {
                 Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.fire_401_attribution("batch_upload");
+                    self.fire_401_attribution("batch_upload", &resp);
                     self.breaker.record(Outcome::Failure);
                     return None;
                 }
@@ -949,7 +946,7 @@ impl StorageClient {
 
             match request.send().await {
                 Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.fire_401_attribution("batch_upload_json");
+                    self.fire_401_attribution("batch_upload_json", &resp);
                     self.breaker.record(Outcome::Failure);
                     return None;
                 }
@@ -1191,7 +1188,7 @@ impl StorageClient {
                         .map_err(|e| anyhow::anyhow!("Failed to parse upload response: {}", e));
                 }
                 Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.fire_401_attribution("upload");
+                    self.fire_401_attribution("upload", &response);
                     self.breaker.record(Outcome::Failure);
                     return Err(HttpUploadError {
                         status_code: 401,
@@ -1315,7 +1312,7 @@ impl StorageClient {
                         .map_err(|e| anyhow::anyhow!("Failed to parse upload response: {}", e));
                 }
                 Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.fire_401_attribution("upload_file");
+                    self.fire_401_attribution("upload_file", &response);
                     self.breaker.record(Outcome::Failure);
                     return Err(HttpUploadError {
                         status_code: 401,
@@ -1411,7 +1408,7 @@ impl StorageClient {
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.fire_401_attribution("upload_stream");
+            self.fire_401_attribution("upload_stream", &response);
             self.breaker.record(Outcome::Failure);
             anyhow::bail!("Failed to upload to '{}': HTTP 401 Unauthorized", path);
         }
@@ -2423,6 +2420,222 @@ mod download_blob_tests {
             err.to_string().contains("400"),
             "error must mention 400, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod auth_attribution_tests {
+    use super::{
+        Auth401AttributionCallback, ExistsResult, StaticGrokAuth, StorageClient, UploadLimits,
+    };
+    use axum::{Router, response::IntoResponse, routing::get, routing::post};
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use xai_grok_auth::{AuthCredentialProvider, CredentialSnapshot, HttpAuth};
+
+    #[derive(Debug, Default)]
+    struct RecordingAttribution {
+        calls: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl RecordingAttribution {
+        fn calls(&self) -> Vec<(String, Option<String>)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Auth401AttributionCallback for RecordingAttribution {
+        fn record_401(&self, operation: &str, sent_bearer_tail: Option<&str>) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((operation.to_owned(), sent_bearer_tail.map(str::to_owned)));
+        }
+    }
+
+    #[derive(Debug)]
+    struct RotatingProvider {
+        token: Mutex<Option<String>>,
+        fresh_token: String,
+    }
+
+    impl RotatingProvider {
+        fn new(stale_token: &str, fresh_token: &str) -> Self {
+            Self {
+                token: Mutex::new(Some(stale_token.to_owned())),
+                fresh_token: fresh_token.to_owned(),
+            }
+        }
+    }
+
+    impl HttpAuth for RotatingProvider {
+        fn apply(&self, builder: reqwest::RequestBuilder, _: &str) -> reqwest::RequestBuilder {
+            builder
+        }
+    }
+
+    impl AuthCredentialProvider for RotatingProvider {
+        fn snapshot(&self) -> CredentialSnapshot {
+            CredentialSnapshot {
+                token: self.token.lock().unwrap().clone(),
+                ..Default::default()
+            }
+        }
+
+        fn refresh_after_unauthorized<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let mut token = self.token.lock().unwrap();
+                if token.as_deref() == Some(self.fresh_token.as_str()) {
+                    false
+                } else {
+                    *token = Some(self.fresh_token.clone());
+                    true
+                }
+            })
+        }
+    }
+
+    async fn start_server(router: Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (addr, handle)
+    }
+
+    fn provider(token: Option<String>) -> Arc<dyn AuthCredentialProvider> {
+        let auth = StaticGrokAuth::new(token.clone());
+        Arc::new(xai_grok_auth::StaticAuthCredentialProvider::new(
+            Box::new(auth),
+            token,
+        ))
+    }
+
+    fn client_for(
+        addr: SocketAddr,
+        credentials: Arc<dyn AuthCredentialProvider>,
+        attribution: Arc<RecordingAttribution>,
+    ) -> StorageClient {
+        StorageClient::with_provider(
+            &format!("http://{addr}/v1"),
+            reqwest::Client::new(),
+            credentials,
+        )
+        .with_attribution(attribution)
+    }
+
+    #[tokio::test]
+    async fn get_upload_limits_attributes_final_401_once_with_final_attempt_stamp() {
+        let router = Router::new().route(
+            "/v1/storage/limits",
+            get(|headers: axum::http::HeaderMap| async move {
+                match headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                {
+                    Some("Bearer token-stale-tail") | Some("Bearer token-fresh-tail") => {
+                        (axum::http::StatusCode::UNAUTHORIZED, "denied").into_response()
+                    }
+                    other => panic!("unexpected authorization header: {other:?}"),
+                }
+            }),
+        );
+        let (addr, _) = start_server(router).await;
+        let attribution = Arc::new(RecordingAttribution::default());
+        let credentials = Arc::new(RotatingProvider::new(
+            "token-stale-tail",
+            "token-fresh-tail",
+        ));
+        let client = client_for(addr, credentials, attribution.clone());
+
+        assert!(client.get_upload_limits().await.is_err());
+        assert_eq!(
+            attribution.calls(),
+            vec![(
+                "get_upload_limits".to_owned(),
+                Some("n-fresh-tail".to_owned())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_upload_limits_attributes_unauthenticated_401_once_with_none() {
+        let router = Router::new().route(
+            "/v1/storage/limits",
+            get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "denied").into_response() }),
+        );
+        let (addr, _) = start_server(router).await;
+        let attribution = Arc::new(RecordingAttribution::default());
+        let client = client_for(addr, provider(None), attribution.clone());
+
+        assert!(client.get_upload_limits().await.is_err());
+        assert_eq!(
+            attribution.calls(),
+            vec![("get_upload_limits".to_owned(), None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_upload_limits_success_does_not_attribute() {
+        let router = Router::new().route(
+            "/v1/storage/limits",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "max_file_bytes": 1024,
+                    "max_untracked_bytes": 512,
+                    "enabled": true
+                }))
+            }),
+        );
+        let (addr, _) = start_server(router).await;
+        let attribution = Arc::new(RecordingAttribution::default());
+        let client = client_for(
+            addr,
+            provider(Some("token".to_owned())),
+            attribution.clone(),
+        );
+
+        let UploadLimits { enabled, .. } = client.get_upload_limits().await.unwrap();
+        assert!(enabled);
+        assert!(attribution.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn existence_403s_preserve_policy_without_401_attribution() {
+        let router = Router::new()
+            .route(
+                "/v1/storage/exists",
+                get(|| async { (axum::http::StatusCode::FORBIDDEN, "policy").into_response() }),
+            )
+            .route(
+                "/v1/storage/batch_exists",
+                post(|| async { (axum::http::StatusCode::FORBIDDEN, "policy").into_response() }),
+            );
+        let (addr, _) = start_server(router).await;
+        let attribution = Arc::new(RecordingAttribution::default());
+        let client = client_for(
+            addr,
+            provider(Some("test-token".to_owned())),
+            attribution.clone(),
+        );
+
+        assert!(matches!(
+            client.check_exists("path").await,
+            ExistsResult::Unauthorized
+        ));
+        assert!(matches!(
+            client.batch_check_exists(&["path"]).await,
+            ExistsResult::Unauthorized
+        ));
+        assert!(attribution.calls().is_empty());
     }
 }
 

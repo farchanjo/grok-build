@@ -139,6 +139,7 @@ impl SessionActor {
             identity,
             source_items,
             compactor_input_capacity: budget.compactor_input_capacity,
+            cancel_sequence: self.compaction.cancel.cancel_sequence(),
             prompt_index: snapshot.prompt_index,
             original_user_info,
             media_descriptors,
@@ -149,16 +150,30 @@ impl SessionActor {
         &self,
         job: RollingCompactionJob,
     ) -> RollingCompactionResult {
-        let result = self.sample_rolling_source(&job).await;
+        let cancel_sequence = job.cancel_sequence;
+        let (worker_sequence, cancel, _cancel_scope) = self.compaction.cancel.enter_with_sequence();
+        let cancel_preceded_worker = worker_sequence != cancel_sequence;
+        let result = if cancel_preceded_worker {
+            Err(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG.to_owned())
+        } else {
+            self.sample_rolling_source(&job, cancel.clone()).await
+        };
+        let cancelled = cancel_preceded_worker || cancel.is_cancelled();
         RollingCompactionResult {
             identity: job.identity,
             summary: result,
+            cancelled,
+            cancel_sequence,
             prompt_index: job.prompt_index,
             original_user_info: job.original_user_info,
         }
     }
 
-    async fn sample_rolling_source(&self, job: &RollingCompactionJob) -> Result<String, String> {
+    async fn sample_rolling_source(
+        &self,
+        job: &RollingCompactionJob,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, String> {
         let routes = self
             .prepare_compaction_routes()
             .await
@@ -188,6 +203,7 @@ impl SessionActor {
             wall_clock_budget_secs,
             crate::util::config::CompactionToolChoice::None,
         )
+        .with_cancel(cancel)
         .with_supplied_prompt();
         let chunk_prompt = xai_grok_compaction::CompactionPrompt {
             system: "You compress coding-agent history without losing actionable state."
@@ -315,6 +331,16 @@ impl SessionActor {
         &self,
         result: RollingCompactionResult,
     ) -> xai_chat_state::CasSpliceResult {
+        if result.cancelled || self.compaction.cancel.cancel_sequence() != result.cancel_sequence {
+            self.send_xai_notification(
+                crate::extensions::notification::SessionUpdate::AutoCompactCancelled {
+                    reason: "User cancelled compaction".to_string(),
+                },
+            )
+            .await;
+            tracing::debug!("discarded user-cancelled rolling compaction result");
+            return xai_chat_state::CasSpliceResult::Stale;
+        }
         let summary = match result.summary {
             Ok(summary) => summary,
             Err(error) => {
@@ -329,7 +355,6 @@ impl SessionActor {
             }
         };
         let tokens_before = self.chat_state_handle.get_estimated_total_tokens().await;
-
         let metadata = xai_chat_state::CompactionPersistenceMetadata {
             checkpoint_id: uuid::Uuid::new_v4().to_string(),
             prompt_index: result.prompt_index,
@@ -337,14 +362,31 @@ impl SessionActor {
             original_user_info: result.original_user_info,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        let outcome = self
-            .chat_state_handle
-            .cas_splice_conversation_with_persistence(
-                result.identity,
-                vec![ConversationItem::compaction_summary(summary)],
-                Some(metadata),
+        let receiver =
+            self.compaction
+                .cancel
+                .run_if_sequence_current(result.cancel_sequence, || {
+                    self.chat_state_handle
+                        .enqueue_cas_splice_conversation_with_persistence(
+                            result.identity,
+                            vec![ConversationItem::compaction_summary(summary)],
+                            Some(metadata),
+                        )
+                });
+        let Some(Some(receiver)) = receiver else {
+            self.send_xai_notification(
+                crate::extensions::notification::SessionUpdate::AutoCompactCancelled {
+                    reason: "User cancelled compaction".to_string(),
+                },
             )
             .await;
+            tracing::debug!("discarded rolling compaction cancelled before CAS enqueue");
+            return xai_chat_state::CasSpliceResult::Stale;
+        };
+        let outcome = receiver.await.unwrap_or_else(|_| {
+            tracing::error!("ChatStateActor dropped rolling compaction CAS reply");
+            xai_chat_state::CasSpliceResult::Stale
+        });
         match outcome {
             xai_chat_state::CasSpliceResult::Applied => {
                 self.chat_state_handle
@@ -412,7 +454,7 @@ mod tests {
     use super::{SessionActor, rolling_fixed_prefix_count};
     use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
     use crate::session::persistence::PersistenceMsg;
-    use crate::session::rolling_compaction::RollingCompactionResult;
+    use crate::session::rolling_compaction::{RollingCompactionJob, RollingCompactionResult};
     use tokio::sync::mpsc;
     use xai_chat_state::types::CompactSourceIdentity;
     use xai_grok_inference_types::ConversationItem;
@@ -508,6 +550,8 @@ mod tests {
                 let result = RollingCompactionResult {
                     identity,
                     summary: Ok("test summary".to_string()),
+                    cancelled: false,
+                    cancel_sequence: actor.compaction.cancel.cancel_sequence(),
                     prompt_index: 0,
                     original_user_info: None,
                 };
@@ -525,6 +569,157 @@ mod tests {
                     reason.contains("Conversation changed"),
                     "reason should mention conversation changed: {reason}"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rolling_worker_discards_cancel_that_arrived_after_admission() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor =
+                    create_test_actor_for_rolling(0, 128_000, gateway_tx, persistence_tx).await;
+                let source_items = vec![ConversationItem::user("cold history")];
+                let job = RollingCompactionJob {
+                    identity: CompactSourceIdentity::new(0, 0, 1, &source_items).unwrap(),
+                    source_items,
+                    compactor_input_capacity: 64_000,
+                    cancel_sequence: actor.compaction.cancel.cancel_sequence(),
+                    prompt_index: 0,
+                    original_user_info: None,
+                    media_descriptors: std::sync::Arc::new(
+                        xai_chat_state::compaction_utils::CompactionMediaDescriptors::default(),
+                    ),
+                };
+                let pending = actor.compaction.cancel.begin_cancel_command();
+
+                let result = actor.run_rolling_compaction_job(job).await;
+
+                assert!(result.cancelled);
+                assert!(
+                    result
+                        .summary
+                        .unwrap_err()
+                        .contains(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
+                );
+                drop(pending);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_rolling_compaction_result_discards_user_cancel_without_cas() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor =
+                    create_test_actor_for_rolling(0, 256_000, gateway_tx, persistence_tx).await;
+                actor
+                    .chat_state_handle
+                    .push_user_message(ConversationItem::system("system"));
+                actor
+                    .chat_state_handle
+                    .push_user_message(ConversationItem::user("unchanged"));
+                let before = actor.chat_state_handle.get_conversation().await;
+                let before_text = before
+                    .iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>();
+                let identity = CompactSourceIdentity::new(0, 0, before.len(), &before).unwrap();
+
+                let outcome = actor
+                    .apply_rolling_compaction_result(RollingCompactionResult {
+                        identity,
+                        summary: Ok("must not apply".to_string()),
+                        cancelled: true,
+                        cancel_sequence: actor.compaction.cancel.cancel_sequence(),
+                        prompt_index: 0,
+                        original_user_info: None,
+                    })
+                    .await;
+
+                assert_eq!(outcome, xai_chat_state::CasSpliceResult::Stale);
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .get_conversation()
+                        .await
+                        .iter()
+                        .map(ConversationItem::text_content)
+                        .collect::<Vec<_>>(),
+                    before_text
+                );
+                let update = next_xai_update(&mut persistence_rx).await;
+                let crate::extensions::notification::SessionUpdate::AutoCompactCancelled {
+                    reason,
+                } = update
+                else {
+                    panic!("expected AutoCompactCancelled, got {update:?}");
+                };
+                assert!(reason.contains("User cancelled"));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_rolling_compaction_result_discards_cancel_arriving_after_worker_completion() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor =
+                    create_test_actor_for_rolling(0, 256_000, gateway_tx, persistence_tx).await;
+                actor
+                    .chat_state_handle
+                    .push_user_message(ConversationItem::system("system"));
+                actor
+                    .chat_state_handle
+                    .push_user_message(ConversationItem::user("unchanged"));
+                let before = actor.chat_state_handle.get_conversation().await;
+                let before_text = before
+                    .iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>();
+                let identity = CompactSourceIdentity::new(0, 0, before.len(), &before).unwrap();
+                let result = RollingCompactionResult {
+                    identity,
+                    summary: Ok("must not apply".to_string()),
+                    cancelled: false,
+                    cancel_sequence: actor.compaction.cancel.cancel_sequence(),
+                    prompt_index: 0,
+                    original_user_info: None,
+                };
+
+                let _pending = actor.compaction.cancel.begin_cancel_command();
+                let outcome = actor.apply_rolling_compaction_result(result).await;
+
+                assert_eq!(outcome, xai_chat_state::CasSpliceResult::Stale);
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .get_conversation()
+                        .await
+                        .iter()
+                        .map(ConversationItem::text_content)
+                        .collect::<Vec<_>>(),
+                    before_text
+                );
+                let update = next_xai_update(&mut persistence_rx).await;
+                assert!(matches!(
+                    update,
+                    crate::extensions::notification::SessionUpdate::AutoCompactCancelled { .. }
+                ));
             })
             .await;
     }
@@ -555,6 +750,8 @@ mod tests {
                 let result = RollingCompactionResult {
                     identity,
                     summary: Err("sampling failed: context overflow".to_string()),
+                    cancelled: false,
+                    cancel_sequence: actor.compaction.cancel.cancel_sequence(),
                     prompt_index: 0,
                     original_user_info: None,
                 };
@@ -743,6 +940,8 @@ mod tests {
                 let result = RollingCompactionResult {
                     identity,
                     summary: Ok("compacted summary".to_string()),
+                    cancelled: false,
+                    cancel_sequence: actor.compaction.cancel.cancel_sequence(),
                     prompt_index: 0,
                     original_user_info: None,
                 };
@@ -910,6 +1109,8 @@ mod tests {
                 let result = RollingCompactionResult {
                     identity,
                     summary: Ok("test summary".to_string()),
+                    cancelled: false,
+                    cancel_sequence: actor.compaction.cancel.cancel_sequence(),
                     prompt_index: 0,
                     original_user_info: None,
                 };

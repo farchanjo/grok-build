@@ -20,6 +20,7 @@ pub mod attribution;
 
 pub mod bridge;
 pub mod computer;
+pub mod extra_ca;
 pub mod gitignore;
 pub mod implementations;
 pub mod normalization;
@@ -34,5 +35,5 @@ pub mod util;
 pub mod versions;
 
 pub use attribution::{
-    Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SharedAttributionCallback, ToolConsumer,
+    Auth401AttributionCallback, BEARER_TAIL_CHARS, SharedAttributionCallback, ToolConsumer,
 };

@@ -77,6 +77,14 @@ pub trait ChatPersistence: Send + 'static {
     /// Replace the entire chat history (non-transactional repairs / rewind).
     fn replace_history(&mut self, items: &[ConversationItem]);
 
+    /// Destructive image-strip rewrite. The host must create or preserve a
+    /// recoverable pre-strip backup before replacing history, then acknowledge
+    /// the combined disk outcome. A failed backup must gate off the rewrite.
+    fn replace_history_for_strip_and_ack(
+        &mut self,
+        items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>>;
+
     /// Persist a compaction checkpoint, replacement history, and marker using
     /// the host's marker-last protocol, then acknowledge the final state.
     fn commit_compaction_and_ack(
@@ -86,6 +94,19 @@ pub trait ChatPersistence: Send + 'static {
 
     /// Flush pending writes to disk.
     fn flush(&mut self);
+}
+
+/// Disk-acknowledged outcome of a URL-scoped conversation image strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripOutcome {
+    /// Images were stripped and the backup-gated rewrite succeeded.
+    Applied { stripped: usize },
+    /// No stored image matched the requested URL set.
+    NoMatch,
+    /// Memory was stripped, but backup, write, or acknowledgement failed.
+    WriteFailed { stripped: usize },
+    /// The chat-state actor was unavailable, so no result is known.
+    ActorUnavailable,
 }
 
 // ============================================================================
@@ -101,6 +122,8 @@ pub enum PersistenceRecord {
     AcknowledgedMessage(ConversationItem),
     /// The full history was replaced.
     ReplaceHistory(Vec<ConversationItem>),
+    /// A backup-gated, acknowledged image-strip rewrite was requested.
+    ReplaceHistoryForStrip(Vec<ConversationItem>),
     /// A marker-last compaction commit was requested.
     CommitCompaction(CompactionPersistenceRequest),
     /// A flush was requested.
@@ -112,6 +135,7 @@ pub enum PersistenceRecord {
 /// the actor did. No locks, no atomics — just message passing.
 pub struct MockChatPersistence {
     tx: mpsc::UnboundedSender<PersistenceRecord>,
+    fail_strip_writes: bool,
     persistence_ack_tx:
         Option<mpsc::UnboundedSender<oneshot::Sender<Result<StrictAppendAck, StrictAppendError>>>>,
     compaction_ack_tx:
@@ -137,6 +161,7 @@ impl MockChatPersistence {
         (
             Self {
                 tx,
+                fail_strip_writes: false,
                 persistence_ack_tx: None,
                 compaction_ack_tx: None,
                 persisted_working_directory_switches: Vec::new(),
@@ -149,6 +174,13 @@ impl MockChatPersistence {
         )
     }
 
+    /// Create a mock whose acknowledged strip rewrite fails.
+    pub fn new_failing_strip_writes() -> (Self, MockPersistenceReceiver) {
+        let (mut mock, receiver) = Self::new();
+        mock.fail_strip_writes = true;
+        (mock, receiver)
+    }
+
     /// Create a mock whose persistence acknowledgement is test-controlled.
     pub fn new_with_manual_persistence_ack() -> (Self, MockPersistenceReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -157,6 +189,7 @@ impl MockChatPersistence {
         (
             Self {
                 tx,
+                fail_strip_writes: false,
                 persistence_ack_tx: Some(persistence_ack_tx),
                 compaction_ack_tx: Some(compaction_ack_tx),
                 persisted_working_directory_switches: Vec::new(),
@@ -257,6 +290,28 @@ impl ChatPersistence for MockChatPersistence {
             .send(PersistenceRecord::ReplaceHistory(items.to_vec()));
     }
 
+    fn replace_history_for_strip_and_ack(
+        &mut self,
+        items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        let sent = self
+            .tx
+            .send(PersistenceRecord::ReplaceHistoryForStrip(items.to_vec()));
+        let result = if sent.is_err() {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "mock persistence closed",
+            ))
+        } else if self.fail_strip_writes {
+            Err(io::Error::new(io::ErrorKind::StorageFull, "mock disk full"))
+        } else {
+            Ok(())
+        };
+        let _ = reply.send(result);
+        receiver
+    }
+
     fn commit_compaction_and_ack(
         &mut self,
         request: CompactionPersistenceRequest,
@@ -308,6 +363,14 @@ impl ChatPersistence for NullChatPersistence {
         receiver
     }
     fn replace_history(&mut self, _items: &[ConversationItem]) {}
+    fn replace_history_for_strip_and_ack(
+        &mut self,
+        _items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        let _ = reply.send(Ok(()));
+        receiver
+    }
     fn commit_compaction_and_ack(
         &mut self,
         _request: CompactionPersistenceRequest,

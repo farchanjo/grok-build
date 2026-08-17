@@ -22,6 +22,7 @@ pub mod jsonl;
 pub(crate) mod relocation;
 pub mod search;
 pub mod search_fts;
+pub(crate) mod search_gate;
 pub mod search_remote_sync;
 pub(crate) mod summary_write;
 
@@ -1376,6 +1377,20 @@ pub trait StorageAdapter: Send + Sync {
         messages: &[ConversationItem],
     ) -> io::Result<()>;
 
+    /// Preserve the earliest on-disk history before an image-strip rewrite.
+    /// Implementations must serialize this with competing strip writers so a
+    /// later, already-stripped view cannot overwrite the first backup.
+    async fn backup_chat_history_before_strip(&self, info: &Info) -> io::Result<()>;
+
+    /// Perform the backup and destructive rewrite as one writer-serialized
+    /// operation. This closes the reconnect race between separate backup and
+    /// replacement calls.
+    async fn replace_chat_history_after_strip(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> io::Result<()>;
+
     /// Atomically replace history while durably recording the previous view in
     /// a pending marker. The marker lets startup repair a process crash that
     /// lands after this replacement but before the durable compaction commit.
@@ -1488,6 +1503,19 @@ pub trait StorageAdapter: Send + Sync {
         info: &Info,
         checkpoint_file: &str,
     ) -> io::Result<crate::extensions::notification::CompactionCheckpointFile>;
+}
+
+/// Run a destructive image-strip rewrite only after its recoverable backup
+/// succeeds. This ordering is intentionally centralized and independently
+/// testable.
+pub(crate) async fn strip_rewrite_gated(
+    storage: &dyn StorageAdapter,
+    info: &Info,
+    messages: &[ConversationItem],
+) -> io::Result<()> {
+    storage
+        .replace_chat_history_after_strip(info, messages)
+        .await
 }
 
 pub use jsonl::JsonlStorageAdapter;

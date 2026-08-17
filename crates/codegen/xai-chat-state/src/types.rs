@@ -121,6 +121,42 @@ pub struct NotificationMeta {
     pub turn_start_ms: Option<i64>,
 }
 
+/// Optional proactive byte budget for inline images in request-copy histories.
+///
+/// This is deliberately provider-neutral and ephemeral: the shell derives it
+/// from the active provider and updates it on model switches. It is not stored
+/// in [`ChatStateSnapshot`], so older persisted sessions remain compatible and
+/// unknown providers never inherit a stale first-party policy after restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageBudgetConfig {
+    /// High-water mark at which oldest-first image eviction starts.
+    pub trigger_bytes: usize,
+    /// Low-water mark to reclaim down to once the trigger is crossed.
+    pub reclaim_target_bytes: usize,
+}
+
+/// First-party xAI proxy policy: start evicting at 47 MiB and reclaim to
+/// 25 MiB. The shell must opt in only for an explicitly resolved xAI provider;
+/// this constant is never a default for unknown routes.
+pub const XAI_IMAGE_BUDGET: ImageBudgetConfig =
+    ImageBudgetConfig::new(47 * 1024 * 1024, 25 * 1024 * 1024);
+
+impl ImageBudgetConfig {
+    /// Construct a valid high-water/low-water image budget.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `reclaim_target_bytes >= trigger_bytes`, because that would
+    /// remove hysteresis and could rewrite the prompt prefix on every turn.
+    pub const fn new(trigger_bytes: usize, reclaim_target_bytes: usize) -> Self {
+        assert!(reclaim_target_bytes < trigger_bytes);
+        Self {
+            trigger_bytes,
+            reclaim_target_bytes,
+        }
+    }
+}
+
 /// Configuration for tool-result pruning.
 ///
 /// Prunes old, large tool results from the conversation to reclaim context space.

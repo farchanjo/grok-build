@@ -90,6 +90,11 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         inherited_tool_overrides: None,
         yolo_mode: false,
         subagent_event_tx: tx,
+        subagent_admission: Arc::new(
+            xai_grok_tools::implementations::grok_build::task::admission::SubagentAdmission::new(
+                xai_grok_tools::implementations::grok_build::task::admission::SubagentLimits::default(),
+            ),
+        ),
         hunk_tracker_handle: xai_hunk_tracker::HunkTrackerHandle::noop(),
         hunk_tracking_enabled: false,
         fs: Arc::new(xai_grok_workspace::file_system::LocalFs::new(

@@ -123,7 +123,7 @@ impl ImageGenClient {
             Ok::<(), xai_tool_runtime::ToolError>(())
         })?;
 
-        let http = reqwest::Client::builder()
+        let http = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
             .timeout(std::time::Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS))
             .read_timeout(std::time::Duration::from_secs(IMAGE_GEN_READ_TIMEOUT_SECS))
             .default_headers(headers)

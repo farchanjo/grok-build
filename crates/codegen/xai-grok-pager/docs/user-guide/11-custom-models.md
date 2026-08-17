@@ -474,8 +474,8 @@ hosts when the catalog misses). ChatGPT OAuth pre-turn refresh applies only
 when the active model base URL is the Codex Responses route; a disk-global
 ChatGPT login never overwrites OpenRouter, OpenAI API-key, Anthropic, or
 first-party xAI credentials. The repair prompt names the provider and directs
-you to `/providers` to replace or test the key. It does **not** mention
-`/login` and does not start xAI OAuth. ChatGPT OAuth may remint only its own
+you to `/providers` to replace or test the key and never starts xAI OAuth.
+ChatGPT OAuth may remint only its own
 OpenAI credential. First-party xAI session failures still use the existing
 session recovery path until provider-scoped login fully replaces it.
 

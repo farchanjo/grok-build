@@ -3,10 +3,20 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+
+/// True only for trigger-bearing interactive cancels that are allowed to stop
+/// compaction. Send-now, legacy/teardown `None`, and the internal persistence
+/// fail-stop keep their existing semantics.
+pub(crate) fn is_explicit_compaction_cancel_trigger(trigger: Option<&str>) -> bool {
+    trigger.is_some_and(|trigger| {
+        trigger != "send_now" && trigger != "compaction_persistence_indeterminate"
+    })
+}
 
 /// Auto-compaction is gated whenever `auto_compact_suppressed` is not [`SUPPRESS_NONE`].
 pub(crate) const SUPPRESS_NONE: u8 = 0;
@@ -51,6 +61,172 @@ pub struct AsyncCompactionCache {
     /// when prefire finished before compact (not counted in telemetry TTFT unless
     /// the user waited on an in-flight pass-1).
     pub pass1_latency_ms: u64,
+}
+
+/// Cancel gate for in-flight compact, prefire, and rolling operations.
+///
+/// Each top-level operation owns a fresh token. The gate retains every active
+/// token so one explicit user stop cancels overlapping operations together,
+/// while a new operation started after that stop does not inherit an old
+/// cancelled token that is still unwinding.
+#[derive(Clone, Default)]
+pub struct CompactCancelGate {
+    inner: Arc<Mutex<CompactCancelState>>,
+}
+
+#[derive(Default)]
+struct CompactCancelState {
+    active: Vec<(u64, tokio_util::sync::CancellationToken)>,
+    next_scope_id: u64,
+    cancel_commands_pending: usize,
+    cancel_sequence: u64,
+}
+
+/// Removes one active cancellation token when its operation ends.
+pub struct CompactCancelScope {
+    gate: CompactCancelGate,
+    scope_id: u64,
+}
+
+impl Drop for CompactCancelScope {
+    fn drop(&mut self) {
+        self.gate.end(self.scope_id);
+    }
+}
+
+/// Clears an out-of-band promotion barrier unless ownership was transferred to
+/// the queued actor command.
+pub(crate) struct PendingCompactCancelCommand {
+    gate: CompactCancelGate,
+    committed: bool,
+}
+
+impl PendingCompactCancelCommand {
+    /// Transfer responsibility for clearing the barrier to the actor command.
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingCompactCancelCommand {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.gate.clear_cancel_command_pending();
+        }
+    }
+}
+
+impl CompactCancelGate {
+    /// Start an independent compaction operation and atomically capture the
+    /// cancellation sequence at which its token became visible.
+    pub(crate) fn enter_with_sequence(
+        &self,
+    ) -> (u64, tokio_util::sync::CancellationToken, CompactCancelScope) {
+        let (cancel_sequence, scope_id, token) = {
+            let mut state = self.inner.lock().expect("compaction cancel gate poisoned");
+            state.next_scope_id = state.next_scope_id.wrapping_add(1);
+            let scope_id = state.next_scope_id;
+            let token = tokio_util::sync::CancellationToken::new();
+            state.active.push((scope_id, token.clone()));
+            (state.cancel_sequence, scope_id, token)
+        };
+        (
+            cancel_sequence,
+            token,
+            CompactCancelScope {
+                gate: self.clone(),
+                scope_id,
+            },
+        )
+    }
+
+    /// Start an independent compaction operation.
+    pub fn enter(&self) -> (tokio_util::sync::CancellationToken, CompactCancelScope) {
+        let (_, token, scope) = self.enter_with_sequence();
+        (token, scope)
+    }
+
+    fn end(&self, scope_id: u64) {
+        let mut state = self.inner.lock().expect("compaction cancel gate poisoned");
+        let old_len = state.active.len();
+        state.active.retain(|(id, _)| *id != scope_id);
+        debug_assert_eq!(state.active.len() + 1, old_len, "unknown compaction scope");
+    }
+
+    /// Cancel every compaction operation currently in flight.
+    pub fn request_cancel(&self) {
+        let tokens = {
+            let state = self.inner.lock().expect("compaction cancel gate poisoned");
+            state
+                .active
+                .iter()
+                .map(|(_, token)| token.clone())
+                .collect::<Vec<_>>()
+        };
+        for token in tokens {
+            token.cancel();
+        }
+    }
+
+    /// Mark that an out-of-band user cancellation will queue normal actor
+    /// teardown. Rolling-result handling pauses prompt promotion until the
+    /// corresponding actor command clears the barrier.
+    pub(crate) fn begin_cancel_command(&self) -> PendingCompactCancelCommand {
+        let mut state = self.inner.lock().expect("compaction cancel gate poisoned");
+        state.cancel_commands_pending = state.cancel_commands_pending.saturating_add(1);
+        state.cancel_sequence = state.cancel_sequence.wrapping_add(1);
+        PendingCompactCancelCommand {
+            gate: self.clone(),
+            committed: false,
+        }
+    }
+
+    pub(crate) fn clear_cancel_command_pending(&self) {
+        let mut state = self.inner.lock().expect("compaction cancel gate poisoned");
+        state.cancel_commands_pending = state.cancel_commands_pending.saturating_sub(1);
+    }
+
+    /// Monotonic user-cancel sequence used to reject a result produced before
+    /// a cancel even if its sampling scope has already drained.
+    pub fn cancel_sequence(&self) -> u64 {
+        self.inner
+            .lock()
+            .expect("compaction cancel gate poisoned")
+            .cancel_sequence
+    }
+
+    pub fn cancel_command_pending(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("compaction cancel gate poisoned")
+            .cancel_commands_pending
+            > 0
+    }
+
+    /// Linearize synchronous work against out-of-band cancellation. The
+    /// closure must not await; holding this short mutex section prevents a
+    /// pending marker from landing between the final sequence check and the
+    /// protected action (prompt spawn or durable-CAS enqueue).
+    pub(crate) fn run_if_sequence_current<T>(
+        &self,
+        expected_sequence: u64,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.inner.lock().expect("compaction cancel gate poisoned");
+        if state.cancel_commands_pending > 0 || state.cancel_sequence != expected_sequence {
+            return None;
+        }
+        Some(action())
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("compaction cancel gate poisoned")
+            .active
+            .iter()
+            .any(|(_, token)| token.is_cancelled())
+    }
 }
 
 /// Prefire two-pass state. `Default` so it drops into existing `CompactionConfig`
@@ -152,6 +328,8 @@ pub struct CompactionConfig {
     pub prefire: PrefireState,
     /// Sticky once a forked session releases its inherited prefix under compaction pressure (see `run_compact_inner`), so it stops re-pinning it.
     pub prefix_released: AtomicBool,
+    /// Explicit user cancellation for the current compaction generation.
+    pub cancel: CompactCancelGate,
     /// True from admission of a rolling job until its result is applied or
     /// discarded. Prompt promotion pauses while this is set, making the CAS
     /// application an idle safe point rather than racing an in-flight sample.
@@ -211,5 +389,82 @@ mod prefire_state_tests {
         let state = PrefireState::default();
         assert!(state.take_handle().is_none());
         assert!(state.take().is_none());
+    }
+}
+
+#[cfg(test)]
+mod compact_cancel_gate_tests {
+    use super::*;
+
+    #[test]
+    fn only_interactive_trigger_bearing_cancels_stop_compaction() {
+        assert!(is_explicit_compaction_cancel_trigger(Some("ctrl_c")));
+        assert!(is_explicit_compaction_cancel_trigger(Some("esc")));
+        assert!(is_explicit_compaction_cancel_trigger(Some("dashboard")));
+        assert!(!is_explicit_compaction_cancel_trigger(Some("send_now")));
+        assert!(!is_explicit_compaction_cancel_trigger(Some(
+            "compaction_persistence_indeterminate"
+        )));
+        assert!(!is_explicit_compaction_cancel_trigger(None));
+    }
+
+    #[test]
+    fn request_cancel_trips_shared_token() {
+        let gate = CompactCancelGate::default();
+        let (token, _scope) = gate.enter();
+        assert!(!token.is_cancelled());
+        gate.request_cancel();
+        assert!(token.is_cancelled());
+        assert!(gate.is_cancelled());
+    }
+
+    #[test]
+    fn pending_cancel_command_is_shared_and_clearable() {
+        let gate = CompactCancelGate::default();
+        let clone = gate.clone();
+        let before = gate.cancel_sequence();
+        let first = clone.begin_cancel_command();
+        let second = gate.begin_cancel_command();
+        assert!(gate.cancel_command_pending());
+        assert_eq!(gate.cancel_sequence(), before.wrapping_add(2));
+        let unsent = gate.begin_cancel_command();
+        assert_eq!(gate.cancel_sequence(), before.wrapping_add(3));
+        drop(unsent);
+        assert!(gate.cancel_command_pending());
+        first.commit();
+        gate.clear_cancel_command_pending();
+        assert!(clone.cancel_command_pending());
+        second.commit();
+        clone.clear_cancel_command_pending();
+        assert!(!clone.cancel_command_pending());
+        assert_eq!(clone.cancel_sequence(), before.wrapping_add(3));
+    }
+
+    #[test]
+    fn request_cancel_is_noop_when_idle() {
+        let gate = CompactCancelGate::default();
+        gate.request_cancel();
+        let (token, _scope) = gate.enter();
+        assert!(!token.is_cancelled());
+        assert!(!gate.is_cancelled());
+    }
+
+    #[test]
+    fn overlapping_operations_cancel_together_but_new_operation_starts_fresh() {
+        let gate = CompactCancelGate::default();
+        let (first_token, first_scope) = gate.enter();
+        let (second_token, second_scope) = gate.enter();
+        gate.request_cancel();
+        assert!(first_token.is_cancelled());
+        assert!(second_token.is_cancelled());
+
+        let (next_token, next_scope) = gate.enter();
+        assert!(!next_token.is_cancelled());
+        assert!(gate.is_cancelled(), "old cancelled scopes are still active");
+
+        drop(first_scope);
+        drop(second_scope);
+        assert!(!gate.is_cancelled());
+        drop(next_scope);
     }
 }

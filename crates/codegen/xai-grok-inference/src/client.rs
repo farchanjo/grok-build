@@ -21,13 +21,14 @@ use reqwest::header::{
 use serde::Serialize;
 
 use xai_grok_inference_types::error::{
-    parse_rate_limit_reset, try_parse_stream_error, user_facing_api_error_message_for,
+    parse_error_code, parse_rate_limit_reset, try_parse_stream_error,
+    user_facing_api_error_message_for,
 };
 use xai_grok_inference_types::{
     ApiErrorDiagnostics, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
     ConversationRequest, ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER,
-    InferenceError, MessagesRequestWrapper, ResponseModelMetadata, Result, build_messages_request,
-    is_check_event, messages, rs,
+    InferenceError, MessagesRequestWrapper, ResponseModelMetadata, Result, SentCredential,
+    build_messages_request, is_check_event, messages, rs,
 };
 
 use crate::config::{AuthScheme, InferenceConfig, OriginClientInfo};
@@ -418,6 +419,7 @@ fn api_error(
     retry_after_secs: Option<u64>,
     should_retry: Option<bool>,
     diagnostics: Option<ApiErrorDiagnostics>,
+    error_code: Option<xai_grok_inference_types::ApiErrorCode>,
 ) -> InferenceError {
     if let Some(diagnostics) = diagnostics.as_ref() {
         tracing::warn!(
@@ -441,6 +443,7 @@ fn api_error(
         retry_after_secs,
         should_retry,
         diagnostics,
+        error_code,
     }
 }
 
@@ -632,6 +635,21 @@ impl std::fmt::Debug for InferenceClient {
     }
 }
 
+/// Request builder coupled to the auth state captured when its headers were
+/// built. A later credential refresh must not change how a 401 is accounted.
+struct SentRequest {
+    builder: reqwest::RequestBuilder,
+    sent_credential: SentCredential,
+    sent_bearer_tail: Option<String>,
+}
+
+fn auth_rejected(message: String, credential: SentCredential) -> InferenceError {
+    InferenceError::Auth {
+        message,
+        credential,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ClientDefaults {
     model: String,
@@ -742,9 +760,8 @@ impl InferenceClient {
                             key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
-                        InferenceError::Auth(
-                            "Invalid api_key: cannot be converted to a valid HTTP header"
-                                .to_string(),
+                        InferenceError::auth_unknown(
+                            "Invalid api_key: cannot be converted to a valid HTTP header",
                         )
                     })?;
                     headers.insert(HeaderName::from_static("x-api-key"), header_value);
@@ -757,9 +774,8 @@ impl InferenceClient {
                             key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
-                        InferenceError::Auth(
-                            "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
-                                .to_string(),
+                        InferenceError::auth_unknown(
+                            "Invalid api_key: cannot be converted to a valid HTTP Authorization header",
                         )
                     })?;
                     headers.insert(AUTHORIZATION, header_value);
@@ -909,23 +925,25 @@ impl InferenceClient {
         self.openrouter_metadata_requested
     }
 
-    /// POST with default headers. Overrides auth from resolver if wired.
-    fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+    /// POST with auth provenance captured from the headers that will be sent.
+    /// A wired resolver is authoritative: when it has no value, stale default
+    /// credentials are removed and the request is classified `Missing`.
+    fn post(&self, url: impl reqwest::IntoUrl) -> SentRequest {
         let mut headers = self.default_headers.clone();
-        if let Some(resolver) = &self.bearer_resolver
-            && let Some(fresh) = resolver.current_bearer()
-        {
-            match self.defaults.auth_scheme {
-                AuthScheme::XApiKey => {
-                    headers.remove(AUTHORIZATION);
-                    if let Ok(v) = HeaderValue::from_str(&fresh) {
-                        headers.insert(HeaderName::from_static("x-api-key"), v);
+        if let Some(resolver) = &self.bearer_resolver {
+            headers.remove(AUTHORIZATION);
+            headers.remove(HeaderName::from_static("x-api-key"));
+            if let Some(fresh) = resolver.current_bearer() {
+                match self.defaults.auth_scheme {
+                    AuthScheme::XApiKey => {
+                        if let Ok(v) = HeaderValue::from_str(&fresh) {
+                            headers.insert(HeaderName::from_static("x-api-key"), v);
+                        }
                     }
-                }
-                AuthScheme::Bearer => {
-                    headers.remove(HeaderName::from_static("x-api-key"));
-                    if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
-                        headers.insert(AUTHORIZATION, v);
+                    AuthScheme::Bearer => {
+                        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
+                            headers.insert(AUTHORIZATION, v);
+                        }
                     }
                 }
             }
@@ -945,68 +963,69 @@ impl InferenceClient {
                 has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
             );
         }
+        let sent_bearer_tail =
+            Self::sent_bearer_tail_from_headers(&headers, self.defaults.auth_scheme);
+        let sent_credential = SentCredential::from_sent_bearer_tail(sent_bearer_tail.as_deref());
         if let Some(injector) = &self.header_injector {
             injector.inject(&mut headers);
         }
-        self.http.post(url).headers(headers)
+        SentRequest {
+            builder: self.http.post(url).headers(headers),
+            sent_credential,
+            sent_bearer_tail,
+        }
     }
 
-    /// Bearer prefix for 401 attribution. Prefers live resolver, falls back to default_headers.
-    fn current_sent_bearer_prefix(&self) -> Option<String> {
-        self.bearer_resolver
-            .as_ref()
-            .and_then(|r| r.current_bearer())
-            .or_else(|| self.extract_sent_bearer())
-            .map(|mut s| {
-                s.truncate(crate::attribution::SENT_BEARER_PREFIX_LEN.min(s.len()));
-                s
-            })
-    }
-
-    /// Extract the bearer from `default_headers`, truncated to prefix length.
-    /// Reads `x-api-key` (Anthropic Messages API) or `Authorization` (OpenAI-completions).
-    fn extract_sent_bearer(&self) -> Option<String> {
-        let raw = match self.defaults.auth_scheme {
-            AuthScheme::XApiKey => self
-                .default_headers
+    fn sent_bearer_tail_from_headers(headers: &HeaderMap, scheme: AuthScheme) -> Option<String> {
+        // `HeaderValue::to_str` accepts visible ASCII only, while a value built
+        // from a Rust string may contain valid UTF-8 obs-text. Attribution must
+        // remain Unicode-safe whenever those exact bytes are present on the
+        // request; arbitrary non-UTF-8 header bytes still fail closed to None.
+        fn utf8(value: &HeaderValue) -> Option<&str> {
+            std::str::from_utf8(value.as_bytes()).ok()
+        }
+        let raw = match scheme {
+            AuthScheme::XApiKey => headers
                 .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            AuthScheme::Bearer => self
-                .default_headers
+                .and_then(utf8),
+            AuthScheme::Bearer => headers
                 .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.strip_prefix("Bearer "))
-                .map(|s| s.to_string()),
+                .and_then(utf8)
+                .and_then(|value| value.strip_prefix("Bearer ")),
         };
-        raw.map(|mut s| {
-            // Truncate in-place so we never materialize a heap-resident
-            // copy of the full bearer outside the local stack of this
-            // function. `String::truncate` operates on byte indices and
-            // panics on a non-char-boundary cut; bearer tokens are
-            // ASCII (per the `Authorization` and `x-api-key` header
-            // grammars) so the byte index is always safe.
-            s.truncate(crate::attribution::SENT_BEARER_PREFIX_LEN.min(s.len()));
-            s
-        })
+        raw.map(|bearer| xai_grok_inference_types::bearer_fragment::bearer_tail(bearer).to_owned())
     }
 
-    /// Invoke the optional 401 attribution callback for one logical
-    /// 401 response. Each of the six UNAUTHORIZED arms in this file
-    /// calls this helper immediately before returning
-    /// `InferenceError::Auth(...)`. Emit happens at the lowest layer
-    /// that saw the status, so higher layers that react to a 401 must
-    /// not emit a duplicate event.
-    ///
-    /// The bearer passed to the callback is already truncated to
-    /// [`crate::attribution::SENT_BEARER_PREFIX_LEN`] characters by
-    /// [`Self::extract_sent_bearer`]; the trait contract guarantees
-    /// that callers downstream of this crate never see the full
-    /// bearer.
-    fn record_401_attribution(&self, consumer: crate::attribution::InferenceConsumer) {
+    /// Best-effort view for request-start diagnostics only. A 401 uses the
+    /// build-time tail stored in [`SentRequest`] so refresh races cannot
+    /// rewrite attribution or retry accounting.
+    fn current_sent_bearer_tail(&self) -> Option<String> {
+        if self.bearer_resolver.is_some() {
+            return self
+                .bearer_resolver
+                .as_ref()
+                .and_then(|resolver| resolver.current_bearer())
+                .map(|bearer| {
+                    xai_grok_inference_types::bearer_fragment::bearer_tail(&bearer).to_owned()
+                });
+        }
+        Self::sent_bearer_tail_from_headers(&self.default_headers, self.defaults.auth_scheme)
+    }
+
+    /// Extract the configured credential tail from `default_headers`. Tests
+    /// only; 401 handling uses the per-request capture.
+    #[cfg(test)]
+    fn extract_sent_bearer(&self) -> Option<String> {
+        Self::sent_bearer_tail_from_headers(&self.default_headers, self.defaults.auth_scheme)
+    }
+
+    fn record_401_attribution(
+        &self,
+        consumer: crate::attribution::InferenceConsumer,
+        sent_bearer_tail: Option<&str>,
+    ) {
         if let Some(cb) = self.attribution_callback.as_ref() {
-            let sent_prefix = self.current_sent_bearer_prefix();
-            cb.record_401(consumer, sent_prefix.as_deref());
+            cb.record_401(consumer, sent_bearer_tail);
         }
     }
 
@@ -1028,7 +1047,7 @@ impl InferenceClient {
     /// Non-secret auth facts for sampling logs (scheme + presence only).
     /// Never returns credential values or stable prefixes.
     pub fn auth_info(&self) -> crate::inference_log::AuthInfo {
-        let has_credential = self.current_sent_bearer_prefix().is_some();
+        let has_credential = self.current_sent_bearer_tail().is_some();
         let auth_type = if !has_credential {
             "none"
         } else {
@@ -1159,7 +1178,12 @@ impl InferenceClient {
         effort.map(crate::config::OpenRouterReasoning::from_effort)
     }
 
-    async fn handle_response(&self, response: reqwest::Response) -> Result<ChatCompletionResponse> {
+    async fn handle_response(
+        &self,
+        response: reqwest::Response,
+        sent_credential: SentCredential,
+        sent_bearer_tail: Option<&str>,
+    ) -> Result<ChatCompletionResponse> {
         let status = response.status();
         let headers = response.headers().clone();
         let model_metadata = extract_model_metadata(&headers);
@@ -1174,13 +1198,17 @@ impl InferenceClient {
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(crate::attribution::InferenceConsumer::ChatCompletions);
+                self.record_401_attribution(
+                    crate::attribution::InferenceConsumer::ChatCompletions,
+                    sent_bearer_tail,
+                );
                 let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
                 let server_message =
                     user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
-                return Err(InferenceError::Auth(format!(
-                    "Unauthorized (401): {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401): {server_message}"),
+                    sent_credential,
+                ));
             }
             let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
             let message = user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
@@ -1191,6 +1219,7 @@ impl InferenceClient {
                 retry_after_secs,
                 should_retry,
                 diagnostics,
+                parse_error_code(bytes.as_ref()),
             ));
         }
 
@@ -1237,17 +1266,20 @@ impl InferenceClient {
             first_party: self.first_party,
         };
         let reasoning = self.openrouter_reasoning_object(payload.reasoning_effort);
-        let http_request = grok_headers
-            .apply(self.post(self.endpoint("chat/completions")))
-            .json(&ChatRequestWithFallbacks {
-                inner: &payload,
-                models: self.openrouter_fallback_models(),
-                provider: self.openrouter_provider_preferences(),
-                plugins: self.openrouter_plugins(),
-                reasoning: reasoning.as_ref(),
-                tool_stream: self.defaults.zai_tool_stream,
-                thinking: self.defaults.zai_thinking.as_ref(),
-            });
+        let SentRequest {
+            builder,
+            sent_credential,
+            sent_bearer_tail,
+        } = self.post(self.endpoint("chat/completions"));
+        let http_request = grok_headers.apply(builder).json(&ChatRequestWithFallbacks {
+            inner: &payload,
+            models: self.openrouter_fallback_models(),
+            provider: self.openrouter_provider_preferences(),
+            plugins: self.openrouter_plugins(),
+            reasoning: reasoning.as_ref(),
+            tool_stream: self.defaults.zai_tool_stream,
+            thinking: self.defaults.zai_thinking.as_ref(),
+        });
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -1255,7 +1287,8 @@ impl InferenceClient {
             e
         })?;
 
-        self.handle_response(response).await
+        self.handle_response(response, sent_credential, sent_bearer_tail.as_deref())
+            .await
     }
 
     /// Start a streaming chat completion request. Returns a stream of typed chunks.
@@ -1311,8 +1344,13 @@ impl InferenceClient {
             user_id: payload.x_grok_user_id.as_deref(),
             first_party: self.first_party,
         };
+        let SentRequest {
+            builder,
+            sent_credential,
+            sent_bearer_tail,
+        } = self.post(self.endpoint("chat/completions"));
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("chat/completions")))
+            .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .json(&streaming_request);
 
@@ -1347,6 +1385,7 @@ impl InferenceClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::InferenceConsumer::ChatCompletionsStream,
+                    sent_bearer_tail.as_deref(),
                 );
                 let endpoint = self.endpoint("chat/completions");
                 let body = response.bytes().await.unwrap_or_default();
@@ -1358,9 +1397,10 @@ impl InferenceClient {
                 let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
                 let server_message =
                     user_facing_api_error_message_for(status, body.as_ref(), provider_label);
-                return Err(InferenceError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_credential,
+                ));
             }
 
             let bytes = response.bytes().await?;
@@ -1386,6 +1426,7 @@ impl InferenceClient {
                 retry_after_secs,
                 should_retry,
                 diagnostics,
+                parse_error_code(bytes.as_ref()),
             ));
         }
 
@@ -1586,9 +1627,12 @@ impl InferenceClient {
             InferenceError::Serialization(e)
         })?;
         self.finalize_responses_request_body(&mut request_body, Vec::new());
-        let http_request = grok_headers
-            .apply(self.post(self.endpoint("responses")))
-            .json(&request_body);
+        let SentRequest {
+            builder,
+            sent_credential,
+            sent_bearer_tail,
+        } = self.post(self.endpoint("responses"));
+        let http_request = grok_headers.apply(builder).json(&request_body);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1609,14 +1653,18 @@ impl InferenceClient {
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(crate::attribution::InferenceConsumer::Responses);
+                self.record_401_attribution(
+                    crate::attribution::InferenceConsumer::Responses,
+                    sent_bearer_tail.as_deref(),
+                );
                 let endpoint = self.endpoint("responses");
                 let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
                 let server_message =
                     user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
-                return Err(InferenceError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_credential,
+                ));
             }
 
             let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
@@ -1635,6 +1683,7 @@ impl InferenceClient {
                 retry_after_secs,
                 should_retry,
                 diagnostics,
+                parse_error_code(bytes.as_ref()),
             ));
         }
 
@@ -1726,8 +1775,13 @@ impl InferenceClient {
             .defaults
             .doom_loop_recovery
             .map(crate::doom_loop::DoomLoopSignalCollector::new);
+        let SentRequest {
+            builder,
+            sent_credential,
+            sent_bearer_tail,
+        } = self.post(self.endpoint("responses"));
         let mut http_request = grok_headers
-            .apply(self.post(self.endpoint("responses")))
+            .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if doom_loop.is_some() {
             // Presence opts in; the server ignores the value.
@@ -1761,7 +1815,10 @@ impl InferenceClient {
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 span.record("error", "unauthorized (401)");
-                self.record_401_attribution(crate::attribution::InferenceConsumer::ResponsesStream);
+                self.record_401_attribution(
+                    crate::attribution::InferenceConsumer::ResponsesStream,
+                    sent_bearer_tail.as_deref(),
+                );
                 let endpoint = self.endpoint("responses");
                 let body = response.bytes().await.unwrap_or_default();
                 let diagnostics = extract_api_error_diagnostics(
@@ -1772,9 +1829,10 @@ impl InferenceClient {
                 let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
                 let server_message =
                     user_facing_api_error_message_for(status, body.as_ref(), provider_label);
-                return Err(InferenceError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_credential,
+                ));
             }
             let model_metadata = extract_model_metadata(&response_headers);
             let retry_after_secs = extract_retry_after(&response_headers);
@@ -1802,6 +1860,7 @@ impl InferenceClient {
                 retry_after_secs,
                 should_retry,
                 diagnostics,
+                parse_error_code(bytes.as_ref()),
             ));
         }
 
@@ -1965,9 +2024,12 @@ impl InferenceClient {
             user_id: request.x_grok_user_id.as_deref(),
             first_party: self.first_party,
         };
-        let http_request = grok_headers
-            .apply(self.post(self.endpoint("messages")))
-            .json(&request.inner);
+        let SentRequest {
+            builder,
+            sent_credential,
+            sent_bearer_tail,
+        } = self.post(self.endpoint("messages"));
+        let http_request = grok_headers.apply(builder).json(&request.inner);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1988,14 +2050,18 @@ impl InferenceClient {
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(crate::attribution::InferenceConsumer::Messages);
+                self.record_401_attribution(
+                    crate::attribution::InferenceConsumer::Messages,
+                    sent_bearer_tail.as_deref(),
+                );
                 let endpoint = self.endpoint("messages");
                 let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
                 let server_message =
                     user_facing_api_error_message_for(status, bytes.as_ref(), provider_label);
-                return Err(InferenceError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_credential,
+                ));
             }
 
             let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
@@ -2014,6 +2080,7 @@ impl InferenceClient {
                 retry_after_secs,
                 should_retry,
                 diagnostics,
+                parse_error_code(bytes.as_ref()),
             ));
         }
 
@@ -2083,8 +2150,13 @@ impl InferenceClient {
             user_id: request.x_grok_user_id.as_deref(),
             first_party: self.first_party,
         };
+        let SentRequest {
+            builder,
+            sent_credential,
+            sent_bearer_tail,
+        } = self.post(self.endpoint("messages"));
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("messages")))
+            .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .json(&request.inner);
 
@@ -2114,7 +2186,10 @@ impl InferenceClient {
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 span.record("error", "unauthorized (401)");
-                self.record_401_attribution(crate::attribution::InferenceConsumer::MessagesStream);
+                self.record_401_attribution(
+                    crate::attribution::InferenceConsumer::MessagesStream,
+                    sent_bearer_tail.as_deref(),
+                );
                 let endpoint = self.endpoint("messages");
                 let body = response.bytes().await.unwrap_or_default();
                 let diagnostics = extract_api_error_diagnostics(
@@ -2125,9 +2200,10 @@ impl InferenceClient {
                 let provider_label = self.provider_label_for_diagnostics(diagnostics.as_ref());
                 let server_message =
                     user_facing_api_error_message_for(status, body.as_ref(), provider_label);
-                return Err(InferenceError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_credential,
+                ));
             }
             let model_metadata = extract_model_metadata(&response_headers);
             let retry_after_secs = extract_retry_after(&response_headers);
@@ -2155,6 +2231,7 @@ impl InferenceClient {
                 retry_after_secs,
                 should_retry,
                 diagnostics,
+                parse_error_code(bytes.as_ref()),
             ));
         }
 
@@ -2486,6 +2563,7 @@ impl InferenceClient {
                 retry_after_secs: info.retry_after_secs,
                 should_retry: None,
                 diagnostics: info.diagnostics,
+                error_code: info.error_code,
             })
     }
 }
@@ -2531,6 +2609,10 @@ mod tests {
             supports_backend_search: false,
             supports_native_schema: None,
             supports_strict_tools: None,
+            // Explicit unknown: None means the model capability is not known.
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -3207,6 +3289,7 @@ mod tests {
         let client = InferenceClient::new(config).expect("build");
         let req = client
             .post("http://localhost/test")
+            .builder
             .build()
             .expect("build request");
         assert!(
@@ -3268,20 +3351,18 @@ mod tests {
         fn record_401(
             &self,
             consumer: crate::attribution::InferenceConsumer,
-            sent_bearer: Option<&str>,
+            sent_bearer_tail: Option<&str>,
         ) {
             self.invocations
                 .lock()
                 .unwrap()
-                .push((consumer, sent_bearer.map(|s| s.to_string())));
+                .push((consumer, sent_bearer_tail.map(str::to_owned)));
         }
     }
 
-    /// `extract_sent_bearer` strips the `"Bearer "` prefix off
-    /// `Authorization` for OpenAI-completions backends and truncates the
-    /// remaining bearer to the cross-crate prefix length.
+    /// `extract_sent_bearer` strips `Bearer ` and keeps the shared tail.
     #[test]
-    fn extract_sent_bearer_strips_bearer_prefix_for_openai_compat() {
+    fn extract_sent_bearer_uses_tail_for_openai_compat() {
         let cfg = InferenceConfig {
             api_key: Some("test-bearer-1234567890".to_string()),
             api_backend: ApiBackend::ChatCompletions,
@@ -3289,17 +3370,14 @@ mod tests {
         };
         let client = InferenceClient::new(cfg).expect("client should build");
         let bearer = client.extract_sent_bearer();
-        // Bearer is truncated at the crate boundary -- callers
-        // downstream of this method only ever see the prefix.
-        assert_eq!(bearer.as_deref(), Some("test-bearer-"));
+        assert_eq!(bearer.as_deref(), Some("r-1234567890"));
         assert_eq!(
-            bearer.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            bearer.as_deref().map(str::chars).map(Iterator::count),
+            Some(crate::attribution::BEARER_TAIL_CHARS),
         );
     }
 
-    /// `extract_sent_bearer` reads `x-api-key` for Anthropic Messages API
-    /// and truncates the value to the cross-crate prefix length.
+    /// `extract_sent_bearer` reads the `x-api-key` tail for Messages.
     #[test]
     fn extract_sent_bearer_reads_x_api_key_for_messages() {
         let cfg = InferenceConfig {
@@ -3310,10 +3388,24 @@ mod tests {
         };
         let client = InferenceClient::new(cfg).expect("client should build");
         let bearer = client.extract_sent_bearer();
-        assert_eq!(bearer.as_deref(), Some("anthropic-ke"));
+        assert_eq!(bearer.as_deref(), Some("c-key-abc123"));
         assert_eq!(
-            bearer.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            bearer.as_deref().map(str::chars).map(Iterator::count),
+            Some(crate::attribution::BEARER_TAIL_CHARS),
+        );
+    }
+
+    #[test]
+    fn sent_bearer_tail_is_unicode_safe() {
+        let cfg = InferenceConfig {
+            api_key: Some("aébcdefghijkl".to_owned()),
+            api_backend: ApiBackend::ChatCompletions,
+            ..minimal_config()
+        };
+        let client = InferenceClient::new(cfg).expect("client should build");
+        assert_eq!(
+            client.extract_sent_bearer().as_deref(),
+            Some("ébcdefghijkl")
         );
     }
 
@@ -3341,6 +3433,7 @@ mod tests {
         let client = InferenceClient::new(cfg).expect("client should build");
         let request = client
             .post("https://example.test/v1/messages")
+            .builder
             .build()
             .expect("request should build");
         let auth = request
@@ -3369,6 +3462,7 @@ mod tests {
         let client = InferenceClient::new(cfg).expect("client should build");
         let request = client
             .post("https://example.test/v1/responses")
+            .builder
             .build()
             .expect("request should build");
         let auth_count = request.headers().get_all(AUTHORIZATION).iter().count();
@@ -3397,6 +3491,7 @@ mod tests {
         let client = InferenceClient::new(cfg).expect("client should build");
         let request = client
             .post("https://example.test/v1/messages")
+            .builder
             .build()
             .expect("request should build");
         let api_key = request
@@ -3407,9 +3502,7 @@ mod tests {
         assert!(request.headers().get(AUTHORIZATION).is_none());
     }
 
-    /// Bearers shorter than the prefix length pass through unchanged.
-    /// Defensive against the truncation logic inadvertently widening
-    /// short bearers (no panics, no zero-padding).
+    /// Bearers shorter than the tail length pass through unchanged.
     #[test]
     fn extract_sent_bearer_short_bearer_passes_through_unchanged() {
         let cfg = InferenceConfig {
@@ -3421,13 +3514,9 @@ mod tests {
         assert_eq!(client.extract_sent_bearer().as_deref(), Some("abc"));
     }
 
-    /// `record_401_attribution` invokes the wired callback with the
-    /// expected `consumer` and the truncated bearer prefix that the
-    /// wire would carry. The key assertion is that the callback
-    /// receives the prefix only -- the full bearer never crosses the
-    /// crate boundary.
+    /// The callback receives only the request-captured bearer tail.
     #[test]
-    fn record_401_attribution_invokes_callback_with_extracted_bearer() {
+    fn record_401_attribution_invokes_callback_with_captured_tail() {
         let cb = std::sync::Arc::new(CountingCallback::default());
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let cfg = InferenceConfig {
@@ -3438,19 +3527,23 @@ mod tests {
             ..minimal_config()
         };
         let client = InferenceClient::new(cfg).expect("client should build");
-        client.record_401_attribution(crate::attribution::InferenceConsumer::ChatCompletionsStream);
+        let sent_bearer_tail = client
+            .post("https://example.test/v1/chat/completions")
+            .sent_bearer_tail;
+        client.record_401_attribution(
+            crate::attribution::InferenceConsumer::ChatCompletionsStream,
+            sent_bearer_tail.as_deref(),
+        );
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(
             calls[0].0,
             crate::attribution::InferenceConsumer::ChatCompletionsStream
         );
-        // Prefix-only -- the `extra-tail` portion of the bearer is
-        // dropped by `extract_sent_bearer` before the callback fires.
-        assert_eq!(calls[0].1.as_deref(), Some("the-bearer-1"));
+        assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
         assert_eq!(
-            calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            calls[0].1.as_deref().map(str::chars).map(Iterator::count),
+            Some(crate::attribution::BEARER_TAIL_CHARS),
         );
     }
 
@@ -3479,7 +3572,7 @@ mod tests {
         let client = InferenceClient::new(cfg).expect("client should build");
 
         // Build a request to inspect the final headers.
-        let builder = client.post("https://example.test/v1/responses");
+        let builder = client.post("https://example.test/v1/responses").builder;
         let request = builder.body("").build().expect("request should build");
 
         let auth_values: Vec<_> = request.headers().get_all(AUTHORIZATION).iter().collect();
@@ -3512,7 +3605,7 @@ mod tests {
         };
         let client = InferenceClient::new(cfg).expect("client should build");
         // Must not panic.
-        client.record_401_attribution(crate::attribution::InferenceConsumer::ChatCompletions);
+        client.record_401_attribution(crate::attribution::InferenceConsumer::ChatCompletions, None);
     }
 
     /// `response.completed` carrying
@@ -3846,7 +3939,7 @@ mod tests {
         // Build a throwaway client just to get a `RequestBuilder` to attach
         // headers to. We only inspect the built request's headers.
         let client = InferenceClient::new(minimal_config()).expect("client should build");
-        let builder = || client.post("https://example.test/chat/completions");
+        let builder = || client.post("https://example.test/chat/completions").builder;
 
         let headers = GrokRequestHeaders {
             conv_id: "conv-1",
@@ -3878,7 +3971,7 @@ mod tests {
     #[test]
     fn grok_request_headers_skipped_for_third_party() {
         let client = InferenceClient::new(minimal_config()).expect("client should build");
-        let builder = || client.post("https://example.test/chat/completions");
+        let builder = || client.post("https://example.test/chat/completions").builder;
 
         // The per-request identity headers that `GrokRequestHeaders` injects.
         const IDENTITY_HEADERS: &[&str] = &[
@@ -4000,6 +4093,7 @@ mod tests {
         let client = InferenceClient::new(cfg).expect("client should build");
         let req = client
             .post("https://api.anthropic.com/v1/messages")
+            .builder
             .build()
             .expect("build request");
         let h = req.headers();

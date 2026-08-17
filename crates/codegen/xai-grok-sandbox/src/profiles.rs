@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::allow_path::normalize_allow_path;
 #[cfg(all(feature = "enforce", unix))]
 use crate::deny::{
     apply_deny_globs_to_capability_set, apply_deny_paths_to_capability_set, effective_deny_paths,
@@ -451,17 +452,19 @@ impl ProfileName {
                     profile.restrict_network = restrict_net;
                 }
 
-                // Add custom read-only paths
                 for path_str in &profile_config.read_only {
-                    profile.read_only.push(PathBuf::from(path_str));
+                    if let Some(path) = normalize_allow_path(path_str) {
+                        profile.read_only.push(path);
+                    }
                 }
-
-                // Add custom read-write paths
                 for path_str in &profile_config.read_write {
-                    profile.read_write.push(PathBuf::from(path_str));
+                    if let Some(path) = normalize_allow_path(path_str) {
+                        profile.read_write.push(path);
+                    }
                 }
 
-                // Add custom deny paths
+                // Deny entries stay raw: globs there are partitioned and
+                // enforced as patterns, not directory grants.
                 for path_str in &profile_config.deny {
                     profile.deny.push(PathBuf::from(path_str));
                 }
@@ -752,6 +755,44 @@ read_write = ["/tmp/ci-artifacts"]
         assert!(config.profiles.contains_key("ci"));
         assert_eq!(config.profiles["devbox"].read_only, vec!["/data"]);
         assert_eq!(config.profiles["devbox"].deny, vec!["/data/private"]);
+    }
+
+    /// Custom-profile resolve: allow entries are normalized, deny entries are not.
+    #[test]
+    fn custom_profile_strips_allow_globs_keeps_deny_globs() {
+        let workspace = std::env::current_dir().unwrap();
+        let config = SandboxConfig {
+            profiles: HashMap::from([(
+                "cargo".to_string(),
+                ProfileConfig {
+                    extends: Some("workspace".to_string()),
+                    restrict_network: None,
+                    read_only: vec!["/opt/tooling/**".to_string()],
+                    read_write: vec![
+                        "/home/user/.cargo/registry/cache/**".to_string(),
+                        "/home/user/.cargo/registry/index".to_string(),
+                    ],
+                    deny: vec!["**/.env".to_string(), "/secrets/**".to_string()],
+                },
+            )]),
+        };
+        let resolved = ProfileName::Custom("cargo".to_string())
+            .resolve_profile(&workspace, &config)
+            .expect("cargo profile resolves");
+
+        // Custom entries are appended after the base profile's own paths.
+        assert_eq!(
+            resolved.read_write[resolved.read_write.len() - 2..],
+            [
+                PathBuf::from("/home/user/.cargo/registry/cache"),
+                PathBuf::from("/home/user/.cargo/registry/index"),
+            ]
+        );
+        assert_eq!(resolved.read_only, [PathBuf::from("/opt/tooling")]);
+        assert_eq!(
+            resolved.deny,
+            [PathBuf::from("**/.env"), PathBuf::from("/secrets/**")]
+        );
     }
 
     #[test]

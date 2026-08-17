@@ -51,6 +51,31 @@ fn search_replace_call(id: &str, path: &str) -> ToolCallResponse {
         ),
     }
 }
+fn pre_tool_use_registry(script: &str) -> xai_grok_hooks::discovery::HookRegistry {
+    let (mut registry, _) = xai_grok_hooks::discovery::load_hooks(None, None);
+    registry.append_specs(vec![xai_grok_hooks::config::HookSpec {
+        name: "test/pretooluse".into(),
+        event: xai_grok_hooks::event::HookEventName::PreToolUse,
+        handler_type: xai_grok_hooks::config::HandlerType::Command,
+        configured_matcher: None,
+        matcher: None,
+        enabled: true,
+        command: Some(std::path::PathBuf::from(script)),
+        command_raw: Some(script.to_string()),
+        url: None,
+        url_raw: None,
+        timeout_ms: 5000,
+        source_dir: std::path::PathBuf::from("/tmp"),
+        extra_env: std::collections::HashMap::new(),
+    }]);
+    registry
+}
+
+fn install_pre_tool_use_hook(actor: &mut SessionActor, script: &str) {
+    actor.hook_resolved_workspace_root = "/tmp".to_string();
+    *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(pre_tool_use_registry(script)));
+}
+
 async fn prepare(
     actor: &SessionActor,
     call: ToolCallResponse,
@@ -150,6 +175,81 @@ async fn inactive_plan_mode_does_not_gate_edits() {
                 result.is_ok(),
                 "edit outside plan mode must prepare; got {:?}",
                 result.err()
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_tool_use_rewrite_becomes_effective_prepared_input() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut actor = build_gate_actor().await;
+            install_pre_tool_use_hook(
+                &mut actor,
+                r#"echo '{"hookSpecificOutput":{"updatedInput":{"file_path":"/tmp/rewritten.rs","old_string":"a","new_string":"b"}}}'"#,
+            );
+            let prepared = prepare(
+                &actor,
+                search_replace_call("call_rewrite", "/tmp/original.rs"),
+            )
+            .await
+            .expect("valid rewrite must prepare");
+            assert_eq!(prepared.parsed_args["file_path"], "/tmp/rewritten.rs");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&prepared.raw_arguments).unwrap()
+                    ["file_path"],
+                "/tmp/rewritten.rs"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_pre_tool_use_rewrite_fails_closed() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut actor = build_gate_actor().await;
+            install_pre_tool_use_hook(
+                &mut actor,
+                r#"echo '{"hookSpecificOutput":{"updatedInput":{"file_path":123,"old_string":"a","new_string":"b"}}}'"#,
+            );
+            let result = prepare(
+                &actor,
+                search_replace_call("call_invalid_rewrite", "/tmp/original.rs"),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ToolLoop::ToolParsingError)),
+                "invalid selected rewrite must fail closed, got {result:?}"
+            );
+            let text = tool_result_text(&actor, "call_invalid_rewrite").await;
+            assert!(text.contains("invalid updatedInput"), "tool result: {text}");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn plan_gate_sees_pre_tool_use_rewritten_path() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut actor = build_gate_actor().await;
+            install_pre_tool_use_hook(
+                &mut actor,
+                r#"echo '{"hookSpecificOutput":{"updatedInput":{"file_path":"/tmp/src/main.rs","old_string":"a","new_string":"b"}}}'"#,
+            );
+            activate_plan_mode(&actor);
+            let result = prepare(
+                &actor,
+                search_replace_call("call_hook_gate", "/tmp/test-session/plan.md"),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ToolLoop::Continue)),
+                "plan gate must reject the rewritten non-plan path, got {result:?}"
             );
         })
         .await;

@@ -119,9 +119,9 @@ fn spawn_agent_thread_direct(
     Ok(thread::Builder::new()
         .name("acp-agent-worker".into())
         .spawn(move || -> Result<()> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
+            let mut runtime_builder = tokio::runtime::Builder::new_current_thread();
+            runtime_builder.enable_all();
+            let rt = xai_tty_utils::runtime::apply_blocking_pool(&mut runtime_builder).build()?;
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let client_tx = channel.tx.clone();

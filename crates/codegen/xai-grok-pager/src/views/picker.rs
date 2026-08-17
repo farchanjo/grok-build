@@ -458,10 +458,10 @@ fn render_search_bar_with_label_viewport(
     };
     let bg_style = |style: Style| -> Style { if let Some(c) = bg { style.bg(c) } else { style } };
 
-    // "Always-active" mode: cursor always visible (Floating mode search).
-    let always_active = !active && !show_hint;
-
-    if active || !query.is_empty() || always_active {
+    // Focus exclusively controls cursor visibility. An unfocused nonempty
+    // query remains visible, while an unfocused empty input renders either its
+    // hint or a blank row.
+    if active || !query.is_empty() {
         let label_w = label.len() as u16;
         buf.set_line(
             x,
@@ -525,7 +525,7 @@ fn render_search_bar_with_label_viewport(
 
         let cursor_display_w = (cursor_col as u16).min(cursor_limit as u16);
 
-        if active || always_active {
+        if active {
             let cursor_x = input_x + cursor_display_w;
             if cursor_x < x + width {
                 // Inverse-video the cell at the cursor position so the
@@ -3329,8 +3329,8 @@ mod tests {
 
         // A `show_search_hint: false` picker (command palette / arg-picker family):
         // the cursor must track focus (`search_active`), not render always-on.
-        let theme = Theme::current();
-        let config = cfg(false, false);
+        let theme = Theme::groknight();
+        let config = cfg(true, false);
         let area = Rect::new(0, 0, 60, 16);
 
         // Render the picker; report whether the search row drew a cursor (an

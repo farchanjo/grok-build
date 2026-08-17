@@ -273,7 +273,7 @@ pub async fn fetch_gcs_version_from_base(channel: &str, base_url: &str) -> Resul
 
 async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<String> {
     let url = format!("{}/{}", base_url, channel);
-    let client = reqwest::Client::builder()
+    let client = xai_grok_tools::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .timeout(Duration::from_secs(15))
         .build()?;
 

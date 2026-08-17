@@ -1,4 +1,8 @@
 use super::*;
+use crate::agent::mvp_agent::acp_agent::{
+    RESUME_REFUSES_CHAT, RESUME_REFUSES_EXTRA_DIRS, load_request_for_resume,
+    shell_session_capabilities,
+};
 /// Build an unsigned JWT with a `tier` claim (header.payload.sig base64url).
 fn jwt_with_tier(tier: u64) -> String {
     use base64::Engine;
@@ -1124,6 +1128,18 @@ fn make_test_handle(
 ) -> crate::session::SessionHandle {
     let (cmd_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    make_test_handle_with_channels(model, yolo, client_id, cmd_tx, persistence_tx)
+}
+
+fn make_test_handle_with_channels(
+    model: &str,
+    yolo: bool,
+    client_id: Option<&str>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<
+        crate::session::persistence::PersistenceMsg,
+    >,
+) -> crate::session::SessionHandle {
     let (hunk_event_tx, _hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let hunk_cancel = tokio_util::sync::CancellationToken::new();
     let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
@@ -1140,6 +1156,7 @@ fn make_test_handle(
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        compaction_cancel: Default::default(),
         info: crate::session::info::Info {
             id: acp::SessionId::new("test"),
             cwd: "/tmp".to_string(),
@@ -3096,7 +3113,12 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
             .expect("cancel must succeed");
         let mut saw_local_cancel = false;
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if let SessionCommand::Cancel { .. } = cmd {
+            if let SessionCommand::Cancel {
+                compaction_cancel_pending,
+                ..
+            } = cmd
+            {
+                assert!(!compaction_cancel_pending);
                 saw_local_cancel = true;
             }
         }
@@ -3106,6 +3128,45 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
         );
     });
 }
+
+#[test]
+fn explicit_cancel_marks_and_transfers_compaction_barrier_ownership() {
+    use crate::session::SessionCommand;
+    use acp::Agent as _;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-explicit-compact-cancel");
+        let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+        let gate = handle.compaction_cancel.clone();
+        let (_token, _scope) = gate.enter();
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        let meta: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "cancelTrigger": "esc"
+            }))
+            .unwrap();
+
+        agent
+            .cancel(acp::CancelNotification::new(sid).meta(meta))
+            .await
+            .expect("cancel must succeed");
+
+        let command = cmd_rx.try_recv().expect("cancel command must be queued");
+        let SessionCommand::Cancel {
+            compaction_cancel_pending,
+            ..
+        } = command
+        else {
+            panic!("expected cancel command");
+        };
+        assert!(compaction_cancel_pending);
+        assert!(gate.cancel_command_pending());
+        assert!(gate.is_cancelled());
+        gate.clear_cancel_command_pending();
+        assert!(!gate.cancel_command_pending());
+    });
+}
+
 /// Regression (post-cancel slot hang, first bad release 0.2.101; see
 /// `dispatch_locks`). SDK e2e shape:
 /// `test_cancel_ends_in_flight_turn_and_frees_slot` (grok-agent-sdk).
@@ -3241,6 +3302,293 @@ async fn drive_close(agent: &MvpAgent, session_id: &str) -> Result<acp::ExtRespo
             std::sync::Arc::from(raw),
         ))
         .await
+}
+/// Drive standard ACP `session/close` through the `Agent` trait.
+async fn drive_standard_close(
+    agent: &MvpAgent,
+    session_id: &str,
+) -> Result<acp::CloseSessionResponse, acp::Error> {
+    use acp::Agent as _;
+    agent
+        .close_session(acp::CloseSessionRequest::new(acp::SessionId::new(
+            session_id.to_string(),
+        )))
+        .await
+}
+#[test]
+fn standard_session_capabilities_are_truthful() {
+    let capabilities = shell_session_capabilities();
+    assert!(capabilities.resume.is_some());
+    assert!(capabilities.close.is_some());
+    assert!(
+        capabilities.additional_directories.is_none(),
+        "resume rejects additional directories, so the agent must not advertise them"
+    );
+}
+#[test]
+fn resume_translation_forces_no_replay_and_disables_code_restore() {
+    let mut meta = acp::Meta::new();
+    meta.insert("noReplay".into(), serde_json::Value::Bool(false));
+    meta.insert("x.ai/restore_code".into(), serde_json::Value::Bool(true));
+    let load = load_request_for_resume(
+        acp::ResumeSessionRequest::new(
+            acp::SessionId::new("sess-resume"),
+            std::path::PathBuf::from("/tmp"),
+        )
+        .meta(meta),
+    );
+    let meta = load
+        .meta
+        .expect("resume conversion must carry policy metadata");
+    assert_eq!(meta.get("noReplay"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        meta.get("x.ai/restore_code"),
+        Some(&serde_json::Value::Bool(false))
+    );
+}
+#[test]
+fn standard_resume_rejects_unsupported_additional_directories() {
+    run_local_for_bridge_test(|| async {
+        use acp::Agent as _;
+        let err = build_minimal_agent_for_tests()
+            .resume_session(
+                acp::ResumeSessionRequest::new(
+                    acp::SessionId::new("sess-resume"),
+                    std::path::PathBuf::from("/tmp"),
+                )
+                .additional_directories(vec![std::path::PathBuf::from("/extra")]),
+            )
+            .await
+            .expect_err("resume must reject roots the load path cannot honor");
+        assert_eq!(err.code, acp::Error::invalid_params().code);
+        assert_eq!(err.data, Some(serde_json::json!(RESUME_REFUSES_EXTRA_DIRS)));
+    });
+}
+#[test]
+fn standard_resume_rejects_declared_chat_sessions() {
+    run_local_for_bridge_test(|| async {
+        use acp::Agent as _;
+        let mut meta = acp::Meta::new();
+        meta.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
+        let err = build_minimal_agent_for_tests()
+            .resume_session(
+                acp::ResumeSessionRequest::new(
+                    acp::SessionId::new("sess-chat"),
+                    std::path::PathBuf::from("/tmp"),
+                )
+                .meta(meta),
+            )
+            .await
+            .expect_err("standard resume must refuse chat sessions");
+        assert_eq!(err.code, acp::Error::invalid_params().code);
+        assert_eq!(err.data, Some(serde_json::json!(RESUME_REFUSES_CHAT)));
+    });
+}
+
+fn insert_native_catalog_model(agent: &MvpAgent, model_id: &str) {
+    let mut entry = crate::agent::config::ModelEntry::fallback(
+        model_id,
+        &crate::agent::config::EndpointsConfig::default(),
+    );
+    entry.info.execution_backend =
+        crate::agent::execution_backend::ExecutionBackend::NativeInference;
+    agent.models_manager.insert_test_entry(model_id, entry);
+}
+
+fn spawn_model_switch_actor(
+    session_id: &acp::SessionId,
+    model_id: &str,
+) -> (
+    crate::session::SessionHandle,
+    tokio::sync::mpsc::UnboundedReceiver<crate::session::persistence::PersistenceMsg>,
+) {
+    let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor_persistence_tx = persistence_tx.clone();
+    tokio::task::spawn_local(async move {
+        let mut execution_backend =
+            crate::agent::execution_backend::ExecutionBackend::NativeInference;
+        let mut external_runtime = None;
+        while let Some(command) = cmd_rx.recv().await {
+            match command {
+                crate::session::SessionCommand::GetExecutionBackend { responds_to } => {
+                    let _ = responds_to.send(execution_backend);
+                }
+                crate::session::SessionCommand::GetActiveAgent { responds_to } => {
+                    let _ = responds_to.send(Some("grok-build".to_string()));
+                }
+                crate::session::SessionCommand::RestoreExecutionMode {
+                    execution_backend: restored_backend,
+                    external_runtime: restored_runtime,
+                    responds_to,
+                } => {
+                    let result = match restored_runtime.as_ref() {
+                        Some(envelope) => restored_backend
+                            .external_kind()
+                            .filter(|kind| *kind == envelope.kind)
+                            .ok_or_else(|| "external envelope/backend mismatch".to_string())
+                            .and_then(|_| envelope.validate().map_err(|e| e.to_string())),
+                        None => Ok(()),
+                    };
+                    if result.is_ok() {
+                        execution_backend = restored_backend;
+                        external_runtime = restored_runtime;
+                    }
+                    let _ = responds_to.send(result);
+                }
+                crate::session::SessionCommand::SetSessionModel {
+                    inference_config,
+                    execution_backend: applied_backend,
+                    responds_to,
+                    ..
+                } => {
+                    execution_backend = applied_backend;
+                    let model_id = acp::ModelId::new(inference_config.model);
+                    let _ = actor_persistence_tx.send(
+                        crate::session::persistence::PersistenceMsg::CurrentModel {
+                            model_id: model_id.clone(),
+                            agent_name: Some("grok-build".to_string()),
+                            reasoning_effort: Some(inference_config.reasoning_effort),
+                            execution_backend: Some(applied_backend),
+                            external_runtime: Some(external_runtime.clone()),
+                        },
+                    );
+                    let _ = responds_to.send(Ok(model_id));
+                }
+                _ => {}
+            }
+        }
+    });
+    let mut handle =
+        make_test_handle_with_channels(model_id, false, None, cmd_tx, persistence_tx);
+    handle.info.id = session_id.clone();
+    (handle, persistence_rx)
+}
+
+async fn run_authoritative_load_model_switch(
+    use_resume_translation: bool,
+) -> Vec<crate::session::persistence::PersistenceMsg> {
+    let agent = build_minimal_agent_for_tests();
+    let model_id = "catalog-native-resume-model";
+    insert_native_catalog_model(&agent, model_id);
+    let session_id = acp::SessionId::new(if use_resume_translation {
+        "standard-resume-external"
+    } else {
+        "load-external"
+    });
+    if use_resume_translation {
+        let request = load_request_for_resume(acp::ResumeSessionRequest::new(
+            session_id.clone(),
+            std::path::PathBuf::from("/tmp"),
+        ));
+        assert_eq!(request.session_id, session_id);
+    }
+    let (handle, mut persistence_rx) = spawn_model_switch_actor(&session_id, model_id);
+    agent.sessions.borrow_mut().insert(session_id.clone(), handle);
+
+    let backend = crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
+        crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+    );
+    let mut envelope = crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(
+        crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+    );
+    envelope.session_pointer = Some("claude-session-original".into());
+    envelope.selected_model = Some("claude-opus".into());
+    agent
+        .restore_summary_execution_mode(&session_id, backend, Some(envelope.clone()))
+        .await
+        .expect("persisted external mode must restore");
+    crate::agent::handlers::model_switch::apply_with_execution_backend_for_test(
+        &agent,
+        acp::SetSessionModelRequest::new(session_id, acp::ModelId::new(model_id)),
+        Some(backend),
+    )
+    .await
+    .expect("load-specific model switch must apply");
+
+    let first_write =
+        tokio::time::timeout(std::time::Duration::from_secs(1), persistence_rx.recv())
+            .await
+            .expect("model persistence must arrive")
+            .expect("persistence channel must stay open");
+    let mut writes = vec![first_write];
+    while let Ok(message) = persistence_rx.try_recv() {
+        writes.push(message);
+    }
+    assert!(!writes.is_empty(), "model application must persist CurrentModel");
+    for message in &writes {
+        let crate::session::persistence::PersistenceMsg::CurrentModel {
+            execution_backend,
+            external_runtime,
+            ..
+        } = message
+        else {
+            panic!("load model path must only emit CurrentModel in this harness");
+        };
+        assert_eq!(*execution_backend, Some(backend));
+        assert_eq!(external_runtime.as_ref(), Some(&Some(envelope.clone())));
+        assert_ne!(
+            *execution_backend,
+            Some(crate::agent::execution_backend::ExecutionBackend::NativeInference),
+            "no intermediate catalog-native write is allowed",
+        );
+    }
+    writes
+}
+
+#[test]
+fn load_and_standard_resume_never_persist_catalog_native_for_external_summary() {
+    run_local_for_bridge_test(|| async {
+        let load_writes = run_authoritative_load_model_switch(false).await;
+        let resume_writes = run_authoritative_load_model_switch(true).await;
+        assert_eq!(load_writes.len(), 1);
+        assert_eq!(resume_writes.len(), 1);
+    });
+}
+
+#[test]
+fn failed_load_restore_preserves_external_summary_without_any_write() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let model_id = "catalog-native-failed-load";
+        insert_native_catalog_model(&agent, model_id);
+        let session_id = acp::SessionId::new("failed-external-load");
+        let (handle, mut persistence_rx) = spawn_model_switch_actor(&session_id, model_id);
+        agent.sessions.borrow_mut().insert(session_id.clone(), handle);
+        let backend = crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
+            crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+        );
+        let mut original_envelope =
+            crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(
+                crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+            );
+        original_envelope.session_pointer = Some("claude-session-original".into());
+        let original_summary = (backend, original_envelope.clone());
+        agent
+            .restore_summary_execution_mode(
+                &session_id,
+                backend,
+                Some(original_envelope.clone()),
+            )
+            .await
+            .expect("valid original external summary mode must restore");
+        let mut invalid = original_envelope;
+        invalid.session_pointer = Some("invalid\nclaude-pointer".into());
+
+        agent
+            .restore_summary_execution_mode(&session_id, backend, Some(invalid))
+            .await
+            .expect_err("invalid persisted envelope must abort before model application");
+        assert!(matches!(
+            persistence_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(original_summary.0, backend);
+        assert_eq!(
+            original_summary.1.session_pointer.as_deref(),
+            Some("claude-session-original")
+        );
+    });
 }
 /// No-evict keystone: a client disconnecting mid-turn must NOT destroy the
 /// session. The actor stays resident, no `Shutdown` is sent, the resident
@@ -3564,6 +3912,53 @@ fn session_live_state_map_is_bounded_across_cycles() {
             agent.session_live_state.borrow().len(),
             0,
             "terminal closes must leave no residual live-state entries (bounded map)"
+        );
+    });
+}
+#[test]
+fn standard_close_uses_the_explicit_close_lifecycle() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-standard-close");
+        let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, Some("turn-1"));
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+
+        let missing = drive_standard_close(&agent, "no-such-session")
+            .await
+            .expect("closing a missing session succeeds");
+        assert_eq!(
+            missing
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("x.ai/closeOutcome"))
+                .and_then(|value| value.as_str()),
+            Some("notResident")
+        );
+        assert!(agent.finalize_spy.borrow().is_empty());
+
+        let closed = drive_standard_close(&agent, sid.0.as_ref())
+            .await
+            .expect("standard close must succeed");
+        assert_eq!(
+            closed
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("x.ai/closeOutcome"))
+                .and_then(|value| value.as_str()),
+            Some("closed")
+        );
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(TestSessionCommand::Shutdown)
+        ));
+        assert_eq!(agent.finalize_spy.borrow().as_slice(), &[sid.0.to_string()]);
+        assert!(!agent.sessions.borrow().contains_key(&sid));
+        assert!(
+            agent
+                .roster_delta_spy
+                .borrow()
+                .iter()
+                .any(|(id, state)| id == sid.0.as_ref() && *state == SessionLiveState::Completed)
         );
     });
 }

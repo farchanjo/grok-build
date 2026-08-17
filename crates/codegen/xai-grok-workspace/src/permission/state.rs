@@ -172,13 +172,17 @@ async fn persist_state_to_dir(
     state: &PermissionState,
     client_identifier: Option<&str>,
 ) {
-    if let Err(e) = tokio::fs::create_dir_all(dir).await {
-        tracing::warn!(?e, "failed creating permission state directory");
-        return;
-    }
     let path = state_file_path(dir, client_identifier);
-    if let Err(e) = persist_state_to_path(&path, state).await {
-        tracing::warn!(?e, path = %path.display(), "failed writing permission state");
+    let dir = dir.to_path_buf();
+    // Owner-only dir creation rides the writer's spawn_blocking: GROK_HOME may
+    // sit on a slow filesystem, so no blocking fs work on the async worker.
+    let result = persist_state_to_path_with_writer(&path, state, move |path, contents| {
+        xai_grok_config::create_dir_all_owner_only(&dir)?;
+        xai_grok_config::fs_atomic::write_atomically(path, contents, None)
+    })
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(?e, path = %path.display(), "failed persisting permission state");
     }
 }
 
@@ -187,6 +191,15 @@ pub(crate) async fn persist_state(
     state: &PermissionState,
     client_identifier: Option<&str>,
 ) {
+    // Tighten the sessions root + encoded-CWD shield for this write. The leaf
+    // itself is created owner-only inside persist_state_to_dir. Tests of
+    // persist_state_to_dir use temp leaves and must not go through this path
+    // (it touches process GROK_HOME). mkdir/chmod belongs on the blocking
+    // pool: persist_state is awaited from the permission-manager actor.
+    let cwd_owned = cwd.as_str().to_string();
+    let _ =
+        tokio::task::spawn_blocking(move || xai_grok_config::ensure_sessions_cwd_dir(&cwd_owned))
+            .await;
     persist_state_to_dir(&state_dir_for_cwd(cwd), state, client_identifier).await
 }
 
@@ -548,6 +561,19 @@ allowed_mcp_servers = ["a"]
         let rewritten: PermissionState =
             toml::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         assert_legacy_mcp_state_migrated(&rewritten);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn persist_state_to_dir_creates_owner_only_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions").join("%2Fsome%2Fcwd");
+
+        persist_state_to_dir(&dir, &PermissionState::default(), None).await;
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[tokio::test]

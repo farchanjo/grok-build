@@ -565,6 +565,7 @@ pub fn stream_messages<'a>(
                         retry_after_secs: None,
                         should_retry: None,
                         diagnostics: None,
+                        error_code: None,
                     };
                     yield InferenceEvent::Failed {
                         request_id: request_id.clone(),

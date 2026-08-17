@@ -375,6 +375,16 @@ mod agent {
         acp::AGENT_METHOD_NAMES.session_load,
     );
     acp_define_request_response!(
+        acp::ResumeSessionRequest,
+        acp::ResumeSessionResponse,
+        acp::AGENT_METHOD_NAMES.session_resume,
+    );
+    acp_define_request_response!(
+        acp::CloseSessionRequest,
+        acp::CloseSessionResponse,
+        acp::AGENT_METHOD_NAMES.session_close,
+    );
+    acp_define_request_response!(
         acp::SetSessionModeRequest,
         acp::SetSessionModeResponse,
         acp::AGENT_METHOD_NAMES.session_set_mode,
@@ -402,6 +412,8 @@ mod agent {
         Authenticate(AcpArgsGeneric<acp::AuthenticateRequest, S>),
         NewSession(AcpArgsGeneric<acp::NewSessionRequest, S>),
         LoadSession(AcpArgsGeneric<acp::LoadSessionRequest, S>),
+        ResumeSession(AcpArgsGeneric<acp::ResumeSessionRequest, S>),
+        CloseSession(AcpArgsGeneric<acp::CloseSessionRequest, S>),
         SetSessionMode(AcpArgsGeneric<acp::SetSessionModeRequest, S>),
         Prompt(AcpArgsGeneric<acp::PromptRequest, S>),
         Cancel(AcpArgsGeneric<acp::CancelNotification, S>),
@@ -422,6 +434,8 @@ mod agent {
                 Self::Authenticate(a) => a.method_name(),
                 Self::NewSession(a) => a.method_name(),
                 Self::LoadSession(a) => a.method_name(),
+                Self::ResumeSession(a) => a.method_name(),
+                Self::CloseSession(a) => a.method_name(),
                 Self::SetSessionMode(a) => a.method_name(),
                 Self::Prompt(a) => a.method_name(),
                 Self::Cancel(a) => a.method_name(),
@@ -450,6 +464,12 @@ mod agent {
                     state.serialize_field("request", args.request.borrow())?
                 }
                 Self::LoadSession(args) => {
+                    state.serialize_field("request", args.request.borrow())?
+                }
+                Self::ResumeSession(args) => {
+                    state.serialize_field("request", args.request.borrow())?
+                }
+                Self::CloseSession(args) => {
                     state.serialize_field("request", args.request.borrow())?
                 }
                 Self::SetSessionMode(args) => {
@@ -502,6 +522,10 @@ mod agent {
                 parse!(NewSession)
             } else if method == acp::AGENT_METHOD_NAMES.session_load {
                 parse!(LoadSession)
+            } else if method == acp::AGENT_METHOD_NAMES.session_resume {
+                parse!(ResumeSession)
+            } else if method == acp::AGENT_METHOD_NAMES.session_close {
+                parse!(CloseSession)
             } else if method == acp::AGENT_METHOD_NAMES.session_set_mode {
                 parse!(SetSessionMode)
             } else if method == acp::AGENT_METHOD_NAMES.session_prompt {
@@ -529,6 +553,8 @@ mod agent {
                 Self::Authenticate(args) => AcpAgentMessageBox::Authenticate(args.boxed()),
                 Self::NewSession(args) => AcpAgentMessageBox::NewSession(args.boxed()),
                 Self::LoadSession(args) => AcpAgentMessageBox::LoadSession(args.boxed()),
+                Self::ResumeSession(args) => AcpAgentMessageBox::ResumeSession(args.boxed()),
+                Self::CloseSession(args) => AcpAgentMessageBox::CloseSession(args.boxed()),
                 Self::SetSessionMode(args) => AcpAgentMessageBox::SetSessionMode(args.boxed()),
                 Self::Prompt(args) => AcpAgentMessageBox::Prompt(args.boxed()),
                 Self::Cancel(args) => AcpAgentMessageBox::Cancel(args.boxed()),
@@ -576,6 +602,24 @@ mod agent {
                         _ = args
                             .response_tx
                             .send(agent.load_session(args.request).await)
+                            .ok();
+                    }
+                    .boxed_local(),
+                ),
+                AcpAgentMessage::ResumeSession(args) => spawn(
+                    async move {
+                        _ = args
+                            .response_tx
+                            .send(agent.resume_session(args.request).await)
+                            .ok();
+                    }
+                    .boxed_local(),
+                ),
+                AcpAgentMessage::CloseSession(args) => spawn(
+                    async move {
+                        _ = args
+                            .response_tx
+                            .send(agent.close_session(args.request).await)
                             .ok();
                     }
                     .boxed_local(),
@@ -629,6 +673,46 @@ mod agent {
                     .boxed_local(),
                 ),
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn round_trip(message: AcpAgentMessage) -> AcpAgentMessage {
+            let json = serde_json::to_value(&message).expect("serialize ACP message");
+            serde_json::from_value(json).expect("deserialize ACP message")
+        }
+
+        #[test]
+        fn standard_session_resume_round_trips_through_agent_message() {
+            let (response_tx, _response_rx) = oneshot::channel();
+            let message = AcpAgentMessage::ResumeSession(AcpArgs {
+                request: acp::ResumeSessionRequest::new(
+                    acp::SessionId::new("session-1"),
+                    std::path::PathBuf::from("/workspace"),
+                ),
+                response_tx,
+            });
+            let decoded = round_trip(message);
+            assert_eq!(
+                decoded.method_name(),
+                acp::AGENT_METHOD_NAMES.session_resume
+            );
+            assert!(matches!(decoded, AcpAgentMessage::ResumeSession(_)));
+        }
+
+        #[test]
+        fn standard_session_close_round_trips_through_agent_message() {
+            let (response_tx, _response_rx) = oneshot::channel();
+            let message = AcpAgentMessage::CloseSession(AcpArgs {
+                request: acp::CloseSessionRequest::new(acp::SessionId::new("session-1")),
+                response_tx,
+            });
+            let decoded = round_trip(message);
+            assert_eq!(decoded.method_name(), acp::AGENT_METHOD_NAMES.session_close);
+            assert!(matches!(decoded, AcpAgentMessage::CloseSession(_)));
         }
     }
 }

@@ -945,11 +945,11 @@ fn render_workspace_payload(payload: &ControlPayload, json: bool) {
 struct CachedSession {
     /// Verbatim `session/load` request JSON (preferred replay form: preserves
     /// the client's exact cwd / mcpServers / meta). `None` when the session
-    /// was only ever created via `session/new` — the load is synthesized.
+    /// was only ever created or resumed — the load is synthesized.
     load_request_json: Option<String>,
-    /// `cwd` captured from `session/new` / `session/load` params.
+    /// `cwd` captured from `session/new` / `session/load` / `session/resume` params.
     cwd: Option<String>,
-    /// `mcpServers` captured from `session/new` / `session/load` params.
+    /// `mcpServers` captured from lifecycle request params.
     mcp_servers_json: Option<String>,
 }
 /// ACP state cached from the stdio stream for replay after leader reconnect.
@@ -958,18 +958,32 @@ struct CachedSession {
 /// multiple sessions over one bridge), not just the most recent one — a
 /// leader crash must restore all of them or the others die with
 /// "unknown session id" on their next prompt.
+#[derive(Clone)]
+enum PendingCacheMutation {
+    Load {
+        session_id: String,
+        cached: CachedSession,
+    },
+    New {
+        cached: CachedSession,
+    },
+    Resume {
+        session_id: String,
+        cached: CachedSession,
+    },
+    Close {
+        session_id: String,
+    },
+}
 #[derive(Default, Clone)]
 struct StdioReplayState {
     initialize_json: Option<String>,
     /// Sessions to restore on reconnect, keyed by session id, in first-seen
     /// order (Vec keeps replay order deterministic).
     sessions: Vec<(String, CachedSession)>,
-    /// cwd/mcp from the most recent `session/new` REQUEST whose response has
-    /// not been observed yet. Folded into `sessions` when the response
-    /// carrying the assigned session id arrives. Never replayed while
-    /// unconfirmed (the id is unknown; the client's own request died with the
-    /// old leader and is its to retry).
-    pending_new: Option<CachedSession>,
+    /// Lifecycle requests awaiting a successful response with the exact same
+    /// JSON-RPC request id. They never modify confirmed replay state early.
+    pending_cache_mutations: std::collections::HashMap<String, PendingCacheMutation>,
     /// Most recently created/loaded session id — reported in
     /// `x.ai/leader_reconnected` as the primary restored session.
     last_session_id: Option<String>,
@@ -982,6 +996,13 @@ impl StdioReplayState {
             self.sessions.push((sid.to_string(), cached));
         }
     }
+    /// Preserve a prior verbatim load because it carries client metadata that a
+    /// synthesized load for a resume-only session cannot reconstruct.
+    fn insert_session_if_new(&mut self, sid: &str, cached: CachedSession) {
+        if !self.sessions.iter().any(|(id, _)| id == sid) {
+            self.sessions.push((sid.to_string(), cached));
+        }
+    }
     fn remove_session(&mut self, sid: &str) {
         self.sessions.retain(|(id, _)| id != sid);
         if self.last_session_id.as_deref() == Some(sid) {
@@ -989,7 +1010,49 @@ impl StdioReplayState {
         }
     }
 }
+fn cached_session_from_params(
+    params: &serde_json::Value,
+    verbatim: Option<&str>,
+) -> Option<(String, CachedSession)> {
+    let sid = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())?;
+    Some((
+        sid.to_string(),
+        CachedSession {
+            load_request_json: verbatim.map(str::to_string),
+            cwd: params
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            mcp_servers_json: params
+                .get("mcpServers")
+                .and_then(|m| serde_json::to_string(m).ok()),
+        },
+    ))
+}
+fn json_rpc_id_key(json: &serde_json::Value) -> Option<String> {
+    let id = json.get("id")?;
+    if id.is_string() || id.is_number() {
+        serde_json::to_string(id).ok()
+    } else {
+        None
+    }
+}
+const CACHED_METHODS: &[&str] = &[
+    "\"initialize\"",
+    "\"session/new\"",
+    "\"session/load\"",
+    "\"session/resume\"",
+    "\"session/close\"",
+    "\"x.ai/session/close\"",
+    "\"_x.ai/session/close\"",
+];
 fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState>) {
+    if !CACHED_METHODS.iter().any(|method| msg.contains(method)) {
+        return;
+    }
     let Ok(json) = serde_json::from_str::<serde_json::Value>(msg) else {
         return;
     };
@@ -1003,32 +1066,49 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
             s.initialize_json = Some(msg.to_string());
         }
         "session/load" => {
+            let Some(request_id) = json_rpc_id_key(&json) else {
+                return;
+            };
+            let Some(params) = json.get("params") else {
+                return;
+            };
+            let Some((sid, cached)) = cached_session_from_params(params, Some(msg)) else {
+                return;
+            };
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(params) = json.get("params") {
-                let sid = params
-                    .get("sessionId")
-                    .or_else(|| params.get("session_id"))
-                    .and_then(|v| v.as_str());
-                if let Some(sid) = sid {
-                    let cached = CachedSession {
-                        load_request_json: Some(msg.to_string()),
-                        cwd: params
-                            .get("cwd")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        mcp_servers_json: params
-                            .get("mcpServers")
-                            .and_then(|m| serde_json::to_string(m).ok()),
-                    };
-                    s.upsert_session(sid, cached);
-                    s.last_session_id = Some(sid.to_string());
-                }
-            }
+            s.pending_cache_mutations.insert(
+                request_id,
+                PendingCacheMutation::Load {
+                    session_id: sid,
+                    cached,
+                },
+            );
+        }
+        "session/resume" => {
+            let Some(request_id) = json_rpc_id_key(&json) else {
+                return;
+            };
+            let Some(params) = json.get("params") else {
+                return;
+            };
+            let Some((sid, cached)) = cached_session_from_params(params, None) else {
+                return;
+            };
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.pending_cache_mutations.insert(
+                request_id,
+                PendingCacheMutation::Resume {
+                    session_id: sid,
+                    cached,
+                },
+            );
         }
         "session/new" => {
-            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(request_id) = json_rpc_id_key(&json) else {
+                return;
+            };
             let params = json.get("params");
-            s.pending_new = Some(CachedSession {
+            let cached = CachedSession {
                 load_request_json: None,
                 cwd: params
                     .and_then(|p| p.get("cwd"))
@@ -1037,35 +1117,83 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
                 mcp_servers_json: params
                     .and_then(|p| p.get("mcpServers"))
                     .and_then(|m| serde_json::to_string(m).ok()),
-            });
+            };
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.pending_cache_mutations
+                .insert(request_id, PendingCacheMutation::New { cached });
         }
-        "x.ai/session/close" | "_x.ai/session/close" => {
-            if let Some(sid) = json
+        "session/close" | "x.ai/session/close" | "_x.ai/session/close" => {
+            let Some(request_id) = json_rpc_id_key(&json) else {
+                return;
+            };
+            let Some(sid) = json
                 .get("params")
                 .and_then(|p| p.get("sessionId").or_else(|| p.get("session_id")))
                 .and_then(|v| v.as_str())
-            {
-                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-                s.remove_session(sid);
-            }
+            else {
+                return;
+            };
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.pending_cache_mutations.insert(
+                request_id,
+                PendingCacheMutation::Close {
+                    session_id: sid.to_string(),
+                },
+            );
         }
         _ => {}
     }
 }
-fn cache_incoming_session_id(msg: &str, state: &std::sync::Mutex<StdioReplayState>) {
+fn cache_incoming_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState>) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(msg) else {
         return;
     };
-    if let Some(sid) = json
+    if json.get("method").is_some() {
+        return;
+    }
+    let request_id = json_rpc_id_key(&json);
+    let response_succeeded = if json.get("error").is_some() {
+        Some(false)
+    } else if json.get("result").is_some() {
+        Some(true)
+    } else {
+        None
+    };
+    let response_session_id = json
         .get("result")
         .and_then(|r| r.get("sessionId").or_else(|| r.get("session_id")))
         .and_then(|v| v.as_str())
-    {
-        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pending) = s.pending_new.take() {
-            s.upsert_session(sid, pending);
+        .map(str::to_string);
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(request_id) = request_id else {
+        return;
+    };
+    let Some(response_succeeded) = response_succeeded else {
+        return;
+    };
+    let Some(pending) = s.pending_cache_mutations.remove(&request_id) else {
+        return;
+    };
+    if !response_succeeded {
+        return;
+    }
+    match pending {
+        PendingCacheMutation::Load { session_id, cached } => {
+            s.upsert_session(&session_id, cached);
+            s.last_session_id = Some(session_id);
         }
-        s.last_session_id = Some(sid.to_string());
+        PendingCacheMutation::New { cached } => {
+            let Some(session_id) = response_session_id else {
+                return;
+            };
+            s.upsert_session(&session_id, cached);
+            s.last_session_id = Some(session_id);
+        }
+        PendingCacheMutation::Resume { session_id, cached } => {
+            s.insert_session_if_new(&session_id, cached);
+            s.last_session_id = Some(session_id);
+        }
+        PendingCacheMutation::Close { session_id } => s.remove_session(&session_id),
     }
 }
 /// Synthetic JSON-RPC id for the `session/load` the bridge constructs itself
@@ -1289,12 +1417,7 @@ async fn forward_stdio_line_to_leader(
     if trimmed.is_empty() {
         return;
     }
-    if trimmed.contains("\"initialize\"")
-        || trimmed.contains("\"session/load\"")
-        || trimmed.contains("\"session/new\"")
-    {
-        cache_outgoing_acp_state(&trimmed, replay_state);
-    }
+    cache_outgoing_acp_state(&trimmed, replay_state);
     let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
         {
@@ -1539,9 +1662,7 @@ async fn run_agent_command(
                     loop {
                         match rx.recv().await {
                             Some(ref msg) => {
-                                if msg.contains("\"sessionId\"") || msg.contains("\"session_id\"") {
-                                    cache_incoming_session_id(msg, &replay_state);
-                                }
+                                cache_incoming_acp_state(msg, &replay_state);
                                 if stdout.write_all(msg.as_bytes()).await.is_err()
                                     || stdout.write_all(b"\n").await.is_err()
                                     || stdout.flush().await.is_err()
@@ -2048,9 +2169,11 @@ fn main() {
             "Found crashed sessions from a previous run"
         );
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
+    let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+    runtime_builder
+        .worker_threads(xai_tty_utils::runtime::capped_worker_threads().get())
+        .enable_all();
+    let runtime = xai_tty_utils::runtime::build_with_blocking_pool(&mut runtime_builder)
         .unwrap_or_else(|e| panic!("failed to start tokio runtime: {e}"));
     let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);
     xai_grok_telemetry::debug_log::flush();
@@ -3001,6 +3124,15 @@ mod tests {
     fn make_state() -> std::sync::Mutex<StdioReplayState> {
         std::sync::Mutex::new(StdioReplayState::default())
     }
+    fn cache_successful_load(msg: &str, state: &std::sync::Mutex<StdioReplayState>) {
+        let request: serde_json::Value = serde_json::from_str(msg).unwrap();
+        let id = request.get("id").cloned().expect("load request id");
+        cache_outgoing_acp_state(msg, state);
+        cache_incoming_acp_state(
+            &serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}).to_string(),
+            state,
+        );
+    }
     #[test]
     fn cache_initialize_request() {
         let state = make_state();
@@ -3010,10 +3142,16 @@ mod tests {
         assert_eq!(s.initialize_json.as_deref(), Some(msg));
     }
     #[test]
-    fn cache_session_load_preserves_full_request() {
+    fn cache_session_load_preserves_full_request_after_matching_success() {
         let state = make_state();
         let msg = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp","mcpServers":[]}}"#;
         cache_outgoing_acp_state(msg, &state);
+        {
+            let s = state.lock().unwrap();
+            assert!(s.sessions.is_empty());
+            assert!(s.last_session_id.is_none());
+        }
+        cache_incoming_acp_state(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#, &state);
         let s = state.lock().unwrap();
         let (sid, cached) = &s.sessions[0];
         assert_eq!(sid, "s1");
@@ -3026,44 +3164,281 @@ mod tests {
     fn cache_session_new_is_pending_until_response_assigns_id() {
         let state = make_state();
         let load = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#;
-        cache_outgoing_acp_state(load, &state);
+        cache_successful_load(load, &state);
         let new = r#"{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"/home"}}"#;
         cache_outgoing_acp_state(new, &state);
         {
             let s = state.lock().unwrap();
             assert_eq!(s.sessions.len(), 1);
             assert_eq!(s.sessions[0].0, "s1");
-            assert!(s.pending_new.is_some());
-            assert_eq!(
-                s.pending_new.as_ref().unwrap().cwd.as_deref(),
-                Some("/home")
-            );
+            assert!(matches!(
+                s.pending_cache_mutations.get("3"),
+                Some(PendingCacheMutation::New { cached })
+                    if cached.cwd.as_deref() == Some("/home")
+            ));
         }
-        cache_incoming_session_id(
+        cache_incoming_acp_state(
             r#"{"jsonrpc":"2.0","id":3,"result":{"sessionId":"s2"}}"#,
             &state,
         );
         let s = state.lock().unwrap();
-        assert!(s.pending_new.is_none());
+        assert!(s.pending_cache_mutations.is_empty());
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.sessions[1].0, "s2");
         assert_eq!(s.sessions[1].1.cwd.as_deref(), Some("/home"));
         assert_eq!(s.last_session_id.as_deref(), Some("s2"));
     }
     #[test]
-    fn cache_session_close_stops_replaying_it() {
+    fn session_new_responses_are_correlated_out_of_order() {
         let state = make_state();
         cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":10,"method":"session/new","params":{"cwd":"/first"}}"#,
+            &state,
+        );
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":11,"method":"session/new","params":{"cwd":"/second"}}"#,
+            &state,
+        );
+
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":11,"result":{"sessionId":"session-second"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(s.sessions.len(), 1);
+            assert_eq!(s.sessions[0].0, "session-second");
+            assert_eq!(s.sessions[0].1.cwd.as_deref(), Some("/second"));
+            assert_eq!(s.last_session_id.as_deref(), Some("session-second"));
+            assert!(s.pending_cache_mutations.contains_key("10"));
+            assert!(!s.pending_cache_mutations.contains_key("11"));
+        }
+
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":99,"error":{"code":-32000,"message":"unrelated"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.pending_cache_mutations.contains_key("10"));
+            assert_eq!(s.sessions.len(), 1);
+        }
+
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":10,"result":{"sessionId":"session-first"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 2);
+        assert_eq!(s.sessions[1].0, "session-first");
+        assert_eq!(s.sessions[1].1.cwd.as_deref(), Some("/first"));
+        assert_eq!(s.last_session_id.as_deref(), Some("session-first"));
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn mismatched_and_error_responses_do_not_apply_another_load() {
+        let state = make_state();
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":"load-1","method":"session/load","params":{"sessionId":"s1","cwd":"/tmp","_meta":{"verbatim":true}}}"#,
+            &state,
+        );
+
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":"other","result":{"sessionId":"wrong"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.sessions.is_empty());
+            assert!(s.last_session_id.is_none());
+            assert_eq!(s.pending_cache_mutations.len(), 1);
+        }
+
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":"load-1","error":{"code":-32000,"message":"load failed"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        assert!(s.sessions.is_empty());
+        assert!(s.last_session_id.is_none());
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn failed_close_retains_cached_session() {
+        let state = make_state();
+        cache_successful_load(
             r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#,
             &state,
         );
         cache_outgoing_acp_state(
-            r#"{"jsonrpc":"2.0","id":3,"method":"_x.ai/session/close","params":{"sessionId":"s1"}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"session/close","params":{"sessionId":"s1"}}"#,
+            &state,
+        );
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"close failed"}}"#,
             &state,
         );
         let s = state.lock().unwrap();
-        assert!(s.sessions.is_empty(), "closed session must not be replayed");
+        assert_eq!(s.sessions.len(), 1);
+        assert_eq!(s.sessions[0].0, "s1");
+        assert_eq!(s.last_session_id.as_deref(), Some("s1"));
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn failed_session_new_does_not_consume_another_pending_new() {
+        let state = make_state();
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":"new-a","method":"session/new","params":{"cwd":"/a"}}"#,
+            &state,
+        );
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":"new-b","method":"session/new","params":{"cwd":"/b"}}"#,
+            &state,
+        );
+
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":"new-a","error":{"code":-32000,"message":"new failed"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.sessions.is_empty());
+            assert!(!s.pending_cache_mutations.contains_key(r#""new-a""#));
+            assert!(s.pending_cache_mutations.contains_key(r#""new-b""#));
+        }
+
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":"new-b","result":{"sessionId":"s-b"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 1);
+        assert_eq!(s.sessions[0].0, "s-b");
+        assert_eq!(s.sessions[0].1.cwd.as_deref(), Some("/b"));
+        assert_eq!(s.last_session_id.as_deref(), Some("s-b"));
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn successful_close_removes_cached_session_only_after_result() {
+        let state = make_state();
+        cache_successful_load(
+            r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#,
+            &state,
+        );
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":3,"method":"session/close","params":{"sessionId":"s1"}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(s.sessions.len(), 1);
+            assert_eq!(s.last_session_id.as_deref(), Some("s1"));
+        }
+        cache_incoming_acp_state(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#, &state);
+        let s = state.lock().unwrap();
+        assert!(s.sessions.is_empty(), "successful close must stop replay");
         assert!(s.last_session_id.is_none());
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn failed_resume_is_not_cached_or_made_last_session() {
+        let state = make_state();
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":"resume-1","method":"session/resume","params":{"sessionId":"s1","cwd":"/proj","mcpServers":[{"name":"one"}]}}"#,
+            &state,
+        );
+        cache_incoming_acp_state(
+            r#"{"jsonrpc":"2.0","id":"resume-1","error":{"code":-32000,"message":"resume failed"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        assert!(s.sessions.is_empty());
+        assert!(s.last_session_id.is_none());
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn mismatched_response_does_not_consume_pending_resume() {
+        let state = make_state();
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":"resume-1","method":"session/resume","params":{"sessionId":"s1","cwd":"/proj"}}"#,
+            &state,
+        );
+        cache_incoming_acp_state(r#"{"jsonrpc":"2.0","id":"other","result":{}}"#, &state);
+        {
+            let s = state.lock().unwrap();
+            assert!(s.sessions.is_empty());
+            assert!(s.pending_cache_mutations.contains_key(r#""resume-1""#));
+        }
+        cache_incoming_acp_state(r#"{"jsonrpc":"2.0","id":"resume-1","result":{}}"#, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 1);
+        assert_eq!(s.sessions[0].0, "s1");
+        assert_eq!(s.last_session_id.as_deref(), Some("s1"));
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn successful_resume_is_cached_only_after_result_with_params_retained() {
+        let state = make_state();
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":"resume-1","method":"session/resume","params":{"sessionId":"s1","cwd":"/proj","mcpServers":[{"name":"one"}]}}"#,
+            &state,
+        );
+        {
+            let s = state.lock().unwrap();
+            assert!(s.sessions.is_empty());
+            assert!(s.last_session_id.is_none());
+        }
+        cache_incoming_acp_state(r#"{"jsonrpc":"2.0","id":"resume-1","result":{}}"#, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 1);
+        assert_eq!(s.sessions[0].0, "s1");
+        assert_eq!(s.sessions[0].1.load_request_json, None);
+        assert_eq!(s.sessions[0].1.cwd.as_deref(), Some("/proj"));
+        assert_eq!(
+            s.sessions[0].1.mcp_servers_json.as_deref(),
+            Some(r#"[{"name":"one"}]"#)
+        );
+        assert_eq!(s.last_session_id.as_deref(), Some("s1"));
+        assert!(s.pending_cache_mutations.is_empty());
+    }
+    #[test]
+    fn compat_close_waits_for_success() {
+        for method in ["x.ai/session/close", "_x.ai/session/close"] {
+            let state = make_state();
+            cache_successful_load(
+                r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#,
+                &state,
+            );
+            cache_outgoing_acp_state(
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":3,"method":"{method}","params":{{"sessionId":"s1"}}}}"#
+                ),
+                &state,
+            );
+            {
+                let s = state.lock().unwrap();
+                assert_eq!(s.sessions.len(), 1, "{method} removed session early");
+                assert_eq!(s.last_session_id.as_deref(), Some("s1"));
+            }
+            cache_incoming_acp_state(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#, &state);
+            let s = state.lock().unwrap();
+            assert!(s.sessions.is_empty(), "{method} did not commit close");
+            assert!(s.last_session_id.is_none());
+        }
+    }
+    #[test]
+    fn successful_resume_preserves_the_original_verbatim_load() {
+        let state = make_state();
+        let load = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp","_meta":{"noReplay":true}}}"#;
+        cache_successful_load(load, &state);
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":"s1","cwd":"/other","mcpServers":[]}}"#,
+            &state,
+        );
+        cache_incoming_acp_state(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 1);
+        assert_eq!(s.sessions[0].1.load_request_json.as_deref(), Some(load));
     }
     /// An UNCONFIRMED `session/new` (leader died before its response) must not
     /// be replayed — its id was never assigned — but previously loaded
@@ -3076,7 +3451,7 @@ mod tests {
             &state,
         );
         let load_a = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"session-A","cwd":"/old"}}"#;
-        cache_outgoing_acp_state(load_a, &state);
+        cache_successful_load(load_a, &state);
         cache_outgoing_acp_state(
             r#"{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"/new"}}"#,
             &state,
@@ -3134,7 +3509,7 @@ mod tests {
             &state,
         );
         let msg = r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"abc123"}}"#;
-        cache_incoming_session_id(msg, &state);
+        cache_incoming_acp_state(msg, &state);
         let s = state.lock().unwrap();
         assert_eq!(s.last_session_id.as_deref(), Some("abc123"));
         assert_eq!(s.sessions.len(), 1);
@@ -3149,7 +3524,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
             &state,
         );
-        cache_outgoing_acp_state(
+        cache_successful_load(
             r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"sess-1","cwd":"/a"}}"#,
             &state,
         );
@@ -3157,7 +3532,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"/b"}}"#,
             &state,
         );
-        cache_incoming_session_id(
+        cache_incoming_acp_state(
             r#"{"jsonrpc":"2.0","id":3,"result":{"sessionId":"sess-2"}}"#,
             &state,
         );
@@ -3204,11 +3579,11 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
             &state,
         );
-        cache_outgoing_acp_state(
+        cache_successful_load(
             r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"sess-bad","cwd":"/a"}}"#,
             &state,
         );
-        cache_outgoing_acp_state(
+        cache_successful_load(
             r#"{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"sess-good","cwd":"/b"}}"#,
             &state,
         );
@@ -3243,7 +3618,7 @@ mod tests {
     fn cache_incoming_ignores_non_session_response() {
         let state = make_state();
         let msg = r#"{"jsonrpc":"2.0","id":1,"result":{"models":[]}}"#;
-        cache_incoming_session_id(msg, &state);
+        cache_incoming_acp_state(msg, &state);
         let s = state.lock().unwrap();
         assert!(s.last_session_id.is_none());
         assert!(s.sessions.is_empty());
@@ -3265,7 +3640,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
             &state_mutex,
         );
-        cache_outgoing_acp_state(
+        cache_successful_load(
             r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#,
             &state_mutex,
         );
@@ -3308,7 +3683,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#,
             &state_mutex,
         );
-        cache_outgoing_acp_state(
+        cache_successful_load(
             r#"{"jsonrpc":"2.0","id":8,"method":"session/load","params":{"sessionId":"s9","cwd":"/tmp"}}"#,
             &state_mutex,
         );
@@ -3374,7 +3749,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
             &state_mutex,
         );
-        cache_outgoing_acp_state(
+        cache_successful_load(
             r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"gone","cwd":"/tmp"}}"#,
             &state_mutex,
         );
@@ -3414,7 +3789,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}"#,
             &state_mutex,
         );
-        cache_incoming_session_id(
+        cache_incoming_acp_state(
             r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-new"}}"#,
             &state_mutex,
         );

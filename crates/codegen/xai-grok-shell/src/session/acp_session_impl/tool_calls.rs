@@ -835,7 +835,7 @@ impl SessionActor {
         );
         let parse_result = serde_json::from_str::<serde_json::Value>(args_str);
         let mut concatenated_json_count: usize = 0;
-        let raw_input = match &parse_result {
+        let mut raw_input = match &parse_result {
             Ok(value) => value.clone(),
             Err(e) => {
                 if let Some(objects) = crate::session::helpers::tool_input_parsing::try_extract_concatenated_json_objects(
@@ -883,7 +883,7 @@ impl SessionActor {
                 }
             }
         };
-        let tool_input = match self
+        let mut tool_input = match self
             .agent
             .borrow()
             .tool_bridge()
@@ -904,6 +904,101 @@ impl SessionActor {
                 return Ok(Err(ToolLoop::ToolParsingError));
             }
         };
+        let _recovered_raw_input = if concatenated_json_count > 0 {
+            Some(raw_input.clone())
+        } else {
+            None
+        };
+        let mut dispatch_target_name = tool_input.dispatch_target_name();
+        let original_resolved_tool_name = dispatch_target_name
+            .clone()
+            .unwrap_or_else(|| call.function.name.clone());
+        let mut raw_arguments = call.function.arguments.clone();
+        let mut selected_rewrite = None;
+        if self.hook_event_active(xai_grok_hooks::event::HookEventName::PreToolUse) {
+            let (hook_tool_input, hook_tool_input_truncated) =
+                xai_grok_hooks::event::truncate_payload(raw_input.clone());
+            let envelope = self.make_hook_envelope(
+                xai_grok_hooks::event::HookEventName::PreToolUse,
+                None,
+                xai_grok_hooks::event::HookPayload::PreToolUse {
+                    tool_name: original_resolved_tool_name.clone(),
+                    tool_use_id: call.id.clone(),
+                    tool_input: hook_tool_input,
+                    tool_input_truncated: hook_tool_input_truncated,
+                    subagent_type: self.subagent_type_label(),
+                },
+            );
+            let hook_registry_snapshot = self.hook_registry.borrow().clone();
+            if let Some(registry) = hook_registry_snapshot {
+                let ctx = self.hook_run_ctx();
+                let pre_result =
+                    xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx)
+                        .await;
+                self.send_hook_execution(
+                    "pre_tool_use",
+                    Some(&original_resolved_tool_name),
+                    None,
+                    &pre_result.results,
+                )
+                .await;
+                self.emit_hook_executed_telemetry(
+                    "pre_tool_use",
+                    Some(&original_resolved_tool_name),
+                    &pre_result.results,
+                )
+                .await;
+                if let xai_grok_hooks::result::HookDecision::Deny { reason, hook_name } =
+                    pre_result.decision
+                {
+                    return Ok(Err(self
+                        .deny_tool(
+                            &call.id,
+                            &tool_call_id,
+                            original_resolved_tool_name.clone(),
+                            hook_name,
+                            reason,
+                        )
+                        .await?));
+                }
+                selected_rewrite = pre_result.updated_input;
+            }
+            let (denied, client_rewrite) = self
+                .run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope)
+                .await?;
+            if let Some(denied) = denied {
+                return Ok(Err(denied));
+            }
+            if client_rewrite.is_some() {
+                selected_rewrite = client_rewrite;
+            }
+        }
+        if let Some(rewrite) = selected_rewrite {
+            let updated_args = rewrite.input.to_string();
+            tool_input = match self
+                .tool_bridge_handle()
+                .try_parse(&call.function.name, rewrite.input.clone())
+                .await
+            {
+                Ok(input) => input,
+                Err(err) => {
+                    let msg = format!(
+                        "PreToolUse hook '{}' returned an invalid updatedInput: {err}",
+                        rewrite.hook_name
+                    );
+                    self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
+                        .await?;
+                    return Ok(Err(ToolLoop::ToolParsingError));
+                }
+            };
+            dispatch_target_name = tool_input.dispatch_target_name();
+            raw_arguments = updated_args;
+            raw_input = rewrite.input;
+            concatenated_json_count = 0;
+        }
+        let resolved_tool_name = dispatch_target_name
+            .clone()
+            .unwrap_or_else(|| call.function.name.clone());
         let access_kind = AccessKind::from(&tool_input);
         let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {
@@ -924,69 +1019,6 @@ impl SessionActor {
         let tool_call_display = self
             .send_tool_call_start(&tool_call_id, &call.function.name, tool_input.clone())
             .await;
-        let _recovered_raw_input = if concatenated_json_count > 0 {
-            Some(raw_input.clone())
-        } else {
-            None
-        };
-        let dispatch_target_name = tool_input.dispatch_target_name();
-        let resolved_tool_name = dispatch_target_name
-            .clone()
-            .unwrap_or_else(|| call.function.name.clone());
-        if self.hook_event_active(xai_grok_hooks::event::HookEventName::PreToolUse) {
-            let (hook_tool_input, hook_tool_input_truncated) =
-                xai_grok_hooks::event::truncate_payload(raw_input.clone());
-            let envelope = self.make_hook_envelope(
-                xai_grok_hooks::event::HookEventName::PreToolUse,
-                None,
-                xai_grok_hooks::event::HookPayload::PreToolUse {
-                    tool_name: resolved_tool_name.clone(),
-                    tool_use_id: call.id.clone(),
-                    tool_input: hook_tool_input,
-                    tool_input_truncated: hook_tool_input_truncated,
-                    subagent_type: self.subagent_type_label(),
-                },
-            );
-            let hook_registry_snapshot = self.hook_registry.borrow().clone();
-            if let Some(registry) = hook_registry_snapshot {
-                let ctx = self.hook_run_ctx();
-                let pre_result =
-                    xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx)
-                        .await;
-                self.send_hook_execution(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    None,
-                    &pre_result.results,
-                )
-                .await;
-                self.emit_hook_executed_telemetry(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    &pre_result.results,
-                )
-                .await;
-                if let xai_grok_hooks::result::HookDecision::Deny { reason, hook_name } =
-                    pre_result.decision
-                {
-                    return Ok(Err(self
-                        .deny_tool(
-                            &call.id,
-                            &tool_call_id,
-                            resolved_tool_name.clone(),
-                            hook_name,
-                            reason,
-                        )
-                        .await?));
-                }
-            }
-            if let Some(denied) = self
-                .run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope)
-                .await?
-            {
-                return Ok(Err(denied));
-            }
-        }
         let plan_file_auto_approve = if let AccessKind::Edit(ref path) = access_kind {
             self.plan_mode
                 .lock()
@@ -1357,31 +1389,14 @@ impl SessionActor {
             .agent
             .borrow()
             .tool_bridge()
-            .tool_kind(&call.function.name)
-            .map(|k| {
-                use xai_grok_tools::types::tool::ToolKind;
-                matches!(
-                    k,
-                    ToolKind::Read
-                        | ToolKind::Search
-                        | ToolKind::Lsp
-                        | ToolKind::ListDir
-                        | ToolKind::List
-                        | ToolKind::MemorySearch
-                        | ToolKind::MemoryGet
-                        | ToolKind::WebSearch
-                        | ToolKind::WebFetch
-                        | ToolKind::EnterPlan
-                        | ToolKind::ExitPlan
-                        | ToolKind::AskUser
-                )
-            })
+            .tool_kind(&resolved_tool_name)
+            .map(xai_grok_tools::types::tool::ToolKind::is_read_only)
             .unwrap_or(false);
         let prepared = PreparedToolCall {
             call_id: call.id.clone(),
             tool_call_id,
             tool_name: call.function.name.clone(),
-            raw_arguments: call.function.arguments.clone(),
+            raw_arguments,
             parsed_args: raw_input.clone(),
             model_id: model_id_str,
             concatenated_json_count,
@@ -2809,11 +2824,17 @@ impl SessionActor {
                 .await;
             }
             InferenceEvent::Completed {
-                response, metrics, ..
+                request_id,
+                response,
+                metrics,
             } => {
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
                     let _ = tx.send(());
                 }
+                let session = Arc::clone(self);
+                tokio::task::spawn_local(async move {
+                    session.apply_pending_image_strip(&request_id).await;
+                });
                 if let Some(policy) = self.doom_loop_recovery {
                     let triggers = policy.confident_triggers(&response.doom_loop_signals);
                     if !triggers.is_empty() {
@@ -2847,6 +2868,14 @@ impl SessionActor {
             }
             InferenceEvent::ModelMetadata { metadata, .. } => {
                 self.handle_model_metadata_update(metadata).await;
+            }
+            InferenceEvent::ImagesStripped {
+                request_id,
+                stripped_urls,
+                reason,
+            } => {
+                self.handle_images_stripped(request_id, stripped_urls, reason)
+                    .await;
             }
             InferenceEvent::Retrying {
                 request_id,
@@ -2918,6 +2947,7 @@ impl SessionActor {
                 .await;
             }
             InferenceEvent::Failed { request_id, error } => {
+                self.drop_pending_image_strip(&request_id);
                 xai_grok_telemetry::unified_log::error(
                     "shell.turn.inference_failed",
                     Some(self.session_info.id.0.as_ref()),

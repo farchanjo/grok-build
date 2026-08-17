@@ -75,6 +75,7 @@ fn openrouter_401_is_auth_error_kind() {
         retry_after_secs: None,
         should_retry: None,
         diagnostics: None,
+        error_code: None,
     };
     assert!(err.is_auth_error());
 }

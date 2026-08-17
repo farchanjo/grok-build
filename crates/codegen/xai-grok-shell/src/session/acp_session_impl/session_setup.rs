@@ -411,12 +411,16 @@ impl SessionActor {
             }
         };
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let sent_tail = response
+                .extensions()
+                .get::<xai_grok_auth::StampedBearerTail>()
+                .map(|stamp| stamp.0.as_str());
             crate::auth::attribution::record_consumer_401(
                 am,
                 None,
                 crate::auth::attribution::ConsumerKind::IdleResumeModelRefresh,
                 "",
-                creds.api_key.as_deref(),
+                sent_tail,
             );
         }
         let result = if !response.status().is_success() {

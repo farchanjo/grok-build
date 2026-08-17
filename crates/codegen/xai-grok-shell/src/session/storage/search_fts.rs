@@ -14,8 +14,20 @@
 //! The `cwd` column is intentionally excluded from the FTS table — it is a
 //! filter dimension only, applied via JOIN on `session_docs`.
 
+use std::time::Duration;
+
 use rusqlite::{Connection, OptionalExtension, params};
 use xai_sqlite_journal::JournalMode;
+
+pub(crate) const META_KEY_BOOTSTRAP_CLAIM: &str = "bootstrap_claimed_at";
+pub(crate) const META_KEY_LAST_BOOTSTRAP: &str = "last_bootstrap_at";
+const META_KEY_MUTATION_GENERATION: &str = "mutation_generation";
+const META_KEY_FRESHNESS_TRIGGERS_ENABLED: &str = "freshness_triggers_enabled";
+const CLAIM_TOKEN_SQL: &str = "substr(value, instr(value, ':') + 1)";
+
+fn claim_stamp(now_unix: i64, token: &str) -> String {
+    format!("{now_unix}:{token}")
+}
 
 /// Bump when making breaking schema changes that require dropping and
 /// recreating tables, or to force a rebuild of stale index content
@@ -46,6 +58,19 @@ pub struct SessionIndexState {
     pub content: String,
     pub content_hash: String,
     pub last_indexed_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimedUpsert {
+    Lost,
+    Stale,
+    Unchanged,
+    Indexed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BootstrapClaim {
+    pub mutation_generation: i64,
 }
 
 /// A single search result row.
@@ -84,11 +109,24 @@ impl SessionSearchIndex {
     /// A NEWER stored version is tolerated read/write without dropping.
     pub fn open_or_create(db_path: &std::path::Path) -> Result<Self, rusqlite::Error> {
         if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = crate::util::grok_home::create_dir_all_owner_only(parent);
         }
 
         // The mode decision statfs's the parent dir created above.
         Self::open_with_journal_mode(db_path, JournalMode::for_db_path(db_path))
+    }
+
+    /// Open an existing index without creating or migrating it. Used only for
+    /// best-effort deletion while the feature gate is off.
+    pub(crate) fn open_existing(db_path: &std::path::Path) -> Result<Self, rusqlite::Error> {
+        let mode = JournalMode::for_db_path(db_path);
+        let db = Connection::open_with_flags(
+            mode.effective_db_path(db_path),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        db.busy_timeout(Duration::from_secs(5))?;
+        mode.apply(&db)?;
+        Ok(Self { db })
     }
 
     /// Open with an explicit journal mode — the seam tests use to exercise
@@ -100,8 +138,15 @@ impl SessionSearchIndex {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
         let db = journal_mode.open(db_path)?;
 
-        // Check existing schema version
-        let stored_version: Option<String> = db
+        // Serialize version detection, destructive upgrade, schema rebuild,
+        // and version stamping. A concurrent opener waits, then rechecks the
+        // version after the first opener has committed the complete schema.
+        let current: u64 = SCHEMA_VERSION
+            .parse()
+            .expect("SCHEMA_VERSION is an integer");
+        let schema =
+            rusqlite::Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Immediate)?;
+        let stored_version: Option<String> = schema
             .query_row(
                 "SELECT value FROM meta WHERE key = 'session_search_schema_version'",
                 [],
@@ -113,38 +158,29 @@ impl SessionSearchIndex {
         // One-way ratchet: drop only on UPGRADE (stored < current). Multiple
         // grok generations share this DB (stable vs alpha); an equality check
         // made each binary wipe the other's index in a ping-pong that left
-        // search empty mid-rebootstrap. A newer index is safe to read: bumps
-        // regenerate content only (table schema is column-identical), and the
-        // newer binary re-upserts any rows we write via content-hash mismatch.
-        // `None` = fresh DB; a non-integer stored value = legacy/corrupt → 0.
-        let current: u64 = SCHEMA_VERSION
-            .parse()
-            .expect("SCHEMA_VERSION is an integer");
+        // search empty mid-rebootstrap. A newer index is safe to read.
         let stored: Option<u64> = stored_version.as_deref().map(|v| v.parse().unwrap_or(0));
         let owned_by_newer = stored.is_some_and(|s| s > current);
         if stored.is_some_and(|s| s < current) {
-            // Discard the stale index AND its completed-bootstrap marker in
-            // one transaction. Binaries that predate the one-way ratchet
-            // (schema ≤ 3) still wipe a newer index on open, re-stamp their
-            // own version, and rewrite `last_bootstrap_at` when their
-            // bootstrap finishes. If that marker survived this upgrade drop,
-            // a "did a bootstrap complete?" check would trust it and never
-            // repopulate the now-empty tables — leaving content search
-            // permanently empty (the query path itself performs this drop).
-            // Deleting the marker makes the wipe observable: the search
-            // manager re-runs a full bootstrap and remote sync correctly
-            // treats the local index as stale. All other `meta` keys are
-            // preserved.
-            db.execute_batch(
+            // Atomically invalidate both bootstrap coordination rows with the
+            // destructive drop. All unrelated metadata survives.
+            schema.execute_batch(
                 "
-                BEGIN;
                 DROP TRIGGER IF EXISTS session_docs_ai;
                 DROP TRIGGER IF EXISTS session_docs_ad;
                 DROP TRIGGER IF EXISTS session_docs_au;
+                DROP TRIGGER IF EXISTS session_docs_freshness_ai;
+                DROP TRIGGER IF EXISTS session_docs_freshness_ad;
+                DROP TRIGGER IF EXISTS session_docs_freshness_au;
                 DROP TABLE IF EXISTS session_docs_fts;
                 DROP TABLE IF EXISTS session_docs;
-                DELETE FROM meta WHERE key = 'last_bootstrap_at';
-                COMMIT;
+                DROP TABLE IF EXISTS session_freshness;
+                DELETE FROM meta WHERE key IN (
+                    'last_bootstrap_at',
+                    'bootstrap_claimed_at',
+                    'mutation_generation',
+                    'freshness_triggers_enabled'
+                );
                 ",
             )?;
         } else if owned_by_newer {
@@ -155,13 +191,19 @@ impl SessionSearchIndex {
             );
         }
 
-        // Create tables + content-synced FTS5 with auto-sync triggers
-        db.execute_batch(
+        // Create tables + content-synced FTS5 with auto-sync triggers while
+        // still holding the serialized schema transaction.
+        schema.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('mutation_generation', '0');
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('freshness_triggers_enabled', '1');
 
             CREATE TABLE IF NOT EXISTS session_docs (
                 session_id TEXT PRIMARY KEY,
@@ -172,9 +214,11 @@ impl SessionSearchIndex {
                 content_hash TEXT NOT NULL
             );
 
-            -- FTS only indexes title + content (searchable columns).
-            -- cwd is NOT in the FTS table — it is a filter dimension only,
-            -- applied via JOIN on session_docs.
+            CREATE TABLE IF NOT EXISTS session_freshness (
+                session_id TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS session_docs_fts USING fts5(
                 title,
                 content,
@@ -182,7 +226,6 @@ impl SessionSearchIndex {
                 content_rowid='rowid'
             );
 
-            -- Keep FTS in sync via triggers so callers only touch session_docs.
             CREATE TRIGGER IF NOT EXISTS session_docs_ai AFTER INSERT ON session_docs BEGIN
                 INSERT INTO session_docs_fts(rowid, title, content)
                 VALUES (new.rowid, new.title, new.content);
@@ -199,11 +242,55 @@ impl SessionSearchIndex {
                 INSERT INTO session_docs_fts(rowid, title, content)
                 VALUES (new.rowid, new.title, new.content);
             END;
+
+            CREATE TRIGGER IF NOT EXISTS session_docs_freshness_ai
+            AFTER INSERT ON session_docs
+            WHEN (SELECT value FROM meta WHERE key = 'freshness_triggers_enabled') = '1'
+            BEGIN
+                INSERT INTO session_freshness(session_id, generation)
+                VALUES (
+                    new.session_id,
+                    CAST((SELECT value FROM meta WHERE key = 'mutation_generation') AS INTEGER) + 1
+                )
+                ON CONFLICT(session_id) DO UPDATE SET generation = excluded.generation;
+                UPDATE meta
+                SET value = CAST(value AS INTEGER) + 1
+                WHERE key = 'mutation_generation';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS session_docs_freshness_ad
+            AFTER DELETE ON session_docs
+            WHEN (SELECT value FROM meta WHERE key = 'freshness_triggers_enabled') = '1'
+            BEGIN
+                INSERT INTO session_freshness(session_id, generation)
+                VALUES (
+                    old.session_id,
+                    CAST((SELECT value FROM meta WHERE key = 'mutation_generation') AS INTEGER) + 1
+                )
+                ON CONFLICT(session_id) DO UPDATE SET generation = excluded.generation;
+                UPDATE meta
+                SET value = CAST(value AS INTEGER) + 1
+                WHERE key = 'mutation_generation';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS session_docs_freshness_au
+            AFTER UPDATE ON session_docs
+            WHEN (SELECT value FROM meta WHERE key = 'freshness_triggers_enabled') = '1'
+            BEGIN
+                INSERT INTO session_freshness(session_id, generation)
+                VALUES (
+                    new.session_id,
+                    CAST((SELECT value FROM meta WHERE key = 'mutation_generation') AS INTEGER) + 1
+                )
+                ON CONFLICT(session_id) DO UPDATE SET generation = excluded.generation;
+                UPDATE meta
+                SET value = CAST(value AS INTEGER) + 1
+                WHERE key = 'mutation_generation';
+            END;
             ",
         )?;
 
-        // Add last_indexed_offset column (idempotent migration).
-        match db.execute(
+        match schema.execute(
             "ALTER TABLE session_docs ADD COLUMN last_indexed_offset INTEGER NOT NULL DEFAULT 0",
             [],
         ) {
@@ -216,25 +303,31 @@ impl SessionSearchIndex {
             }
         }
 
-        // Persist schema version — but never regress the row a newer
-        // generation owns (it would re-trigger that binary's upgrade drop).
+        // Never regress a version row owned by a newer generation.
         if stored != Some(current) && !owned_by_newer {
-            db.execute(
+            schema.execute(
                 "INSERT OR REPLACE INTO meta(key, value) \
                  VALUES ('session_search_schema_version', ?1)",
                 params![SCHEMA_VERSION],
             )?;
         }
+        // A process that died during a fenced bootstrap transaction rolls the
+        // transaction back. Resetting here also heals a legacy/crash residue
+        // before any ordinary writer uses the triggers.
+        schema.execute(
+            "UPDATE meta SET value = '1' WHERE key = ?1",
+            params![META_KEY_FRESHNESS_TRIGGERS_ENABLED],
+        )?;
+        schema.commit()?;
 
         Ok(Self { db })
     }
 
-    /// Insert or update a session document in the index.
-    ///
-    /// The content-synced FTS triggers handle updating `session_docs_fts`
-    /// automatically.
-    pub fn upsert_doc(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
-        self.db.execute(
+    fn write_doc(
+        tx: &rusqlite::Transaction<'_>,
+        doc: &SessionDoc,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = tx.execute(
             "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash, last_indexed_offset)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(session_id) DO UPDATE SET
@@ -243,7 +336,13 @@ impl SessionSearchIndex {
                  title = excluded.title,
                  content = excluded.content,
                  content_hash = excluded.content_hash,
-                 last_indexed_offset = excluded.last_indexed_offset",
+                 last_indexed_offset = excluded.last_indexed_offset
+             WHERE session_docs.cwd != excluded.cwd
+                OR session_docs.updated_at != excluded.updated_at
+                OR session_docs.title != excluded.title
+                OR session_docs.content != excluded.content
+                OR session_docs.content_hash != excluded.content_hash
+                OR session_docs.last_indexed_offset != excluded.last_indexed_offset",
             params![
                 doc.session_id,
                 doc.cwd,
@@ -254,7 +353,52 @@ impl SessionSearchIndex {
                 doc.last_indexed_offset as i64
             ],
         )?;
-        Ok(())
+        Ok(changed == 1)
+    }
+
+    /// Insert or update a session document as an incremental mutation.
+    ///
+    /// Every notification receives a database-global generation, even when
+    /// the indexed fields are unchanged. The schema triggers stamp changed
+    /// rows; this method stamps unchanged observations explicitly. Recording
+    /// that generation alongside the session lets an older bootstrap snapshot
+    /// decline to overwrite or prune the row. The generation bump, document
+    /// write, and freshness row commit in one cross-process SQLite transaction.
+    pub(crate) fn upsert_doc_incremental(&self, doc: &SessionDoc) -> Result<bool, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        Self::set_freshness_triggers_enabled(&tx, true)?;
+        let changed = Self::write_doc(&tx, doc)?;
+        if !changed {
+            // An unchanged incremental observation still fences an older
+            // bootstrap snapshot. Advance freshness explicitly because the
+            // session_docs update trigger did not fire.
+            tx.execute(
+                "UPDATE meta
+                 SET value = CAST(value AS INTEGER) + 1
+                 WHERE key = ?1",
+                params![META_KEY_MUTATION_GENERATION],
+            )?;
+            tx.execute(
+                "INSERT INTO session_freshness(session_id, generation)
+                 SELECT ?1, CAST(value AS INTEGER) FROM meta WHERE key = ?2
+                 ON CONFLICT(session_id) DO UPDATE SET generation = excluded.generation",
+                params![doc.session_id, META_KEY_MUTATION_GENERATION],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Insert or update a session document in the index.
+    ///
+    /// The content-synced FTS triggers handle updating `session_docs_fts`
+    /// automatically. This public helper uses incremental freshness semantics;
+    /// bootstrap writes use the separately fenced claim-owner API.
+    pub fn upsert_doc(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
+        self.upsert_doc_incremental(doc).map(|_| ())
     }
 
     /// Insert a session document only if no row exists for its `session_id`.
@@ -263,7 +407,12 @@ impl SessionSearchIndex {
     /// across processes, so a two-step gate could clobber a full-content row
     /// written between the check and the insert.
     pub fn insert_doc_if_absent(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
-        self.db.execute(
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        Self::set_freshness_triggers_enabled(&tx, true)?;
+        tx.execute(
             "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash, last_indexed_offset)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(session_id) DO NOTHING",
@@ -277,15 +426,44 @@ impl SessionSearchIndex {
                 doc.last_indexed_offset as i64
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// Remove a session document from the index.
+    /// Remove a session document from the index and retain a generation
+    /// tombstone so an older bootstrap cannot resurrect it.
     pub fn delete_doc(&self, session_id: &str) -> Result<(), rusqlite::Error> {
-        self.db.execute(
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        Self::set_freshness_triggers_enabled(&tx, true)?;
+        let deleted = tx.execute(
             "DELETE FROM session_docs WHERE session_id = ?1",
             params![session_id],
         )?;
+        if deleted == 0 {
+            // Preserve a tombstone for an absent/deleted session. No DELETE
+            // trigger fired, so advance the generation explicitly.
+            let bumped = tx.execute(
+                "UPDATE meta
+                 SET value = CAST(value AS INTEGER) + 1
+                 WHERE key = ?1",
+                params![META_KEY_MUTATION_GENERATION],
+            )?;
+            if bumped == 1 {
+                tx.execute(
+                    "INSERT INTO session_freshness(session_id, generation)
+                     SELECT ?1, CAST(value AS INTEGER) FROM meta WHERE key = ?2
+                     ON CONFLICT(session_id) DO UPDATE SET generation = excluded.generation",
+                    params![session_id, META_KEY_MUTATION_GENERATION],
+                )?;
+            }
+            // `open_existing` intentionally does not migrate a legacy index.
+            // When the generation row is missing, deletion above still
+            // preserves best-effort gate-off eviction.
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -333,10 +511,30 @@ impl SessionSearchIndex {
         session_id: &str,
         offset: u64,
     ) -> Result<(), rusqlite::Error> {
-        self.db.execute(
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        Self::set_freshness_triggers_enabled(&tx, true)?;
+        let changed = tx.execute(
             "UPDATE session_docs SET last_indexed_offset = ?2 WHERE session_id = ?1",
             params![session_id, offset as i64],
         )?;
+        if changed == 0 {
+            tx.execute(
+                "UPDATE meta
+                 SET value = CAST(value AS INTEGER) + 1
+                 WHERE key = ?1",
+                params![META_KEY_MUTATION_GENERATION],
+            )?;
+            tx.execute(
+                "INSERT INTO session_freshness(session_id, generation)
+                 SELECT ?1, CAST(value AS INTEGER) FROM meta WHERE key = ?2
+                 ON CONFLICT(session_id) DO UPDATE SET generation = excluded.generation",
+                params![session_id, META_KEY_MUTATION_GENERATION],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -358,6 +556,406 @@ impl SessionSearchIndex {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Atomically claim an absent, expired, malformed, or implausibly
+    /// future-dated bootstrap lease and snapshot the current incremental
+    /// mutation generation in the same SQLite transaction.
+    pub(crate) fn try_claim_bootstrap(
+        &self,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+    ) -> Result<Option<BootstrapClaim>, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let lease_secs = lease.as_secs() as i64;
+        let changed = tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value
+             WHERE CAST(meta.value AS INTEGER) <= ?3
+                OR CAST(meta.value AS INTEGER) > ?4",
+            params![
+                META_KEY_BOOTSTRAP_CLAIM,
+                claim_stamp(now_unix, token),
+                now_unix.saturating_sub(lease_secs),
+                now_unix.saturating_add(lease_secs),
+            ],
+        )?;
+        let claim = if changed == 1 {
+            Some(BootstrapClaim {
+                mutation_generation: tx.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?1",
+                    params![META_KEY_MUTATION_GENERATION],
+                    |row| row.get(0),
+                )?,
+            })
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(claim)
+    }
+
+    pub(crate) fn refresh_bootstrap_claim(
+        &self,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!(
+                "UPDATE meta SET value = ?2
+                 WHERE key = ?1
+                   AND {CLAIM_TOKEN_SQL} = ?3
+                   AND CAST(value AS INTEGER) > ?4
+                   AND CAST(value AS INTEGER) <= ?5"
+            ),
+            params![
+                META_KEY_BOOTSTRAP_CLAIM,
+                claim_stamp(now_unix, token),
+                token,
+                now_unix.saturating_sub(lease.as_secs() as i64),
+                now_unix.saturating_add(lease.as_secs() as i64),
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub(crate) fn set_meta_if_claim_owner(
+        &self,
+        key: &str,
+        value: &str,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!(
+                "INSERT INTO meta(key, value)
+                 SELECT ?1, ?2
+                 WHERE EXISTS (
+                     SELECT 1 FROM meta
+                     WHERE key = ?3
+                       AND {CLAIM_TOKEN_SQL} = ?4
+                       AND CAST(value AS INTEGER) > ?5
+                       AND CAST(value AS INTEGER) <= ?6
+                 )
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            ),
+            params![
+                key,
+                value,
+                META_KEY_BOOTSTRAP_CLAIM,
+                token,
+                now_unix.saturating_sub(lease.as_secs() as i64),
+                now_unix.saturating_add(lease.as_secs() as i64),
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub(crate) fn release_bootstrap_claim(&self, token: &str) -> Result<bool, rusqlite::Error> {
+        let changed = self.db.execute(
+            &format!("DELETE FROM meta WHERE key = ?1 AND {CLAIM_TOKEN_SQL} = ?2"),
+            params![META_KEY_BOOTSTRAP_CLAIM, token],
+        )?;
+        Ok(changed == 1)
+    }
+
+    fn set_freshness_triggers_enabled(
+        tx: &rusqlite::Transaction<'_>,
+        enabled: bool,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute(
+            "UPDATE meta SET value = ?2 WHERE key = ?1",
+            params![
+                META_KEY_FRESHNESS_TRIGGERS_ENABLED,
+                if enabled { "1" } else { "0" }
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Insert or update a bootstrap document only while the current claim is
+    /// still owned and unexpired and no newer incremental mutation exists for
+    /// this session. The lease and generation checks are part of the same SQL
+    /// transaction as the mutation, so neither a takeover nor an incremental
+    /// writer can race between the fence and the write.
+    pub(crate) fn upsert_doc_if_claim_owner(
+        &self,
+        doc: &SessionDoc,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+        bootstrap_generation: i64,
+    ) -> Result<ClaimedUpsert, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        Self::set_freshness_triggers_enabled(&tx, false)?;
+        let changed = tx.execute(
+            &format!(
+                "INSERT INTO session_docs(
+                     session_id, cwd, updated_at, title, content, content_hash, last_indexed_offset
+                 )
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                 WHERE EXISTS (
+                     SELECT 1 FROM meta
+                     WHERE key = ?8
+                       AND {CLAIM_TOKEN_SQL} = ?9
+                       AND CAST(value AS INTEGER) > ?10
+                       AND CAST(value AS INTEGER) <= ?11
+                 )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM session_freshness
+                     WHERE session_id = ?1 AND generation > ?12
+                 )
+                   AND (
+                     NOT EXISTS (
+                         SELECT 1 FROM session_docs WHERE session_id = ?1
+                     )
+                     OR EXISTS (
+                         SELECT 1 FROM session_docs
+                         WHERE session_id = ?1
+                           AND (
+                               cwd != ?2
+                               OR updated_at != ?3
+                               OR title != ?4
+                               OR content != ?5
+                               OR content_hash != ?6
+                               OR last_indexed_offset != ?7
+                           )
+                     )
+                   )
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     cwd = excluded.cwd,
+                     updated_at = excluded.updated_at,
+                     title = excluded.title,
+                     content = excluded.content,
+                     content_hash = excluded.content_hash,
+                     last_indexed_offset = excluded.last_indexed_offset
+                 WHERE session_docs.cwd != excluded.cwd
+                    OR session_docs.updated_at != excluded.updated_at
+                    OR session_docs.title != excluded.title
+                    OR session_docs.content != excluded.content
+                    OR session_docs.content_hash != excluded.content_hash
+                    OR session_docs.last_indexed_offset != excluded.last_indexed_offset"
+            ),
+            params![
+                doc.session_id,
+                doc.cwd,
+                doc.updated_at_unix,
+                doc.title,
+                doc.content,
+                doc.content_hash,
+                doc.last_indexed_offset as i64,
+                META_KEY_BOOTSTRAP_CLAIM,
+                token,
+                now_unix.saturating_sub(lease.as_secs() as i64),
+                now_unix.saturating_add(lease.as_secs() as i64),
+                bootstrap_generation,
+            ],
+        )?;
+        let incrementally_newer = tx
+            .query_row(
+                "SELECT 1 FROM session_freshness
+                 WHERE session_id = ?1 AND generation > ?2",
+                params![doc.session_id, bootstrap_generation],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let still_owner = tx
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM meta
+                     WHERE key = ?1
+                       AND {CLAIM_TOKEN_SQL} = ?2
+                       AND CAST(value AS INTEGER) > ?3
+                       AND CAST(value AS INTEGER) <= ?4"
+                ),
+                params![
+                    META_KEY_BOOTSTRAP_CLAIM,
+                    token,
+                    now_unix.saturating_sub(lease.as_secs() as i64),
+                    now_unix.saturating_add(lease.as_secs() as i64),
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Self::set_freshness_triggers_enabled(&tx, true)?;
+        tx.commit()?;
+        Ok(if changed == 1 {
+            ClaimedUpsert::Indexed
+        } else if !still_owner {
+            ClaimedUpsert::Lost
+        } else if incrementally_newer {
+            ClaimedUpsert::Stale
+        } else {
+            ClaimedUpsert::Unchanged
+        })
+    }
+
+    pub(crate) fn insert_doc_if_absent_if_claim_owner(
+        &self,
+        doc: &SessionDoc,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+        bootstrap_generation: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let owned = tx
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM meta
+                     WHERE key = ?1
+                       AND {CLAIM_TOKEN_SQL} = ?2
+                       AND CAST(value AS INTEGER) > ?3
+                       AND CAST(value AS INTEGER) <= ?4"
+                ),
+                params![
+                    META_KEY_BOOTSTRAP_CLAIM,
+                    token,
+                    now_unix.saturating_sub(lease.as_secs() as i64),
+                    now_unix.saturating_add(lease.as_secs() as i64),
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if owned {
+            Self::set_freshness_triggers_enabled(&tx, false)?;
+            tx.execute(
+                "INSERT INTO session_docs(
+                     session_id, cwd, updated_at, title, content, content_hash, last_indexed_offset
+                 )
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM session_freshness
+                     WHERE session_id = ?1 AND generation > ?8
+                 )
+                 ON CONFLICT(session_id) DO NOTHING",
+                params![
+                    doc.session_id,
+                    doc.cwd,
+                    doc.updated_at_unix,
+                    doc.title,
+                    doc.content,
+                    doc.content_hash,
+                    doc.last_indexed_offset as i64,
+                    bootstrap_generation,
+                ],
+            )?;
+            Self::set_freshness_triggers_enabled(&tx, true)?;
+        }
+        tx.commit()?;
+        Ok(owned)
+    }
+
+    fn is_claim_owner(
+        &self,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        self.db
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM meta
+                     WHERE key = ?1
+                       AND {CLAIM_TOKEN_SQL} = ?2
+                       AND CAST(value AS INTEGER) > ?3
+                       AND CAST(value AS INTEGER) <= ?4"
+                ),
+                params![
+                    META_KEY_BOOTSTRAP_CLAIM,
+                    token,
+                    now_unix.saturating_sub(lease.as_secs() as i64),
+                    now_unix.saturating_add(lease.as_secs() as i64),
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|owner| owner.is_some())
+    }
+
+    /// Prune under one immediate transaction. A stale claimant cannot delete
+    /// rows based on an obsolete disk snapshot, and rows created, relocated,
+    /// updated, or deleted incrementally after the claim snapshot are retained.
+    pub(crate) fn prune_missing_if_claim_owner(
+        &self,
+        now_unix: i64,
+        lease: Duration,
+        token: &str,
+        bootstrap_generation: i64,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<bool, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let owned = tx
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM meta
+                     WHERE key = ?1
+                       AND {CLAIM_TOKEN_SQL} = ?2
+                       AND CAST(value AS INTEGER) > ?3
+                       AND CAST(value AS INTEGER) <= ?4"
+                ),
+                params![
+                    META_KEY_BOOTSTRAP_CLAIM,
+                    token,
+                    now_unix.saturating_sub(lease.as_secs() as i64),
+                    now_unix.saturating_add(lease.as_secs() as i64),
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !owned {
+            return Ok(false);
+        }
+        Self::set_freshness_triggers_enabled(&tx, false)?;
+        let ids = {
+            let mut stmt = tx.prepare("SELECT session_id FROM session_docs")?;
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?
+        };
+        for id in ids {
+            if !keep.contains(&id) {
+                tx.execute(
+                    "DELETE FROM session_docs
+                     WHERE session_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM session_freshness
+                           WHERE session_id = ?1 AND generation > ?2
+                       )",
+                    params![id, bootstrap_generation],
+                )?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM session_freshness
+             WHERE generation <= ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_docs
+                   WHERE session_docs.session_id = session_freshness.session_id
+               )",
+            params![bootstrap_generation],
+        )?;
+        Self::set_freshness_triggers_enabled(&tx, true)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Return all session IDs currently in the index.
@@ -692,6 +1290,14 @@ mod tests {
             Some("1700000001"),
             "unrelated meta keys must survive the drop"
         );
+        assert_eq!(
+            reopened
+                .get_meta(META_KEY_MUTATION_GENERATION)
+                .unwrap()
+                .as_deref(),
+            Some("0"),
+            "a destructive rebuild must reset the freshness generation"
+        );
         // Recreated tables + FTS triggers must be functional end-to-end.
         reopened
             .upsert_doc(&test_doc("s2", "Python profiling", "flamegraph"))
@@ -699,6 +1305,71 @@ mod tests {
         let qr = reopened.query("python", None, 10, 0, false).unwrap();
         assert_eq!(qr.total_estimate, Some(1));
         assert_eq!(qr.results[0].session_id, "s2");
+    }
+
+    #[test]
+    fn concurrent_upgrade_openers_drop_only_once() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("session_search.sqlite");
+        {
+            let index = SessionSearchIndex::open_or_create(&path).unwrap();
+            index
+                .upsert_doc(&test_doc("old", "Old", "stale content"))
+                .unwrap();
+            index
+                .set_meta("session_search_schema_version", "3")
+                .unwrap();
+            index.set_meta(META_KEY_LAST_BOOTSTRAP, "done").unwrap();
+            index
+                .set_meta(META_KEY_BOOTSTRAP_CLAIM, "1000:owner")
+                .unwrap();
+        }
+
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let opened = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let write_done = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let opens: Vec<_> = (0..2)
+            .map(|i| {
+                let path = path.clone();
+                let start = start.clone();
+                let opened = opened.clone();
+                let write_done = write_done.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    let index = SessionSearchIndex::open_or_create(&path).unwrap();
+                    opened.wait();
+                    if i == 0 {
+                        index
+                            .upsert_doc(&test_doc("fresh", "Fresh", "survives waiter"))
+                            .unwrap();
+                        write_done.wait();
+                    } else {
+                        write_done.wait();
+                        assert!(index.get_content_hash("fresh").unwrap().is_some());
+                    }
+                })
+            })
+            .collect();
+        start.wait();
+        opened.wait();
+        for open in opens {
+            open.join().unwrap();
+        }
+
+        let index = SessionSearchIndex::open_or_create(&path).unwrap();
+        assert_eq!(
+            index
+                .get_meta("session_search_schema_version")
+                .unwrap()
+                .as_deref(),
+            Some(SCHEMA_VERSION)
+        );
+        assert_eq!(index.get_meta(META_KEY_LAST_BOOTSTRAP).unwrap(), None);
+        assert_eq!(index.get_meta(META_KEY_BOOTSTRAP_CLAIM).unwrap(), None);
+        assert!(
+            index.get_content_hash("fresh").unwrap().is_some(),
+            "the opener that waited for the upgrade must not drop a row written after both opens"
+        );
     }
 
     #[test]
@@ -858,6 +1529,386 @@ mod tests {
 
         let new = index.query("kubernetes", None, 10, 0, false).unwrap();
         assert_eq!(new.results.len(), 1);
+    }
+
+    #[test]
+    fn bootstrap_claim_is_exclusive_expiring_and_owner_fenced() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("session_search.sqlite");
+        let first = SessionSearchIndex::open_or_create(&path).unwrap();
+        let second = SessionSearchIndex::open_or_create(&path).unwrap();
+
+        assert!(
+            first
+                .try_claim_bootstrap(1_000, Duration::from_secs(300), "first")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            second
+                .try_claim_bootstrap(1_100, Duration::from_secs(300), "second")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !second
+                .refresh_bootstrap_claim(1_101, Duration::from_secs(300), "second")
+                .unwrap()
+        );
+        assert!(
+            first
+                .refresh_bootstrap_claim(1_150, Duration::from_secs(300), "first")
+                .unwrap()
+        );
+        assert!(
+            second
+                .try_claim_bootstrap(1_451, Duration::from_secs(300), "second")
+                .unwrap()
+                .is_some()
+        );
+        assert!(!first.release_bootstrap_claim("first").unwrap());
+        assert!(
+            !first
+                .set_meta_if_claim_owner(
+                    META_KEY_LAST_BOOTSTRAP,
+                    "done",
+                    1_451,
+                    Duration::from_secs(300),
+                    "first",
+                )
+                .unwrap()
+        );
+        assert!(
+            second
+                .set_meta_if_claim_owner(
+                    META_KEY_LAST_BOOTSTRAP,
+                    "done",
+                    1_451,
+                    Duration::from_secs(300),
+                    "second",
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            second.get_meta(META_KEY_LAST_BOOTSTRAP).unwrap().as_deref(),
+            Some("done")
+        );
+        assert!(second.release_bootstrap_claim("second").unwrap());
+    }
+
+    #[test]
+    fn bootstrap_upsert_cannot_overwrite_newer_incremental_state() {
+        let tmp = TempDir::new().unwrap();
+        let bootstrap = open(&tmp);
+        let incremental = open(&tmp);
+        let lease = Duration::from_secs(300);
+        let claim = bootstrap
+            .try_claim_bootstrap(1_000, lease, "bootstrap")
+            .unwrap()
+            .unwrap();
+
+        let stale = test_doc("session", "Old cwd", "before scan");
+        let mut fresh = test_doc("session", "New cwd", "after scan");
+        fresh.cwd = "/relocated/workspace".to_string();
+        incremental.upsert_doc_incremental(&fresh).unwrap();
+
+        assert_eq!(
+            bootstrap
+                .upsert_doc_if_claim_owner(
+                    &stale,
+                    1_001,
+                    lease,
+                    "bootstrap",
+                    claim.mutation_generation,
+                )
+                .unwrap(),
+            ClaimedUpsert::Stale
+        );
+        let hits = bootstrap.query("after", None, 10, 0, false).unwrap();
+        assert_eq!(hits.results[0].cwd, "/relocated/workspace");
+        assert!(
+            bootstrap
+                .query("before", None, 10, 0, false)
+                .unwrap()
+                .results
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn bootstrap_upsert_cannot_resurrect_incrementally_deleted_session() {
+        let tmp = TempDir::new().unwrap();
+        let bootstrap = open(&tmp);
+        let incremental = open(&tmp);
+        let lease = Duration::from_secs(300);
+        let original = test_doc("deleted", "Deleted", "original content");
+        incremental.upsert_doc(&original).unwrap();
+        let claim = bootstrap
+            .try_claim_bootstrap(1_000, lease, "bootstrap")
+            .unwrap()
+            .unwrap();
+
+        incremental.delete_doc("deleted").unwrap();
+        assert_eq!(
+            bootstrap
+                .upsert_doc_if_claim_owner(
+                    &original,
+                    1_001,
+                    lease,
+                    "bootstrap",
+                    claim.mutation_generation,
+                )
+                .unwrap(),
+            ClaimedUpsert::Stale
+        );
+        assert_eq!(bootstrap.get_content_hash("deleted").unwrap(), None);
+    }
+
+    #[test]
+    fn bootstrap_prune_retains_late_created_or_relocated_rows() {
+        let tmp = TempDir::new().unwrap();
+        let bootstrap = open(&tmp);
+        let incremental = open(&tmp);
+        let lease = Duration::from_secs(300);
+        let claim = bootstrap
+            .try_claim_bootstrap(1_000, lease, "bootstrap")
+            .unwrap()
+            .unwrap();
+
+        incremental
+            .upsert_doc_incremental(&test_doc("late", "Late", "created after scan"))
+            .unwrap();
+        let mut relocated = test_doc("relocated", "Moved", "new path");
+        relocated.cwd = "/new/path".to_string();
+        incremental.upsert_doc_incremental(&relocated).unwrap();
+
+        assert!(
+            bootstrap
+                .prune_missing_if_claim_owner(
+                    1_001,
+                    lease,
+                    "bootstrap",
+                    claim.mutation_generation,
+                    &std::collections::HashSet::new(),
+                )
+                .unwrap()
+        );
+        let ids: std::collections::HashSet<_> = bootstrap
+            .all_indexed_session_ids()
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(ids, ["late".to_string(), "relocated".to_string()].into());
+        let moved = bootstrap.query("moved", None, 10, 0, false).unwrap();
+        assert_eq!(moved.results[0].cwd, "/new/path");
+    }
+
+    #[test]
+    fn incremental_update_before_claim_is_replaced_by_later_bootstrap_scan() {
+        let tmp = TempDir::new().unwrap();
+        let bootstrap = open(&tmp);
+        let incremental = open(&tmp);
+        let lease = Duration::from_secs(300);
+        incremental
+            .upsert_doc_incremental(&test_doc("session", "Old", "before claim"))
+            .unwrap();
+        let claim = bootstrap
+            .try_claim_bootstrap(1_000, lease, "bootstrap")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            bootstrap
+                .upsert_doc_if_claim_owner(
+                    &test_doc("session", "Fresh", "scanned after claim"),
+                    1_001,
+                    lease,
+                    "bootstrap",
+                    claim.mutation_generation,
+                )
+                .unwrap(),
+            ClaimedUpsert::Indexed
+        );
+        assert_eq!(
+            bootstrap
+                .query("scanned", None, 10, 0, false)
+                .unwrap()
+                .results
+                .len(),
+            1
+        );
+        assert!(
+            bootstrap
+                .query("before", None, 10, 0, false)
+                .unwrap()
+                .results
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn bootstrap_prune_removes_rows_not_mutated_after_claim() {
+        let tmp = TempDir::new().unwrap();
+        let bootstrap = open(&tmp);
+        let lease = Duration::from_secs(300);
+        bootstrap
+            .upsert_doc(&test_doc("orphan", "Orphan", "old row"))
+            .unwrap();
+        let claim = bootstrap
+            .try_claim_bootstrap(1_000, lease, "bootstrap")
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            bootstrap
+                .prune_missing_if_claim_owner(
+                    1_001,
+                    lease,
+                    "bootstrap",
+                    claim.mutation_generation,
+                    &std::collections::HashSet::new(),
+                )
+                .unwrap()
+        );
+        assert_eq!(bootstrap.get_content_hash("orphan").unwrap(), None);
+    }
+
+    #[test]
+    fn reclaimed_lease_keeps_original_generation_fence() {
+        let tmp = TempDir::new().unwrap();
+        let stale_owner = open(&tmp);
+        let new_owner = open(&tmp);
+        let incremental = open(&tmp);
+        let lease = Duration::from_secs(300);
+        let first_claim = stale_owner
+            .try_claim_bootstrap(1_000, lease, "first")
+            .unwrap()
+            .unwrap();
+        let fresh = test_doc("session", "Fresh", "incremental after first claim");
+        incremental.upsert_doc_incremental(&fresh).unwrap();
+        let second_claim = new_owner
+            .try_claim_bootstrap(1_301, lease, "second")
+            .unwrap()
+            .unwrap();
+        assert!(second_claim.mutation_generation > first_claim.mutation_generation);
+
+        assert_eq!(
+            stale_owner
+                .upsert_doc_if_claim_owner(
+                    &test_doc("session", "Stale", "first bootstrap"),
+                    1_301,
+                    lease,
+                    "first",
+                    first_claim.mutation_generation,
+                )
+                .unwrap(),
+            ClaimedUpsert::Lost
+        );
+        assert_eq!(
+            new_owner
+                .upsert_doc_if_claim_owner(
+                    &fresh,
+                    1_301,
+                    lease,
+                    "second",
+                    second_claim.mutation_generation,
+                )
+                .unwrap(),
+            ClaimedUpsert::Unchanged
+        );
+        assert_eq!(
+            new_owner
+                .query("incremental", None, 10, 0, false)
+                .unwrap()
+                .results
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn expired_owner_cannot_refresh_write_prune_or_mark_complete() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        let lease = Duration::from_secs(300);
+        let claim = index
+            .try_claim_bootstrap(1_000, lease, "expired")
+            .unwrap()
+            .unwrap();
+        index
+            .upsert_doc(&test_doc("stale", "Stale", "row"))
+            .unwrap();
+
+        assert!(
+            !index
+                .refresh_bootstrap_claim(1_301, lease, "expired")
+                .unwrap()
+        );
+        assert_eq!(
+            index
+                .upsert_doc_if_claim_owner(
+                    &test_doc("late", "Late", "write"),
+                    1_301,
+                    lease,
+                    "expired",
+                    claim.mutation_generation,
+                )
+                .unwrap(),
+            ClaimedUpsert::Lost
+        );
+        assert!(
+            !index
+                .insert_doc_if_absent_if_claim_owner(
+                    &test_doc("placeholder", "Placeholder", ""),
+                    1_301,
+                    lease,
+                    "expired",
+                    claim.mutation_generation,
+                )
+                .unwrap()
+        );
+        assert!(
+            !index
+                .prune_missing_if_claim_owner(
+                    1_301,
+                    lease,
+                    "expired",
+                    claim.mutation_generation,
+                    &std::collections::HashSet::new(),
+                )
+                .unwrap()
+        );
+        assert!(
+            !index
+                .set_meta_if_claim_owner(META_KEY_LAST_BOOTSTRAP, "done", 1_301, lease, "expired",)
+                .unwrap()
+        );
+        assert_eq!(index.get_content_hash("late").unwrap(), None);
+        assert_eq!(index.get_content_hash("placeholder").unwrap(), None);
+        assert!(index.get_content_hash("stale").unwrap().is_some());
+        assert_eq!(index.get_meta(META_KEY_LAST_BOOTSTRAP).unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_and_future_bootstrap_claims_are_reclaimable() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        index.set_meta(META_KEY_BOOTSTRAP_CLAIM, "garbage").unwrap();
+        assert!(
+            index
+                .try_claim_bootstrap(1_000, Duration::from_secs(300), "owner")
+                .unwrap()
+                .is_some()
+        );
+        index
+            .set_meta(META_KEY_BOOTSTRAP_CLAIM, "9999999999:future")
+            .unwrap();
+        assert!(
+            index
+                .try_claim_bootstrap(1_000, Duration::from_secs(300), "owner-2")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1153,5 +2204,19 @@ mod tests {
         let qr = index.query("…", None, 10, 0, false).unwrap();
         assert!(qr.results.is_empty());
         assert_eq!(qr.total_estimate, Some(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn open_or_create_creates_owner_only_parent() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("sessions");
+        let db_path = parent.join("session_search.sqlite");
+        let _ = SessionSearchIndex::open_or_create(&db_path).unwrap();
+        assert_eq!(
+            crate::test_support::unix_mode(&parent),
+            0o700,
+            "sessions parent created by open_or_create must be 0700"
+        );
     }
 }

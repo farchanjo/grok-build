@@ -55,6 +55,35 @@ fn insert_applied_tool_overrides(
         );
     }
 }
+pub(super) const RESUME_REFUSES_CHAT: &str =
+    "session/resume is not supported for chat sessions; use session/load";
+pub(super) const RESUME_REFUSES_EXTRA_DIRS: &str =
+    "session/resume does not support additionalDirectories";
+pub(super) fn shell_session_capabilities() -> acp::SessionCapabilities {
+    acp::SessionCapabilities::new()
+        .resume(acp::SessionResumeCapabilities::new())
+        .close(acp::SessionCloseCapabilities::new())
+}
+/// Reshape standard resume into the existing load path while enforcing the
+/// protocol's no-replay semantics and preventing a mid-turn code checkout.
+pub(super) fn load_request_for_resume(args: acp::ResumeSessionRequest) -> acp::LoadSessionRequest {
+    let acp::ResumeSessionRequest {
+        session_id,
+        cwd,
+        mcp_servers,
+        meta,
+        ..
+    } = args;
+    let mut meta = meta.unwrap_or_default();
+    meta.insert("noReplay".to_string(), serde_json::Value::Bool(true));
+    meta.insert(
+        "x.ai/restore_code".to_string(),
+        serde_json::Value::Bool(false),
+    );
+    acp::LoadSessionRequest::new(session_id, cwd)
+        .mcp_servers(mcp_servers)
+        .meta(meta)
+}
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MvpAgent {
     /// In the meta, we provide
@@ -131,8 +160,8 @@ impl acp::Agent for MvpAgent {
                     serde_json::json!({
                     "user_id": user_id,
                     "needs_user_info": needs_user_info,
-                    "key_prefix": crate::auth::token_suffix(&auth.key),
-                    "rt_prefix": auth.refresh_token.as_deref().map(crate::auth::token_suffix),
+                    "key_prefix": xai_grok_auth::bearer_tail(&auth.key),
+                    "rt_prefix": auth.refresh_token.as_deref().map(xai_grok_auth::bearer_tail),
                 }),
                 ),
             );
@@ -220,22 +249,22 @@ impl acp::Agent for MvpAgent {
             .auth_manager
             .current()
             .map(|a| (
-                crate::auth::token_suffix(&a.key).to_owned(),
+                xai_grok_auth::bearer_tail(&a.key).to_owned(),
                 a
                     .refresh_token
                     .as_deref()
-                    .map(|t| crate::auth::token_suffix(t).to_owned()),
+                    .map(|t| xai_grok_auth::bearer_tail(t).to_owned()),
             ));
         self.auth_manager.force_reload_from_disk();
         let post = self
             .auth_manager
             .current()
             .map(|a| (
-                crate::auth::token_suffix(&a.key).to_owned(),
+                xai_grok_auth::bearer_tail(&a.key).to_owned(),
                 a
                     .refresh_token
                     .as_deref()
-                    .map(|t| crate::auth::token_suffix(t).to_owned()),
+                    .map(|t| xai_grok_auth::bearer_tail(t).to_owned()),
             ));
         xai_grok_telemetry::unified_log::info(
             "auth init disk refresh",
@@ -297,25 +326,6 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        // Unpinned: advertise xai.api_key whenever API-key auth is allowed so
-        // the TUI can start without interactive Grok login; credentials come
-        // from env/config/providers at request time. preferred_method=api_key
-        // stays fail-closed and still requires a resolvable key.
-        let has_external_api_key = {
-            let models = self.models_manager.models();
-            let preferred = self.cfg.borrow().grok_com_config.preferred_method;
-            match preferred {
-                Some(crate::auth::PreferredAuthMethod::ApiKey) => {
-                    !disable_api_key_auth
-                        && auth_method::has_api_key_credentials(models.values())
-                }
-                Some(crate::auth::PreferredAuthMethod::Oidc) => false,
-                None => auth_method::should_advertise_xai_api_key(
-                    disable_api_key_auth,
-                    models.values(),
-                ),
-            }
-        };
         let init_has_current = self.auth_manager.current().is_some();
         let init_is_expired = self.auth_manager.is_expired();
         xai_grok_telemetry::unified_log::info(
@@ -393,7 +403,47 @@ impl acp::Agent for MvpAgent {
             );
         }
         let preferred_method = self.cfg.borrow().grok_com_config.preferred_method;
-        // has_external_api_key already accounts for preferred_method above.
+        let (has_alternative_api_key_route, has_api_key_credentials) = {
+            let models = self.models_manager.models();
+            (
+                auth_method::has_alternative_api_key_route(models.values()),
+                auth_method::has_api_key_credentials(models.values()),
+            )
+        };
+        let should_probe_first_party_env_key =
+            crate::auth::should_probe_first_party_env_key(crate::auth::FirstPartyEnvProbePolicy {
+                disable_api_key_auth,
+                has_alternative_api_key_route,
+                has_first_party_env_key: auth_method::has_xai_api_key_env(),
+                has_usable_session: has_cached_token,
+                preferred_method_is_set: preferred_method.is_some(),
+            });
+        let first_party_env_api_key_ok = if should_probe_first_party_env_key {
+            let xai_api_base_url = self.cfg.borrow().endpoints.xai_api_base_url.clone();
+            crate::auth::first_party_env_key_allows_advertise(
+                &xai_api_base_url,
+                crate::auth::DEFAULT_PROBE_TIMEOUT,
+            )
+            .await
+        } else {
+            true
+        };
+        self.auth_manager
+            .set_first_party_env_api_key_ok(first_party_env_api_key_ok);
+        // Unpinned stays provider-deferred unless a first-party env key alone
+        // would suppress normal login and the probe knows it is unusable.
+        // preferred_method pins remain authoritative and are never probed.
+        let has_external_api_key = match preferred_method {
+            Some(crate::auth::PreferredAuthMethod::ApiKey) => {
+                !disable_api_key_auth && has_api_key_credentials
+            }
+            Some(crate::auth::PreferredAuthMethod::Oidc) => false,
+            None => auth_method::should_advertise_xai_api_key_after_probe(
+                disable_api_key_auth,
+                has_alternative_api_key_route,
+                first_party_env_api_key_ok,
+            ),
+        };
         let has_cached_token = match preferred_method {
             Some(crate::auth::PreferredAuthMethod::ApiKey) => false,
             _ => has_cached_token,
@@ -417,6 +467,9 @@ impl acp::Agent for MvpAgent {
                 "HOME": std::env::var("HOME").unwrap_or_else(|_| "(unset)".into()),
                 "has_external_api_key": has_external_api_key,
                 "disable_api_key_auth": disable_api_key_auth,
+                "has_alternative_api_key_route": has_alternative_api_key_route,
+                "first_party_env_probe_ran": should_probe_first_party_env_key,
+                "first_party_env_api_key_ok": first_party_env_api_key_ok,
                 "has_cached_token": has_cached_token,
                 "has_enterprise_oidc": has_enterprise_oidc,
                 "init_has_current": init_has_current,
@@ -497,6 +550,7 @@ impl acp::Agent for MvpAgent {
                     "x.ai/hooks": {
                         "blockingEvents": crate::extensions::hooks::ADVERTISED_BLOCKING_EVENTS,
                         "decisions": crate::extensions::hooks::ADVERTISED_DECISIONS,
+                        "preToolUseSignals": crate::extensions::hooks::ADVERTISED_PRE_TOOL_USE_SIGNALS,
                         "stopSignals": crate::extensions::hooks::ADVERTISED_STOP_SIGNALS,
                     },
                     "x.ai/capabilities": {
@@ -516,7 +570,8 @@ impl acp::Agent for MvpAgent {
                         )
                         .mcp_capabilities(
                             acp::McpCapabilities::new().http(true).sse(true),
-                        ),
+                        )
+                        .session_capabilities(shell_session_capabilities()),
                 )
                 .auth_methods(auth_methods)
                 .meta({
@@ -1182,7 +1237,7 @@ impl acp::Agent for MvpAgent {
                         client_terminal,
                         client_fs_read,
                         client_fs_write,
-                        preloaded_envrc: None,
+                        envrc: None,
                         persisted_signals: None,
                         persisted_plan_mode: None,
                         persisted_goal_mode: None,
@@ -1197,7 +1252,7 @@ impl acp::Agent for MvpAgent {
                         prompt_display_cwd: None,
                     }
             };
-            self.spawn_and_register_session(init, spawn_opts).await
+            self.spawn_and_register_session(init, spawn_opts, false).await
         };
         spawn_res?;
         tracing::debug!(session_id = %session_id.0, "new_session: spawn_session_actor");
@@ -1633,6 +1688,22 @@ impl acp::Agent for MvpAgent {
                 self.cfg.borrow().session.load_envrc.unwrap_or(true)
             }
         };
+        // Overlap the bounded evaluator with transcript replay for cold loads.
+        // A resident session keeps its existing environment and does not rerun
+        // repository side effects.
+        let envrc = if !load_envrc {
+            Some(xai_grok_workspace::envrc::spawn_envrc_load(
+                cwd.as_path().to_path_buf(),
+                false,
+            ))
+        } else if session_exists {
+            None
+        } else {
+            Some(xai_grok_workspace::envrc::spawn_envrc_load(
+                cwd.as_path().to_path_buf(),
+                folder_trust::project_scope_allowed(cwd.as_path()),
+            ))
+        };
         let (initial_total_tokens, delta_completions, unfinished_subagents) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
@@ -1691,10 +1762,6 @@ impl acp::Agent for MvpAgent {
         for rx in reconcile_completions {
             let _ = rx.await;
         }
-        let preloaded_envrc = xai_grok_workspace::envrc::load_envrc_or_empty_when_trusted(
-            cwd.as_path(),
-            load_envrc && folder_trust::project_scope_allowed(cwd.as_path()),
-        );
         let client_code_nav_enabled = request_meta
             .as_ref()
             .and_then(|m| m.get("codeNavEnabled"))
@@ -1743,7 +1810,7 @@ impl acp::Agent for MvpAgent {
                         client_terminal,
                         client_fs_read,
                         client_fs_write,
-                        preloaded_envrc: Some(preloaded_envrc),
+                        envrc,
                         persisted_signals,
                         persisted_plan_mode,
                         persisted_goal_mode: _persisted_goal_mode,
@@ -1757,6 +1824,7 @@ impl acp::Agent for MvpAgent {
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd,
                     },
+                    true,
                 )
                 .await?;
             drop(spawn_timer);
@@ -2002,20 +2070,22 @@ impl acp::Agent for MvpAgent {
                     );
                     map
                 });
-            let _ = crate::agent::handlers::model_switch::apply(
-                    self,
-                    acp::SetSessionModelRequest::new(session_id.to_owned(), model_id)
-                        .meta(restore_meta),
-                )
-                .await;
-            // Summary execution mode is authoritative on resume. Re-apply after
-            // model_switch (which seeds from the catalog) so Native↔external
-            // cannot flip silently, including when turn_count > 0.
+            // The persisted execution mode is authoritative for load and
+            // standard resume. Restore it before model application without a
+            // disk write, then have the load-specific switch emit one correct
+            // CurrentModel record with the original external envelope.
             Self::restore_summary_execution_mode(
                 self,
                 &session_id,
                 summary.execution_backend,
                 summary.external_runtime.clone(),
+            )
+            .await?;
+            crate::agent::handlers::model_switch::apply_for_load(
+                self,
+                acp::SetSessionModelRequest::new(session_id.to_owned(), model_id)
+                    .meta(restore_meta),
+                summary.execution_backend,
             )
             .await?;
         }
@@ -2148,6 +2218,47 @@ impl acp::Agent for MvpAgent {
             });
         }
         Ok(response)
+    }
+    async fn resume_session(
+        &self,
+        arguments: acp::ResumeSessionRequest,
+    ) -> Result<acp::ResumeSessionResponse, acp::Error> {
+        tracing::info!(session_id = %arguments.session_id.0, "session/resume");
+        if !arguments.additional_directories.is_empty() {
+            return Err(acp::Error::invalid_params().data(RESUME_REFUSES_EXTRA_DIRS));
+        }
+        if crate::agent::chat_modes::process_chat_mode_enabled()
+            || parse_session_kind(arguments.meta.as_ref())
+                == crate::session::unified_list::SessionKind::Chat
+        {
+            return Err(acp::Error::invalid_params().data(RESUME_REFUSES_CHAT));
+        }
+        let loaded = self.load_session(load_request_for_resume(arguments)).await?;
+        Ok(acp::ResumeSessionResponse::new()
+            .modes(loaded.modes)
+            .models(loaded.models)
+            .config_options(loaded.config_options)
+            .meta(loaded.meta))
+    }
+    async fn close_session(
+        &self,
+        arguments: acp::CloseSessionRequest,
+    ) -> Result<acp::CloseSessionResponse, acp::Error> {
+        let session_id = arguments.session_id;
+        let existed = self.sessions.borrow().contains_key(&session_id);
+        if existed {
+            self.request_session_shutdown(&session_id);
+            self.close_session_explicit(&session_id);
+            tracing::info!(session_id = %session_id.0, "session/close");
+        } else {
+            tracing::debug!(session_id = %session_id.0, "session/close: session not found (already closed)");
+        }
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "x.ai/closeOutcome".to_string(),
+            serde_json::json!(if existed { "closed" } else { "notResident" }),
+        );
+        Ok(acp::CloseSessionResponse::new().meta(meta))
     }
     #[tracing::instrument(
         name = "agent.prompt",
@@ -3310,16 +3421,32 @@ impl acp::Agent for MvpAgent {
                 .and_then(|m| m.get("rewindIfPristine"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let explicit_compaction_cancel =
+                crate::session::compaction_config::is_explicit_compaction_cancel_trigger(
+                    cancel_trigger.as_deref(),
+                );
+            // This must stay ahead of dispatch serialization: a prompt can hold
+            // the dispatch lock while awaiting this actor, and compaction can in
+            // turn block that actor. The shared handle is the out-of-band stop.
+            let pending_compaction_cancel = explicit_compaction_cancel.then(|| {
+                let pending = handle.compaction_cancel.begin_cancel_command();
+                handle.compaction_cancel.request_cancel();
+                pending
+            });
             let dispatch_lock = self.dispatch_lock(&args.session_id);
             let _dispatch_guard = dispatch_lock.lock().await;
-            let _ = handle
-                .cmd_tx
-                .send(SessionCommand::Cancel {
-                    cancel_subagents,
-                    kill_background_tasks: false,
-                    rewind_if_pristine,
-                    trigger: cancel_trigger,
-                });
+            let sent = handle.cmd_tx.send(SessionCommand::Cancel {
+                cancel_subagents,
+                kill_background_tasks: false,
+                rewind_if_pristine,
+                trigger: cancel_trigger,
+                compaction_cancel_pending: pending_compaction_cancel.is_some(),
+            });
+            if sent.is_ok()
+                && let Some(pending) = pending_compaction_cancel
+            {
+                pending.commit();
+            }
         }
         Ok(())
     }

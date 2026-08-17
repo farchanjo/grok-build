@@ -167,7 +167,7 @@ impl AnthropicClient {
                 "base_url must not be empty".into(),
             ));
         }
-        let http = reqwest::Client::builder()
+        let http = crate::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| AnthropicClientError::Transport(e.to_string()))?;
@@ -375,6 +375,7 @@ impl AnthropicClient {
                                 xai_grok_inference_types::InferenceError::StreamError {
                                     error_type,
                                     message,
+                                    ..
                                 } => (error_type, message),
                                 other => ("stream_error".into(), other.to_string()),
                             };

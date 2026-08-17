@@ -883,6 +883,7 @@ pub(crate) async fn handle_subagent_request(
         )
         .with_hunk_tracking_enabled(ctx.hunk_tracking_enabled);
     tool_ctx.subagent_event_tx = Some(ctx.subagent_event_tx.clone());
+    tool_ctx.subagent_admission = ctx.subagent_admission.clone();
     let task_output_budget = request
         .runtime_overrides
         .output_token_budget

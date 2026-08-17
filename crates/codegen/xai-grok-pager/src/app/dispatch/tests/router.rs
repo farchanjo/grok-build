@@ -1945,6 +1945,20 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
                          truth.",
                 );
             }
+            ("compaction_status", SettingKind::Status) => {
+                assert_eq!(
+                    build_pager_snapshot(&app).compaction_in_progress,
+                    crate::settings::PagerLocalSnapshot::default().compaction_in_progress,
+                    "default compaction status must match the runtime activity state",
+                );
+            }
+            ("media_status", SettingKind::Status) => {
+                assert_eq!(
+                    build_pager_snapshot(&app).media_status,
+                    crate::settings::PagerLocalSnapshot::default().media_status,
+                    "default media status must match the status built from the runtime defaults",
+                );
+            }
             _ => {
                 panic!(
                     "PAGER setting `{}` has no arm in \

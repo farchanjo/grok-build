@@ -188,6 +188,7 @@ impl SessionActor {
             .and_then(|c| c.reasoning_effort.map(|e| e.as_str().to_owned()));
 
         let mut envelope = self.external_runtime.borrow().clone();
+        let stored_valid_envelope = envelope.clone().and_then(|env| env.validated().ok());
         if envelope.is_none() {
             let started = runtime
                 .start(ExternalStartRequest {
@@ -210,6 +211,8 @@ impl SessionActor {
         let envelope = envelope.ok_or_else(|| {
             crate::agent::external_runtime::ExternalRuntimeError::unavailable(kind).into_acp_error()
         })?;
+        let prior_valid_envelope =
+            stored_valid_envelope.or_else(|| envelope.clone().validated().ok());
 
         // Wire cancel: if the session turn_cancel fires, cancel the *retained* runtime.
         let cancel_token = self.turn_cancel.borrow().clone();
@@ -376,16 +379,24 @@ impl SessionActor {
                 .push_assistant_response(ConversationItem::assistant(assistant_text));
         }
 
-        // Persist redacted envelope only (no raw NDJSON).
+        // Persist redacted envelope only (no raw NDJSON). A runtime outcome
+        // that fails validation can never replace the durable pointer.
         let envelope_to_store = match outcome.envelope.clone().validated() {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
                     session_id = %self.session_info.id.0,
                     error = %e,
-                    "external envelope failed validation; keeping prior pointer only"
+                    "external envelope failed validation; retaining prior valid envelope"
                 );
-                outcome.envelope.clone()
+                prior_valid_envelope.ok_or_else(|| {
+                    crate::agent::external_runtime::ExternalRuntimeError::new(
+                        crate::agent::external_runtime::ExternalRuntimeErrorKind::InvalidRequest,
+                        format!("external runtime returned an invalid envelope: {e}"),
+                        Some(kind),
+                    )
+                    .into_acp_error()
+                })?
             }
         };
         *self.external_runtime.borrow_mut() = Some(envelope_to_store.clone());
@@ -1493,17 +1504,14 @@ impl SessionActor {
                 );
                 if let Some(explanation) = refusal {
                     let details = (!explanation.is_empty()).then(|| explanation.clone());
-                    self.dispatch_hook(
-                        xai_grok_hooks::event::HookEventName::StopFailure,
-                        xai_grok_hooks::event::HookPayload::StopFailure {
+                    self.report_turn_end(
+                        prompt_id,
+                        TurnEnd::Failed {
                             error: xai_grok_hooks::event::StopFailureKind::InvalidRequest,
                             error_details: details.clone(),
                             last_assistant_message: details,
                         },
-                        Some(prompt_id),
-                        None,
-                    )
-                    .await;
+                    );
                 }
                 self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
@@ -1633,17 +1641,14 @@ impl SessionActor {
                         error_category: Some(error_category),
                     },
                 );
-                self.dispatch_hook(
-                    xai_grok_hooks::event::HookEventName::StopFailure,
-                    xai_grok_hooks::event::HookPayload::StopFailure {
+                self.report_turn_end(
+                    prompt_id,
+                    TurnEnd::Failed {
                         error: Self::stop_failure_error_type(err),
                         error_details: Self::turn_error_detail(err),
                         last_assistant_message: Some(Self::format_turn_error_message(err)),
                     },
-                    Some(prompt_id),
-                    None,
-                )
-                .await;
+                );
             }
         }
         xai_grok_telemetry::session_ctx::log_session_event(
@@ -2687,54 +2692,98 @@ impl SessionActor {
                 }
                 Ok(InferenceTurnOutcome::CompactAndResubmit) => {
                     context_compaction_recovery_used = true;
-                    auth_retry_schedule.reset();
+                    // Compaction is not an inference success; keep every auth
+                    // counter unchanged until a model response actually lands.
                     continue;
                 }
-                Ok(InferenceTurnOutcome::RefreshAuthAndResubmit) => {
-                    if let Some((attempt, delay)) = auth_retry_schedule.next_delay() {
-                        let delay_ms = delay.as_millis() as u64;
-                        tracing::warn!(
-                            attempt,
-                            delay_ms,
-                            "auth 401 retry: backing off before resubmit"
+                Ok(InferenceTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
+                    if auth_retry_schedule.reset_if_incident_spans_suspend() {
+                        tracing::info!(
+                            "auth 401 retry: incident spanned suspend; charged budget reset"
                         );
-                        xai_grok_telemetry::unified_log::warn(
-                            "shell.turn.auth_retry_backoff",
-                            Some(self.session_info.id.0.as_ref()),
-                            Some(serde_json::json!({
-                                "loop_index": loop_index,
-                                "attempt": attempt,
-                                "max_retries": AuthRetrySchedule::MAX_RETRIES,
-                                "delay_ms": delay_ms,
-                            })),
-                        );
-                        self.send_xai_notification(XaiSessionUpdate::RetryState(
-                            crate::extensions::notification::RetryState::Retrying {
-                                attempt,
-                                max_retries: AuthRetrySchedule::MAX_RETRIES,
-                                reason: "Re-authenticated after 401; retrying request".to_string(),
-                                backoff_ms: Some(delay.as_millis() as u64),
-                                is_rate_limited: false,
-                                provider_name: None,
-                                provider_code: None,
-                            },
-                        ))
-                        .await;
-                        sleep(delay).await;
-                        continue;
                     }
-                    let msg = format!(
-                        "Auth recovery succeeded but inference request was \
-                         still rejected (401) after {} retries",
-                        AuthRetrySchedule::MAX_RETRIES
-                    );
-                    tracing::error!(msg);
-                    return Err(acp::Error::internal_error().data(
-                        crate::inference::error::error_data_with_status(msg, Some(401)),
-                    ));
+                    match auth_retry_schedule.on_recovered_401(credential) {
+                        AuthRetryDecision::UnchargedResubmit { resubmit } => {
+                            tracing::warn!(
+                                resubmit,
+                                "auth 401 retry: no credential was sent; paced resubmit"
+                            );
+                            self.send_xai_notification(XaiSessionUpdate::RetryState(
+                                crate::extensions::notification::RetryState::Retrying {
+                                    attempt: resubmit,
+                                    max_retries: AuthRetrySchedule::MAX_UNCHARGED_RESUBMITS,
+                                    reason: "Re-authenticated after a credential-less 401; retrying request"
+                                        .to_string(),
+                                    backoff_ms: Some(1_000),
+                                    is_rate_limited: false,
+                                    provider_name: None,
+                                    provider_code: None,
+                                },
+                            ))
+                            .await;
+                            pace_uncharged_resubmit(store, self.auth_manager.as_ref()).await;
+                            continue;
+                        }
+                        AuthRetryDecision::Backoff { attempt, delay } => {
+                            let delay_ms = delay.as_millis() as u64;
+                            tracing::warn!(
+                                attempt,
+                                delay_ms,
+                                authenticated =
+                                    credential == xai_grok_inference_types::SentCredential::Sent,
+                                "auth 401 retry: backing off before resubmit"
+                            );
+                            xai_grok_telemetry::unified_log::warn(
+                                "shell.turn.auth_retry_backoff",
+                                Some(self.session_info.id.0.as_ref()),
+                                Some(serde_json::json!({
+                                    "loop_index": loop_index,
+                                    "attempt": attempt,
+                                    "max_retries": AuthRetrySchedule::MAX_RETRIES,
+                                    "delay_ms": delay_ms,
+                                })),
+                            );
+                            self.send_xai_notification(XaiSessionUpdate::RetryState(
+                                crate::extensions::notification::RetryState::Retrying {
+                                    attempt,
+                                    max_retries: AuthRetrySchedule::MAX_RETRIES,
+                                    reason: "Re-authenticated after 401; retrying request"
+                                        .to_string(),
+                                    backoff_ms: Some(delay_ms),
+                                    is_rate_limited: false,
+                                    provider_name: None,
+                                    provider_code: None,
+                                },
+                            ))
+                            .await;
+                            sleep(delay).await;
+                            continue;
+                        }
+                        decision @ (AuthRetryDecision::Exhausted
+                        | AuthRetryDecision::RunawayGuard { .. }) => {
+                            let (rejections, authenticated) = auth_retry_schedule.incident_counts();
+                            let uncharged = auth_retry_schedule.uncharged_rejections();
+                            let msg = match decision {
+                                AuthRetryDecision::RunawayGuard { rejections } => format!(
+                                    "Auth recovery kept succeeding, but {rejections} credential-less inference requests were rejected (401) without a successful response; stopping to prevent an infinite retry loop"
+                                ),
+                                _ if rejections == authenticated => format!(
+                                    "Auth recovery succeeded, but {rejections} authenticated inference requests were still rejected (401); giving up after {} retries",
+                                    AuthRetrySchedule::MAX_RETRIES
+                                ),
+                                _ => format!(
+                                    "Auth retry budget exhausted after {rejections} charged post-recovery 401s ({authenticated} provably carried a credential; {uncharged} credential-less 401s were not charged)"
+                                ),
+                            };
+                            tracing::error!(msg);
+                            return Err(acp::Error::internal_error().data(
+                                crate::inference::error::error_data_with_status(msg, Some(401)),
+                            ));
+                        }
+                    }
                 }
             };
-            auth_retry_schedule.reset();
+            auth_retry_schedule.reset_on_success();
             context_compaction_recovery_used = false;
             let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
             let usage = response.usage.as_ref();
@@ -3263,87 +3312,6 @@ mod identical_tool_call_run_tests {
             last = run.observe("same", "same");
         }
         assert_eq!(last, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
-    }
-}
-/// Backoff schedule for resubmits after a *successful* 401 auth recovery
-/// (fresh token minted, request to be re-sent).
-///
-/// Two hard-won invariants, both regressions from the silent-hang incident
-/// where a turn froze 16m40s and then 11.6 days (user-cancelled at 27min):
-///
-/// - **Delays must be 1s/2s/4s.** `tokio_retry::ExponentialBackoff::
-///   from_millis(base)` raises `base` to the attempt number, so the base must
-///   stay small: `from_millis(1000)` yields 1000ⁿ ms = 1s → 16m40s → 11.57
-///   days. `from_millis(2).factor(500)` yields 2ⁿ × 500ms = 1s, 2s, 4s.
-/// - **The schedule is per-incident, not per-turn.** A long turn can span
-///   several hourly gateway token rotations; each rotation is an independent
-///   401→refresh→retry event. Without `reset()` after a successful response,
-///   the third rotation of one turn would land on the last (largest) delay
-///   and the fourth would fail the turn outright.
-struct AuthRetrySchedule {
-    delays: std::iter::Take<ExponentialBackoff>,
-    attempt: u32,
-}
-impl AuthRetrySchedule {
-    /// Consecutive post-recovery 401s tolerated before the turn fails.
-    const MAX_RETRIES: u32 = 3;
-    fn new() -> Self {
-        Self {
-            delays: ExponentialBackoff::from_millis(2)
-                .factor(500)
-                .max_delay(std::time::Duration::from_secs(10))
-                .take(Self::MAX_RETRIES as usize),
-            attempt: 0,
-        }
-    }
-    /// Next `(attempt_number, delay)` (1-indexed), or `None` once exhausted.
-    fn next_delay(&mut self) -> Option<(u32, std::time::Duration)> {
-        let delay = self.delays.next()?;
-        self.attempt += 1;
-        Some((self.attempt, delay))
-    }
-    /// A successful model response closes the incident: restart the schedule
-    /// so the next token rotation starts back at the shortest delay.
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-}
-#[cfg(test)]
-mod auth_retry_schedule_tests {
-    use super::AuthRetrySchedule;
-    use std::time::Duration;
-    /// Pins the exact schedule. Guards against the `from_millis(1000)`
-    /// footgun (baseⁿ semantics): that spelling produced sleeps of 1s,
-    /// 16m40s, and 11.57 days, observed in the field as a silent
-    /// ~27-minute hang in `waiting_model` that the user had to cancel.
-    #[test]
-    fn schedule_is_one_two_four_seconds_then_exhausted() {
-        let mut schedule = AuthRetrySchedule::new();
-        let steps: Vec<_> = std::iter::from_fn(|| schedule.next_delay()).collect();
-        assert_eq!(
-            steps,
-            vec![
-                (1, Duration::from_secs(1)),
-                (2, Duration::from_secs(2)),
-                (3, Duration::from_secs(4)),
-            ],
-        );
-        assert_eq!(
-            schedule.next_delay(),
-            None,
-            "must exhaust after MAX_RETRIES"
-        );
-    }
-    /// Each successful response must restart the schedule: hourly token
-    /// rotations within one long turn are independent incidents, so they
-    /// must not escalate toward exhaustion (turn failure).
-    #[test]
-    fn reset_restarts_delays_and_attempt_numbering() {
-        let mut schedule = AuthRetrySchedule::new();
-        schedule.next_delay();
-        schedule.next_delay();
-        schedule.reset();
-        assert_eq!(schedule.next_delay(), Some((1, Duration::from_secs(1))));
     }
 }
 #[cfg(test)]

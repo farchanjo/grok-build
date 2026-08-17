@@ -61,7 +61,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
-use tokio_retry::strategy::ExponentialBackoff;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_agent::AgentDefinition;
 use xai_grok_agent::prompt::agents_md::LEGACY_AGENTS_MD_REMINDER_PREFIX;
@@ -82,6 +81,85 @@ use xai_grok_workspace::permission::{
 };
 use xai_grok_workspace::session::file_state::{FileStateHandle, FileStateTracker};
 const SESSION_LOG: &str = "xai_session";
+
+/// Map explicit route provenance to an ephemeral proactive image budget.
+///
+/// `ProviderIdentity::Xai` alone is insufficient: legacy provider-less catalog
+/// entries also use that transport identity. P9 therefore requires a native
+/// execution backend, explicit xAI endpoint provenance, and first-party
+/// identity. Unknown/custom URLs, OpenRouter, OpenAI, Anthropic, and external
+/// runtimes keep proactive eviction disabled and use request-local recovery.
+fn image_budget_for_route(
+    config: &xai_grok_inference::InferenceConfig,
+    execution_backend: crate::agent::execution_backend::ExecutionBackend,
+) -> Option<xai_chat_state::ImageBudgetConfig> {
+    (execution_backend.is_native()
+        && config.provider_identity.is_first_party()
+        && crate::util::is_xai_api_bearer_url(&config.base_url))
+    .then_some(xai_chat_state::XAI_IMAGE_BUDGET)
+}
+
+#[cfg(test)]
+mod provider_image_budget_tests {
+    use super::image_budget_for_route;
+    use crate::agent::execution_backend::{ExecutionBackend, ExternalAgentKind};
+    use xai_grok_inference::config::ProviderIdentity;
+
+    fn config(
+        provider_identity: ProviderIdentity,
+        base_url: &str,
+    ) -> xai_grok_inference::InferenceConfig {
+        xai_grok_inference::InferenceConfig {
+            provider_identity,
+            base_url: base_url.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn proactive_image_budget_requires_explicit_native_xai_route() {
+        assert_eq!(
+            image_budget_for_route(
+                &config(ProviderIdentity::Xai, "https://api.x.ai/v1"),
+                ExecutionBackend::NativeInference,
+            ),
+            Some(xai_chat_state::XAI_IMAGE_BUDGET)
+        );
+
+        for provider in [
+            ProviderIdentity::Custom,
+            ProviderIdentity::OpenAi,
+            ProviderIdentity::OpenRouter,
+            ProviderIdentity::Anthropic,
+        ] {
+            assert_eq!(
+                image_budget_for_route(
+                    &config(provider, "https://api.x.ai/v1"),
+                    ExecutionBackend::NativeInference,
+                ),
+                None,
+                "{provider:?}"
+            );
+        }
+        assert_eq!(
+            image_budget_for_route(
+                &config(ProviderIdentity::Xai, "https://custom.example/v1"),
+                ExecutionBackend::NativeInference,
+            ),
+            None,
+            "legacy provider-less custom routes must not inherit xAI's limit"
+        );
+        assert_eq!(
+            image_budget_for_route(
+                &config(ProviderIdentity::Xai, "https://api.x.ai/v1"),
+                ExecutionBackend::ExternalAgent(ExternalAgentKind::ClaudeCli),
+            ),
+            None,
+            "external runtimes never use native request budgeting"
+        );
+    }
+}
+
 #[path = "compaction.rs"]
 mod compaction;
 #[path = "compaction_segments.rs"]
@@ -90,8 +168,13 @@ mod compaction_segments;
 mod types;
 pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
+#[path = "acp_session_impl/auth_retry.rs"]
+mod auth_retry;
+pub(crate) use auth_retry::{AuthRetryDecision, AuthRetrySchedule, pace_uncharged_resubmit};
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
+#[path = "acp_session_impl/image_strip.rs"]
+mod image_strip;
 #[path = "acp_session_impl/interjection.rs"]
 mod interjection;
 #[path = "acp_session_impl/tool_calls.rs"]
@@ -161,6 +244,12 @@ pub(crate) use goal_support::*;
 #[path = "acp_session_impl/hook_dispatch.rs"]
 mod hook_dispatch;
 use hook_dispatch::*;
+#[path = "acp_session_impl/turn_report_slot.rs"]
+mod turn_report_slot;
+use turn_report_slot::{CommitOutcome, TurnEpoch, TurnReportClaim};
+#[path = "acp_session_impl/turn_end_hooks.rs"]
+mod turn_end_hooks;
+use turn_end_hooks::TurnEnd;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
@@ -947,6 +1036,11 @@ pub(crate) struct SessionActor {
     /// Safe: session actor is single-threaded (LocalSet), no concurrent access.
     pub(crate) hook_registry:
         std::cell::RefCell<Option<Arc<xai_grok_hooks::discovery::HookRegistry>>>,
+    /// The one end-of-turn hook report for the currently promoted turn.
+    pub(crate) turn_report: turn_report_slot::TurnReportSlot,
+    /// Installed by the session's single FIFO turn-end hook worker.
+    pub(crate) turn_end_tx:
+        std::cell::RefCell<Option<tokio::sync::mpsc::UnboundedSender<turn_end_hooks::QueueItem>>>,
     /// Client hooks from `session/new` `_meta["x.ai/hooks"]`; gated in
     /// [`crate::session::acp_session::hooks`]. `RefCell` so `load_session` reconnect can
     /// replace the set on the live actor (see `SessionCommand::SetClientHooks`).
@@ -1036,6 +1130,11 @@ pub(crate) struct SessionActor {
     /// terminal `InferenceEvent::Completed` (every text/thought chunk has been
     /// `send_update`d by then). `None` between turns.
     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// A server-confirmed image strip awaiting a successful terminal event.
+    /// Only one inference request is active per session turn; request ids
+    /// protect the buffer from unrelated terminal events.
+    pub(crate) pending_image_strip:
+        parking_lot::Mutex<Option<(xai_grok_inference::RequestId, Vec<std::sync::Arc<str>>)>>,
     /// Handle to the per-session `xai-grok-inference` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;
@@ -1367,11 +1466,13 @@ const PROMPT_CONTEXT_FILENAME: &str = "prompt_context.json";
 /// The saved JSON enables deterministic re-rendering, `grok prompt --json`
 /// inspection, and post-hoc debugging of what went into a session's system prompt.
 fn save_prompt_context(session_info: &SessionInfo, prompt_context: &xai_grok_agent::PromptContext) {
-    let dir = crate::session::persistence::session_dir(session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(?e, "failed to create session dir for prompt_context.json");
-        return;
-    }
+    let dir = match crate::session::persistence::ensure_owner_only_session_dir(session_info) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(?e, "failed to create session dir for prompt_context.json");
+            return;
+        }
+    };
     let path = dir.join(PROMPT_CONTEXT_FILENAME);
     match serde_json::to_string_pretty(prompt_context) {
         Ok(json) => {
@@ -1399,12 +1500,14 @@ const SYSTEM_PROMPT_FILENAME: &str = "system_prompt.txt";
 /// own `chat_history.jsonl.tmp`; whichever atomic `rename` lands last wins and
 /// the content is identical, so the two writers can never produce a torn file.
 fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[ConversationItem]) {
-    let dir = crate::session::persistence::session_dir(session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(session_id = %session_info.id.0, ?e,
-            "persist_chat_history_jsonl_sync: failed to create session dir");
-        return;
-    }
+    let dir = match crate::session::persistence::ensure_owner_only_session_dir(session_info) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(session_id = %session_info.id.0, ?e,
+                "persist_chat_history_jsonl_sync: failed to create session dir");
+            return;
+        }
+    };
     let final_path = dir.join("chat_history.jsonl");
     let tmp_path = dir.join("chat_history.jsonl.sync.tmp");
     let result = (|| -> std::io::Result<()> {
@@ -1431,11 +1534,13 @@ fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[C
 /// is benign, and this artifact is a convenience mirror, not the source of truth
 /// (the conversation head is).
 fn save_system_prompt(session_info: &SessionInfo, system_prompt: &str) {
-    let dir = crate::session::persistence::session_dir(session_info);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(?e, "failed to create session dir for system_prompt.txt");
-        return;
-    }
+    let dir = match crate::session::persistence::ensure_owner_only_session_dir(session_info) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(?e, "failed to create session dir for system_prompt.txt");
+            return;
+        }
+    };
     let path = dir.join(SYSTEM_PROMPT_FILENAME);
     if let Err(e) = std::fs::write(&path, system_prompt) {
         tracing::warn!(?e, "failed to write system_prompt.txt");
@@ -1933,6 +2038,9 @@ mod feedback_turn_lookup_tests;
 #[path = "acp_session_tests/idle_resume_tests.rs"]
 mod idle_resume_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/image_strip_tests.rs"]
+mod image_strip_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;
 #[cfg(test)]
@@ -1971,6 +2079,9 @@ mod session_thread_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
 mod turn_end_guard_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn_end_reporting_tests.rs"]
+mod turn_end_reporting_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;

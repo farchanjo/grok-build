@@ -51,9 +51,11 @@ pub async fn collect_response(
         retry_after_secs: None,
         model_metadata: None,
         diagnostics: None,
+        error_code: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_inference_types::SentCredential::Unknown,
     })
 }
 

@@ -204,7 +204,7 @@ user-facing “delete file” command today.
 |--------|----------|
 | HTTP 429 | Backoff with rate-limit headers when present; provider-scoped identity |
 | HTTP 529 | Overloaded; retry policy as for other providers |
-| HTTP 401/403 | **Anthropic** identity kept; repair points to `/providers`, not `/login` or xAI OAuth |
+| HTTP 401/403 | **Anthropic** identity kept; repair points to `/providers` and never starts xAI OAuth |
 | HTTP 413 / >32 MiB | Preflight or fatal size error (not image-strip heuristics for pure size) |
 | Rate-limit headers | Parsed for diagnostics; credentials never logged |
 

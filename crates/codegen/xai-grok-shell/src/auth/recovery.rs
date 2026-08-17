@@ -373,7 +373,7 @@ impl UnauthorizedRecovery {
                 "auth recovery: disk token expired",
                 None,
                 Some(serde_json::json!({
-                    "disk_key_prefix": crate::auth::token_suffix(&disk_auth.key),
+                    "disk_key_prefix": xai_grok_auth::bearer_tail(&disk_auth.key),
                     "expires_at": disk_auth.expires_at.map(|e| e.to_rfc3339()),
                 })),
             );
@@ -385,7 +385,7 @@ impl UnauthorizedRecovery {
                 "auth recovery: adopted disk token",
                 None,
                 Some(serde_json::json!({
-                    "adopted_key_prefix": crate::auth::token_suffix(&disk_auth.key),
+                    "adopted_key_prefix": xai_grok_auth::bearer_tail(&disk_auth.key),
                     "expires_at": disk_auth.expires_at.map(|e| e.to_rfc3339()),
                 })),
             );
@@ -428,7 +428,7 @@ impl UnauthorizedRecovery {
             "auth recovery: fresh mint, refresh skipped",
             None,
             Some(serde_json::json!({
-                "key_prefix": crate::auth::token_suffix(&auth.key),
+                "key_prefix": xai_grok_auth::bearer_tail(&auth.key),
                 "mint_age_seconds": mint_age_seconds,
                 "guard_seconds": FRESH_MINT_GUARD_SECS,
                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
@@ -472,7 +472,7 @@ impl UnauthorizedRecovery {
                             None,
                             Some(serde_json::json!({
                                 "token_type": format!("{tt:?}"),
-                                "new_key_prefix": crate::auth::token_suffix(&auth.key),
+                                "new_key_prefix": xai_grok_auth::bearer_tail(&auth.key),
                                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
                             })),
                         );

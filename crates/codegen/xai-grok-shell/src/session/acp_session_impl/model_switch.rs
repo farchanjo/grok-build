@@ -12,6 +12,31 @@ impl SessionActor {
         execution_backend: crate::agent::execution_backend::ExecutionBackend,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(inference_config.model.clone());
+        let prepared_external_runtime = if execution_backend.is_native() {
+            None
+        } else if let Some(envelope) = self.external_runtime.borrow().clone() {
+            let expected_kind = execution_backend.external_kind().ok_or_else(|| {
+                acp::Error::invalid_params().data("external execution backend kind is missing")
+            })?;
+            if envelope.kind != expected_kind {
+                return Err(acp::Error::invalid_params().data(format!(
+                    "external runtime envelope kind '{}' does not match execution backend '{}'",
+                    envelope.kind, expected_kind
+                )));
+            }
+            envelope
+                .validate()
+                .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+            Some(envelope)
+        } else if let Some(kind) = execution_backend.external_kind() {
+            let envelope = crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind);
+            envelope
+                .validate()
+                .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+            Some(envelope)
+        } else {
+            None
+        };
         let prev_backend = self.execution_backend.get();
         // When leaving external mode, or switching to a different external kind,
         // shut down the retained runtime (bridge + temp resources + child).
@@ -27,19 +52,7 @@ impl SessionActor {
             self.shutdown_external_agent_runtime().await;
         }
         self.execution_backend.set(execution_backend);
-        if execution_backend.is_native() {
-            *self.external_runtime.borrow_mut() = None;
-        } else if self.external_runtime.borrow().is_none() {
-            if let Some(kind) = execution_backend.external_kind() {
-                let envelope =
-                    crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(kind);
-                // Empty envelope always validates; keep the call for symmetry with restore.
-                if let Err(e) = envelope.validate() {
-                    return Err(acp::Error::invalid_params().data(e.to_string()));
-                }
-                *self.external_runtime.borrow_mut() = Some(envelope);
-            }
-        }
+        *self.external_runtime.borrow_mut() = prepared_external_runtime;
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(inference_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -82,25 +95,27 @@ impl SessionActor {
                 "supports_backend_search": inference_config.supports_backend_search,
             })),
         );
-        self.chat_state_handle.update_inference_settings(
-            xai_grok_inference_types::InferenceSettings {
-                base_url: inference_config.base_url.clone(),
-                model: inference_config.model.clone(),
-                max_completion_tokens: inference_config.max_completion_tokens,
-                temperature: inference_config.temperature,
-                top_p: inference_config.top_p,
-                api_backend: inference_config.api_backend.clone(),
-                extra_headers: inference_config.extra_headers.clone(),
-                context_window: new_context_window,
-                reasoning_effort: inference_config.reasoning_effort,
-                stream_tool_calls: Some(inference_config.stream_tool_calls),
-                supports_native_schema: inference_config.supports_native_schema,
-                supports_strict_tools: inference_config.supports_strict_tools,
-                supports_image_input: inference_config.supports_image_input,
-                supports_audio_input: inference_config.supports_audio_input,
-                supports_video_input: inference_config.supports_video_input,
-            },
-        );
+        self.chat_state_handle
+            .update_inference_settings_with_image_budget(
+                xai_grok_inference_types::InferenceSettings {
+                    base_url: inference_config.base_url.clone(),
+                    model: inference_config.model.clone(),
+                    max_completion_tokens: inference_config.max_completion_tokens,
+                    temperature: inference_config.temperature,
+                    top_p: inference_config.top_p,
+                    api_backend: inference_config.api_backend.clone(),
+                    extra_headers: inference_config.extra_headers.clone(),
+                    context_window: new_context_window,
+                    reasoning_effort: inference_config.reasoning_effort,
+                    stream_tool_calls: Some(inference_config.stream_tool_calls),
+                    supports_native_schema: inference_config.supports_native_schema,
+                    supports_strict_tools: inference_config.supports_strict_tools,
+                    supports_image_input: inference_config.supports_image_input,
+                    supports_audio_input: inference_config.supports_audio_input,
+                    supports_video_input: inference_config.supports_video_input,
+                },
+                image_budget_for_route(&inference_config, execution_backend),
+            );
         let existing = self.chat_state_handle.get_credentials().await;
         let session_key = self
             .auth_manager
@@ -151,11 +166,6 @@ impl SessionActor {
         }
         let agent_name = self.agent.borrow().definition().name.clone();
         let envelope = self.external_runtime.borrow().clone();
-        if let Some(ref env) = envelope
-            && let Err(e) = env.validate()
-        {
-            return Err(acp::Error::invalid_params().data(e.to_string()));
-        }
         let _ = self
             .notifications
             .persistence_tx

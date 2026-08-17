@@ -623,6 +623,8 @@ pub struct Requirements {
     pub image_edit: Constrained<bool>,
     pub video_gen: Constrained<bool>,
     pub write_file: Constrained<bool>,
+    /// Local full-text session index. Pin via requirements `[features] session_search`.
+    pub session_search: Constrained<bool>,
     /// Voice dictation (STT). Pin via requirements/managed `[features] voice_mode`.
     pub voice_mode: Constrained<bool>,
     pub sandbox_auto_allow_bash: Constrained<bool>,
@@ -2748,6 +2750,20 @@ impl Config {
             .default(true)
             .resolve()
     }
+    /// Local full-text session-search gate. Default on; a requirements pin
+    /// outranks environment, config, and remote settings.
+    pub fn resolve_session_search(&self) -> Resolved<bool> {
+        let remote = self
+            .remote_settings
+            .as_ref()
+            .and_then(|settings| settings.session_search);
+        BoolFlag::env("GROK_SESSION_SEARCH")
+            .requirement(self.requirements.session_search.pinned())
+            .config(self.features.session_search)
+            .feature_flag(remote)
+            .default(true)
+            .resolve()
+    }
     /// Voice dictation gate. Default on.
     ///
     /// Precedence: requirements > `GROK_VOICE_MODE` > config/managed
@@ -3651,7 +3667,9 @@ pub fn apply_external_otel_remote_policy(settings: Option<&crate::util::config::
     }
 }
 /// Seed free-function remote caches after writing `Config.remote_settings`.
-pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
+pub fn apply_remote_settings_side_effects(config: &Config) {
+    crate::session::storage::search_gate::apply(&config.resolve_session_search());
+    let settings = config.remote_settings.as_ref();
     crate::util::config::cache_remote_mcp_startup_timeout_secs(
         settings.and_then(|s| s.mcp_startup_timeout_secs),
     );
@@ -5159,6 +5177,9 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_recap: Option<bool>,
+    /// Full-text index of past sessions. `None` = env / remote / default on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_search: Option<bool>,
     /// Voice dictation (STT). `None` = env / remote / default on.
     /// Set `false` in requirements or managed config to force off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10072,6 +10093,38 @@ reasoning_effort = "low"
         assert!(r.value, "feedback should be true by default");
         assert_eq!(r.source, ConfigSource::Default);
     }
+    #[test]
+    #[serial]
+    fn resolve_session_search_precedence_and_default() {
+        unsafe { std::env::remove_var("GROK_SESSION_SEARCH") };
+        let cfg = Config::default();
+        let resolved = cfg.resolve_session_search();
+        assert!(resolved.value);
+        assert_eq!(resolved.source, ConfigSource::Default);
+
+        unsafe { std::env::set_var("GROK_SESSION_SEARCH", "0") };
+        let mut cfg = Config {
+            features: Features {
+                session_search: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!cfg.resolve_session_search().value);
+        cfg.requirements.session_search.pin(
+            true,
+            crate::config::RequirementSource::Requirements {
+                path: "test".into(),
+            },
+        );
+        assert!(cfg.resolve_session_search().value);
+        assert_eq!(
+            cfg.resolve_session_search().source,
+            ConfigSource::Requirement
+        );
+        unsafe { std::env::remove_var("GROK_SESSION_SEARCH") };
+    }
+
     #[test]
     #[serial]
     fn resolve_session_recap_defaults_to_true_when_unset() {

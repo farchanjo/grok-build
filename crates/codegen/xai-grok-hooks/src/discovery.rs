@@ -79,6 +79,7 @@ impl HookRegistry {
         HookEventName::PermissionDenied,
         HookEventName::Stop,
         HookEventName::StopFailure,
+        HookEventName::StopCancelled,
         HookEventName::Notification,
         HookEventName::SubagentStart,
         HookEventName::SubagentStop,
@@ -383,6 +384,7 @@ mod tests {
             HookEventName::PermissionDenied,
             HookEventName::Stop,
             HookEventName::StopFailure,
+            HookEventName::StopCancelled,
             HookEventName::Notification,
             HookEventName::SubagentStart,
             HookEventName::SubagentStop,
@@ -401,6 +403,7 @@ mod tests {
                 | HookEventName::PermissionDenied
                 | HookEventName::Stop
                 | HookEventName::StopFailure
+                | HookEventName::StopCancelled
                 | HookEventName::Notification
                 | HookEventName::SubagentStart
                 | HookEventName::SubagentStop

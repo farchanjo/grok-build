@@ -391,6 +391,27 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
                 ("lastAssistantMessage", "Turn failed: rate limited".into()),
             ],
         },
+        Case {
+            event_name: HookEventName::StopCancelled,
+            json_key: "StopCancelled",
+            payload: HookPayload::StopCancelled {
+                reason: xai_grok_hooks::event::StopCancelledReason::UserInterrupt,
+                cancelled_by: xai_grok_hooks::event::CancelledBy::User,
+                cancel_trigger: Some("ctrl_c".into()),
+                reason_details: Some("read_file: user declined".into()),
+                last_assistant_message: Some("partial answer".into()),
+                subagent_type: Some("explore".into()),
+            },
+            assertions: vec![
+                ("hookEventName", "stop_cancelled".into()),
+                ("reason", "user_interrupt".into()),
+                ("cancelledBy", "user".into()),
+                ("cancelTrigger", "ctrl_c".into()),
+                ("reasonDetails", "read_file: user declined".into()),
+                ("lastAssistantMessage", "partial answer".into()),
+                ("subagentType", "explore".into()),
+            ],
+        },
     ];
 
     for case in &cases {

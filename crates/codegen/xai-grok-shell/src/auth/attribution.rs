@@ -27,7 +27,7 @@
 //!   "consumer": "OaiCompatClient.<endpoint>" | "StorageClient.<op>"
 //!             | "FeedbackClient.<op>" | "SessionRegistryClient.<op>"
 //!             | "IdleResumeModelRefresh",
-//!   "is_stale_snapshot": <bool; true iff sent_prefix differs from a *known* current_prefix>
+//!   "is_stale_snapshot": <bool; true iff a bearer was sent and its tail differs from a known current tail>
 //! }
 //! ```
 //!
@@ -38,17 +38,18 @@
 //! its six 401 arms; this module provides [`ShellAttribution`], the
 //! concrete impl that the shell wires into
 //! [`xai_grok_inference::InferenceConfig::attribution_callback`] at every
-//! sampler-construction site. Non-sampler sites (storage / feedback /
+//! inference-client construction site. Other sites (storage / feedback /
 //! registry / idle-resume) call [`record_consumer_401`]
 //! directly with their `(consumer_kind, op)` pair.
 
 use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
+use xai_grok_auth::bearer_tail;
 use xai_grok_inference::{Auth401AttributionCallback, InferenceConsumer};
 use xai_grok_tools::{Auth401AttributionCallback as ToolAuth401AttributionCallback, ToolConsumer};
 
-use crate::auth::{AuthManager, TOKEN_TTL, token_suffix};
+use crate::auth::{AuthManager, TOKEN_TTL};
 
 /// `cfg(test)`-only process-global counter that bumps on every
 /// successful `record_auth_401` invocation.
@@ -73,7 +74,7 @@ pub(crate) fn reset_test_emit_count() {
 }
 
 /// Concrete implementation of [`Auth401AttributionCallback`] for the
-/// sampler crate's six 401 arms.
+/// inference crate's six 401 arms.
 ///
 /// One instance is constructed per `InferenceConfig` and cloned cheaply
 /// (the struct holds an `Arc` and an `Option<String>`). The
@@ -101,7 +102,7 @@ impl std::fmt::Debug for ShellAttribution {
 
 impl ShellAttribution {
     /// Construct a shareable attribution callback wired to the given
-    /// [`AuthManager`]. Returns `Arc<dyn Trait>` for the sampler
+    /// [`AuthManager`]. Returns `Arc<dyn Trait>` for the inference
     /// trait so callers can drop the value directly into
     /// [`xai_grok_inference::InferenceConfig::attribution_callback`].
     ///
@@ -139,24 +140,15 @@ impl ShellAttribution {
 }
 
 impl Auth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: InferenceConsumer, sent_bearer_prefix: Option<&str>) {
-        // The sampler crate has already truncated `sent_bearer_prefix`
-        // to `xai_grok_inference::SENT_BEARER_PREFIX_LEN` characters
-        // before this trait method fires (see
-        // `InferenceClient::extract_sent_bearer`); the truncation
-        // inside `compute_attribution_payload` (via `token_suffix`)
-        // is therefore idempotent for this code path. The doubled
-        // truncation is intentional belt-and-suspenders -- the
-        // sampler-side scrub keeps the full bearer from ever leaving
-        // that crate, and the shell-side scrub keeps the local-log
-        // and OTel-span sinks aligned with the existing 12-char
-        // convention used by every other auth log line.
+    fn record_401(&self, consumer: InferenceConsumer, sent_bearer_tail: Option<&str>) {
+        // The inference crate has already scrubbed this to the shared tail.
+        // Reapplying `bearer_tail` downstream is intentionally idempotent.
         record_consumer_401(
             self.auth_manager.as_ref(),
             self.session_id.as_deref(),
             ConsumerKind::OaiCompatClient,
             consumer.as_endpoint(),
-            sent_bearer_prefix,
+            sent_bearer_tail,
         );
     }
 }
@@ -164,13 +156,13 @@ impl Auth401AttributionCallback for ShellAttribution {
 /// Tool-side hook: each tool client (image_gen, video_gen, web_search)
 /// in `xai-grok-tools` emits a 401 attribution event through this
 /// trait when its HTTP request returns UNAUTHORIZED. Same shape as
-/// the sampler-side impl above; routes to the same pair of sinks.
+/// the inference-side impl above; routes to the same pair of sinks.
 ///
 /// `ToolConsumer::VideoGenStart` and `VideoGenPoll` collapse to the
 /// same [`ConsumerKind::VideoGen`] with different op strings so the
 /// gate query can break down video-gen 401s by phase.
 impl ToolAuth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: ToolConsumer, sent_bearer_prefix: Option<&str>) {
+    fn record_401(&self, consumer: ToolConsumer, sent_bearer_tail: Option<&str>) {
         let (kind, op) = match consumer {
             ToolConsumer::ImageGen => (ConsumerKind::ImageGen, ""),
             ToolConsumer::VideoGenStart => (ConsumerKind::VideoGen, "start"),
@@ -182,7 +174,7 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
             self.session_id.as_deref(),
             kind,
             op,
-            sent_bearer_prefix,
+            sent_bearer_tail,
         );
     }
 }
@@ -271,14 +263,9 @@ fn format_consumer(kind: ConsumerKind, op: &str) -> String {
 /// and `upload/storage_client.rs` each
 /// resolve their bearer and call this with the right `(kind, op)`.
 ///
-/// `sent_bearer` may be either a full bearer (passed by the
-/// non-sampler call sites listed above, which read directly from the
-/// client's `user_token` / `deployment_key` snapshot) or a 12-char
-/// prefix (passed by the sampler-side
-/// [`Auth401AttributionCallback`] boundary; the sampler scrubs to a
-/// prefix before crossing the crate boundary). The truncation inside
-/// [`record_auth_401`] / `compute_attribution_payload` is idempotent
-/// for the prefix case.
+/// `sent_bearer` may be either a full bearer or the shared 12-character tail
+/// passed by cross-crate attribution boundaries. The truncation inside
+/// [`record_auth_401`] / `compute_attribution_payload` is idempotent.
 pub(crate) fn record_consumer_401(
     auth_manager: &AuthManager,
     session_id: Option<&str>,
@@ -297,13 +284,9 @@ pub(crate) fn record_consumer_401(
 /// `(sent_key_prefix, current_key_prefix, mint_age_seconds,
 ///   expires_at_seconds_from_now, consumer, is_stale_snapshot)`.
 ///
-/// `sent_bearer` is the bearer that was sent on the wire (the
-/// `Authorization` value with `"Bearer "` already stripped, or the
-/// `x-api-key` value for Anthropic Messages backends), OR a 12-char
-/// prefix of same -- the sampler boundary always passes a prefix
-/// here, the non-sampler shell sites pass full bearers and rely on
-/// the [`compute_attribution_payload`] truncation. `None` is fine;
-/// the prefix becomes the empty string.
+/// `sent_bearer` is either the full wire credential or its shared 12-character
+/// tail. Truncation is idempotent. `None` means the request carried no
+/// credential; a generic 401 then cannot infer ownership of held credentials.
 ///
 /// `consumer` should be one of the canonical strings used by the
 /// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`,
@@ -392,26 +375,24 @@ fn compute_attribution_payload(
     let now = chrono::Utc::now();
 
     // Last-12-char suffix of the bearer the wire actually carried
-    // (see [`token_suffix`]: JWT headers share a common base64 prefix).
+    // (see [`bearer_tail`]: JWT headers share a common base64 prefix).
     // `""` when the request had no bearer at all (distinct case from
     // "had a bearer that turned out to be stale" -- the gate-criteria
     // query can break down on this).
-    let sent_prefix = sent_bearer.map(token_suffix).unwrap_or("");
+    let sent_prefix = sent_bearer.map(bearer_tail).unwrap_or("");
 
     // Single read-lock acquisition: pull the live `GrokAuth` (or
     // `None`) once and derive every other field from it.
     let current_auth = auth_manager.current();
     let current_prefix_owned: Option<String> = current_auth
         .as_ref()
-        .map(|a| token_suffix(&a.key).to_string());
+        .map(|a| bearer_tail(&a.key).to_string());
 
-    // None current means "no evidence of staleness," not stale --
-    // the downstream stale-vs-live split should only count
-    // true-positive staleness (sent bearer differs from a known live
-    // bearer).
-    let is_stale_snapshot = match current_prefix_owned.as_deref() {
-        Some(c) => sent_prefix != c,
-        None => false,
+    // True-positive staleness only. A generic 401 with no credential on the
+    // wire cannot establish ownership of the held credential.
+    let is_stale_snapshot = match (sent_prefix, current_prefix_owned.as_deref()) {
+        ("", _) | (_, None) => false,
+        (sent, Some(current)) => sent != current,
     };
 
     // Mint-age + expiry come from the same `current_auth` we already
@@ -534,6 +515,23 @@ mod tests {
             "en-different"
         );
         assert_eq!(payload_field(&payload, "consumer"), "Test.stale");
+    }
+
+    /// No bearer sent + a generic 401 while `current()` still holds a token ->
+    /// `is_stale_snapshot` must be `false` because ownership is unknown.
+    #[test]
+    fn generic_401_without_bearer_cannot_infer_ownership() {
+        let (_dir, am) = empty_auth_manager();
+        am.hot_swap(fresh_auth("held-token-1234567890"));
+
+        let payload = compute_attribution_payload(&am, "Test.generic", None);
+
+        assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), "");
+        assert_eq!(
+            payload_field(&payload, "current_key_prefix"),
+            "n-1234567890"
+        );
     }
 
     /// Live token sent + 401 with `current() == None` ->

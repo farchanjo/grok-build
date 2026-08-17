@@ -58,9 +58,11 @@ fn auth_error() -> xai_grok_inference::InferenceErrorInfo {
         retry_after_secs: None,
         model_metadata: None,
         diagnostics: None,
+        error_code: None,
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_inference_types::SentCredential::Unknown,
     }
 }
 
@@ -197,7 +199,10 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
             let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "session-based auth with a working refresher must return RefreshAuthAndResubmit"
             );
             assert!(called.load(Ordering::SeqCst), "refresher must be invoked");
@@ -459,9 +464,11 @@ fn model_not_found_error() -> xai_grok_inference::InferenceErrorInfo {
             retry_after_secs: None,
             model_metadata: None,
             diagnostics: None,
+            error_code: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_inference_types::SentCredential::Unknown,
         }
 }
 
@@ -527,9 +534,11 @@ fn unauthorized_401_error() -> xai_grok_inference::InferenceErrorInfo {
             retry_after_secs: None,
             model_metadata: None,
             diagnostics: None,
+            error_code: None,
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_inference_types::SentCredential::Unknown,
         }
 }
 
@@ -713,7 +722,10 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "session-based method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -747,7 +759,10 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "oidc method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -1324,7 +1339,10 @@ async fn sampler_401_on_provider_model_remints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "provider 401 must re-mint and resubmit"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1360,7 +1378,10 @@ async fn sampler_non_auth_kind_401_on_provider_model_still_recovers() {
             error.kind = xai_grok_inference::InferenceErrorKind::Api;
             let result = actor.handle_sampling_failure(error).await;
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "a non-Auth-kind 401 on a provider model must still recover via 4c"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1392,7 +1413,10 @@ async fn sampler_401_with_no_key_on_provider_model_mints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "an unauthenticated 401 on a provider model must mint and resubmit"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1435,7 +1459,10 @@ async fn sampler_401_on_provider_model_never_refreshes_session() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "the provider arm must recover"
             );
             assert!(
@@ -1778,7 +1805,10 @@ async fn moonshot_openrouter_401_with_weblogin_loaded_skips_xai_recovery() {
                 "OpenRouter 401 must be terminal, not recovery"
             );
             assert!(
-                !matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                !matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "must not return RefreshAuthAndResubmit for OpenRouter"
             );
             assert!(
@@ -1890,7 +1920,7 @@ async fn openai_api_key_401_with_session_method_skips_xai_recovery() {
             assert!(!called.load(Ordering::SeqCst));
             assert!(!matches!(
                 result,
-                Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)
+                Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
             ));
 
             let mut saw = false;
@@ -1942,7 +1972,10 @@ async fn first_party_xai_401_still_runs_session_recovery() {
             // Default test model is first-party (no OpenRouter provider).
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(InferenceFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(InferenceFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "first-party xAI must still recover via session refresh"
             );
             assert!(

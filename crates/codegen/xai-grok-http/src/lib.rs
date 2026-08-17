@@ -284,7 +284,7 @@ pub fn shared_client() -> reqwest::Client {
     CLIENT
         .get_or_init(|| {
             let _timer = startup_timer!("startup.http_client_build");
-            reqwest::Client::builder()
+            xai_grok_inference::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
                 .connect_timeout(std::time::Duration::from_secs(30))
                 .user_agent(process_user_agent_string())
                 .pool_idle_timeout(std::time::Duration::from_secs(30))
@@ -326,7 +326,7 @@ pub fn shared_upload_client() -> reqwest::Client {
     static UPLOAD_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     UPLOAD_CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            xai_grok_inference::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
                 // Force HTTP/1.1: batch_upload multipart bodies are silently
                 // dropped when an HTTP/2 connection degrades (GOAWAY, flow-control
                 // exhaustion). Because all streams share one connection, a single
@@ -348,7 +348,7 @@ pub fn shared_upload_client() -> reqwest::Client {
 /// connect timeout (callers bound each request with their own total timeout). The retry escape
 /// policy that reaches for this client to dodge a poisoned pool lives on `send_with_retry_escaping_pool`.
 pub(crate) fn fresh_http1_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    xai_grok_inference::extra_ca::with_extra_root_certificates(reqwest::Client::builder())
         .http1_only()
         .pool_max_idle_per_host(0)
         .user_agent(process_user_agent_string())
@@ -368,6 +368,21 @@ pub fn error_cause_chain(err: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     msg
+}
+
+/// Find the first nested operating-system error code without parsing display
+/// strings. Reqwest/hyper commonly hide `ECONNRESET` behind several sources.
+pub fn find_os_error_code(err: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>()
+            && let Some(code) = io_error.raw_os_error()
+        {
+            return Some(code);
+        }
+        current = error.source();
+    }
+    None
 }
 
 /// How a `reqwest` request/send failure should be treated by a retry loop.
@@ -493,14 +508,16 @@ pub fn shared_blocking_client() -> reqwest::blocking::Client {
     BLOCKING_CLIENT
         .get_or_init(|| {
             let _timer = startup_timer!("startup.http_blocking_client_build");
-            reqwest::blocking::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .timeout(std::time::Duration::from_secs(30))
-                .user_agent(process_user_agent_string())
-                .pool_idle_timeout(std::time::Duration::from_secs(30))
-                .tcp_keepalive(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build shared blocking HTTP client")
+            xai_grok_inference::extra_ca::with_extra_root_certificates_blocking(
+                reqwest::blocking::Client::builder(),
+            )
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(process_user_agent_string())
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build shared blocking HTTP client")
         })
         .clone()
 }
@@ -540,6 +557,25 @@ mod tests {
             "error sending request: connection closed before message completed",
             "the hidden source cause must be appended after ': '"
         );
+    }
+
+    #[test]
+    fn os_error_code_is_found_through_nested_sources() {
+        #[derive(Debug)]
+        struct Wrapper(std::io::Error);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "transport failed")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        const TEST_OS_ERROR: i32 = 12_345;
+        let reset = std::io::Error::from_raw_os_error(TEST_OS_ERROR);
+        assert_eq!(find_os_error_code(&Wrapper(reset)), Some(TEST_OS_ERROR));
     }
 
     #[test]

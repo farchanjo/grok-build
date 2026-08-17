@@ -141,8 +141,11 @@ async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
     let cutoff = xai_grok_inference_types::ToolOverrides {
         x_search: Some(xai_grok_inference_types::XSearchOptions {
             date_bound: Some(
-                xai_grok_inference_types::SearchDateBound::new(None, Some("2020-01-01".to_string()))
-                    .unwrap(),
+                xai_grok_inference_types::SearchDateBound::new(
+                    None,
+                    Some("2020-01-01".to_string()),
+                )
+                .unwrap(),
             ),
         }),
         web_search: None,

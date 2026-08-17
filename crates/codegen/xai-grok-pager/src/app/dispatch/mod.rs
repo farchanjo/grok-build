@@ -59,7 +59,7 @@ pub(in crate::app) use ctx::maybe_open_welcome_session_picker;
 #[cfg(test)]
 pub(crate) use ctx::{SwitchCause, switch_to_agent};
 #[cfg(test)]
-pub(crate) use settings::ui::{ROLLBACK_NO_ARM_TOAST, build_pager_snapshot};
+pub(crate) use settings::ui::ROLLBACK_NO_ARM_TOAST;
 #[cfg(test)]
 pub(crate) use turn::TURN_END_RECONCILE_GRACE;
 

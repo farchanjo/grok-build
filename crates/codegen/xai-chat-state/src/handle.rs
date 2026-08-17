@@ -165,11 +165,36 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::IncrementPromptIndex);
     }
 
-    /// Update the sampling config (e.g., model switch).
+    /// Update sampling settings while preserving the active ephemeral request
+    /// policy. Callers that own a model/provider switch must use
+    /// [`update_inference_settings_with_image_budget`](Self::update_inference_settings_with_image_budget)
+    /// so settings and policy change atomically.
     pub fn update_inference_settings(&self, config: InferenceSettings) {
         let _ = self
             .cmd_tx
             .send(ChatStateCommand::UpdateInferenceSettings { config });
+    }
+
+    /// Atomically update sampling settings and the ephemeral provider-derived
+    /// proactive image budget.
+    pub fn update_inference_settings_with_image_budget(
+        &self,
+        config: InferenceSettings,
+        image_budget: Option<crate::types::ImageBudgetConfig>,
+    ) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::UpdateInferenceSettingsWithImageBudget {
+                config,
+                image_budget,
+            });
+    }
+
+    /// Replace only the ephemeral proactive image budget.
+    pub fn update_image_budget(&self, image_budget: Option<crate::types::ImageBudgetConfig>) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::UpdateImageBudget { image_budget });
     }
 
     /// Track that the agent edited a file path.
@@ -225,6 +250,19 @@ impl ChatStateHandle {
             reply,
         })
         .await
+    }
+
+    /// Strip matching stored images and wait for the backup-gated disk result.
+    /// A dead actor is distinct from a successful no-op.
+    pub async fn strip_conversation_images(
+        &self,
+        urls: Vec<std::sync::Arc<str>>,
+    ) -> crate::StripOutcome {
+        self.query("StripConversationImages", |reply| {
+            ChatStateCommand::StripConversationImages { urls, reply }
+        })
+        .await
+        .unwrap_or(crate::StripOutcome::ActorUnavailable)
     }
 
     /// Atomically align the leading `System` message with `prompt` (insert one
@@ -696,6 +734,35 @@ impl ChatStateHandle {
             .await
     }
 
+    /// Synchronously enqueue a CAS splice and return its acknowledged result
+    /// receiver. Callers that must linearize enqueue against another mutex can
+    /// invoke this while holding that mutex, then await only after releasing it.
+    pub fn enqueue_cas_splice_conversation_with_persistence(
+        &self,
+        identity: CompactSourceIdentity,
+        items: Vec<ConversationItem>,
+        persistence: Option<crate::persistence::CompactionPersistenceMetadata>,
+    ) -> Option<oneshot::Receiver<CasSpliceResult>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(ChatStateCommand::CasSpliceConversation {
+                identity,
+                items,
+                persistence,
+                reply,
+            })
+            .is_err()
+        {
+            tracing::error!(
+                cmd_name = "CasSpliceConversation",
+                "ChatStateActor dead: send failed"
+            );
+            return None;
+        }
+        Some(receiver)
+    }
+
     /// CAS splice with an acknowledged marker-last persistence commit.
     pub async fn cas_splice_conversation_with_persistence(
         &self,
@@ -703,16 +770,21 @@ impl ChatStateHandle {
         items: Vec<ConversationItem>,
         persistence: Option<crate::persistence::CompactionPersistenceMetadata>,
     ) -> CasSpliceResult {
-        self.query("CasSpliceConversation", |reply| {
-            ChatStateCommand::CasSpliceConversation {
-                identity,
-                items,
-                persistence,
-                reply,
+        let Some(receiver) =
+            self.enqueue_cas_splice_conversation_with_persistence(identity, items, persistence)
+        else {
+            return CasSpliceResult::Stale;
+        };
+        match receiver.await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::error!(
+                    cmd_name = "CasSpliceConversation",
+                    "ChatStateActor dead: reply dropped"
+                );
+                CasSpliceResult::Stale
             }
-        })
-        .await
-        .unwrap_or(CasSpliceResult::Stale)
+        }
     }
 }
 

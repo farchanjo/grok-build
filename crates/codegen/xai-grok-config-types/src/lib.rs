@@ -824,6 +824,10 @@ pub struct RemoteSettings {
     /// Optional remote kill-switch; shell defaults ON when unset (set `false` to disable).
     #[serde(default)]
     pub session_recap: Option<bool>,
+    /// Enables the local full-text session index. Optional remote kill-switch;
+    /// the shell defaults ON when unset.
+    #[serde(default)]
+    pub session_search: Option<bool>,
     /// Enables the `ask_user_question` tool. Optional remote kill-switch:
     /// `Some(false)` strips the tool; `Some(true)` or absent → the shell
     /// default (ON). Feature-flagged via remote settings.

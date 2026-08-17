@@ -224,14 +224,6 @@ pub enum SessionCommand {
         external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
         responds_to: oneshot::Sender<Result<(), String>>,
     },
-    /// Persist execution backend + envelope onto the session Summary without
-    /// changing sampling / model id. Used after resume restore so disk matches
-    /// the authoritative summary mode.
-    PersistExecutionMode {
-        execution_backend: crate::agent::execution_backend::ExecutionBackend,
-        external_runtime: Option<crate::agent::external_runtime::ExternalRuntimeEnvelope>,
-        responds_to: oneshot::Sender<Result<(), String>>,
-    },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the
     /// session's `AgentRebuildSpec` and the new `AgentDefinition`,
     /// re-register MCP tools, swap the live `Agent`, rewrite the
@@ -654,6 +646,9 @@ pub enum SessionCommand {
         /// (subagent shutdown). Recorded in the `mid_turn_abort` turn-end's
         /// `cancellation_context` JSON; the category stays `MidTurnAbort`.
         trigger: Option<String>,
+        /// This exact command owns one out-of-band compaction promotion barrier
+        /// and must clear it after actor-side teardown.
+        compaction_cancel_pending: bool,
     },
     Shutdown,
     /// Force-trigger a feedback request notification for local client testing.

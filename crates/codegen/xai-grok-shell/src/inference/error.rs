@@ -101,7 +101,7 @@ fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
 pub fn map_sampling_err_to_acp(err: InferenceError) -> acp::Error {
     use reqwest::StatusCode;
     match err {
-        InferenceError::Auth(msg) => acp::Error::auth_required().data(msg),
+        InferenceError::Auth { message, .. } => acp::Error::auth_required().data(message),
         InferenceError::InvalidConfiguration(msg) => acp::Error::invalid_params().data(msg),
         InferenceError::Http(e) => {
             acp::Error::internal_error().data(format!("http client init failed: {e}"))
@@ -149,6 +149,7 @@ pub fn map_sampling_err_to_acp(err: InferenceError) -> acp::Error {
         InferenceError::StreamError {
             error_type,
             message,
+            ..
         } => acp::Error::internal_error().data(format!("{error_type}: {message}")),
         InferenceError::EmptyResponse { context } => acp::Error::internal_error().data(format!(
             "empty response from model ({}): model={}, had_reasoning={}, finish_reason={}",
@@ -504,6 +505,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::ErrorCode::from(RATE_LIMITED_ERROR_CODE));
@@ -523,6 +525,7 @@ mod tests {
             retry_after_secs: Some(60),
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         assert_eq!(err.retry_after(), Some(60));
         let acp_err = map_sampling_err_to_acp(err);
@@ -539,6 +542,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let server_err = InferenceError::Api {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -547,6 +551,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let rate_acp = map_sampling_err_to_acp(rate_err);
         let server_acp = map_sampling_err_to_acp(server_err);
@@ -565,6 +570,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::Error::internal_error().code);
@@ -580,6 +586,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_eq!(acp_err.code, acp::Error::auth_required().code);
@@ -603,6 +610,7 @@ mod tests {
             retry_after_secs: None,
             should_retry: None,
             diagnostics: None,
+            error_code: None,
         };
         let acp_err = map_sampling_err_to_acp(err);
         assert_ne!(
@@ -660,6 +668,7 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
@@ -686,6 +695,7 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
@@ -708,6 +718,7 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: None,
                 diagnostics: None,
+                error_code: None,
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
