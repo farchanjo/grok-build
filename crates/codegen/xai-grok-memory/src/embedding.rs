@@ -313,6 +313,60 @@ pub struct MockEmbeddingProvider {
     pub dimensions: usize,
 }
 
+/// Embedding provider adapter over a credential-free [`super::retrieval::MemoryRetrieval`].
+///
+/// Lets the memory backend embed through a named profile (or synthesized
+/// legacy source) via the PR17 `RetrievalService` without this crate holding
+/// any credentials. Same source space is guaranteed by construction.
+pub struct RetrievalEmbeddingProvider {
+    retrieval: std::sync::Arc<dyn super::retrieval::MemoryRetrieval>,
+    dimensions: usize,
+    model: String,
+}
+
+impl RetrievalEmbeddingProvider {
+    pub fn new(retrieval: std::sync::Arc<dyn super::retrieval::MemoryRetrieval>) -> Self {
+        let spec = retrieval.source_spec();
+        let dimensions = spec.dimensions;
+        let model = spec.model;
+        Self {
+            retrieval,
+            dimensions,
+            model,
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for RetrievalEmbeddingProvider {
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
+        let out = self.retrieval.embed_batch(&owned).await?;
+        // Fail closed on dimensional drift: never surface vectors that would
+        // mix a different embedding space into this index.
+        if out.iter().any(|v| v.len() != self.dimensions) {
+            return Err(format!(
+                "embedding provider returned vectors of wrong dimension (expected {}); \
+                 refusing to mix spaces",
+                self.dimensions
+            )
+            .into());
+        }
+        Ok(out)
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl EmbeddingProvider for MockEmbeddingProvider {

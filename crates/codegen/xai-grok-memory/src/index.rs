@@ -148,7 +148,14 @@ impl MemoryIndex {
         // Create schema
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
 
-        // Store/verify embedding dimensions in meta table
+        // Store/verify embedding dimensions in meta table.
+        //
+        // PR21: this is NOT a destructive migration anymore. A dimension
+        // mismatch no longer drops `chunks_vec` (which destroyed all vectors).
+        // Instead it records a fail-closed pending marker so the transactional
+        // rebuild state machine (`super::rebuild`) can rebuild vectors through
+        // the pinned source and atomically swap them in. Chunks + FTS survive
+        // every vector-migration failure.
         let stored_dims: Option<String> = db
             .query_row(schema::GET_META_SQL, params!["embedding_dimensions"], |r| {
                 r.get(0)
@@ -157,30 +164,20 @@ impl MemoryIndex {
 
         match stored_dims {
             Some(ref s) if s.parse::<usize>().ok() == Some(dimensions) => {
-                // Dimensions match — nothing to do
+                // Dimensions match — nothing to do.
             }
             Some(ref s) => {
-                // Dimension mismatch — recreate vec table
+                // Dimension mismatch — fail closed: mark rebuild pending, do NOT
+                // drop the existing vec table (would destroy users' vectors).
                 tracing::warn!(
                     stored = %s,
                     requested = dimensions,
-                    "embedding dimension mismatch, recreating chunks_vec"
+                    "embedding dimension mismatch, marking vector rebuild pending (FTS-only)"
                 );
-                if vec_available {
-                    let _ = db.execute("DROP TABLE IF EXISTS chunks_vec", []);
-                    db.execute_batch(&format!(
-                        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(\n    \
-                         chunk_id TEXT PRIMARY KEY,\n    \
-                         embedding FLOAT[{dimensions}]\n);"
-                    ))?;
-                }
-                db.execute(
-                    schema::UPSERT_META_SQL,
-                    params!["embedding_dimensions", dimensions.to_string()],
-                )?;
+                super::rebuild::mark_dimension_mismatch_pending(&db)?;
             }
             None => {
-                // First time — store dimensions
+                // First time — store dimensions.
                 db.execute(
                     schema::UPSERT_META_SQL,
                     params!["embedding_dimensions", dimensions.to_string()],
@@ -207,10 +204,48 @@ impl MemoryIndex {
         self.embedding_dimensions
     }
 
-    /// Direct access to the underlying SQLite connection (test-only).
-    #[cfg(test)]
+    /// Direct access to the underlying SQLite connection (shared with
+    /// `super::rebuild` state machine).
     pub(crate) fn db(&self) -> &rusqlite::Connection {
         &self.db
+    }
+
+    /// Read a `meta` value.
+    pub(crate) fn meta_get(&self, key: &str) -> Option<String> {
+        self.db
+            .query_row(schema::GET_META_SQL, params![key], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+    }
+
+    /// Installed canonical vector fingerprint hash, if any.
+    ///
+    /// Public so the shell can reconcile PR15 `MemoryReindexImpact` semantics
+    /// with the actually-persisted fingerprint rather than assuming.
+    pub fn installed_vector_fingerprint_hash(&self) -> Option<String> {
+        let h = self
+            .meta_get(schema::META_VECTOR_FINGERPRINT_HASH)?
+            .trim()
+            .to_owned();
+        if h.is_empty() { None } else { Some(h) }
+    }
+
+    /// Installed vector schema compat version (0 when unset/legacy).
+    pub fn installed_vector_schema_version(&self) -> u32 {
+        self.meta_get(schema::META_VECTOR_SCHEMA_VERSION)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Number of rows currently in `chunks_vec` (vector rows installed).
+    pub(crate) fn vec_row_count(&self) -> i64 {
+        if !self.vec_available {
+            return 0;
+        }
+        self.db
+            .query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0))
+            .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------------
@@ -515,7 +550,7 @@ impl MemoryIndex {
     // Vector operations (no-op if !vec_available)
     // -----------------------------------------------------------------------
 
-    /// Return chunks that don't have embeddings yet.
+    /// Return chunks that don't have embeddings yet (legacy path).
     pub fn chunks_without_embeddings(&self) -> Result<Vec<(String, String)>, rusqlite::Error> {
         if !self.vec_available {
             return Ok(vec![]);
@@ -531,6 +566,42 @@ impl MemoryIndex {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(results)
+    }
+
+    /// All chunks not yet staged for the given attempt `pending_id`.
+    ///
+    /// Unlike [`Self::chunks_without_embeddings`], this ignores the *current*
+    /// `chunks_vec` contents: a rebuild replaces the entire embedding space, so
+    /// every chunk (including those with old-space vectors) must be re-embedded
+    /// and staged before atomic install. Staged rows survive a crash/reopen, so
+    /// a retry only re-embeds the remaining chunks.
+    pub(crate) fn chunks_not_staged(
+        &self,
+        pending_id: &str,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        if !self.vec_available {
+            return Ok(vec![]);
+        }
+        let mut stmt = self.db.prepare(
+            "SELECT c.id, c.text FROM chunks c \
+             WHERE NOT EXISTS ( \
+               SELECT 1 FROM vector_staging s \
+               WHERE s.pending_id = ?1 AND s.chunk_id = c.id \
+             )",
+        )?;
+        let results = stmt
+            .query_map(params![pending_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    /// Total number of chunks in the index (for install completeness checks).
+    pub(crate) fn chunk_count(&self) -> i64 {
+        self.db
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .unwrap_or(0)
     }
 
     /// Insert or update an embedding for a chunk.

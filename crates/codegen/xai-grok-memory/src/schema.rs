@@ -12,6 +12,19 @@
 /// dropping and recreating tables.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// meta key for the installed canonical vector fingerprint hash.
+pub const META_VECTOR_FINGERPRINT_HASH: &str = "vector_fingerprint_hash";
+/// meta key for the installed canonical vector fingerprint payload JSON.
+pub const META_VECTOR_FINGERPRINT: &str = "vector_fingerprint";
+/// meta key for the installed vector schema compat version.
+pub const META_VECTOR_SCHEMA_VERSION: &str = "vector_schema_version";
+/// meta key encoding the pending rebuild state (JSON, or '' when none).
+pub const META_VECTOR_REBUILD_PENDING: &str = "vector_rebuild_pending";
+/// meta key for the intended fingerprint currently staged ('' when none).
+pub const META_VECTOR_STAGING_FP: &str = "vector_rebuild_staging_fp";
+/// meta key for the index-level (non-vector) schema version.
+pub const META_SCHEMA_VERSION: &str = "schema_version";
+
 /// Generate the SQL schema for the memory index.
 ///
 /// `dimensions` controls the embedding vector size for `chunks_vec`.
@@ -48,7 +61,27 @@ CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(hash);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='');
 
+-- Transactional vector rebuild staging. Plain (non-virtual) table so a
+-- partially-completed rebuild can be dropped/ignored and only swapped into
+-- the live vector table atomically on success. Rows are keyed by the rebuild
+-- attempt id (pending_id) plus the intended fingerprint, so a stale async
+-- result for an old intended fingerprint/incarnation can never be installed
+-- over a newer pending target.
+CREATE TABLE IF NOT EXISTS vector_staging (
+    pending_id TEXT NOT NULL,
+    intended_fingerprint TEXT NOT NULL,
+    chunk_id TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    PRIMARY KEY (pending_id, chunk_id)
+);
+
 INSERT OR IGNORE INTO meta(key, value) VALUES ('reindex_claim', '');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_SCHEMA_VERSION}', '{SCHEMA_VERSION}');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_FINGERPRINT_HASH}', '');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_FINGERPRINT}', '');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_SCHEMA_VERSION}', '0');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_REBUILD_PENDING}', '');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_STAGING_FP}', '');
 "#
     );
 

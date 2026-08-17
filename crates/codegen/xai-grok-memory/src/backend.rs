@@ -89,6 +89,45 @@ impl EndpointScopedCredentials {
     }
 }
 
+/// Max candidate-body chars sent to a remote reranker (bounded metadata/text).
+const RERANK_BODY_CHAR_BOUND: usize = 4_000;
+
+/// Extract a normalized origin host (no credentials, no path) from a base URL.
+fn origin_host(base_url: &str) -> String {
+    match reqwest::Url::parse(base_url) {
+        Ok(url) => match url.host_str() {
+            Some(h) => match url.port() {
+                Some(p) => format!("{h}:{p}"),
+                None => h.to_owned(),
+            },
+            None => base_url.trim().to_owned(),
+        },
+        Err(_) => base_url.trim().to_owned(),
+    }
+}
+
+/// Synthesize a deterministic, credential-free legacy embedding source spec
+/// from `[memory.embedding]` + legacy endpoint. Existing users with populated
+/// vectors and no persisted fingerprint adopt this spec so they never have to
+/// reconnect/rebuild.
+fn legacy_source_spec(
+    cfg: &xai_grok_config_types::MemoryEmbeddingConfig,
+    base_url: &str,
+) -> Option<super::fingerprint::EmbeddingSourceSpec> {
+    let model = cfg.model.as_deref().filter(|m| !m.is_empty())?;
+    Some(super::fingerprint::EmbeddingSourceSpec {
+        provider_instance_id: "legacy:memory.embedding".to_owned(),
+        incarnation: None,
+        origin_host: origin_host(base_url),
+        embedding_path: "/v1/embeddings".to_owned(),
+        protocol: "openai_compatible".to_owned(),
+        model: model.to_owned(),
+        dimensions: cfg.dimensions,
+        encoding: "float".to_owned(),
+        normalization: super::fingerprint::NORMALIZATION_NONE.to_owned(),
+    })
+}
+
 /// All configuration needed to build a fully-wired [`MemoryBackendImpl`] for a live session.
 ///
 /// Grouping these in one struct ensures every call site — ToolBridge, first-turn
@@ -120,6 +159,11 @@ pub struct MemoryBackendParams {
     /// - `"compaction_recovery"` — post-compaction context re-injection
     pub search_source: &'static str,
     pub embedding_credentials: EndpointScopedCredentials,
+    /// Credential-free retrieval facade (PR21). When present, embeddings and
+    /// optional remote reranking route through it (named profile or a
+    /// shell-synthesized legacy source) instead of the legacy
+    /// `[memory.embedding]` provider. `None` keeps the legacy path.
+    pub retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
 }
 
 impl MemoryBackendParams {
@@ -206,6 +250,7 @@ pub struct MemoryBackendImpl {
     /// injection and compaction-recovery backends use their own local counters.
     pub search_counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
     embedding_credentials: EndpointScopedCredentials,
+    retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
 }
 
 impl MemoryBackendImpl {
@@ -224,6 +269,7 @@ impl MemoryBackendImpl {
             session_id: String::new(),
             search_source: "tool",
             embedding_credentials: EndpointScopedCredentials::none(),
+            retrieval: None,
             search_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -269,16 +315,6 @@ impl MemoryBackendImpl {
         xai_sqlite_journal::JournalMode::for_db_path(&self.db_path).open_readonly(&self.db_path)
     }
 
-    async fn make_embedding_provider(&self) -> Option<super::embedding::ApiEmbeddingProvider> {
-        build_embedding_provider(
-            self.embed_config.as_ref(),
-            &self.embedding_credentials,
-            self.embed_api_key.as_deref(),
-            &self.embed_base_url,
-        )
-        .await
-    }
-
     /// Build a fully configured backend for a live session.
     ///
     /// Prefer this over calling `new()` + individual builder methods: it ensures
@@ -304,7 +340,35 @@ impl MemoryBackendImpl {
             backend = backend.with_watcher(w.clone(), params.stale_claim_secs);
         }
         backend.embedding_credentials = params.embedding_credentials.clone();
+        backend.retrieval = params.retrieval.clone();
         backend
+    }
+
+    /// Attach a credential-free retrieval facade (PR21).
+    pub fn with_retrieval(
+        mut self,
+        retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
+    ) -> Self {
+        self.retrieval = retrieval;
+        self
+    }
+
+    /// Resolve the effective (spec, dimensions) for the pinned embedding
+    /// source: the named-profile/synthesized-legacy facade when present, else
+    /// the legacy `[memory.embedding]` config, else `None` + default dims.
+    fn effective_embedding_spec(&self) -> (Option<super::fingerprint::EmbeddingSourceSpec>, usize) {
+        if let Some(r) = &self.retrieval {
+            let spec = r.source_spec();
+            return (Some(spec.clone()), spec.dimensions);
+        }
+        let cfg = self.embed_config.as_ref();
+        match cfg {
+            Some(c) => match legacy_source_spec(c, &self.embed_base_url) {
+                Some(spec) => (Some(spec.clone()), spec.dimensions),
+                None => (None, 1024),
+            },
+            None => (None, 1024),
+        }
     }
 }
 
@@ -344,11 +408,58 @@ impl MemoryBackend for MemoryBackendImpl {
         // `&index` borrow across an `.await` point. The code below is
         // structured into sync phases (borrow &index) and async phases
         // (no &index borrow) to satisfy this constraint.
-        let embed_dims = self.embed_config.as_ref().map_or(1024, |ec| ec.dimensions);
+        // Resolve the effective embedding source (named profile via the
+        // credential-free facade, or a synthesized legacy `[memory.embedding]`
+        // source) and the pinned vector space.
+        let index_config = xai_grok_config_types::MemoryIndexConfig::default();
+        let (spec, embed_dims) = self.effective_embedding_spec();
+        // Build an embedder for the pinned source (None ⇒ no vectors / FTS-only).
+        let embedder: Option<std::sync::Arc<dyn super::embedding::EmbeddingProvider>> =
+            if let Some(r) = &self.retrieval {
+                Some(std::sync::Arc::new(
+                    super::embedding::RetrievalEmbeddingProvider::new(r.clone()),
+                ))
+            } else if self.embed_config.is_some() {
+                build_embedding_provider(
+                    self.embed_config.as_ref(),
+                    &self.embedding_credentials,
+                    self.embed_api_key.as_deref(),
+                    &self.embed_base_url,
+                )
+                .await
+                .map(
+                    |p| -> std::sync::Arc<dyn super::embedding::EmbeddingProvider> {
+                        std::sync::Arc::new(p)
+                    },
+                )
+            } else {
+                None
+            };
+        // Cancel token for the vector rebuild loop (search has no external
+        // cancellation; the loop only checks this to stay cooperative).
+        let rebuild_cancel = tokio_util::sync::CancellationToken::new();
+        // Reconcile / transactionally rebuild vectors through the pinned source.
+        let readiness = match &spec {
+            Some(s) => {
+                crate::rebuild::ensure_vectors_ready(
+                    &self.db_path,
+                    self.storage.clone(),
+                    index_config.clone(),
+                    s,
+                    embedder.clone(),
+                    self.stale_claim_secs,
+                    rebuild_cancel,
+                )
+                .await
+            }
+            None => crate::rebuild::VectorReadiness::Disabled,
+        };
+        let vec_active = matches!(readiness, crate::rebuild::VectorReadiness::Ready);
+
         let mut index = super::index::MemoryIndex::open_or_create(
             &self.db_path,
             self.storage.clone(),
-            xai_grok_config_types::MemoryIndexConfig::default(),
+            index_config,
             embed_dims,
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -398,15 +509,18 @@ impl MemoryBackend for MemoryBackendImpl {
         }
 
         // ── Async phase: embed missing chunks (no &index borrow) ──
-        let provider = self.make_embedding_provider().await;
+        // Incremental embedding into `chunks_vec` only when the pinned vector
+        // space is installed (Ready); during a pending rebuild we must never
+        // mix old/new-space rows into the vec table.
         let mut embedded_count: usize = 0;
-        if !reindex_chunks.is_empty()
-            && let Some(ref provider) = provider
+        if vec_active
+            && !reindex_chunks.is_empty()
+            && let Some(ref embedder) = embedder
         {
             let mut upserts: Vec<(String, Vec<f32>)> = Vec::new();
             for batch in reindex_chunks.chunks(32) {
                 let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
-                match provider.embed_batch(&texts).await {
+                match embedder.embed_batch(&texts).await {
                     Ok(embeddings) => {
                         for ((chunk_id, _), emb) in batch.iter().zip(embeddings.into_iter()) {
                             upserts.push((chunk_id.clone(), emb));
@@ -468,12 +582,12 @@ impl MemoryBackend for MemoryBackendImpl {
             }
         }
 
-        let vec_available = index.vec_available() && provider.is_some();
+        let vec_available = index.vec_available() && embedder.is_some() && vec_active;
 
         // ── Async phase: embed query for vector search (no &index borrow) ──
         let query_embedding = if vec_available {
-            if let Some(ref provider) = provider {
-                match provider.embed_batch(&[query]).await {
+            if let Some(ref embedder) = embedder {
+                match embedder.embed_batch(&[query]).await {
                     Ok(embeddings) if !embeddings.is_empty() => {
                         Some(embeddings.into_iter().next().unwrap())
                     }
@@ -490,8 +604,8 @@ impl MemoryBackend for MemoryBackendImpl {
             None
         };
 
-        // ── Sync phase 3: vector search + scoring + merge (borrows &index) ──
-        let results = super::search::hybrid_search_merge(
+        // ── Sync phase 3: local ordering (borrows &index) ──
+        let (mut candidates, mut relevance) = super::search::build_local_candidates(
             &index,
             fts_results,
             query_embedding.as_deref(),
@@ -500,6 +614,22 @@ impl MemoryBackend for MemoryBackendImpl {
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             Box::new(std::io::Error::other(e.to_string()))
         })?;
+
+        // ── Async phase: optional remote rerank through the pinned source
+        // (no &index borrow). Feed bounded text only. On any failure the
+        // complete exact local pre-rerank order is restored and MMR/
+        // truncation continue. ──
+        super::search::remote_rerank(
+            &mut candidates,
+            &mut relevance,
+            self.retrieval.as_deref(),
+            query,
+            RERANK_BODY_CHAR_BOUND,
+        )
+        .await;
+
+        // ── Sync phase 4: finalize (MMR + truncation) ──
+        let results = super::search::finalize_order(candidates, relevance, &search_config);
 
         // Record accesses for the returned chunks so access_count and
         // last_accessed stay current.  Non-fatal: a failed write is a no-op
@@ -614,6 +744,7 @@ mod factory_tests {
             stale_claim_secs: 60,
             search_source: "tool",
             embedding_credentials: EndpointScopedCredentials::none(),
+            retrieval: None,
         }
     }
 
@@ -1223,6 +1354,7 @@ mod factory_tests {
                 None,
                 Some(probe),
             ),
+            retrieval: None,
         };
 
         let provider = params.make_embedding_provider().await;
@@ -1240,6 +1372,116 @@ mod factory_tests {
             0,
             "sync current_api_key must NOT be called — the async path is the contract"
         );
+    }
+
+    /// A backend wired with a credential-free retrieval facade routes
+    /// embedding through that facade (pinned space); the legacy
+    /// `[memory.embedding]` provider is not consulted.
+    #[tokio::test]
+    async fn test_facade_search_pins_space_and_installs_fingerprint() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        let f = tmp.path().join("note.md");
+        std::fs::write(&f, "# Guide\n\nRust ownership rules.").unwrap();
+        idx.reindex_file(&f, "workspace").unwrap();
+        drop(idx);
+
+        let fake = std::sync::Arc::new(crate::retrieval::FakeMemoryRetrieval::new(
+            dims,
+            "pinned-model",
+        ));
+        let params = MemoryBackendParams {
+            retrieval: Some(fake.clone()),
+            ..make_params_fts_only("facade-test")
+        };
+        let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
+        let results = backend.search("rust ownership", 5, 0.0).await.unwrap();
+        assert!(
+            !results.is_empty(),
+            "facade-backed search must return results"
+        );
+        assert!(
+            fake.embed_calls() > 0,
+            "facade must be the embedding source"
+        );
+
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert!(
+            idx.installed_vector_fingerprint_hash().is_some(),
+            "search through the facade must install a durable fingerprint"
+        );
+    }
+
+    /// A facade whose embedding source fails degrades to FTS-only: results
+    /// still come back, no fingerprint is installed, and no partial/mixed
+    /// vectors ever appear.
+    #[tokio::test]
+    async fn test_facade_failure_degrades_to_fts_only() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        let f = tmp.path().join("note.md");
+        std::fs::write(&f, "# Guide\n\nRust borrow checker.").unwrap();
+        idx.reindex_file(&f, "workspace").unwrap();
+        drop(idx);
+
+        let failing = std::sync::Arc::new(
+            crate::retrieval::FakeMemoryRetrieval::new(dims, "m").with_embedment(|_| {
+                Err(crate::retrieval::RetrievalError::new(
+                    crate::retrieval::RetrievalErrorKind::Transient,
+                ))
+            }),
+        );
+        let params = MemoryBackendParams {
+            retrieval: Some(failing),
+            ..make_params_fts_only("facade-fail-test")
+        };
+        let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
+        let results = backend.search("rust borrow", 5, 0.0).await.unwrap();
+        assert!(
+            !results.is_empty(),
+            "FTS must still return results when the facade embedding fails"
+        );
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        // Failing source => no vector set ever installed; no partial/mixed
+        // vectors may ever appear.
+        assert_eq!(
+            idx.vec_row_count(),
+            0,
+            "no vectors may be installed on failure"
+        );
+        assert!(idx.chunk_count() > 0, "chunks must survive");
     }
 }
 

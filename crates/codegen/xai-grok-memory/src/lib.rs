@@ -28,9 +28,12 @@ pub mod chunker;
 pub mod dream;
 pub mod dream_lock;
 pub mod embedding;
+pub mod fingerprint;
 pub mod index;
 pub mod mmr;
 pub mod query_expansion;
+pub mod rebuild;
+pub mod retrieval;
 pub mod schema;
 pub mod search;
 pub mod storage;
@@ -38,7 +41,9 @@ pub mod text_utils;
 pub mod watcher;
 
 pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
+pub use fingerprint::{EmbeddingSourceSpec, VectorFingerprint};
 pub use index::{MemoryIndex, init_sqlite_vec};
+pub use retrieval::{MemoryRetrieval, RetrievalError, RetrievalErrorKind};
 pub use storage::{MemoryScope, MemoryStorage};
 
 /// Embed all chunks that don't have embeddings yet.

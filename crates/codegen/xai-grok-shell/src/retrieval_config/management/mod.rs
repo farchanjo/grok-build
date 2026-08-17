@@ -892,8 +892,11 @@ pub fn compute_memory_reindex_impact(
     MemoryReindexImpact {
         requires_confirmation: memory_affected,
         reason: if memory_affected {
+            // PR21: memory vectors are rebuilt automatically and transactionally
+            // through the pinned profile (FTS-only while a rebuild is pending).
             "Selected memory retrieval profile embedding identity or dimensions would change. \
-             Reindex is not performed automatically in this release; confirm to save config only."
+             Memory vectors will be rebuilt automatically through the pinned profile; \
+             memory search stays FTS-only until the transactional rebuild completes."
                 .into()
         } else {
             "Embedding models changed but memory has no named profile selection.".into()

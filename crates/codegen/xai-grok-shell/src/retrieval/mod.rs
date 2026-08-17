@@ -15,6 +15,7 @@ pub mod clock;
 pub mod cooldown;
 pub mod error;
 pub mod graph;
+pub mod memory_facade;
 pub mod pipeline;
 pub mod registry;
 pub mod reload;
@@ -39,6 +40,7 @@ pub use graph::{
     EmbeddingRouteDescriptor, EmbeddingSpaceId, RerankerRouteDescriptor, RetrievalSnapshot,
     SnapshotProfile,
 };
+pub use memory_facade::{RetrievalServiceMemoryFacade, facade_for_profile};
 pub use pipeline::{
     CandidateRow, EmbedStageResult, PipelineOptions, RerankStageResult, RetrieveResult,
 };

@@ -777,9 +777,32 @@ pub(crate) async fn spawn_session_actor(
             auth_manager.as_ref(),
             api_key_provider.clone(),
         );
+        // PR21: when `[memory] retrieval_profile` is set, memory
+        // embeddings/rerank route through the exact named PR15 profile + PR17
+        // provider routes (never the active chat model base URL/API key/OAuth).
+        // The facade is credential-free. When the profile is configured but
+        // cannot be resolved, memory degrades to FTS-only — it never falls
+        // back to a sibling `[memory.embedding]` credential path.
+        let named_retrieval_profile = memory_config
+            .as_ref()
+            .and_then(|mc| mc.retrieval_profile.clone());
+        let memory_retrieval_facade: Option<std::sync::Arc<dyn xai_grok_memory::MemoryRetrieval>> =
+            named_retrieval_profile.as_deref().and_then(|pid| {
+                let home = xai_grok_config::grok_home();
+                let registry = crate::retrieval::registry_for_home(home)?;
+                crate::retrieval::facade_for_profile(&registry.service(), pid)
+            });
+        // When a named profile is configured, it is authoritative: never fall
+        // back to the legacy `[memory.embedding]` provider (sibling credential
+        // path / active chat model). Unresolved profile ⇒ FTS-only.
+        let embed_config = if named_retrieval_profile.is_some() {
+            None
+        } else {
+            memory_config.as_ref().map(|mc| mc.embedding.clone())
+        };
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
-            embed_config: memory_config.as_ref().map(|mc| mc.embedding.clone()),
+            embed_config,
             embed_base_url: embed_base_url.clone(),
             embed_api_key: embed_api_key.clone(),
             search_config: memory_config
@@ -789,6 +812,7 @@ pub(crate) async fn spawn_session_actor(
             stale_claim_secs: watcher_config.stale_claim_secs,
             search_source: "tool",
             embedding_credentials: embed_credentials,
+            retrieval: memory_retrieval_facade,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
             storage.clone(),

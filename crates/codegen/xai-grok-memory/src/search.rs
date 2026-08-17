@@ -190,14 +190,19 @@ pub async fn hybrid_search(
     hybrid_search_merge(index, fts_results, query_embedding.as_deref(), config)
 }
 
-/// Synchronous merge phase: vector search (if embedding provided), score
-/// normalization, temporal decay, source weighting, MMR, and truncation.
-pub(super) fn hybrid_search_merge(
+/// Synchronous local-ordering phase: vector search (if embedding provided),
+/// score normalization, temporal decay, source weighting, and content filter.
+///
+/// Returns `(results, relevance)` — `results` ordered best-first by the
+/// unclamped `relevance` score, aligned index-for-index. MMR and truncation
+/// are intentionally deferred (see [`finalize_order`]) so the optional remote
+/// rerank can run between local ordering and MMR/truncation.
+pub(super) fn build_local_candidates(
     index: &MemoryIndex,
     fts_results: Vec<super::index::FtsResult>,
     query_embedding: Option<&[f32]>,
     config: &MemorySearchConfig,
-) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+) -> Result<(Vec<SearchResult>, Vec<f64>), Box<dyn std::error::Error>> {
     let candidate_limit = config.max_results * 3;
 
     let vec_results = if let Some(embedding) = query_embedding {
@@ -380,12 +385,101 @@ pub(super) fn hybrid_search_merge(
         results.push(result);
     }
 
+    // MMR stability note: build_local_candidates stops here with local
+    // ordering intact; finalize_order applies MMR + truncation.
+    Ok((results, relevance))
+}
+
+/// Apply MMR (opt-in) then truncate to `max_results`.
+///
+/// `relevance` must remain aligned index-for-index with `results` after any
+/// remote-rerank permutation has been applied by the caller.
+pub(super) fn finalize_order(
+    mut results: Vec<SearchResult>,
+    relevance: Vec<f64>,
+    config: &MemorySearchConfig,
+) -> Vec<SearchResult> {
     // MMR diversity re-ranking (opt-in, applied before truncation)
     super::mmr::mmr_rerank(&mut results, &relevance, &config.mmr);
 
     results.truncate(config.max_results);
 
-    Ok(results)
+    results
+}
+
+/// Backward-compatible synchronous merge (no remote rerank): local ordering
+/// then finalize (MMR + truncate).
+pub(super) fn hybrid_search_merge(
+    index: &MemoryIndex,
+    fts_results: Vec<super::index::FtsResult>,
+    query_embedding: Option<&[f32]>,
+    config: &MemorySearchConfig,
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    let (results, relevance) = build_local_candidates(index, fts_results, query_embedding, config)?;
+    Ok(finalize_order(results, relevance, config))
+}
+
+/// Bound a snippet for rerank payloads (feed bounded metadata/text only).
+fn snippet_bounded(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_owned();
+    }
+    // Truncate by chars without splitting a UTF-8 boundary mid-codepoint.
+    let mut out: Vec<char> = Vec::with_capacity(max_chars);
+    for c in s.chars() {
+        if out.len() >= max_chars {
+            break;
+        }
+        out.push(c);
+    }
+    out.into_iter().collect()
+}
+
+/// Optionally apply a remote rerank between local ordering and [`finalize_order`].
+///
+/// Candidate text is bounded before being sent. On any failure — reranker
+/// unavailable, cancelled, malformed, stale, or returning invalid indices —
+/// the **complete exact local pre-rerank order** is restored (a no-op here)
+/// before MMR/truncation continue. No partial reorder/loss ever occurs.
+pub async fn remote_rerank(
+    results: &mut Vec<SearchResult>,
+    relevance: &mut Vec<f64>,
+    retrieval: Option<&dyn super::retrieval::MemoryRetrieval>,
+    query: &str,
+    max_body_chars: usize,
+) {
+    let Some(r) = retrieval else { return };
+    if results.is_empty() {
+        return;
+    }
+    let docs: Vec<String> = results
+        .iter()
+        .map(|res| snippet_bounded(&res.snippet, max_body_chars))
+        .collect();
+    let perm = match r.rerank(query, &docs).await {
+        Ok(Some(p)) => super::retrieval::validate_rerank_permutation(Some(&p), results.len()),
+        _ => None,
+    };
+    let Some(perm) = perm else {
+        // Invalid/unavailable: restore complete exact local pre-rerank order
+        // (already in place).
+        return;
+    };
+    let old_results = std::mem::replace(results, Vec::with_capacity(results.len()));
+    // `relevance` is only aligned when MMR is enabled; otherwise it is empty
+    // and must simply stay empty through the permutation (finalize skips MMR).
+    let relevance_aligned = relevance.len() == old_results.len();
+    let old_relevance = if relevance_aligned {
+        std::mem::replace(relevance, Vec::with_capacity(relevance.len()))
+    } else {
+        Vec::new()
+    };
+    for &i in &perm {
+        results.push(old_results[i].clone());
+        if relevance_aligned {
+            relevance.push(old_relevance[i]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1345,5 +1439,152 @@ mod tests {
                 r.score,
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21: remote rerank between local ordering and MMR/truncation
+    // -----------------------------------------------------------------------
+
+    /// Build two near-identical chunks with an access-boosted one so local
+    /// order is deterministic: [boosted, plain].
+    async fn two_chunk_local_candidates(tmp: &TempDir) -> (Vec<SearchResult>, Vec<f64>) {
+        let mut idx = test_index(tmp);
+        let fa = tmp.path().join("a.md");
+        let fb = tmp.path().join("b.md");
+        std::fs::write(&fa, "# Rust\n\nRust ownership model explained.").unwrap();
+        std::fs::write(&fb, "# Rust\n\nRust ownership model explained.").unwrap();
+        idx.reindex_file(&fa, "workspace").unwrap();
+        idx.reindex_file(&fb, "workspace").unwrap();
+        // Boost chunk B (plain one is first alphabetically = a.md, boosted = b.md).
+        let chunk_b_id = format!("{}:0", fb.to_string_lossy());
+        idx.record_access(&chunk_b_id).unwrap();
+        let config = MemorySearchConfig {
+            max_results: 10,
+            min_score: 0.0,
+            ..Default::default()
+        };
+        let fts = idx.search_fts("rust ownership", 10).unwrap();
+        let (results, relevance) = build_local_candidates(&idx, fts, None, &config).unwrap();
+        (results, relevance)
+    }
+
+    #[tokio::test]
+    async fn test_remote_rerank_success_applied_before_mmr() {
+        let tmp = TempDir::new().unwrap();
+        let (mut results, mut relevance) = two_chunk_local_candidates(&tmp).await;
+        let local_first = results[0].chunk_id.clone();
+        // Local order: boosted b.md first.
+        assert!(local_first.ends_with("b.md:0"), "{local_first}");
+
+        // Remote rerank reverses to [a, b].
+        let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
+        let fake = fake.with_rerank(|_q, docs| {
+            assert_eq!(docs.len(), 2);
+            Ok(Some(vec![1, 0]))
+        });
+        super::remote_rerank(
+            &mut results,
+            &mut relevance,
+            Some(&fake),
+            "rust ownership",
+            4000,
+        )
+        .await;
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            results[0].chunk_id.ends_with("a.md:0"),
+            "rerank must move a.md first"
+        );
+        assert!(results[1].chunk_id.ends_with("b.md:0"));
+
+        // MMR + truncation continue after rerank (lambda = 1 keeps relevance
+        // order; truncation is the observable continuation).
+        let config = MemorySearchConfig {
+            max_results: 1,
+            min_score: 0.0,
+            mmr: xai_grok_config_types::MmrConfig {
+                enabled: true,
+                lambda: 1.0,
+            },
+            ..Default::default()
+        };
+        let final_order = finalize_order(results, relevance, &config);
+        assert_eq!(
+            final_order.len(),
+            1,
+            "truncation must still apply after rerank"
+        );
+        assert!(final_order[0].chunk_id.ends_with("a.md:0"));
+    }
+
+    #[tokio::test]
+    async fn test_remote_rerank_invalid_indices_keeps_complete_local_order() {
+        let tmp = TempDir::new().unwrap();
+        let (results, relevance) = two_chunk_local_candidates(&tmp).await;
+        let local_ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
+        let mut results = results.clone();
+        let mut relevance = relevance.clone();
+
+        for bad_perm in [
+            vec![0, 0],    // duplicate
+            vec![0, 1, 2], // wrong length / out of range
+            vec![2, 0],    // out of range
+            vec![1, 1],    // duplicate + missing
+        ] {
+            let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
+            let fake = fake.with_rerank(move |_q, _d| Ok(Some(bad_perm.clone())));
+            let mut r = results.clone();
+            let mut rel = relevance.clone();
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
+            assert_eq!(
+                ids, local_ids,
+                "invalid indices must restore the complete exact local order"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_rerank_outage_or_error_keeps_local_order() {
+        let tmp = TempDir::new().unwrap();
+        let (results, relevance) = two_chunk_local_candidates(&tmp).await;
+        let local_ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
+
+        // Outage: Ok(None).
+        {
+            let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
+            let mut r = results.clone();
+            let mut rel = relevance.clone();
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
+            assert_eq!(ids, local_ids, "reranker unavailable must keep local order");
+        }
+        // Error.
+        {
+            use crate::retrieval::{RetrievalError, RetrievalErrorKind};
+            let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rerank-m");
+            let fake =
+                fake.with_rerank(|_q, _d| Err(RetrievalError::new(RetrievalErrorKind::Transient)));
+            let mut r = results.clone();
+            let mut rel = relevance.clone();
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
+            assert_eq!(ids, local_ids, "reranker error must keep local order");
+        }
+    }
+
+    #[test]
+    fn validate_permutation_rejects_malformed() {
+        use crate::retrieval::validate_rerank_permutation;
+        assert_eq!(
+            validate_rerank_permutation(Some(&[1, 0]), 2),
+            Some(vec![1, 0])
+        );
+        assert_eq!(validate_rerank_permutation(Some(&[0, 0]), 2), None);
+        assert_eq!(validate_rerank_permutation(Some(&[0]), 2), None);
+        assert_eq!(validate_rerank_permutation(Some(&[2, 0]), 2), None);
+        assert_eq!(validate_rerank_permutation(Some(&[]), 0), Some(vec![]));
+        assert_eq!(validate_rerank_permutation(None, 2), None);
     }
 }
