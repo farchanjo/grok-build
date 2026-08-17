@@ -324,16 +324,19 @@ impl RetrievalService {
                         stage: RetrievalStage::Orchestrate,
                     });
                 }
-                // Hard mode (and optional limit hard): typed budget errors propagate.
+                // Limit-hard alone: output overflow from rerank (Issue 12).
+                Err(e @ OrchestratorError::OutputBudgetExceeded { .. })
+                    if options.hard_error_on_limit_exceeded
+                        || options.hard_error_on_semantic_failure =>
+                {
+                    return Err(e);
+                }
+                // Semantic hard: all typed budget errors from rerank.
                 Err(
                     e @ OrchestratorError::DeadlineExceeded { .. }
                     | e @ OrchestratorError::AttemptBudgetExceeded { .. }
-                    | e @ OrchestratorError::InputBudgetExceeded { .. }
-                    | e @ OrchestratorError::OutputBudgetExceeded { .. },
-                ) if options.hard_error_on_semantic_failure
-                    || (options.hard_error_on_limit_exceeded
-                        && matches!(e, OrchestratorError::OutputBudgetExceeded { .. })) =>
-                {
+                    | e @ OrchestratorError::InputBudgetExceeded { .. },
+                ) if options.hard_error_on_semantic_failure => {
                     return Err(e);
                 }
                 Err(OrchestratorError::DeadlineExceeded { .. })

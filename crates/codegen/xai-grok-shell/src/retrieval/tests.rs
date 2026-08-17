@@ -359,6 +359,148 @@ async fn hard_error_opt_in_on_semantic_failure() {
 }
 
 #[tokio::test]
+async fn limit_hard_only_rerank_output_overflow_is_hard() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-limit-hard-rerank", clock);
+    let mut graph = test_graph_two_embed_routes();
+    // Tiny output budget so a successful rerank overflow fails charge_output_bytes.
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_output_tokens = 1;
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_attempts = 4;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
+    );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    // Minimal embed vectors so embed itself does not exhaust the output budget
+    // before rerank (1 dim * 1 * 4 bytes ≈ 1 token; max is 1).
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 1, fill: 0.0 });
+    // Rerank success produces hits; charge uses hits.len()*32 >> budget.
+    fake.set_rerank("rr-a", FakeRerankScript::Ok);
+    let (svc, _) = service(reg, fake);
+    let err = svc
+        .retrieve(
+            "default",
+            "q",
+            RetrieveCandidates::Explicit(vec![
+                CandidateRow {
+                    id: "1".into(),
+                    text: "a".into(),
+                    score: None,
+                    metadata: None,
+                },
+                CandidateRow {
+                    id: "2".into(),
+                    text: "b".into(),
+                    score: None,
+                    metadata: None,
+                },
+            ]),
+            PipelineOptions {
+                hard_error_on_semantic_failure: false,
+                hard_error_on_limit_exceeded: true,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OrchestratorError::OutputBudgetExceeded { .. }),
+        "limit-hard alone must hard-fail rerank output overflow, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn soft_rerank_output_overflow_degrades() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-soft-rerank-out", clock);
+    let mut graph = test_graph_two_embed_routes();
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_output_tokens = 1;
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_attempts = 4;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
+    );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 1, fill: 0.0 });
+    fake.set_rerank("rr-a", FakeRerankScript::Ok);
+    let (svc, _) = service(reg, fake);
+    let out = svc
+        .retrieve(
+            "default",
+            "q",
+            RetrieveCandidates::Explicit(vec![
+                CandidateRow {
+                    id: "1".into(),
+                    text: "a".into(),
+                    score: None,
+                    metadata: None,
+                },
+                CandidateRow {
+                    id: "2".into(),
+                    text: "b".into(),
+                    score: None,
+                    metadata: None,
+                },
+            ]),
+            PipelineOptions {
+                hard_error_on_semantic_failure: false,
+                hard_error_on_limit_exceeded: false,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        out.degradations
+            .iter()
+            .any(|d| d.kind == DegradationKind::BudgetExhausted),
+        "soft mode must degrade on rerank output overflow: {out:?}"
+    );
+    // Exact pre-rerank order preserved.
+    assert_eq!(
+        out.candidates
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["1", "2"]
+    );
+}
+
+#[tokio::test]
 async fn hard_retrieve_rerank_budget_propagates_typed_attempt_error() {
     let clock = Arc::new(MockClock::new());
     let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-hard-rerank-budget", clock);

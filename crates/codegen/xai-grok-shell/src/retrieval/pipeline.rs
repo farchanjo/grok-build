@@ -44,6 +44,11 @@ pub struct PipelineOptions {
     /// When true, candidate/result over-limit returns [`OrchestratorError::LimitExceeded`]
     /// instead of soft truncation. Default soft-clamps to profile limits.
     /// Independent of [`Self::hard_error_on_semantic_failure`].
+    ///
+    /// When true, candidate/result over-limit and **rerank output-budget**
+    /// overflow propagate as typed hard errors even if semantic hard mode is
+    /// off. Semantic deadline/attempt/input failures still follow the semantic
+    /// hard/soft flag only.
     pub hard_error_on_limit_exceeded: bool,
 }
 
@@ -530,9 +535,11 @@ pub async fn rerank_with_profile(
         match outcome {
             Ok(result) => {
                 let out_bytes = result.hits.len().saturating_mul(32);
-                // Output overflow is always typed (hard or soft handled by caller).
+                // Output overflow: hard when semantic-hard *or* limit-hard
+                // (`hard_error_on_limit_exceeded` is independent of semantic hard).
                 if let Err(e) = budget.charge_output_bytes(out_bytes) {
-                    return if hard {
+                    let hard_output = hard || options.hard_error_on_limit_exceeded;
+                    return if hard_output {
                         Err(e)
                     } else {
                         rerank_budget_outcome(false, e, &ctx.profile.id)
