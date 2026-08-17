@@ -252,13 +252,28 @@ pub fn validate_http_base_url(raw: &str) -> Result<(), ProviderLifecycleError> {
     Ok(())
 }
 
-/// Validate extra headers: no Authorization, no CR/LF, no x-grok-*.
+/// Validate extra headers for management save and resolve.
+///
+/// Rejects case-insensitive restricted names so typed fields own them and
+/// free-form extras cannot collide with auth or org/project identity:
+/// - `Authorization` / `Cookie` / `Proxy-Authorization`
+/// - `OpenAI-Organization` / `OpenAI-Project` (typed provider fields own these)
+/// - `Content-Type` / `Accept` (transport owns negotiation)
+/// - `x-grok-*` first-party headers
+/// - values containing CR/LF/control characters
 pub fn validate_extra_headers(
     headers: &IndexMap<String, String>,
 ) -> Result<(), ProviderLifecycleError> {
     for (k, v) in headers {
         let lower = k.to_ascii_lowercase();
-        if lower == "authorization" || lower == "cookie" || lower == "proxy-authorization" {
+        if lower == "authorization"
+            || lower == "cookie"
+            || lower == "proxy-authorization"
+            || lower == "openai-organization"
+            || lower == "openai-project"
+            || lower == "content-type"
+            || lower == "accept"
+        {
             return Err(ProviderLifecycleError::InvalidHeader(format!(
                 "restricted header `{k}`"
             )));
@@ -268,9 +283,9 @@ pub fn validate_extra_headers(
                 "first-party header `{k}` not allowed on custom providers"
             )));
         }
-        if v.chars().any(|c| c == '\r' || c == '\n') {
+        if v.chars().any(|c| c == '\r' || c == '\n' || c.is_control()) {
             return Err(ProviderLifecycleError::InvalidHeader(format!(
-                "header `{k}` contains newline"
+                "header `{k}` contains control characters"
             )));
         }
     }
@@ -311,5 +326,25 @@ mod tests {
         let mut h = IndexMap::new();
         h.insert("Authorization".into(), "Bearer x".into());
         assert!(validate_extra_headers(&h).is_err());
+    }
+
+    #[test]
+    fn extra_headers_reject_org_project_and_content_negotiation() {
+        for name in [
+            "OpenAI-Organization",
+            "openai-project",
+            "Content-Type",
+            "ACCEPT",
+        ] {
+            let mut h = IndexMap::new();
+            h.insert(name.into(), "x".into());
+            assert!(
+                validate_extra_headers(&h).is_err(),
+                "expected reject for {name}"
+            );
+        }
+        let mut ok = IndexMap::new();
+        ok.insert("X-Custom-Lab".into(), "1".into());
+        assert!(validate_extra_headers(&ok).is_ok());
     }
 }

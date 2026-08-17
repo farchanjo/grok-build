@@ -221,35 +221,39 @@ impl RetrievalTransport {
                 .await
             {
                 Ok(v) => return Ok(v),
-                // Total attempts = 1 + max_retries. Retry only while attempts
-                // already spent is still strictly less than that budget.
-                Err(e) if e.is_retryable() && attempts < 1 + self.policy.max_retries => {
-                    let sleep_ms = match &e {
-                        RetrievalError::RateLimited {
-                            retry_after_ms: Some(ms),
-                        } => (*ms).min(5_000),
-                        RetrievalError::RateLimited { .. } => 250 * u64::from(attempts),
-                        RetrievalError::Http {
-                            category: RetrievalErrorCategory::Server,
-                            ..
-                        } => 200 * u64::from(attempts),
-                        RetrievalError::Transport(_) | RetrievalError::Timeout => {
-                            200 * u64::from(attempts)
-                        }
-                        _ => 200 * u64::from(attempts),
-                    };
-                    let sleep_ms = sleep_ms.min(5_000);
-                    let sleep_dur = Duration::from_millis(sleep_ms);
-                    if started.elapsed() + sleep_dur >= self.policy.total_deadline {
+                Err(e) => {
+                    // Prefer exact DeadlineExceeded when total budget is gone.
+                    if started.elapsed() >= self.policy.total_deadline {
                         return Err(RetrievalError::DeadlineExceeded);
                     }
-                    tokio::select! {
-                        _ = cancel.cancelled() => return Err(RetrievalError::Cancelled),
-                        _ = tokio::time::sleep(sleep_dur) => {}
+                    if e.is_retryable() && attempts < 1 + self.policy.max_retries {
+                        let sleep_ms = match &e {
+                            RetrievalError::RateLimited {
+                                retry_after_ms: Some(ms),
+                            } => (*ms).min(5_000),
+                            RetrievalError::RateLimited { .. } => 250 * u64::from(attempts),
+                            RetrievalError::Http {
+                                category: RetrievalErrorCategory::Server,
+                                ..
+                            } => 200 * u64::from(attempts),
+                            RetrievalError::Transport(_) | RetrievalError::Timeout => {
+                                200 * u64::from(attempts)
+                            }
+                            _ => 200 * u64::from(attempts),
+                        };
+                        let sleep_ms = sleep_ms.min(5_000);
+                        let sleep_dur = Duration::from_millis(sleep_ms);
+                        if started.elapsed() + sleep_dur >= self.policy.total_deadline {
+                            return Err(RetrievalError::DeadlineExceeded);
+                        }
+                        tokio::select! {
+                            _ = cancel.cancelled() => return Err(RetrievalError::Cancelled),
+                            _ = tokio::time::sleep(sleep_dur) => {}
+                        }
+                        continue;
                     }
-                    continue;
+                    return Err(e);
                 }
-                Err(e) => return Err(e),
             }
         }
     }
@@ -438,6 +442,10 @@ fn validate_header_name(name: &str) -> RetrievalResult<()> {
     if lower == "authorization"
         || lower == "cookie"
         || lower == "proxy-authorization"
+        || lower == "openai-organization"
+        || lower == "openai-project"
+        || lower == "content-type"
+        || lower == "accept"
         || lower.starts_with("x-grok-")
     {
         return Err(RetrievalError::InvalidRequest(format!(
@@ -490,12 +498,29 @@ fn validate_extra_headers(headers: &[(String, String)]) -> RetrievalResult<()> {
     Ok(())
 }
 
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+/// Parse `Retry-After` as delta-seconds or IMF-fixdate (HTTP-date).
+/// Returns milliseconds until retry, capped by callers for sleep.
+pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after_value(raw, chrono::Utc::now())
+}
+
+/// Pure parser for tests: delta-seconds or IMF-fixdate relative to `now`.
+pub fn parse_retry_after_value(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
+    let raw = raw.trim();
     if let Ok(secs) = raw.parse::<u64>() {
         return Some(secs.saturating_mul(1000));
     }
-    None
+    // IMF-fixdate: Sun, 06 Nov 1994 08:49:37 GMT
+    let parsed = chrono::DateTime::parse_from_str(raw, "%a, %d %b %Y %H:%M:%S GMT")
+        .or_else(|_| chrono::DateTime::parse_from_rfc2822(raw))
+        .ok()?;
+    let target = parsed.with_timezone(&chrono::Utc);
+    let delta = target.signed_duration_since(now);
+    if delta.num_milliseconds() <= 0 {
+        return Some(0);
+    }
+    Some(delta.num_milliseconds() as u64)
 }
 
 fn extract_error_message(preview: &str) -> Option<String> {
@@ -569,6 +594,33 @@ mod tests {
             name: "Authorization".into(),
         });
         assert!(RetrievalTransport::from_route(&route).is_err());
+        for name in [
+            "OpenAI-Organization",
+            "Content-Type",
+            "Accept",
+            "openai-project",
+        ] {
+            let route = sample_route(RetrievalAuthScheme::CustomHeader { name: name.into() });
+            assert!(
+                RetrievalTransport::from_route(&route).is_err(),
+                "expected reject for custom auth name {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_retry_after_delta_and_http_date() {
+        use chrono::{TimeZone, Utc};
+        assert_eq!(parse_retry_after_value("3", Utc::now()), Some(3000));
+        assert_eq!(parse_retry_after_value("0", Utc::now()), Some(0));
+        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        // 10 seconds later
+        let date = "Sun, 06 Nov 1994 08:49:47 GMT";
+        assert_eq!(parse_retry_after_value(date, now), Some(10_000));
+        // Past date → 0
+        let past = "Sun, 06 Nov 1994 08:49:00 GMT";
+        assert_eq!(parse_retry_after_value(past, now), Some(0));
+        assert!(parse_retry_after_value("not-a-date", now).is_none());
     }
 
     #[test]

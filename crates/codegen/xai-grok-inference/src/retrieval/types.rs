@@ -512,10 +512,14 @@ pub type RetrievalResult<T> = Result<T, RetrievalError>;
 // ---------------------------------------------------------------------------
 
 /// Async embeddings adapter bound to one exact resolved route.
+///
+/// Credentials are passed per call (short-lived, secret-bearing, redacted
+/// Debug). Config/profile DTOs never carry secrets.
 pub trait EmbeddingAdapter: Send + Sync {
     fn embed(
         &self,
         request: EmbeddingRequest,
+        credential: &crate::retrieval::transport::RetrievalCredential,
         cancel: CancellationToken,
     ) -> impl std::future::Future<Output = RetrievalResult<EmbeddingResult>> + Send;
 
@@ -523,10 +527,14 @@ pub trait EmbeddingAdapter: Send + Sync {
 }
 
 /// Async reranker adapter bound to one exact resolved route.
+///
+/// Credentials are passed per call (short-lived, secret-bearing, redacted
+/// Debug). Config/profile DTOs never carry secrets.
 pub trait RerankAdapter: Send + Sync {
     fn rerank(
         &self,
         request: RerankRequest,
+        credential: &crate::retrieval::transport::RetrievalCredential,
         cancel: CancellationToken,
     ) -> impl std::future::Future<Output = RetrievalResult<RerankResult>> + Send;
 

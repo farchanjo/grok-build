@@ -1,8 +1,22 @@
 //! Disable / remove / incarnation fail-closed checks for request boundaries.
 //!
 //! In-flight work may complete. The next request/turn and any retry against a
-//! disabled, removed, or replaced incarnation/generation fails closed with an
-//! actionable, secret-free error. Sibling accounts are never borrowed.
+//! disabled, removed, or replaced incarnation fails closed with an actionable,
+//! secret-free error. Sibling accounts are never borrowed.
+//!
+//! ## Generation semantics (intentional split)
+//!
+//! **Legacy soft generation (this module):** a generation mismatch only fails
+//! closed when `is_retry` is true **or** `provenance_incarnation` is set. A
+//! fresh non-retry request that carries a stale generation pin without an
+//! incarnation pin is allowed to proceed. Chat/auxiliary callers historically
+//! rely on this soft path.
+//!
+//! **Retrieval-strict generation:** the retrieval runtime
+//! (`retrieval_runtime`) performs its **own** precheck before calling this
+//! guard: `session_registry_generation: Some(stale)` always fails against
+//! live generation, independent of retry/incarnation. Do not assume
+//! retrieval-strict behavior from this shared guard alone.
 
 use super::id::ProviderId;
 use super::instance::ProviderIncarnation;
@@ -201,6 +215,9 @@ fn assert_route_usable_inner(
         }
     }
 
+    // Soft generation: only fail closed on mismatch for retries or when an
+    // incarnation pin is present. Fresh non-retry requests without incarnation
+    // do not fail here (see module docs). Retrieval applies a strict precheck.
     if let Some(expected_gen) = req.session_registry_generation {
         let live = service.generation();
         if live != 0 && expected_gen != 0 && live != expected_gen {
@@ -353,6 +370,53 @@ mod tests {
     fn sibling_isolation() {
         assert!(assert_not_sibling_borrow("a", "a").is_ok());
         assert!(assert_not_sibling_borrow("a", "b").is_err());
+    }
+
+    #[test]
+    fn shared_generation_mismatch_is_soft_without_retry_or_incarnation() {
+        // Documents the intentional split: soft guard allows stale generation on
+        // a fresh non-retry request without incarnation pin. Retrieval applies a
+        // strict precheck outside this function.
+        let dir = TempDir::new().unwrap();
+        let mut entries = IndexMap::new();
+        entries.insert(
+            "lab".into(),
+            ModelProviderConfig {
+                base_url: Some("http://127.0.0.1:9/v1".into()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let service = ProviderService::from_model_providers(&entries)
+            .unwrap()
+            .with_generation(5);
+        // Soft: no retry, no incarnation → ok despite stale pin.
+        assert!(
+            assert_route_usable(
+                dir.path(),
+                &service,
+                &RouteGuardRequest {
+                    provider_instance_id: "lab",
+                    provenance_incarnation: None,
+                    session_registry_generation: Some(1),
+                    is_retry: false,
+                },
+            )
+            .is_ok()
+        );
+        // Hard on retry.
+        let err = assert_route_usable(
+            dir.path(),
+            &service,
+            &RouteGuardRequest {
+                provider_instance_id: "lab",
+                provenance_incarnation: None,
+                session_registry_generation: Some(1),
+                is_retry: true,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, RouteGuardError::GenerationReplaced { .. }));
     }
 
     #[test]

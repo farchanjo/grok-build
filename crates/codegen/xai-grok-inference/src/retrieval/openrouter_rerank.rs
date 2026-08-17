@@ -168,6 +168,9 @@ impl OpenRouterRerankAdapter {
                 },
             };
 
+            if started.elapsed() >= total_deadline {
+                return Err(RetrievalError::DeadlineExceeded);
+            }
             if mapped.is_retryable() && attempts < 1 + max_retries {
                 let sleep_ms = match &mapped {
                     RetrievalError::RateLimited {
@@ -208,10 +211,10 @@ impl RerankAdapter for OpenRouterRerankAdapter {
     async fn rerank(
         &self,
         request: RerankRequest,
+        credential: &RetrievalCredential,
         cancel: CancellationToken,
     ) -> RetrievalResult<RerankResult> {
-        let _ = (request, cancel);
-        Err(RetrievalError::MissingCredential)
+        OpenRouterRerankAdapter::rerank(self, request, credential, cancel).await
     }
 
     fn route_context(&self) -> &RetrievalRouteContext {

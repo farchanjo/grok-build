@@ -1509,27 +1509,47 @@ embeddings = true
     }
 
     #[test]
-    fn xai_session_only_path_not_silently_api_keyed_without_api_route() {
-        // Built-in xai has ApiKey route in the set; selection prefers it.
-        // When XAI_API_KEY missing, MissingCredential — never session.
+    fn xai_api_key_missing_is_missing_credential_never_session() {
+        // Explicit embeddings-capable xAI fixture: route set includes ApiKey
+        // (preferred over XaiSession). Absent XAI_API_KEY → MissingCredential
+        // only — never session borrow.
         let dir = TempDir::new().unwrap();
         let home = dir.path();
-        unsafe {
-            std::env::remove_var("XAI_API_KEY");
-        }
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+[model_providers.xai]
+kind = "xai"
+base_url = "https://api.x.ai/v1"
+enabled = true
+capability_mode = "manual"
+
+[model_providers.xai.capabilities]
+embeddings = true
+"#,
+        )
+        .unwrap();
+        invalidate_for_home(home);
+        let _guard = xai_grok_test_support::EnvGuard::unset("XAI_API_KEY");
         let cfg = EmbeddingModelConfig {
             provider: "xai".into(),
-            model: "e".into(),
+            model: "text-embedding".into(),
             ..Default::default()
         };
-        let err = resolve_embedding_runtime(home, &cfg, &RetrievalResolveOptions::default(), None)
-            .unwrap_err();
-        // Capability may allow; credential or surface depending on routes.
+        let counters = RetrievalResolveCounters::default();
+        let err = resolve_embedding_runtime(
+            home,
+            &cfg,
+            &RetrievalResolveOptions::default(),
+            Some(&counters),
+        )
+        .unwrap_err();
         assert!(
-            matches!(err, RetrievalRuntimeError::MissingCredential { .. })
-                || matches!(err, RetrievalRuntimeError::CapabilityDenied { .. })
-                || matches!(err, RetrievalRuntimeError::SurfaceMismatch { .. }),
-            "{err}"
+            matches!(err, RetrievalRuntimeError::MissingCredential { .. }),
+            "expected MissingCredential (no session borrow), got {err}"
         );
+        // Capability passed (embeddings true); secrets were attempted.
+        assert!(counters.capability_checks() >= 1);
+        assert!(counters.secret_lookups() >= 1);
     }
 }

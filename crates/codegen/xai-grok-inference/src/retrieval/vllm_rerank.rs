@@ -66,10 +66,10 @@ impl RerankAdapter for VllmRerankAdapter {
     async fn rerank(
         &self,
         request: RerankRequest,
+        credential: &RetrievalCredential,
         cancel: CancellationToken,
     ) -> RetrievalResult<RerankResult> {
-        let _ = (request, cancel);
-        Err(RetrievalError::MissingCredential)
+        VllmRerankAdapter::rerank(self, request, credential, cancel).await
     }
 
     fn route_context(&self) -> &RetrievalRouteContext {

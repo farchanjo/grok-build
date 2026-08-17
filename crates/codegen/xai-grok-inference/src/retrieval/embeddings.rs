@@ -79,12 +79,10 @@ impl EmbeddingAdapter for OpenaiCompatibleEmbeddings {
     async fn embed(
         &self,
         request: EmbeddingRequest,
+        credential: &RetrievalCredential,
         cancel: CancellationToken,
     ) -> RetrievalResult<EmbeddingResult> {
-        // Trait path has no credential — callers must use `embed` with credential
-        // or the shell wrapper. Fail closed rather than inventing secrets.
-        let _ = (request, cancel);
-        Err(RetrievalError::MissingCredential)
+        OpenaiCompatibleEmbeddings::embed(self, request, credential, cancel).await
     }
 
     fn route_context(&self) -> &RetrievalRouteContext {

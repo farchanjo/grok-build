@@ -811,13 +811,11 @@ async fn total_deadline_exceeded_fast() {
         )
         .await
         .unwrap_err();
-    // May surface as Timeout (per-attempt clamp) or DeadlineExceeded.
+    // Per-attempt timeout is clamped to remaining budget; after the attempt
+    // returns, the loop maps spent budget to exact DeadlineExceeded.
     assert!(
-        matches!(
-            err,
-            RetrievalError::DeadlineExceeded | RetrievalError::Timeout | RetrievalError::Cancelled
-        ),
-        "{err:?}"
+        matches!(err, RetrievalError::DeadlineExceeded),
+        "expected DeadlineExceeded, got {err:?}"
     );
 }
 
@@ -878,6 +876,143 @@ async fn openrouter_rerank_429_then_success() {
         .unwrap();
     assert_eq!(res.hits[0].index, 0);
     assert!(hits.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn openrouter_rerank_503_then_success() {
+    use super::openrouter_rerank::OpenRouterRerankAdapter;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/api/v1/rerank",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                axum::Json(json!({
+                    "model": "rr",
+                    "results": [{
+                        "index": 0,
+                        "relevance_score": 0.4,
+                        "document": {"text": "a"}
+                    }]
+                }))
+                .into_response()
+            }
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/api/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::Bearer);
+    route.api_surface = "openrouter_native".into();
+    route.provider_kind = "openrouter".into();
+    route.purpose = RetrievalPurpose::Rerank;
+    route.max_retries = 2;
+    route.extra_headers.clear();
+    let client = OpenRouterRerankAdapter::new(route).unwrap();
+    client
+        .rerank(
+            RerankRequest {
+                model: "rr".into(),
+                query: "q".into(),
+                documents: vec!["a".into()],
+                top_n: None,
+                endpoint: "/rerank".into(),
+                return_documents: false,
+            },
+            &RetrievalCredential::new(Some("or-key".into())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(hits.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn openrouter_rerank_max_retries_zero_one_hit() {
+    use super::openrouter_rerank::OpenRouterRerankAdapter;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits2 = hits.clone();
+    let app = Router::new().route(
+        "/api/v1/rerank",
+        post(move || {
+            let hits = hits2.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/api/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::Bearer);
+    route.api_surface = "openrouter_native".into();
+    route.provider_kind = "openrouter".into();
+    route.purpose = RetrievalPurpose::Rerank;
+    route.max_retries = 0;
+    route.extra_headers.clear();
+    let client = OpenRouterRerankAdapter::new(route).unwrap();
+    let err = client
+        .rerank(
+            RerankRequest {
+                model: "rr".into(),
+                query: "q".into(),
+                documents: vec!["a".into()],
+                top_n: None,
+                endpoint: "/rerank".into(),
+                return_documents: false,
+            },
+            &RetrievalCredential::new(Some("or-key".into())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RetrievalError::Http { status: 503, .. }));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn openrouter_rerank_oversized_response() {
+    use super::openrouter_rerank::OpenRouterRerankAdapter;
+    let app = Router::new().route(
+        "/api/v1/rerank",
+        post(|| async {
+            let big = "x".repeat(8192);
+            (StatusCode::OK, big).into_response()
+        }),
+    );
+    let (addr, _h) = spawn_router(app).await;
+    let base = format!("http://{addr}/api/v1");
+    let mut route = route_for(&base, RetrievalAuthScheme::Bearer);
+    route.api_surface = "openrouter_native".into();
+    route.provider_kind = "openrouter".into();
+    route.purpose = RetrievalPurpose::Rerank;
+    route.max_response_bytes = 64;
+    route.max_retries = 0;
+    route.extra_headers.clear();
+    let client = OpenRouterRerankAdapter::new(route).unwrap();
+    let err = client
+        .rerank(
+            RerankRequest {
+                model: "rr".into(),
+                query: "q".into(),
+                documents: vec!["a".into()],
+                top_n: None,
+                endpoint: "/rerank".into(),
+                return_documents: false,
+            },
+            &RetrievalCredential::new(Some("or-key".into())),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, RetrievalError::OversizedResponse { .. }),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

@@ -762,15 +762,8 @@ impl PlatformTransport {
                 });
             }
 
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| PlatformError::Transport(e.to_string()))?;
-            if bytes.len() > self.policy.max_response_bytes {
-                return Err(PlatformError::OversizedResponse {
-                    limit_bytes: self.policy.max_response_bytes,
-                });
-            }
+            let bytes =
+                read_body_bounded(response, self.policy.max_response_bytes, &self.cancel).await?;
 
             if !status.is_success() {
                 let preview = redact_preview(
@@ -790,11 +783,11 @@ impl PlatformTransport {
             }
 
             if spec.expect_binary {
-                return Ok(ResponseBody::Bytes(bytes.to_vec()));
+                return Ok(ResponseBody::Bytes(bytes));
             }
             if spec.expect_sse {
-                let text = String::from_utf8(bytes.to_vec())
-                    .map_err(|e| PlatformError::Decode(e.to_string()))?;
+                let text =
+                    String::from_utf8(bytes).map_err(|e| PlatformError::Decode(e.to_string()))?;
                 return Ok(ResponseBody::SseFrames(split_sse_data_frames(&text)));
             }
             if bytes.is_empty() {
@@ -805,6 +798,36 @@ impl PlatformTransport {
             return Ok(ResponseBody::Json(value));
         }
     }
+}
+
+/// Stream response body chunks until complete or hard byte cap exceeded.
+async fn read_body_bounded(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    cancel: &CancellationToken,
+) -> PlatformResult<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(PlatformError::Cancelled);
+        }
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => return Err(PlatformError::Cancelled),
+            c = response.chunk() => c.map_err(|e| PlatformError::Transport(e.to_string()))?,
+        };
+        match chunk {
+            Some(bytes) => {
+                if out.len().saturating_add(bytes.len()) > max_bytes {
+                    return Err(PlatformError::OversizedResponse {
+                        limit_bytes: max_bytes,
+                    });
+                }
+                out.extend_from_slice(&bytes);
+            }
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 fn multipart_text_part(
@@ -878,10 +901,24 @@ fn validate_extra_headers(headers: &ExtraHeaders) -> PlatformResult<()> {
 
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after_value(raw, chrono::Utc::now())
+}
+
+/// Parse Retry-After delta-seconds or IMF-fixdate; returns milliseconds.
+pub fn parse_retry_after_value(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
+    let raw = raw.trim();
     if let Ok(secs) = raw.parse::<u64>() {
         return Some(secs.saturating_mul(1000));
     }
-    None
+    let parsed = chrono::DateTime::parse_from_str(raw, "%a, %d %b %Y %H:%M:%S GMT")
+        .or_else(|_| chrono::DateTime::parse_from_rfc2822(raw))
+        .ok()?;
+    let target = parsed.with_timezone(&chrono::Utc);
+    let delta = target.signed_duration_since(now);
+    if delta.num_milliseconds() <= 0 {
+        return Some(0);
+    }
+    Some(delta.num_milliseconds() as u64)
 }
 
 fn extract_error_message(preview: &str) -> Option<String> {
@@ -984,5 +1021,21 @@ mod tests {
         let body = ": keep-alive\n\ndata: {\"a\":1}\n\ndata: [DONE]\n\n";
         let frames = split_sse_data_frames(body);
         assert_eq!(frames, vec!["{\"a\":1}".to_string(), "[DONE]".to_string()]);
+    }
+
+    #[test]
+    fn parse_retry_after_delta_and_http_date() {
+        use chrono::{TimeZone, Utc};
+        assert_eq!(parse_retry_after_value("2", Utc::now()), Some(2000));
+        let now = Utc.with_ymd_and_hms(1994, 11, 6, 8, 49, 37).unwrap();
+        assert_eq!(
+            parse_retry_after_value("Sun, 06 Nov 1994 08:49:47 GMT", now),
+            Some(10_000)
+        );
+        assert_eq!(
+            parse_retry_after_value("Sun, 06 Nov 1994 08:49:00 GMT", now),
+            Some(0)
+        );
+        assert!(parse_retry_after_value("garbage", now).is_none());
     }
 }
