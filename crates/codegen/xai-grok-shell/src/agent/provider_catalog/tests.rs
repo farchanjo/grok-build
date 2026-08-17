@@ -147,15 +147,16 @@ fn hop(path: &str, status: u16, body: &str) -> RecordedHop {
     }
 }
 
-// ── 1. Four accounts ───────────────────────────────────────────────────────
+// ── 1. Four accounts (Gate D: visible + selectable + auth isolation) ───────
 
 #[tokio::test]
-async fn four_accounts_distinct_canonical_ids_gate_hides_additional() {
+async fn four_accounts_distinct_canonical_ids_gate_open_selectable() {
     // Shared process lock with gate.rs tests — hold across env set/restore
     // and the full refresh/publish that reads multi_account_rollout_enabled().
+    // Default-enabled after Gate D (absent env); also accepts explicit "1".
     let _gate = multi_account_rollout_env_lock();
     let _restore = EnvRestore::capture(MULTI_ACCOUNT_ROLLOUT_ENV);
-    _restore.set("1");
+    _restore.clear();
     assert!(multi_account_rollout_enabled());
 
     let home = tempfile::tempdir().unwrap();
@@ -167,17 +168,17 @@ async fn four_accounts_distinct_canonical_ids_gate_hides_additional() {
         200,
         r#"{"data":[{"id":"shared-model"}]}"#,
     )]);
-    let (oa2, _, h2) = spawn_scripted_server(vec![hop(
+    let (oa2, rec2, h2) = spawn_scripted_server(vec![hop(
         "/models",
         200,
         r#"{"data":[{"id":"shared-model"}]}"#,
     )]);
-    let (or1, _, h3) = spawn_scripted_server(vec![hop(
+    let (or1, rec3, h3) = spawn_scripted_server(vec![hop(
         "/models",
         200,
         r#"{"data":[{"id":"shared-model","name":"Shared","supported_parameters":["tools"]}]}"#,
     )]);
-    let (or2, _, h4) = spawn_scripted_server(vec![hop(
+    let (or2, rec4, h4) = spawn_scripted_server(vec![hop(
         "/models",
         200,
         r#"{"data":[{"id":"shared-model","name":"Shared","supported_parameters":["tools"]}]}"#,
@@ -222,24 +223,56 @@ async fn four_accounts_distinct_canonical_ids_gate_hides_additional() {
     assert_eq!(snap.generation, pub_gen);
 
     let proj = snap.gated_projection();
-    assert!(proj.selection_entries.contains_key("openai:shared-model"));
+    let expected = [
+        "openai:shared-model",
+        "openai_work:shared-model",
+        "openrouter:shared-model",
+        "openrouter_team:shared-model",
+    ];
+    for id in expected {
+        assert!(
+            proj.selection_entries.contains_key(id),
+            "missing selection entry {id}"
+        );
+        let entry = proj.get_selectable(id).expect("selectable");
+        assert!(entry.info.user_selectable, "{id} must be selectable");
+        assert!(!entry.info.hidden, "{id} must not be hidden");
+        assert!(snap.get(id).is_some(), "snap.get({id}) must succeed");
+    }
     assert!(
-        proj.selection_entries
-            .contains_key("openai_work:shared-model")
-    );
-    assert!(
+        proj.hidden_additional_ids.is_empty(),
+        "Gate D open: no hidden-additional ids, got {:?}",
         proj.hidden_additional_ids
-            .contains(&"openai_work:shared-model".into())
     );
-    assert!(snap.get("openai:shared-model").is_some());
-    assert!(snap.get("openai_work:shared-model").is_none());
-    assert!(proj.get_any("openai_work:shared-model").is_some());
+    let visible = proj.visible_entries();
+    assert_eq!(visible.len(), 4, "four distinct visible/selectable ids");
 
-    let reqs = rec1.lock().unwrap();
-    assert!(
-        reqs[0].contains("Authorization: Bearer token-oa1")
-            || reqs[0].contains("authorization: Bearer token-oa1")
-    );
+    // Exact per-instance Authorization isolation for all four servers.
+    fn assert_bearer(recs: &std::sync::MutexGuard<'_, Vec<String>>, token: &str) {
+        assert!(!recs.is_empty(), "expected at least one request");
+        let req = &recs[0];
+        let lower = req.to_ascii_lowercase();
+        let needle = format!("authorization: bearer {token}");
+        assert!(
+            lower.contains(&needle.to_ascii_lowercase())
+                || req.contains(&format!("Bearer {token}")),
+            "expected Authorization bearer {token} in:\n{req}"
+        );
+        // No sibling token leakage.
+        for other in ["token-oa1", "token-oa2", "token-or1", "token-or2"] {
+            if other == token {
+                continue;
+            }
+            assert!(
+                !req.contains(other),
+                "request must not carry sibling token {other}:\n{req}"
+            );
+        }
+    }
+    assert_bearer(&rec1.lock().unwrap(), "token-oa1");
+    assert_bearer(&rec2.lock().unwrap(), "token-oa2");
+    assert_bearer(&rec3.lock().unwrap(), "token-or1");
+    assert_bearer(&rec4.lock().unwrap(), "token-or2");
 
     for h in [h1, h2, h3, h4] {
         h.join().unwrap();
@@ -766,14 +799,15 @@ fn cache_preserves_kind_and_credential_debug_redacts() {
     assert!(load_cached_account(home.path(), &rotated, 1, 1).is_none());
 }
 
-// ── 7. Gate-off ────────────────────────────────────────────────────────────
+// ── 7. Gate-off (explicit kill switch) ─────────────────────────────────────
 
 #[test]
 fn gate_off_omits_additional_from_projection_and_get() {
-    // Shared process lock with gate.rs — hold across clear/restore and publish.
+    // Shared process lock with gate.rs — hold across set/restore and publish.
+    // After Gate D, absent env is enabled; explicit "0" is the rollback switch.
     let _gate = multi_account_rollout_env_lock();
     let _restore = EnvRestore::capture(MULTI_ACCOUNT_ROLLOUT_ENV);
-    _restore.clear();
+    _restore.set("0");
     assert!(!multi_account_rollout_enabled());
 
     let publisher = CatalogPublisher::new();

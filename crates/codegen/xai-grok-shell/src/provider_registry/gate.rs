@@ -1,20 +1,21 @@
-//! Internal multi-account rollout gate.
+//! Internal multi-account rollout gate (Gate D).
 //!
-//! Disabled by default. This is a pure helper/constant plus env-parsed
-//! configuration. It is intentionally *not* consumed by any existing
-//! composition path yet, so it cannot change current behavior and never
-//! publishes duplicate-account models.
+//! Multi-account selection is **default enabled** after Gate D. The environment
+//! variable remains an explicit rollback kill switch:
+//! - absent → enabled
+//! - `1` / `true` / `on` / `yes` → enabled
+//! - `0` / `false` / `off` / `no` (and other non-enable values) → disabled
 
-/// Environment variable that enables the internal multi-account rollout.
+/// Environment variable that controls the multi-account rollout kill switch.
 ///
-/// Any of `1`, `true`, `on`, `yes` enables it; everything else (including the
-/// unset default) keeps it disabled.
+/// Any of `1`, `true`, `on`, `yes` enables it; any other set value disables it.
+/// When unset, the default (enabled after Gate D) applies.
 pub const MULTI_ACCOUNT_ROLLOUT_ENV: &str = "GROK_MULTI_ACCOUNT_ROLLOUT";
 
-/// Default rollout state: disabled until an operator opts in.
-pub const MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED: bool = false;
+/// Default rollout state: enabled after Gate D acceptance.
+pub const MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED: bool = true;
 
-/// Whether the internal multi-account rollout gate is open.
+/// Whether the multi-account rollout gate is open.
 pub fn multi_account_rollout_enabled() -> bool {
     let Some(raw) = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok() else {
         return MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED;
@@ -81,12 +82,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rollout_gate_is_disabled_by_default_and_opt_in() {
+    fn rollout_gate_is_enabled_by_default_with_explicit_kill_switch() {
         with_multi_account_rollout_env(|| {
             unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
             assert!(
-                !multi_account_rollout_enabled(),
-                "absent env stays disabled"
+                multi_account_rollout_enabled(),
+                "absent env stays enabled after Gate D"
             );
 
             for v in ["1", "true", "on", "yes", "TRUE"] {
@@ -95,15 +96,15 @@ mod tests {
             }
             for v in ["0", "false", "off", "no", ""] {
                 unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) };
-                assert!(!multi_account_rollout_enabled(), "`{v}` should not enable");
+                assert!(!multi_account_rollout_enabled(), "`{v}` should disable");
             }
         });
     }
 
     #[test]
-    fn constant_default_is_disabled() {
+    fn constant_default_is_enabled() {
         // Hold the shared lock so this read cannot race a concurrent mutator.
         let _guard = multi_account_rollout_env_lock();
-        assert!(!MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
+        assert!(MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
     }
 }

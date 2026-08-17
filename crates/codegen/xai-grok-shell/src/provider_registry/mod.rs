@@ -6,6 +6,8 @@
 
 pub mod cache;
 pub mod gate;
+#[cfg(test)]
+mod gate_d_acceptance;
 pub mod id;
 pub mod instance;
 pub mod lifecycle;

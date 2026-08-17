@@ -706,15 +706,11 @@ mod tests {
 
     #[test]
     fn additional_account_gated_when_rollout_off() {
-        use crate::provider_registry::MULTI_ACCOUNT_ROLLOUT_ENV;
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_env_lock};
+        let _guard = multi_account_rollout_env_lock();
         let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
-        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+        // Explicit kill switch (absent env is default-enabled after Gate D).
+        unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, "0") };
 
         let mut models = IndexMap::new();
         models.insert("openai-gpt-5.6-sol".into(), entry("gpt-5.6-sol"));
@@ -745,6 +741,48 @@ mod tests {
         // Compatibility path never over-hides.
         assert!(
             resolve_model_identity(&models, "work-openai:gpt-5.6-sol")
+                .resolved()
+                .is_some()
+        );
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
+            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
+        }
+    }
+
+    #[test]
+    fn additional_account_selectable_when_gate_open_by_default() {
+        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_env_lock};
+        let _guard = multi_account_rollout_env_lock();
+        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
+        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+
+        let mut models = IndexMap::new();
+        models.insert("openai-gpt-5.6-sol".into(), entry("gpt-5.6-sol"));
+        models.insert(
+            "work-openai:gpt-5.6-sol".into(),
+            entry_with_provider(
+                "gpt-5.6-sol",
+                Some(("work-openai", ModelProviderKind::OpenAi)),
+            ),
+        );
+        let mut origins = CatalogOrigins::new();
+        origins.insert(
+            "openai-gpt-5.6-sol".into(),
+            CatalogEntryOrigin::LegacyBuiltIn,
+        );
+        origins.insert(
+            "work-openai:gpt-5.6-sol".into(),
+            CatalogEntryOrigin::GeneratedAdditionalAccount,
+        );
+        apply_multi_account_publication_gate(&mut models, &origins);
+        assert!(
+            !models["work-openai:gpt-5.6-sol"].info.hidden,
+            "gate open must not force-hide additional accounts"
+        );
+        assert!(
+            resolve_model_identity_with_origins(&models, &origins, "work-openai:gpt-5.6-sol")
                 .resolved()
                 .is_some()
         );

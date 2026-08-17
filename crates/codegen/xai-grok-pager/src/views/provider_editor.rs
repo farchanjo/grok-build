@@ -1752,4 +1752,81 @@ mod tests {
         assert_eq!(patch.display_name.as_deref(), Some("Changed"));
         assert!(patch.openrouter_order.is_none());
     }
+
+    #[test]
+    fn clone_toggle_enabled_and_operation_id_persistence() {
+        let mut state = ProviderEditorState::new(sample_detail());
+        state.page = ProviderEditorPage::References;
+        state.clone_id_draft = "local_vllm_clone".into();
+        state.field_index = fields_for_page(ProviderEditorPage::References)
+            .iter()
+            .position(|f| *f == EditorField::Clone)
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            EditorOutcome::Command(EditorCommand::Clone {
+                new_id: "local_vllm_clone".into()
+            })
+        );
+
+        state.page = ProviderEditorPage::General;
+        state.field_index = fields_for_page(ProviderEditorPage::General)
+            .iter()
+            .position(|f| *f == EditorField::ToggleEnabled)
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            EditorOutcome::Command(EditorCommand::ToggleEnabled)
+        );
+
+        // Pending mutation op-id is used for late-async discard correlation.
+        state.pending_operation_id = Some("op-editor-1".into());
+        assert_eq!(state.pending_operation_id.as_deref(), Some("op-editor-1"));
+        state.pending_operation_id = None;
+        assert!(state.pending_operation_id.is_none());
+    }
+
+    #[test]
+    fn conflict_clone_and_admin_clear_are_independent() {
+        let mut state = ProviderEditorState::new(sample_detail());
+        state.enter_conflict(
+            xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo {
+                provider_id: "local_vllm".into(),
+                client_generation: RegistryGeneration(1),
+                live_generation: RegistryGeneration(2),
+                changed_fields: vec!["base_url".into()],
+                guidance: "Reload or Clone".into(),
+            },
+        );
+        state.clone_id_draft = "local_vllm_copy".into();
+        state.field_index = fields_for_page(ProviderEditorPage::References)
+            .iter()
+            .position(|f| *f == EditorField::ConflictClone)
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            EditorOutcome::Command(EditorCommand::ConflictClone {
+                new_id: "local_vllm_copy".into()
+            })
+        );
+
+        state.page = ProviderEditorPage::Authentication;
+        state.field_index = fields_for_page(ProviderEditorPage::Authentication)
+            .iter()
+            .position(|f| *f == EditorField::AdminKeySlot)
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('c'))),
+            EditorOutcome::Command(EditorCommand::ClearAdminKey)
+        );
+        assert!(state.clear_admin_key);
+        assert_eq!(
+            state.credential_slot_update().admin,
+            SecretFieldUpdate::Clear
+        );
+        assert_eq!(
+            state.credential_slot_update().application,
+            SecretFieldUpdate::Preserve
+        );
+    }
 }

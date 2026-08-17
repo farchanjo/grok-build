@@ -7,9 +7,10 @@
 //! [`crate::provider_registry::ProviderCacheStore`], and publishes one atomic
 //! [`CatalogSnapshot`] generation.
 //!
-//! Multi-account rows remain behind
-//! [`crate::provider_registry::multi_account_rollout_enabled`]. The single
-//! user-facing API is [`CatalogSnapshot::gated_projection`].
+//! Multi-account selection is default-enabled after Gate D; explicit
+//! `GROK_MULTI_ACCOUNT_ROLLOUT=0` (or false/off/no) remains a kill switch that
+//! omits additional accounts. The single user-facing API is
+//! [`CatalogSnapshot::gated_projection`].
 
 mod bounds;
 mod http_body;

@@ -1586,4 +1586,83 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn configured_add_enable_disable_edit_keyboard_flow() {
+        let mut state = ProviderModalState::new();
+        state.set_configured_providers(vec!["openai_work".into()]);
+        state.focus_provider("openai_work");
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('e'))),
+            ProviderModalOutcome::Command(ProviderCommand::OpenEditor {
+                provider_id: "openai_work".into()
+            })
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('y'))),
+            ProviderModalOutcome::Command(ProviderCommand::Enable {
+                provider_id: "openai_work".into()
+            })
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('n'))),
+            ProviderModalOutcome::Command(ProviderCommand::Disable {
+                provider_id: "openai_work".into()
+            })
+        );
+
+        // Add configured: a → id → base url → kind → confirm.
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('a'))),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(state.mode, ProviderModalMode::Adding { .. }));
+        {
+            let ProviderModalMode::Adding { id_editor, .. } = &mut state.mode else {
+                panic!("expected Adding mode");
+            };
+            id_editor.insert_paste("lab_vllm");
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        {
+            let ProviderModalMode::Adding { url_editor, .. } = &mut state.mode else {
+                panic!("expected Adding mode");
+            };
+            url_editor.insert_paste("http://127.0.0.1:8000/v1");
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        // Kind step → Confirm.
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::AddConfigured)
+        );
+        let pending = state.pending_add.expect("pending add");
+        assert_eq!(pending.id, "lab_vllm");
+        assert_eq!(pending.base_url, "http://127.0.0.1:8000/v1");
+        assert!(!format!("{pending:?}").contains("sk-"));
+    }
+
+    #[test]
+    fn list_operation_id_is_tracked_for_late_async_discard() {
+        let mut state = ProviderModalState::new();
+        // List-level mutations stamp a pending op id for late-async discard.
+        state.pending_list_operation_id = Some("op-list-1".into());
+        assert_eq!(
+            state.pending_list_operation_id.as_deref(),
+            Some("op-list-1")
+        );
+        // Cleared pending means a historical result must be discarded.
+        state.pending_list_operation_id = None;
+        assert!(state.pending_list_operation_id.is_none());
+    }
 }

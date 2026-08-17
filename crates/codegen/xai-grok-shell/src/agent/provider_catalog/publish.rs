@@ -6,8 +6,8 @@
 //!
 //! Multi-account rows remain gated. The single projection API is
 //! [`CatalogSnapshot::gated_projection`]: gate-off omits additional accounts
-//! entirely; gate-on keeps them hidden/non-selectable. Callers must not search
-//! raw `accounts` for user-facing selection.
+//! entirely; gate-on publishes them as visible and user-selectable. Callers
+//! must not search raw `accounts` for user-facing selection.
 
 use super::project::is_built_in_compatibility_instance;
 use super::types::{CatalogFetchSource, DiscoveredModel, InstanceCatalogResult};
@@ -24,10 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct GatedCatalogProjection {
     /// Accounts visible under the current gate (complete only).
     pub accounts: IndexMap<String, InstanceCatalogResult>,
-    /// Selection-keyed entries. Additional accounts (gate on) are present but
-    /// hidden + non-selectable. Gate off omits them entirely.
+    /// Selection-keyed entries. Gate-on includes additional accounts as
+    /// visible + selectable. Gate-off omits them entirely.
     pub selection_entries: IndexMap<String, ModelEntry>,
     /// Canonical ids that are present only as gate-hidden additional rows.
+    /// Empty when Gate D is open (additional accounts are selectable).
     pub hidden_additional_ids: Vec<String>,
     /// Collision diagnostics (additional account lost to built-in key).
     pub collisions: Vec<String>,
@@ -224,7 +225,6 @@ fn build_gated_projection(
 ) -> GatedCatalogProjection {
     let mut gated_accounts = IndexMap::new();
     let mut selection = IndexMap::new();
-    let mut hidden_additional = Vec::new();
     let mut collisions = Vec::new();
 
     // Pass 1: built-in compatibility accounts first (deterministic order).
@@ -244,7 +244,7 @@ fn build_gated_projection(
         }
     }
 
-    // Pass 2: additional accounts only when gate is open.
+    // Pass 2: additional accounts only when gate is open (Gate D: visible + selectable).
     if gate_open {
         for (id, result) in accounts {
             if !result.is_complete_publishable() {
@@ -275,22 +275,19 @@ fn build_gated_projection(
             }
             gated_accounts.insert(id.clone(), result.clone());
             for model in &result.models {
-                let mut entry = discovered_to_model_entry(model);
-                entry.info.hidden = true;
-                entry.info.user_selectable = false;
-                hidden_additional.push(model.canonical_selection_id.clone());
+                let entry = discovered_to_model_entry(model);
                 selection.insert(model.canonical_selection_id.clone(), entry);
             }
         }
     }
 
-    hidden_additional.sort();
-    hidden_additional.dedup();
     collisions.sort();
     GatedCatalogProjection {
         accounts: gated_accounts,
         selection_entries: selection,
-        hidden_additional_ids: hidden_additional,
+        // Gate D open: additional accounts are selectable; nothing is gate-hidden.
+        // Field retained for diagnostics / rollback compatibility.
+        hidden_additional_ids: Vec::new(),
         collisions,
     }
 }
@@ -510,5 +507,138 @@ mod tests {
         assert_eq!(snap.gated_account_count(), 2);
         assert!(snap.get("openai:a").is_some());
         assert!(snap.get("openrouter:b").is_some());
+    }
+
+    #[test]
+    fn gate_open_additional_accounts_are_selectable() {
+        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_env_lock};
+
+        let _gate = multi_account_rollout_env_lock();
+        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
+        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+
+        let publisher = CatalogPublisher::new();
+        let pub_gen = publisher.begin_generation();
+        let mut accounts = IndexMap::new();
+        accounts.insert(
+            "openai".into(),
+            sample_result(
+                "openai",
+                ProviderKind::OpenAi,
+                "gpt-4o",
+                "openai:gpt-4o",
+                pub_gen,
+            ),
+        );
+        accounts.insert(
+            "openai_work".into(),
+            sample_result(
+                "openai_work",
+                ProviderKind::OpenAi,
+                "gpt-4o",
+                "openai_work:gpt-4o",
+                pub_gen,
+            ),
+        );
+        assert!(publisher.publish_if_current(pub_gen, 1, accounts));
+        let snap = publisher.load();
+        let proj = snap.gated_projection();
+        assert!(proj.accounts.contains_key("openai_work"));
+        assert!(snap.get("openai_work:gpt-4o").is_some());
+        assert!(proj.hidden_additional_ids.is_empty());
+        let entry = proj.get_selectable("openai_work:gpt-4o").unwrap();
+        assert!(entry.info.user_selectable);
+        assert!(!entry.info.hidden);
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
+            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
+        }
+    }
+
+    #[test]
+    fn gate_off_omits_additional_and_built_in_collision_wins() {
+        use crate::provider_registry::{MULTI_ACCOUNT_ROLLOUT_ENV, multi_account_rollout_env_lock};
+
+        let _gate = multi_account_rollout_env_lock();
+        let previous = std::env::var(MULTI_ACCOUNT_ROLLOUT_ENV).ok();
+        unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, "0") };
+
+        let publisher = CatalogPublisher::new();
+        let pub_gen = publisher.begin_generation();
+        let mut accounts = IndexMap::new();
+        accounts.insert(
+            "openai".into(),
+            sample_result(
+                "openai",
+                ProviderKind::OpenAi,
+                "gpt-4o",
+                "openai:gpt-4o",
+                pub_gen,
+            ),
+        );
+        accounts.insert(
+            "openai_work".into(),
+            sample_result(
+                "openai_work",
+                ProviderKind::OpenAi,
+                "gpt-4o",
+                "openai_work:gpt-4o",
+                pub_gen,
+            ),
+        );
+        assert!(publisher.publish_if_current(pub_gen, 1, accounts));
+        let snap = publisher.load();
+        assert!(snap.get("openai:gpt-4o").is_some());
+        assert!(snap.get("openai_work:gpt-4o").is_none());
+        assert!(!snap.gated_projection().accounts.contains_key("openai_work"));
+        assert!(
+            !snap
+                .gated_projection()
+                .selection_entries
+                .contains_key("openai_work:gpt-4o")
+        );
+
+        // Built-in-first collision under gate-open (restore enable).
+        unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) };
+        let publisher2 = CatalogPublisher::new();
+        let gen2 = publisher2.begin_generation();
+        let mut collision = IndexMap::new();
+        collision.insert(
+            "openai".into(),
+            sample_result(
+                "openai",
+                ProviderKind::OpenAi,
+                "shared",
+                "openai:shared",
+                gen2,
+            ),
+        );
+        // Additional account reuses built-in canonical id → dropped + recorded.
+        collision.insert(
+            "openai_work".into(),
+            sample_result(
+                "openai_work",
+                ProviderKind::OpenAi,
+                "shared",
+                "openai:shared",
+                gen2,
+            ),
+        );
+        assert!(publisher2.publish_if_current(gen2, 1, collision));
+        let snap2 = publisher2.load();
+        assert!(snap2.get("openai:shared").is_some());
+        assert!(
+            !snap2
+                .gated_projection()
+                .accounts
+                .contains_key("openai_work")
+        );
+        assert!(!snap2.gated_projection().collisions.is_empty());
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var(MULTI_ACCOUNT_ROLLOUT_ENV, v) },
+            None => unsafe { std::env::remove_var(MULTI_ACCOUNT_ROLLOUT_ENV) },
+        }
     }
 }
