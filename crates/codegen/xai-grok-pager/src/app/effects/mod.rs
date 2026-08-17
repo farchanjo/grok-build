@@ -74,6 +74,12 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks.spawn(run_provider_operation(agent_id, operation, repair, tx));
         }
+        Effect::RetrievalOperation {
+            agent_id,
+            operation,
+        } => {
+            tasks.spawn(run_retrieval_operation(agent_id, operation));
+        }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
                 .spawn(async move {
@@ -5233,6 +5239,169 @@ async fn run_provider_operation(
         credential_write_receipt,
         management,
     }
+}
+
+async fn run_retrieval_operation(
+    agent_id: crate::app::agent::AgentId,
+    operation: actions::RetrievalOperation,
+) -> TaskResult {
+    use actions::{RetrievalManagementResult, RetrievalOperation};
+    use crate::views::retrieval_settings_modal::RetrievalCommand;
+    use indexmap::IndexMap;
+    use xai_grok_shell::provider_registry::management::dto::RegistryGeneration;
+    use xai_grok_shell::retrieval_config::management::dto::{
+        CloneRetrievalEntityRequest, DeleteRetrievalEntityRequest, ReorderRetrievalRequest,
+        RetrievalGraphSaveRequest, UpsertEmbeddingRequest, UpsertProfileRequest,
+        UpsertRerankerRequest,
+    };
+    use xai_grok_shell::retrieval_config::RetrievalManagementService;
+
+    let svc = RetrievalManagementService::from_grok_home();
+    let result = match operation {
+        RetrievalOperation::LoadSnapshot => match svc.graph_snapshot() {
+            Ok(snap) => RetrievalManagementResult::Snapshot(snap),
+            Err(e) => RetrievalManagementResult::Error(e),
+        },
+        RetrievalOperation::Preview {
+            kind,
+            id,
+            operation_id,
+        } => RetrievalManagementResult::Preview(svc.preview(&kind, &id, operation_id)),
+        RetrievalOperation::Command(cmd) => {
+            let expected = svc.current_generation();
+            match cmd {
+                RetrievalCommand::Reload
+                | RetrievalCommand::DismissConflictReload
+                | RetrievalCommand::DismissConflictKeepDraft => match svc.graph_snapshot() {
+                    Ok(snap) => RetrievalManagementResult::Snapshot(snap),
+                    Err(e) => RetrievalManagementResult::Error(e),
+                },
+                RetrievalCommand::SaveGraph => {
+                    let Ok(snap) = svc.graph_snapshot() else {
+                        return TaskResult::RetrievalOperationComplete {
+                            agent_id,
+                            result: RetrievalManagementResult::Error(
+                                "could not load graph for save".into(),
+                            ),
+                        };
+                    };
+                    let mut emb = IndexMap::new();
+                    for e in snap.embedding_models {
+                        emb.insert(e.id, e.config);
+                    }
+                    let mut rr = IndexMap::new();
+                    for e in snap.reranker_models {
+                        rr.insert(e.id, e.config);
+                    }
+                    let mut profiles = IndexMap::new();
+                    for e in snap.retrieval_profiles {
+                        profiles.insert(e.id, e.config);
+                    }
+                    let r = svc.save_graph(RetrievalGraphSaveRequest {
+                        expected_generation: snap.generation,
+                        embedding_models: emb,
+                        reranker_models: rr,
+                        retrieval_profiles: profiles,
+                        prime: xai_grok_shell::retrieval_config::PrimeConfig {
+                            skills: snap.prime.skills,
+                            agents: snap.prime.agents,
+                        },
+                        memory_retrieval_profile: snap.memory_retrieval_profile,
+                        confirm_memory_reindex: false,
+                        operation_id: None,
+                    });
+                    RetrievalManagementResult::Mutation(r)
+                }
+                RetrievalCommand::ValidatePreview { kind, id } => {
+                    RetrievalManagementResult::Preview(svc.preview(&kind, &id, None))
+                }
+                RetrievalCommand::UpsertEmbedding { id, config } => {
+                    RetrievalManagementResult::Mutation(svc.upsert_embedding(UpsertEmbeddingRequest {
+                        expected_generation: expected,
+                        id,
+                        config,
+                        operation_id: None,
+                    }))
+                }
+                RetrievalCommand::UpsertReranker { id, config } => {
+                    RetrievalManagementResult::Mutation(svc.upsert_reranker(UpsertRerankerRequest {
+                        expected_generation: expected,
+                        id,
+                        config,
+                        operation_id: None,
+                    }))
+                }
+                RetrievalCommand::UpsertProfile { id, config } => {
+                    RetrievalManagementResult::Mutation(svc.upsert_profile(UpsertProfileRequest {
+                        expected_generation: expected,
+                        id,
+                        config,
+                        operation_id: None,
+                    }))
+                }
+                RetrievalCommand::CloneEntity {
+                    kind,
+                    source_id,
+                    new_id,
+                } => RetrievalManagementResult::Mutation(svc.clone_entity(
+                    CloneRetrievalEntityRequest {
+                        expected_generation: expected,
+                        kind,
+                        source_id,
+                        new_id,
+                        operation_id: None,
+                    },
+                )),
+                RetrievalCommand::DeleteEntity { kind, id } => RetrievalManagementResult::Mutation(
+                    svc.delete_entity(DeleteRetrievalEntityRequest {
+                        expected_generation: expected,
+                        kind,
+                        id,
+                        operation_id: None,
+                    }),
+                ),
+                RetrievalCommand::Reorder { kind, ordered_ids } => RetrievalManagementResult::Mutation(
+                    svc.reorder(ReorderRetrievalRequest {
+                        expected_generation: expected,
+                        kind,
+                        ordered_ids,
+                        operation_id: None,
+                    }),
+                ),
+                RetrievalCommand::SavePrime { prime } => {
+                    RetrievalManagementResult::Mutation(svc.save_prime(expected, prime, None))
+                }
+                RetrievalCommand::SaveMemoryProfile {
+                    profile,
+                    confirm_reindex,
+                } => RetrievalManagementResult::Mutation(svc.save_memory_profile(
+                    expected,
+                    profile,
+                    confirm_reindex,
+                    None,
+                )),
+                RetrievalCommand::ConfirmMemoryReindex => {
+                    // Re-load and save memory profile with confirmation.
+                    let snap = match svc.graph_snapshot() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return TaskResult::RetrievalOperationComplete {
+                                agent_id,
+                                result: RetrievalManagementResult::Error(e),
+                            };
+                        }
+                    };
+                    RetrievalManagementResult::Mutation(svc.save_memory_profile(
+                        RegistryGeneration(snap.generation.get()),
+                        snap.memory_retrieval_profile,
+                        true,
+                        None,
+                    ))
+                }
+            }
+        }
+    };
+    TaskResult::RetrievalOperationComplete { agent_id, result }
 }
 
 #[cfg(test)]

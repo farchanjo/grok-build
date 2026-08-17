@@ -280,9 +280,11 @@ pub enum ImpactGroupKind {
     WorkflowsAndGoals,
     AuxiliaryRoutes,
     Memory,
-    /// Structurally empty until PR15 named retrieval config.
+    /// Named retrieval profiles that route through this provider (PR15).
     RetrievalProfiles,
+    /// Embedding models that exact-reference this provider (PR15).
     EmbeddingModels,
+    /// Reranker models that exact-reference this provider (PR15).
     RerankerModels,
 }
 

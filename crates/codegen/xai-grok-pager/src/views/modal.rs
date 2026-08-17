@@ -294,6 +294,10 @@ pub enum ActiveModal {
     Providers {
         state: Box<crate::views::providers_modal::ProviderModalState>,
     },
+    /// Named retrieval graph editor (`/retrieval-settings`).
+    RetrievalSettings {
+        state: Box<crate::views::retrieval_settings_modal::RetrievalSettingsState>,
+    },
     /// Reset-settings confirmation, stacked above Settings.
     ///
     /// The underlying `SettingsModalState` is moved in/out so cancel
@@ -644,6 +648,7 @@ impl ActiveModal {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::Providers { .. }
+            | ActiveModal::RetrievalSettings { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
@@ -674,6 +679,7 @@ impl ActiveModal {
             ActiveModal::MemoryBrowser { .. } => "Memory",
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::Providers { .. } => "Providers",
+            ActiveModal::RetrievalSettings { .. } => "Retrieval settings",
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
         }

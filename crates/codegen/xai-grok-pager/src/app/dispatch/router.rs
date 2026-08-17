@@ -1032,6 +1032,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
         Action::OpenSettings => dispatch_open_settings(app, None),
         Action::OpenProviders => dispatch_open_providers(app),
+        Action::OpenRetrievalSettings => {
+            crate::app::dispatch::settings::ui::dispatch_open_retrieval_settings(app)
+        }
+        Action::RetrievalCommand(cmd) => {
+            crate::app::dispatch::settings::ui::dispatch_retrieval_command(app, cmd)
+        }
         Action::ProviderCommand(command) => dispatch_provider_command(app, command),
         Action::OpenSettingsFocus { key } => dispatch_open_settings(app, Some(key)),
         Action::PrivacyBannerAccept => dispatch_privacy_banner_accept(app),

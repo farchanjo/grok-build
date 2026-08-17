@@ -215,6 +215,100 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
     effects
 }
 
+/// Open `/retrieval-settings` (shell-authoritative graph snapshot).
+/// Welcome/sessionless mode follows providers placeholder-session compatibility.
+pub(in crate::app::dispatch) fn dispatch_open_retrieval_settings(app: &mut AppView) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::retrieval_settings_modal::RetrievalSettingsState;
+
+    let mut effects = Vec::new();
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => {
+            if let Some(existing) = app.agents.keys().next().copied() {
+                crate::app::dispatch::ctx::switch_to_agent(
+                    app,
+                    existing,
+                    crate::app::dispatch::ctx::SwitchCause::Picker,
+                );
+                existing
+            } else {
+                let (new_id, create_effects) =
+                    crate::app::dispatch::session::lifecycle::dispatch_new_session_inner_with_id(
+                        app, None,
+                    );
+                effects.extend(create_effects);
+                new_id
+            }
+        }
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return effects;
+    };
+    if let Some(ActiveModal::RetrievalSettings { .. }) = agent.active_modal.as_ref() {
+        agent.active_modal = None;
+        return effects;
+    }
+    agent.active_modal = Some(ActiveModal::RetrievalSettings {
+        state: Box::new(RetrievalSettingsState::new()),
+    });
+    effects.push(Effect::RetrievalOperation {
+        agent_id: id,
+        operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+    });
+    effects
+}
+
+/// Route a retrieval modal command to a shell management effect.
+pub(in crate::app::dispatch) fn dispatch_retrieval_command(
+    app: &mut AppView,
+    command: crate::views::retrieval_settings_modal::RetrievalCommand,
+) -> Vec<Effect> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::retrieval_settings_modal::RetrievalCommand;
+
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    let Some(ActiveModal::RetrievalSettings { state }) = agent.active_modal.as_mut() else {
+        return vec![];
+    };
+
+    match command {
+        RetrievalCommand::Reload | RetrievalCommand::DismissConflictReload => {
+            state.loading = true;
+            state.conflict = None;
+            state.dirty = false;
+            vec![Effect::RetrievalOperation {
+                agent_id,
+                operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+            }]
+        }
+        RetrievalCommand::DismissConflictKeepDraft => {
+            state.conflict = None;
+            vec![]
+        }
+        RetrievalCommand::ValidatePreview { kind, id } => {
+            let op_id = state.pending_operation_id.clone();
+            vec![Effect::RetrievalOperation {
+                agent_id,
+                operation: crate::app::actions::RetrievalOperation::Preview {
+                    kind,
+                    id,
+                    operation_id: op_id,
+                },
+            }]
+        }
+        other => vec![Effect::RetrievalOperation {
+            agent_id,
+            operation: crate::app::actions::RetrievalOperation::Command(other),
+        }],
+    }
+}
+
 /// Move a provider command from the modal into an async native-provider
 /// effect. Secrets are consumed exactly once and wrapped in a redacted type
 /// before leaving the reducer.

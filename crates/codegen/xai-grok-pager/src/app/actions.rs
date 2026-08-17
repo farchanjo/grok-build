@@ -633,6 +633,10 @@ pub enum Action {
     OpenSettings,
     /// Open the provider manager (`/providers`, command palette).
     OpenProviders,
+    /// Open the retrieval graph settings (`/retrieval-settings`).
+    OpenRetrievalSettings,
+    /// Command from the retrieval settings modal.
+    RetrievalCommand(crate::views::retrieval_settings_modal::RetrievalCommand),
     /// Credential-free request emitted by the provider modal. The provider
     /// bridge reads a submitted key from the ephemeral modal state instead of
     /// carrying it through this debug-printable action.
@@ -1511,6 +1515,28 @@ pub enum ProviderOperation {
     },
 }
 
+/// Shell-authoritative retrieval graph operations (PR15; secret-free).
+#[derive(Debug)]
+pub enum RetrievalOperation {
+    LoadSnapshot,
+    Preview {
+        kind: String,
+        id: String,
+        operation_id: Option<String>,
+    },
+    /// Opaque command routed through the management service.
+    Command(crate::views::retrieval_settings_modal::RetrievalCommand),
+}
+
+/// Secret-free retrieval management result for the reducer.
+#[derive(Debug, Clone)]
+pub enum RetrievalManagementResult {
+    Snapshot(xai_grok_shell::retrieval_config::dto::RetrievalGraphSnapshot),
+    Mutation(xai_grok_shell::retrieval_config::dto::RetrievalMutationResult),
+    Preview(xai_grok_shell::retrieval_config::dto::RetrievalPreviewResult),
+    Error(String),
+}
+
 #[derive(Debug)]
 pub enum Effect {
     /// Create a new ACP session.
@@ -1539,6 +1565,11 @@ pub enum Effect {
         /// When set, this op was launched as a credential repair; completion
         /// must echo the same scope to resume a stashed prompt.
         repair: Option<crate::app::agent::CredentialRepairScope>,
+    },
+    /// Shell-authoritative retrieval graph management (PR15; secret-free).
+    RetrievalOperation {
+        agent_id: AgentId,
+        operation: RetrievalOperation,
     },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
@@ -2553,6 +2584,11 @@ pub enum TaskResult {
         credential_write_receipt: Option<crate::app::agent::CredentialWriteReceipt>,
         /// Optional shell management result payload (secret-free).
         management: Option<ProviderManagementResult>,
+    },
+    /// Retrieval graph management result (secret-free).
+    RetrievalOperationComplete {
+        agent_id: AgentId,
+        result: RetrievalManagementResult,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {

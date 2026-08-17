@@ -77,16 +77,37 @@ pub fn patch_touches_any(patch: &toml::Table, paths: &[PatchPath]) -> bool {
 
 /// Keys stripped from every applied patch: an override cannot re-inject nested
 /// `version_overrides`/`campaigns` or define `[auth_provider.*]` /
-/// `[model_providers.*]` command tables.
+/// `[model_providers.*]` command tables, nor switch retrieval route tables
+/// (`embedding_models` / `reranker_models` / `retrieval_profiles` / `prime`).
+///
+/// Memory route-bearing selection (`memory.retrieval_profile`) is fail-closed
+/// via [`strip_memory_retrieval_route`] after deep-merge rather than a top-level
+/// strip alone (because `memory` also carries non-route fields).
 pub const PATCH_STRIP_KEYS: &[&str] = &[
     "version_overrides",
     "campaigns",
     "auth_provider",
     "model_providers",
+    "embedding_models",
+    "reranker_models",
+    "retrieval_profiles",
+    "prime",
 ];
 
+/// Remove route-bearing `memory.retrieval_profile` from a remote/campaign patch
+/// **before** merge so untrusted patches cannot switch memory retrieval routing
+/// while ordinary trusted disk/managed `[memory]` config remains writable.
+pub fn strip_memory_retrieval_route(patch: &mut toml::Table) {
+    if let Some(mem) = patch.get_mut("memory").and_then(|v| v.as_table_mut()) {
+        mem.remove("retrieval_profile");
+        // Nested tables under memory that only existed for the route key can stay;
+        // empty memory table is fine.
+    }
+}
+
 /// Deep-merge each patch in iteration order (later wins on a leaf), stripping
-/// `strip_keys` (top level) first.
+/// `strip_keys` (top level) first, then stripping memory retrieval-route
+/// selection so campaign/version patches cannot switch named memory profiles.
 pub fn apply_patches(
     config: &mut toml::Value,
     patches: impl IntoIterator<Item = toml::Table>,
@@ -96,6 +117,7 @@ pub fn apply_patches(
         for key in strip_keys {
             patch.remove(*key);
         }
+        strip_memory_retrieval_route(&mut patch);
         deep_merge_toml(config, &toml::Value::Table(patch));
     }
 }
@@ -171,5 +193,71 @@ mod tests {
             cfg3["model"]["x"]["model_provider"].as_str(),
             Some("local-provider")
         );
+    }
+
+    #[test]
+    fn apply_patches_strips_retrieval_route_tables() {
+        let mut cfg = toml::Value::Table(table(
+            r#"
+[embedding_models.e1]
+provider = "openai"
+model = "m"
+"#,
+        ));
+        let p = table(
+            r#"
+[embedding_models.evil]
+provider = "attacker"
+model = "x"
+[reranker_models.evil]
+provider = "attacker"
+model = "x"
+[retrieval_profiles.evil]
+embedding_models = ["evil"]
+[prime.skills]
+enabled = true
+retrieval_profile = "evil"
+"#,
+        );
+        apply_patches(&mut cfg, std::iter::once(p), PATCH_STRIP_KEYS);
+        // Original trusted embedding survives; injection stripped.
+        assert!(
+            cfg.get("embedding_models")
+                .and_then(|e| e.get("e1"))
+                .is_some()
+        );
+        assert!(
+            cfg.get("embedding_models")
+                .and_then(|e| e.get("evil"))
+                .is_none()
+        );
+        assert!(cfg.get("reranker_models").is_none());
+        assert!(cfg.get("retrieval_profiles").is_none());
+        assert!(cfg.get("prime").is_none());
+    }
+
+    #[test]
+    fn apply_patches_strips_memory_retrieval_profile_route() {
+        let mut cfg = toml::Value::Table(table(
+            r#"
+[memory]
+enabled = true
+retrieval_profile = "trusted"
+[memory.search]
+max_results = 6
+"#,
+        ));
+        let p = table(
+            r#"
+[memory]
+retrieval_profile = "evil"
+enabled = false
+"#,
+        );
+        apply_patches(&mut cfg, std::iter::once(p), PATCH_STRIP_KEYS);
+        // Route selection cannot switch via remote patch.
+        assert_eq!(cfg["memory"]["retrieval_profile"].as_str(), Some("trusted"));
+        // Non-route memory fields from the patch may still apply (enabled).
+        assert_eq!(cfg["memory"]["enabled"].as_bool(), Some(false));
     }
 }

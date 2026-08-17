@@ -1567,6 +1567,40 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             retry_effects
         }
+        TaskResult::RetrievalOperationComplete { agent_id, result } => {
+            use crate::app::actions::RetrievalManagementResult;
+            use crate::views::modal::ActiveModal;
+
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            let Some(ActiveModal::RetrievalSettings { state }) = agent.active_modal.as_mut() else {
+                return vec![];
+            };
+            match result {
+                RetrievalManagementResult::Snapshot(snap) => {
+                    state.apply_snapshot(snap);
+                }
+                RetrievalManagementResult::Mutation(m) => {
+                    let need_reload = m.ok && m.snapshot.is_none();
+                    state.apply_mutation_result(m);
+                    if need_reload {
+                        return vec![crate::app::actions::Effect::RetrievalOperation {
+                            agent_id,
+                            operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+                        }];
+                    }
+                }
+                RetrievalManagementResult::Preview(p) => {
+                    state.apply_preview(p);
+                }
+                RetrievalManagementResult::Error(e) => {
+                    state.loading = false;
+                    state.error = Some(e);
+                }
+            }
+            vec![]
+        }
     }
 }
 

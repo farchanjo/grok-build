@@ -50,6 +50,7 @@ pub mod release_notes;
 pub mod remember;
 pub mod rename;
 pub mod resume;
+pub mod retrieval_settings;
 pub mod rewind;
 pub mod screen_mode_switch;
 pub mod scroll_debug;
@@ -130,6 +131,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(providers::ProvidersCommand),
+        Arc::new(retrieval_settings::RetrievalSettingsCommand),
         Arc::new(privacy::PrivacyCommand),
         Arc::new(rewind::RewindCommand),
         Arc::new(jump::JumpCommand),

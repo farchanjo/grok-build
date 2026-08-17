@@ -468,6 +468,40 @@ impl AgentView {
             }
         }
 
+        // Retrieval settings: shell-authoritative graph editor (no secrets).
+        if let ActiveModal::RetrievalSettings { state } = modal {
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &[],
+                sizing: mw::ModalSizing::default(),
+                fold_info: None,
+            };
+            match mw::handle_modal_key(&mut state.window, key, &chrome_cfg) {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Unhandled => {
+                    if matches!(key.code, KeyCode::Esc)
+                        && matches!(
+                            state.edit,
+                            crate::views::retrieval_settings_modal::RetrievalEditMode::Browse
+                        )
+                        && state.conflict.is_none()
+                    {
+                        self.active_modal = None;
+                        return InputOutcome::Changed;
+                    }
+                    if let Some(cmd) = state.handle_key(*key) {
+                        return InputOutcome::Action(Action::RetrievalCommand(cmd));
+                    }
+                    return InputOutcome::Changed;
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+
         // ResetSettingsConfirm: y/n routing. Handled before generic
         // char-match so Esc/F2/Ctrl+, route to Cancel (not modal close).
         if let Some(ActiveModal::ResetSettingsConfirm { modal, .. }) = self.active_modal.as_ref() {
@@ -519,6 +553,7 @@ impl AgentView {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::Providers { .. }
+            | ActiveModal::RetrievalSettings { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
         }
@@ -1649,6 +1684,15 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        if let Some(ActiveModal::RetrievalSettings { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            if matches!(outcome, ModalWindowOutcome::CloseRequested) {
+                self.active_modal = None;
+            }
+            return InputOutcome::Changed;
+        }
+
         // ResetSettingsConfirm: route mouse events through the
         // modal-window chrome.
         if let Some(ActiveModal::ResetSettingsConfirm { settings_state, .. }) =
@@ -2389,6 +2433,9 @@ impl AgentView {
                 );
             } else if let modal::ActiveModal::Providers { state } = active_modal {
                 crate::views::providers_modal::render_modal(buf, area, state, compact);
+            } else if let modal::ActiveModal::RetrievalSettings { state } = active_modal {
+                let theme = crate::theme::Theme::current();
+                state.render(area, buf, &theme);
             } else if matches!(
                 active_modal,
                 modal::ActiveModal::ResetSettingsConfirm { .. }

@@ -36,6 +36,7 @@ pub mod provider_editor;
 pub mod providers_modal;
 pub mod question_view;
 pub mod queue_pane;
+pub mod retrieval_settings_modal;
 pub mod rewind;
 pub mod scroll_debug_hud;
 pub mod session_picker;

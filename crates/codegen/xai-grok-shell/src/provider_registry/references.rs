@@ -2,7 +2,9 @@
 //!
 //! Scans trusted Grok home/config roots only. Secret-free. Fail-closed on
 //! unreadable/corrupt state (reports scan errors rather than claiming zero
-//! references). Retrieval groups are structurally empty hooks until PR15.
+//! references). Retrieval groups are populated from the named retrieval graph
+//! (PR15): embedding models, rerankers, and profiles that exact-reference the
+//! provider.
 
 use super::management::dto::{
     ImpactGroupKind, ImpactReference, ReferenceImpactSnapshot, RegistryGeneration,
@@ -66,10 +68,14 @@ pub fn build_reference_impact(
     push_err(&mut scan_errors, mem_err);
     groups.push((ImpactGroupKind::Memory, mem_refs));
 
-    // 7. Retrieval hooks (empty until PR15 named retrieval config)
-    groups.push((ImpactGroupKind::RetrievalProfiles, Vec::new()));
-    groups.push((ImpactGroupKind::EmbeddingModels, Vec::new()));
-    groups.push((ImpactGroupKind::RerankerModels, Vec::new()));
+    // 7. Named retrieval graph reverse references (PR15)
+    let (ret_profiles, ret_emb, ret_rr, ret_trunc, ret_err) =
+        scan_retrieval_refs(config_path, provider_id);
+    truncated |= ret_trunc;
+    push_err(&mut scan_errors, ret_err);
+    groups.push((ImpactGroupKind::RetrievalProfiles, ret_profiles));
+    groups.push((ImpactGroupKind::EmbeddingModels, ret_emb));
+    groups.push((ImpactGroupKind::RerankerModels, ret_rr));
 
     let total_refs: usize = groups.iter().map(|(_, r)| r.len()).sum();
     let scan_failed = !scan_errors.is_empty();
@@ -669,6 +675,129 @@ fn scan_auxiliary_config_routes(
         }
     }
     (refs, false, None)
+}
+
+/// Scan named retrieval graph for exact provider references.
+///
+/// Returns (profiles, embedding_models, reranker_models, truncated, error).
+fn scan_retrieval_refs(
+    config_path: &Path,
+    provider_id: &str,
+) -> (
+    Vec<ImpactReference>,
+    Vec<ImpactReference>,
+    Vec<ImpactReference>,
+    bool,
+    Option<String>,
+) {
+    let mut profiles = Vec::new();
+    let mut embeddings = Vec::new();
+    let mut rerankers = Vec::new();
+    let mut truncated = false;
+    let raw = match fs::read_to_string(config_path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (profiles, embeddings, rerankers, false, None);
+        }
+        Err(e) => {
+            return (
+                profiles,
+                embeddings,
+                rerankers,
+                false,
+                Some(format!("config unreadable: {e}")),
+            );
+        }
+    };
+    let val: toml::Value = match toml::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                profiles,
+                embeddings,
+                rerankers,
+                false,
+                Some(format!("config corrupt: {e}")),
+            );
+        }
+    };
+
+    // Embedding models that exact-reference this provider.
+    let mut emb_ids_for_provider: Vec<String> = Vec::new();
+    if let Some(table) = val.get("embedding_models").and_then(|v| v.as_table()) {
+        for (id, entry) in table {
+            if entry.get("provider").and_then(|v| v.as_str()) == Some(provider_id) {
+                if embeddings.len() >= MAX_REFS_PER_GROUP {
+                    truncated = true;
+                    break;
+                }
+                emb_ids_for_provider.push(id.clone());
+                push_ref(
+                    &mut embeddings,
+                    ImpactGroupKind::EmbeddingModels,
+                    format!("embedding_models.\"{id}\""),
+                );
+            }
+        }
+    }
+
+    // Reranker models that exact-reference this provider.
+    let mut rr_ids_for_provider: Vec<String> = Vec::new();
+    if let Some(table) = val.get("reranker_models").and_then(|v| v.as_table()) {
+        for (id, entry) in table {
+            if entry.get("provider").and_then(|v| v.as_str()) == Some(provider_id) {
+                if rerankers.len() >= MAX_REFS_PER_GROUP {
+                    truncated = true;
+                    break;
+                }
+                rr_ids_for_provider.push(id.clone());
+                push_ref(
+                    &mut rerankers,
+                    ImpactGroupKind::RerankerModels,
+                    format!("reranker_models.\"{id}\""),
+                );
+            }
+        }
+    }
+
+    // Profiles that route through those models (exact model-id membership).
+    if let Some(table) = val.get("retrieval_profiles").and_then(|v| v.as_table()) {
+        for (id, entry) in table {
+            let uses_emb = entry
+                .get("embedding_models")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|v| {
+                        v.as_str()
+                            .is_some_and(|s| emb_ids_for_provider.iter().any(|e| e == s))
+                    })
+                })
+                .unwrap_or(false);
+            let uses_rr = entry
+                .get("reranker_models")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter().any(|v| {
+                        v.as_str()
+                            .is_some_and(|s| rr_ids_for_provider.iter().any(|e| e == s))
+                    })
+                })
+                .unwrap_or(false);
+            if uses_emb || uses_rr {
+                if profiles.len() >= MAX_REFS_PER_GROUP {
+                    truncated = true;
+                    break;
+                }
+                push_ref(
+                    &mut profiles,
+                    ImpactGroupKind::RetrievalProfiles,
+                    format!("retrieval_profiles.\"{id}\""),
+                );
+            }
+        }
+    }
+
+    (profiles, embeddings, rerankers, truncated, None)
 }
 
 fn scan_memory_refs(

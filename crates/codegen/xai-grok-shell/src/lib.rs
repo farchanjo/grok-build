@@ -25,6 +25,8 @@ pub mod config;
 pub mod conformance;
 /// Dynamic multi-provider registry, secrets, caches, and TOML lifecycle.
 pub mod provider_registry;
+/// Named retrieval graph: parse, validate, management, and notify (PR15).
+pub mod retrieval_config;
 pub use xai_grok_shell_base::cpu_profile;
 pub use xai_grok_shell_base::env;
 pub mod extensions;
