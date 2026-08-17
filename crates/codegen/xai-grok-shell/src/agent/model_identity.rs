@@ -487,6 +487,26 @@ pub fn require_exact_route(
     }
 }
 
+/// Validate a persisted companion against a live production route context.
+///
+/// Uses instance, incarnation, kind, surface, upstream, and registry generation
+/// from the live freeze — the same axes `matches_live` / exact resume require.
+pub fn validate_companion_against_live_route(
+    stored: &ModelRouteProvenance,
+    live: &xai_grok_inference::ProviderRouteContext,
+    live_upstream: &str,
+) -> Result<(), RouteResumeError> {
+    require_exact_route(
+        stored,
+        Some(live.instance_id()),
+        live.incarnation(),
+        Some(live.provider_kind().as_str()),
+        Some(live.api_surface().as_str()),
+        Some(live_upstream),
+        Some(live.registry_generation()),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteResumeError {
     MissingRoute,
@@ -761,5 +781,73 @@ mod tests {
         let a = discovered_canonical_id("openai", "gpt-4o").unwrap();
         let b = discovered_canonical_id("work-openai", "gpt-4o").unwrap();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn validate_companion_against_live_route_rejects_incarnation_and_registry_drift() {
+        use xai_grok_inference::{
+            ProviderRouteContext, RouteApiSurface, RouteAuthority, RouteCredentialRoute,
+            RouteProviderKind,
+        };
+        use xai_grok_models::{ModelRouteProvenance, UpstreamModelId};
+
+        let upstream = UpstreamModelId::new("gpt-4o").unwrap();
+        let stored = ModelRouteProvenance::new(
+            "openai",
+            Some("11111111-1111-1111-1111-111111111111"),
+            Some("openai"),
+            Some("openai_platform"),
+            &upstream,
+            3,
+        )
+        .unwrap();
+
+        let live = |instance: &str, incarnation: &str, registry: u64| {
+            ProviderRouteContext::builder()
+                .instance_id(instance)
+                .provider_kind(RouteProviderKind::OpenAi)
+                .api_surface(RouteApiSurface::OpenAiPlatform)
+                .credential_route(RouteCredentialRoute::ApiKey)
+                .incarnation(incarnation)
+                .registry_generation(registry)
+                .binding_generation(1)
+                .authority(RouteAuthority::Authoritative)
+                .model_partition("gpt-4o")
+                .build()
+                .unwrap()
+        };
+
+        assert!(
+            validate_companion_against_live_route(
+                &stored,
+                &live("openai", "11111111-1111-1111-1111-111111111111", 3),
+                "gpt-4o"
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_companion_against_live_route(
+                &stored,
+                &live("openai", "22222222-2222-2222-2222-222222222222", 3),
+                "gpt-4o"
+            ),
+            Err(RouteResumeError::IncarnationMismatch)
+        );
+        assert_eq!(
+            validate_companion_against_live_route(
+                &stored,
+                &live("openai", "11111111-1111-1111-1111-111111111111", 9),
+                "gpt-4o"
+            ),
+            Err(RouteResumeError::IncarnationMismatch)
+        );
+        assert_eq!(
+            validate_companion_against_live_route(
+                &stored,
+                &live("openai_work", "11111111-1111-1111-1111-111111111111", 3),
+                "gpt-4o"
+            ),
+            Err(RouteResumeError::IncarnationMismatch)
+        );
     }
 }

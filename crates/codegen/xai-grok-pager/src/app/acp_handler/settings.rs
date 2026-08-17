@@ -3,10 +3,12 @@ use serde::Deserialize;
 
 /// Handle `x.ai/models/update` — model list changed (etag-triggered refresh).
 ///
-/// Updates are atomic and generation-tagged: the catalog map and
-/// `catalog_generation` swap together. Each agent's current selection is
-/// preserved by exact canonical id when still present; removed/recreated
-/// incarnations fall back without borrowing a sibling account.
+/// Updates are generation-gated: stale or equal-generation notifications are
+/// rejected so catalog content and generation stay coherent on both
+/// `app.models` and per-agent state. Each agent's current selection is
+/// preserved by exact canonical catalog id when still present; removed
+/// catalog keys fall back to the shell current (sibling keys are not
+/// auto-selected).
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
         use crate::acp::model_state::ModelState;
@@ -19,19 +21,33 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
         );
 
         let shell_fallback_current = new_models.current.clone();
+        let generation_opt = (generation > 0).then_some(generation);
 
-        // Override app-level default with the active agent's model when that
-        // exact canonical id is still in the catalog.
-        let mut app_models = new_models.clone();
+        // App-level catalog: versioned apply (never wholesale replace — a
+        // delayed lower-generation update must not roll generation backward).
+        let app_applied = app.models.update_catalog_versioned(
+            new_models.available.clone(),
+            shell_fallback_current.clone(),
+            generation_opt,
+        );
+        if !app_applied {
+            tracing::debug!(
+                catalog_generation = generation,
+                app_generation = app.models.catalog_generation,
+                "models/update rejected as stale for app.models; skipping agent fan-out"
+            );
+            return true;
+        }
+
+        // After a successful app apply, prefer the active agent's exact
+        // canonical id when it is still in the new catalog.
         if let ActiveView::Agent(id) = app.active_view
             && let Some(agent) = app.agents.get(&id)
             && let Some(ref agent_model) = agent.session.models.current
-            && app_models.available.contains_key(agent_model)
+            && app.models.available.contains_key(agent_model)
         {
-            app_models.current = Some(agent_model.clone());
+            app.models.current = Some(agent_model.clone());
         }
-
-        app.models = app_models;
 
         for agent in app.agents.values_mut() {
             // Log when an update drops the agent's active model — this is the
@@ -45,20 +61,19 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
                     fallback = ?shell_fallback_current.as_ref().map(|m| m.0.as_ref()),
                     available_count = new_models.available.len(),
                     catalog_generation = generation,
-                    "models update removed this agent's current model; falling back"
+                    "models update removed this agent's current catalog key; falling back"
                 );
             }
-            agent.session.models.update_catalog_versioned(
+            let applied = agent.session.models.update_catalog_versioned(
                 new_models.available.clone(),
                 shell_fallback_current.clone(),
-                Some(generation),
+                generation_opt,
             );
-            // `/model` arguments are cached in the open slash snapshot. Rebuild
-            // it from the shell-authoritative catalog so provider changes are
-            // visible without closing and reopening the picker. Generation
-            // drift is captured by the versioned update above so a stale open
-            // picker cannot mix pre/post-refresh rows.
-            agent.prompt.refresh_slash(&agent.session.models);
+            if applied {
+                // Rebuild slash snapshot only from an applied catalog so open
+                // pickers never mix pre/post-refresh rows from a rejected gen.
+                agent.prompt.refresh_slash(&agent.session.models);
+            }
         }
         // The shell emits this notification after config/model reload. Refresh
         // the pager-owned media snapshot after the agent loop so `/settings`

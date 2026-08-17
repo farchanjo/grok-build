@@ -169,38 +169,60 @@ impl ModelState {
 
     /// Replace the available models, preserving current selection if still valid.
     ///
-    /// When `catalog_generation` is `Some`, the state's generation is updated
-    /// atomically with the catalog swap. A lower or equal generation is still
-    /// applied (shell is authoritative) but the generation never moves backward
-    /// so open pickers can detect drift against a fresher snapshot.
+    /// Ungenerated path (tests / local assignment) always applies content.
     pub fn update_catalog(
         &mut self,
         new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
         fallback_current: Option<acp::ModelId>,
     ) {
-        self.update_catalog_versioned(new_available, fallback_current, None);
+        let _ = self.update_catalog_versioned(new_available, fallback_current, None);
     }
 
     /// Versioned catalog update used by `x.ai/models/update`.
+    ///
+    /// Returns `true` when the catalog was applied. Returns `false` when the
+    /// update is rejected as stale so callers can skip slash rebuilds.
+    ///
+    /// Policy:
+    /// - `incoming_generation < current` (and current > 0): reject entirely —
+    ///   neither `available` nor generation changes.
+    /// - `incoming_generation == current` (and current > 0): no-op (shell bumps
+    ///   generation on every real catalog change).
+    /// - `incoming_generation > current` or generation omitted: apply content
+    ///   and advance generation atomically with the catalog swap.
     pub fn update_catalog_versioned(
         &mut self,
         new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
         fallback_current: Option<acp::ModelId>,
         catalog_generation: Option<u64>,
-    ) {
+    ) -> bool {
+        if let Some(incoming_generation) = catalog_generation {
+            if self.catalog_generation > 0 && incoming_generation < self.catalog_generation {
+                tracing::debug!(
+                    incoming = incoming_generation,
+                    current = self.catalog_generation,
+                    "rejecting stale models/update (lower catalog generation)"
+                );
+                return false;
+            }
+            if self.catalog_generation > 0 && incoming_generation == self.catalog_generation {
+                tracing::debug!(
+                    generation = incoming_generation,
+                    "ignoring models/update with equal catalog generation"
+                );
+                return false;
+            }
+        }
+
         let previous_current_model = self.current.clone();
         self.available = new_available;
         if let Some(incoming_generation) = catalog_generation {
-            // Never move generation backward; a stale delayed notification
-            // must not unlock a selection that was already refreshed.
-            if incoming_generation > self.catalog_generation {
-                self.catalog_generation = incoming_generation;
-            }
+            self.catalog_generation = incoming_generation;
         }
         if let Some(ref id) = self.current {
             if !self.available.contains_key(id) {
                 // Preserve exact canonical selection when possible; only fall
-                // back when the selected incarnation was removed from catalog.
+                // back when the selected catalog key was removed.
                 self.current = fallback_current;
             }
         } else {
@@ -221,10 +243,14 @@ impl ModelState {
                 }
             }
         }
+        true
     }
 
     /// Whether a picker selection opened at `opened_at_generation` is still
     /// valid against the current catalog generation.
+    ///
+    /// Used by `/model` and default-model apply paths to reject confirmations
+    /// that predate a successful versioned catalog refresh.
     pub fn selection_generation_is_current(&self, opened_at_generation: u64) -> bool {
         opened_at_generation == self.catalog_generation
     }
@@ -1122,7 +1148,7 @@ mod tests {
             home.clone(),
             acp::ModelInfo::new(home, "GPT-4o (openai)".to_string()),
         );
-        state.update_catalog_versioned(refreshed, Some(work.clone()), Some(7));
+        assert!(state.update_catalog_versioned(refreshed.clone(), Some(work.clone()), Some(7)));
         assert_eq!(
             state.current.as_ref().map(|id| id.0.as_ref()),
             Some("openai_work:gpt-4o")
@@ -1131,8 +1157,21 @@ mod tests {
         assert!(state.selection_generation_is_current(7));
         assert!(!state.selection_generation_is_current(3));
 
-        // Stale lower generation does not roll the counter backward.
-        state.update_catalog_versioned(state.available.clone(), Some(work), Some(2));
+        // Stale lower generation rejects content entirely (no mix under gen 7).
+        let mut stale = IndexMap::new();
+        stale.insert(
+            work.clone(),
+            acp::ModelInfo::new(work.clone(), "STALE".to_string()),
+        );
+        assert!(!state.update_catalog_versioned(stale, Some(work.clone()), Some(2)));
+        assert_eq!(state.catalog_generation, 7);
+        assert_ne!(
+            state.available.get(&work).map(|i| i.name.as_str()),
+            Some("STALE")
+        );
+
+        // Equal generation is a no-op.
+        assert!(!state.update_catalog_versioned(refreshed, Some(work), Some(7)));
         assert_eq!(state.catalog_generation, 7);
     }
 

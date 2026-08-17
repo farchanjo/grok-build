@@ -1868,21 +1868,31 @@ impl acp::Agent for MvpAgent {
         let available = self.models_manager.available();
         self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
         // Load optional route companion. Old summaries without companions remain
-        // compatible (no rewrite-on-read). Exact-route companions fail closed
-        // when the incarnation/account is gone rather than borrowing a sibling.
+        // compatible (Ok(None) — no rewrite-on-read). Integrity Err is fail-closed
+        // (never treated as legacy absence): no same-family sibling fallback.
         let resume_session_dir = crate::session::persistence::session_dir(&SessionInfo {
             id: session_id.clone(),
             cwd: cwd.as_str().to_owned(),
         });
-        let route_companion = crate::session::storage::model_route::load_route_companion(
+        let companion_load = crate::session::storage::model_route::load_route_companion(
             &resume_session_dir,
             &summary,
-        )
-        .ok()
-        .flatten();
+        );
+        let (route_companion, companion_integrity_failed) = match companion_load {
+            Ok(companion) => (companion, false),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    error = %error,
+                    "load_session: model route companion integrity failed; refusing sibling fallback"
+                );
+                (None, true)
+            }
+        };
         let exact_route_pinned = route_companion
             .as_ref()
-            .is_some_and(|p| p.requires_exact_route());
+            .is_some_and(|p| p.requires_exact_route())
+            || companion_integrity_failed;
         let resolved_catalog_key = resolve_catalog_key_with_origins(
             &models,
             &origins,
@@ -1895,6 +1905,7 @@ impl acp::Agent for MvpAgent {
             available_count = available.len(),
             contains_persisted = available.contains_key(&persisted_model),
             exact_route_pinned,
+            companion_integrity_failed,
             available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
             "load_session: restoring persisted model (debug)"
         );
@@ -1908,60 +1919,81 @@ impl acp::Agent for MvpAgent {
         } else {
             available.keys().find(|id| !id.0.starts_with("grok-build")).cloned()
         };
-        let selectable_catalog_key = selectable_catalog_key_for_persisted(
+        // Origin-aware selectable resolution (Issue 6): never alias onto a
+        // reserved sibling when origins gate rejects additional-account keys.
+        let selectable_catalog_key = selectable_catalog_key_for_persisted_with_origins(
             &models,
             &available,
+            &origins,
             &persisted_model,
         );
-        // When an exact companion is present, the selectable key must still
-        // match the companion's canonical model (if recorded) and live route.
-        let selectable_catalog_key = selectable_catalog_key.filter(|key| {
-            let Some(companion) = route_companion.as_ref() else {
-                return true;
-            };
-            if let Some(canon) = companion.canonical_model.as_deref() {
-                if key.0.as_ref() != canon && persisted_model.0.as_ref() != canon {
-                    tracing::warn!(
-                        session_id = %session_id.0,
-                        selected = %key.0,
-                        companion_canonical = %canon,
-                        "load_session: rejecting selectable key that does not match route companion"
-                    );
-                    return false;
+        // When a companion is present (or integrity failed), validate against
+        // the live ProviderService freeze before accepting the selection.
+        let home = crate::util::grok_home::grok_home();
+        let selectable_catalog_key = if companion_integrity_failed {
+            None
+        } else {
+            selectable_catalog_key.filter(|key| {
+                let Some(companion) = route_companion.as_ref() else {
+                    return true;
+                };
+                if let Some(canon) = companion.canonical_model.as_deref() {
+                    if key.0.as_ref() != canon && persisted_model.0.as_ref() != canon {
+                        tracing::warn!(
+                            session_id = %session_id.0,
+                            selected = %key.0,
+                            companion_canonical = %canon,
+                            "load_session: rejecting selectable key that does not match route companion"
+                        );
+                        return false;
+                    }
                 }
-            }
-            if !companion.requires_exact_route() {
-                return true;
-            }
-            // Catalog-level exact-route guard: instance + upstream must match.
-            // Full incarnation/binding-generation comparison runs when the
-            // session actor freezes the live ProviderService route on apply.
-            // Here we only reject obvious sibling catalog rows so resume never
-            // silently adopts openai_work when the companion pins openai.
-            let Some(entry) = models.get(key.0.as_ref()) else {
-                return false;
-            };
-            let live_instance = entry
-                .model_provider
-                .as_ref()
-                .map(|p| p.id.as_str())
-                .unwrap_or("xai");
-            let live_upstream = entry.info.model.as_str();
-            let instance_ok = live_instance == companion.provider_instance_id.as_str();
-            let upstream_ok = live_upstream == companion.upstream_model.as_str();
-            if !instance_ok || !upstream_ok {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    live_instance,
-                    companion_instance = %companion.provider_instance_id,
+                let Some(entry) = models.get(key.0.as_ref()) else {
+                    return false;
+                };
+                // Resolve live route for this exact selection (instance, incarnation,
+                // surface, registry generation) and require_exact_route.
+                let origin_client = self
+                    .sessions
+                    .borrow()
+                    .get(&session_id)
+                    .and_then(|h| h.origin_client.clone());
+                let inference =
+                    self.prepare_inference_config_for_model(entry, origin_client);
+                let live =
+                    crate::session::route_context::resolve_for_models_manager_with_selection(
+                        &inference,
+                        &self.models_manager,
+                        key.0.as_ref(),
+                        Some(home.as_path()),
+                    );
+                let live_upstream = inference.model.as_str();
+                match crate::agent::model_identity::validate_companion_against_live_route(
+                    companion,
+                    &live,
                     live_upstream,
-                    companion_upstream = %companion.upstream_model,
-                    "load_session: exact route companion rejected sibling catalog entry"
-                );
-                return false;
-            }
-            true
-        });
+                ) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        tracing::warn!(
+                            session_id = %session_id.0,
+                            error = %err,
+                            companion_instance = %companion.provider_instance_id,
+                            live_instance = %live.instance_id(),
+                            companion_incarnation = ?companion.incarnation,
+                            live_incarnation = ?live.incarnation(),
+                            companion_registry_generation = companion.registry_generation,
+                            live_registry_generation = live.registry_generation(),
+                            "load_session: exact route companion rejected live ProviderService freeze"
+                        );
+                        false
+                    }
+                }
+            })
+        };
+        // When exact-route validation fails, refuse model_switch apply so we
+        // never rewrite the companion with a recreated live provenance.
+        let mut skip_model_apply = false;
         let model_id = if let Some(catalog_key) = selectable_catalog_key {
             if catalog_key != persisted_model {
                 tracing::info!(
@@ -2018,6 +2050,7 @@ impl acp::Agent for MvpAgent {
                 .await;
             fallback
         } else {
+            skip_model_apply = exact_route_pinned;
             let fallback = available
                 .keys()
                 .next()
@@ -2029,6 +2062,8 @@ impl acp::Agent for MvpAgent {
                 fallback = %fallback.0,
                 available_count = available.len(),
                 exact_route_pinned,
+                companion_integrity_failed,
+                skip_model_apply,
                 available_keys = ?available.keys().take(10).collect::<Vec<_>>(),
                 "Persisted model no longer available, no same-family fallback — blocking prompts for this session"
             );
@@ -2041,12 +2076,18 @@ impl acp::Agent for MvpAgent {
                     "fallback_model": fallback.0.as_ref(),
                     "available_count": available.len(),
                     "exact_route_pinned": exact_route_pinned,
+                    "companion_integrity_failed": companion_integrity_failed,
                 }),
                 ),
             );
-            let reason = if exact_route_pinned {
+            let reason = if companion_integrity_failed {
                 format!(
-                    "Model \"{}\" is bound to a provider account that is no longer available. Please start a new session.",
+                    "Model \"{}\" route identity is corrupted or incomplete. Please start a new session.",
+                    persisted_model.0,
+                )
+            } else if exact_route_pinned {
+                format!(
+                    "Model \"{}\" is bound to a provider account incarnation that is no longer available. Please start a new session.",
                     persisted_model.0,
                 )
             } else {
@@ -2066,14 +2107,22 @@ impl acp::Agent for MvpAgent {
             self.model_unavailable_sessions
                 .borrow_mut()
                 .insert(session_id.0.to_string(), persisted_model.clone());
-            fallback
+            // Do not apply a sibling fallback model when exact-route failed:
+            // leave the session on the persisted selection and keep the
+            // companion on disk unrewritten.
+            if skip_model_apply {
+                persisted_model
+            } else {
+                fallback
+            }
         };
         tracing::debug!(
             session_id = %session_id.0,
             final_model_id = %model_id.0,
+            skip_model_apply,
             "load_session: resolved final model_id for set_session_model"
         );
-        {
+        if !skip_model_apply {
             let _timer = crate::instrumentation_timer!("session.restore_model");
             let restore_meta = summary
                 .reasoning_effort
@@ -2091,17 +2140,18 @@ impl acp::Agent for MvpAgent {
                         .meta(restore_meta),
                 )
                 .await;
-            // Summary execution mode is authoritative on resume. Re-apply after
-            // model_switch (which seeds from the catalog) so Native↔external
-            // cannot flip silently, including when turn_count > 0.
-            Self::restore_summary_execution_mode(
-                self,
-                &session_id,
-                summary.execution_backend,
-                summary.external_runtime.clone(),
-            )
-            .await?;
         }
+        // Summary execution mode is authoritative on resume. Re-apply after
+        // model_switch (which seeds from the catalog) so Native↔external
+        // cannot flip silently, including when turn_count > 0. Still runs when
+        // exact-route fail-closed skips model apply so mode restore is intact.
+        Self::restore_summary_execution_mode(
+            self,
+            &session_id,
+            summary.execution_backend,
+            summary.external_runtime.clone(),
+        )
+        .await?;
         let mut response_meta_map = serde_json::Map::new();
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
         if let Some(persist) = persist_data {
@@ -2280,10 +2330,12 @@ impl acp::Agent for MvpAgent {
             .cloned();
         if let Some(unavailable_model) = latched_model {
             let models = self.models_manager.models();
+            let origins = self.models_manager.catalog_origins();
             let available = self.models_manager.available();
-            let restore_model_id = selectable_catalog_key_for_persisted(
+            let restore_model_id = selectable_catalog_key_for_persisted_with_origins(
                     &models,
                     &available,
+                    &origins,
                     &unavailable_model,
                 )
                 .unwrap_or(unavailable_model.clone());

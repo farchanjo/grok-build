@@ -229,6 +229,9 @@ struct Inner {
     /// rebuild/hot-reload so open pickers can reject stale selections that
     /// predate the current generation.
     catalog_generation: AtomicU64,
+    /// Serializes catalog + origins + generation publication so readers never
+    /// observe a mismatched generation stamp for the active catalog snapshot.
+    catalog_publish: parking_lot::Mutex<()>,
 }
 
 impl Default for ModelsManager {
@@ -274,6 +277,7 @@ impl ModelsManager {
                 allowlist_excludes_all: AtomicBool::new(false),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
                 catalog_generation: AtomicU64::new(1),
+                catalog_publish: parking_lot::Mutex::new(()),
             }),
         }
     }
@@ -287,7 +291,27 @@ impl ModelsManager {
         self.inner.catalog_generation.load(Ordering::Acquire)
     }
 
-    fn bump_catalog_generation(&self) -> u64 {
+    /// Atomically publish catalog + origins and bump generation.
+    ///
+    /// Returns the generation stamped for this snapshot (for `models/update`).
+    fn publish_catalog(
+        &self,
+        catalog: IndexMap<String, ModelEntry>,
+        origins: crate::agent::model_identity::CatalogOrigins,
+    ) -> u64 {
+        let _guard = self.inner.catalog_publish.lock();
+        *self.inner.models.write() = catalog;
+        *self.inner.catalog_origins.write() = origins;
+        self.inner
+            .catalog_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    fn clear_catalog_locked(&self) -> u64 {
+        let _guard = self.inner.catalog_publish.lock();
+        *self.inner.models.write() = IndexMap::new();
+        *self.inner.catalog_origins.write() = crate::agent::model_identity::CatalogOrigins::new();
         self.inner
             .catalog_generation
             .fetch_add(1, Ordering::AcqRel)
@@ -412,9 +436,7 @@ impl ModelsManager {
                 .allowlist_excludes_all
                 .store(excludes_all, Ordering::Relaxed);
         }
-        *self.inner.models.write() = new_catalog;
-        *self.inner.catalog_origins.write() = new_origins;
-        self.bump_catalog_generation();
+        self.publish_catalog(new_catalog, new_origins);
 
         // A preferred-model flip caused only by a campaign overlay appearing or
         // disappearing must not yank an in-flight session whose current model is
@@ -784,9 +806,7 @@ impl ModelsManager {
 
     fn rebuild(&self, cfg: &config::Config, prefetched: Option<IndexMap<String, ModelEntry>>) {
         let (catalog, origins) = resolve_model_catalog_with_origins(cfg, prefetched);
-        *self.inner.models.write() = catalog;
-        *self.inner.catalog_origins.write() = origins;
-        self.bump_catalog_generation();
+        self.publish_catalog(catalog, origins);
     }
 
     /// Refresh models when the etag changes.
@@ -1156,14 +1176,12 @@ impl ModelsManager {
     /// Wipe in-memory state so a previous identity's catalog doesn't leak.
     fn clear(&self) {
         *self.inner.prefetched.write() = None;
-        *self.inner.models.write() = IndexMap::new();
-        *self.inner.catalog_origins.write() = crate::agent::model_identity::CatalogOrigins::new();
         *self.inner.etag.write() = None;
         *self.inner.has_fetched_real_catalog.write() = false;
         self.inner
             .allowlist_excludes_all
             .store(false, Ordering::Relaxed);
-        self.bump_catalog_generation();
+        let _ = self.clear_catalog_locked();
     }
 
     /// Build a `InferenceConfig` from the current model + auth state.
@@ -1962,7 +1980,32 @@ pub(crate) fn selectable_catalog_key_for_persisted(
     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
     id: &acp::ModelId,
 ) -> Option<acp::ModelId> {
+    selectable_catalog_key_for_persisted_with_origins(
+        models,
+        available,
+        &crate::agent::model_identity::CatalogOrigins::new(),
+        id,
+    )
+}
+
+/// Origin-aware selectable catalog key for production resume / reconnect.
+///
+/// Gated additional-account keys are excluded from alias resolution when the
+/// multi-account rollout is off. Ambiguous aliases return `None` (never a
+/// silent sibling).
+pub(crate) fn selectable_catalog_key_for_persisted_with_origins(
+    models: &IndexMap<String, ModelEntry>,
+    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
+    origins: &crate::agent::model_identity::CatalogOrigins,
+    id: &acp::ModelId,
+) -> Option<acp::ModelId> {
     if available.contains_key(id) {
+        // Exact identity present and selectable — still honor origin gate.
+        if crate::agent::model_identity::is_additional_account_key(id.0.as_ref(), origins)
+            && !crate::provider_registry::multi_account_rollout_enabled()
+        {
+            return None;
+        }
         return Some(id.clone());
     }
     let selectable: IndexMap<String, ModelEntry> = models
@@ -1970,7 +2013,7 @@ pub(crate) fn selectable_catalog_key_for_persisted(
         .filter(|(key, _)| available.contains_key(&acp::ModelId::new((*key).clone())))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    resolve_catalog_key(&selectable, id)
+    resolve_catalog_key_with_origins(&selectable, origins, id)
 }
 
 /// A "campaign-only" preferred flip: the default changed and either side's value

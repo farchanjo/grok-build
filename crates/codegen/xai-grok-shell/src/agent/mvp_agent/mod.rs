@@ -56,7 +56,8 @@ use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_cred
 use crate::agent::feedback_client::FeedbackClient;
 use crate::agent::folder_trust;
 use crate::agent::models::{
-    resolve_catalog_key, resolve_catalog_key_with_origins, selectable_catalog_key_for_persisted,
+    resolve_catalog_key, resolve_catalog_key_with_origins,
+    selectable_catalog_key_for_persisted, selectable_catalog_key_for_persisted_with_origins,
 };
 use crate::agent::session_config;
 use xai_grok_inference_types::{

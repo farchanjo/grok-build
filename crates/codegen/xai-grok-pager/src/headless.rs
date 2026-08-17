@@ -718,9 +718,30 @@ async fn apply_headless_model_and_effort(
     }
 
     let model_id = if let Some(name) = model_name {
-        models
-            .resolve_by_name_or_id(name)
-            .unwrap_or_else(|| acp::ModelId::new(name))
+        match models.resolve_by_name_or_id_detailed(name) {
+            crate::acp::model_state::ModelResolveResult::Resolved(id) => id,
+            crate::acp::model_state::ModelResolveResult::Ambiguous { candidates, .. } => {
+                let list = candidates
+                    .iter()
+                    .map(|id| id.0.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "Ambiguous model '{name}': matches [{list}]. Use the exact provider-qualified id."
+                );
+            }
+            crate::acp::model_state::ModelResolveResult::Missing { .. } => {
+                // Catalog empty at startup (deferred load): allow the raw id so
+                // the shell can resolve later. When the catalog is loaded and
+                // the name is simply unknown, fail closed rather than forging
+                // a sibling-colliding bare slug.
+                if models.available.is_empty() {
+                    acp::ModelId::new(name)
+                } else {
+                    anyhow::bail!("Unknown model: {name}");
+                }
+            }
+        }
     } else {
         models.current.clone().ok_or_else(|| {
             anyhow::anyhow!("--effort/--reasoning-effort: no active model to apply effort to")
