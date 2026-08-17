@@ -160,13 +160,7 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
     use ProviderLifecycleCommand::*;
     match args.command {
         List => {
-            let home = if let Some(cfg) = None::<PathBuf> {
-                let _ = cfg;
-                grok_home()
-            } else {
-                grok_home()
-            };
-            let svc = ProviderManagementService::new(home);
+            let svc = ProviderManagementService::from_grok_home();
             let snap = svc.list_snapshot()?;
             let rows: Vec<_> = snap
                 .rows

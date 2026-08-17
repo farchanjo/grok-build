@@ -429,7 +429,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
             request_seq: seq,
             meta: None,
             repair,
-                    credential_write_receipt: None,
+            credential_write_receipt: None,
         }),
         &mut app,
     );
@@ -1033,11 +1033,11 @@ fn openai_repair_token_does_not_resume_other_providers() {
         token: CredentialRepairToken(7),
         provider_id: "openai".into(),
         credential_generation: 3,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1217,21 +1217,21 @@ fn auth_complete_xai_repair_token_resumes_once() {
         token: CredentialRepairToken(5),
         provider_id: "xai".into(),
         credential_generation: 5,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_scope = CredentialRepairScope {
         token: CredentialRepairToken(50),
         provider_id: "openrouter".into(),
         credential_generation: 7,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1460,21 +1460,21 @@ fn cancel_xai_repair_preserves_openrouter_stash_and_cta() {
         token: CredentialRepairToken(11),
         provider_id: "xai".into(),
         credential_generation: 1,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_scope = CredentialRepairScope {
         token: CredentialRepairToken(12),
         provider_id: "openrouter".into(),
         credential_generation: 9,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_stash_bytes = "openrouter keep";
     {
@@ -1627,21 +1627,21 @@ fn cancel_xai_token_blocks_delayed_auth_complete_resume() {
         token: CredentialRepairToken(22),
         provider_id: "xai".into(),
         credential_generation: 4,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let or_scope = CredentialRepairScope {
         token: CredentialRepairToken(23),
         provider_id: "openrouter".into(),
         credential_generation: 2,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1790,21 +1790,21 @@ fn mismatched_auth_complete_preserves_sibling_stashes_and_ctas() {
         token: CredentialRepairToken(30),
         provider_id: "xai".into(),
         credential_generation: 1,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     let wrong = CredentialRepairScope {
         token: CredentialRepairToken(31),
         provider_id: "xai".into(),
         credential_generation: 1,
-            incarnation: None,
-            registry_generation: 0,
-            failed_binding_generation: 0,
-            credential_route: "api_key".into(),
-            correlation_token: String::new(),
+        incarnation: None,
+        registry_generation: 0,
+        failed_binding_generation: 0,
+        credential_route: "api_key".into(),
+        correlation_token: String::new(),
     };
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -2021,9 +2021,10 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
         &mut app,
     );
     assert!(app.agents[&id].reauth_stashed_prompt.is_some());
-    assert!(!effects
-        .iter()
-        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
 
     // Sibling provider receipt cannot resume.
     {
@@ -2040,14 +2041,15 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(sibling.clone()),
                 credential_write_receipt: Some(sibling.write_receipt(post_gen)),
-            management: None,
-        }),
+                management: None,
+            }),
             &mut app,
         );
         assert!(app.agents[&id].reauth_stashed_prompt.is_some());
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
     }
 
     // Stale incarnation / registry cannot resume.
@@ -2066,14 +2068,15 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(stale.clone()),
                 credential_write_receipt: Some(stale.write_receipt(post_gen)),
-            management: None,
-        }),
+                management: None,
+            }),
             &mut app,
         );
         assert!(app.agents[&id].reauth_stashed_prompt.is_some());
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
     }
 
     // External rotation below the store-bound post fails closed (live != post).
@@ -2092,17 +2095,18 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(scope.clone()),
                 credential_write_receipt: Some(scope.write_receipt(post_gen)),
-            management: None,
-        }),
+                management: None,
+            }),
             &mut app,
         );
         assert!(
             app.agents[&id].reauth_stashed_prompt.is_some(),
             "external rotation must fail closed when live != post"
         );
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
         // Restore exact post generation for the success path.
         let restored =
             store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-repaired-BBBBBBBB")
@@ -2126,8 +2130,8 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(scope.clone()),
                 credential_write_receipt: Some(receipt),
-            management: None,
-        }),
+                management: None,
+            }),
             &mut app,
         );
         assert!(
@@ -2136,7 +2140,12 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
         );
         let send_count = effects
             .iter()
-            .filter(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }))
+            .filter(|e| {
+                matches!(
+                    e,
+                    Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+                )
+            })
             .count();
         assert_eq!(
             send_count, 1,
@@ -2154,13 +2163,14 @@ fn store_bound_api_key_repair_resumes_once_with_temp_home() {
                 claude_cli_status: None,
                 repair: Some(scope.clone()),
                 credential_write_receipt: Some(scope.write_receipt(live_post)),
-            management: None,
-        }),
+                management: None,
+            }),
             &mut app,
         );
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )));
     }
 }
 
@@ -2240,9 +2250,10 @@ fn store_bound_clear_and_replace_rejects_stale_receipt() {
         app.agents[&id].reauth_stashed_prompt.is_some(),
         "clear leaves live None — must not resume"
     );
-    assert!(!effects
-        .iter()
-        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
 
     // Replace stores a new key (post gen advances). Matching receipt resumes once.
     let post = store_provider_api_key(&home, OPENROUTER_API_KEY_SCOPE, "or-key-after-clear-BBB")
@@ -2267,7 +2278,10 @@ fn store_bound_clear_and_replace_rejects_stale_receipt() {
     assert_eq!(
         effects
             .iter()
-            .filter(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }))
+            .filter(|e| matches!(
+                e,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            ))
             .count(),
         1
     );
@@ -2310,10 +2324,7 @@ fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
     );
     assert_eq!(
         xai_grok_shell::session::route_context::live_binding_generation_for_route(
-            &home,
-            "openai",
-            "api_key",
-            None,
+            &home, "openai", "api_key", None,
         ),
         Some(api_post)
     );
@@ -2389,9 +2400,10 @@ fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
         app.agents[&id].reauth_stashed_prompt.is_some(),
         "API-key receipt fields mismatch OAuth scope → no resume"
     );
-    assert!(!effects
-        .iter()
-        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
 
     // Symmetric: API-key failure, OAuth-spelled receipt rejected.
     let api_scope = CredentialRepairScope {
@@ -2444,9 +2456,10 @@ fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
         &mut app,
     );
     assert!(app.agents[&id].reauth_stashed_prompt.is_some());
-    assert!(!effects
-        .iter()
-        .any(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. })));
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+    )));
 
     // Matching API-key receipt + live re-resolve resumes once.
     app.agents.get_mut(&id).unwrap().in_flight_repair = Some(api_scope.clone());
@@ -2468,7 +2481,10 @@ fn oauth_and_api_key_routes_do_not_crossover_on_resume_handler() {
     assert_eq!(
         effects
             .iter()
-            .filter(|e| matches!(e, Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }))
+            .filter(|e| matches!(
+                e,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            ))
             .count(),
         1
     );

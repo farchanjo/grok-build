@@ -295,27 +295,17 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                 expected_generation: state.list_generation,
             },
             ProviderCommand::AddConfigured => {
-                // Draft encoded as non-secret management_message: add:id:kind:base_url
-                let msg = state.management_message.clone().unwrap_or_default();
-                state.management_message = None;
-                if let Some(rest) = msg.strip_prefix("add:") {
-                    let parts: Vec<&str> = rest.splitn(3, ':').collect();
-                    if parts.len() == 3 {
-                        ProviderOperation::AddConfigured {
-                            id: parts[0].to_owned(),
-                            kind: parts[1].to_owned(),
-                            base_url: parts[2].to_owned(),
-                            display_name: None,
-                            expected_generation: state.list_generation,
-                        }
-                    } else {
-                        state.management_error = Some("Add provider draft was incomplete".into());
-                        return vec![];
-                    }
-                } else {
+                let Some(pending) = state.pending_add.take() else {
                     state.management_error =
                         Some("Add provider requires id, kind, and base URL".into());
                     return vec![];
+                };
+                ProviderOperation::AddConfigured {
+                    id: pending.id,
+                    kind: pending.kind,
+                    base_url: pending.base_url,
+                    display_name: pending.display_name,
+                    expected_generation: state.list_generation,
                 }
             }
             ProviderCommand::RefreshCatalog(provider) => ProviderOperation::RefreshCatalogId {
@@ -335,7 +325,8 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                     EditorCommand::Save => {
                         let id = editor.detail.id.clone();
                         let expected_generation = editor.generation().get();
-                        let patch = editor.draft.clone();
+                        // Dirty-field patch only (Issue 8).
+                        let patch = editor.dirty_save_patch();
                         let credential_update = editor.credential_slot_update();
                         let application_key = editor
                             .take_app_secret()

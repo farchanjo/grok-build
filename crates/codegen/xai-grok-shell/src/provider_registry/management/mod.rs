@@ -20,7 +20,7 @@ use super::secrets::{
     read_provider_secret, store_provider_secret,
 };
 use super::toml_edit::{
-    OpenRouterPrefsPatch, ProviderTomlPatch, apply_openrouter_preferences, apply_provider_patch,
+    OpenRouterPrefsPatch, ProviderTomlPatch, apply_provider_patch_with_openrouter,
     disable_provider, enable_provider, remove_provider, upsert_provider,
 };
 use super::{CapabilityCacheStore, CatalogCacheStore, ProviderService, normalize_endpoint_origin};
@@ -29,13 +29,17 @@ use crate::agent::providers::{
     ProviderConnectionTest, ProviderId as BuiltInBackendId, ProviderManager,
 };
 use dto::*;
+use fs2::FileExt;
 use indexmap::IndexMap;
-use std::fs;
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Relative path under `$GROK_HOME` for the durable lifecycle generation counter.
+/// Format: `{generation}\n{config_sha256}\n` so external config edits invalidate clients.
 const GENERATION_REL: &str = "state/provider_lifecycle_generation";
+const LOCK_REL: &str = "state/provider_lifecycle.lock";
 
 const STALE_GUIDANCE: &str = "Registry generation is stale. Reload the providers list, re-apply your edits, \
      or clone into a new id if another client saved first.";
@@ -67,8 +71,12 @@ impl ProviderManagementService {
     }
 
     /// Current durable generation (0 when missing).
+    ///
+    /// Observes external `config.toml` changes: if the config fingerprint no
+    /// longer matches the value recorded at the last management bump, generation
+    /// is force-advanced so stale clients fail closed.
     pub fn current_generation(&self) -> RegistryGeneration {
-        RegistryGeneration(read_generation(&self.home))
+        RegistryGeneration(self.reconcile_generation_with_config())
     }
 
     /// Load a secret-free list snapshot for the browse UI / CLI.
@@ -238,7 +246,11 @@ impl ProviderManagementService {
 
     /// Add a new configured OpenAI/OpenRouter/custom instance.
     pub fn add(&self, req: ProviderAddRequest) -> ProviderMutationResult {
-        if let Err(msg) = self.require_generation(req.expected_generation) {
+        let _lock = match self.acquire_mutation_lock() {
+            Ok(l) => l,
+            Err(e) => return err_result(&req.id, self.current_generation(), e),
+        };
+        if let Err(msg) = self.require_generation_locked(req.expected_generation) {
             return stale_result(&req.id, self.current_generation(), msg);
         }
         let pid = match ProviderId::new(&req.id) {
@@ -276,14 +288,43 @@ impl ProviderManagementService {
             ..Default::default()
         };
         match upsert_provider(&self.config_path, &pid, &patch, false) {
-            Ok(()) => self.bump_ok(pid.as_str()),
+            Ok(()) => match self.cas_bump_generation(req.expected_generation) {
+                Ok(next) => ProviderMutationResult {
+                    ok: true,
+                    id: pid.as_str().to_owned(),
+                    generation: RegistryGeneration(next),
+                    error: None,
+                    stale: false,
+                    guidance: None,
+                },
+                Err(msg) => stale_result(pid.as_str(), self.current_generation(), msg),
+            },
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
     }
 
     /// Save typed fields for an existing provider. Stale generation fails closed.
     pub fn save(&self, req: ProviderSaveRequest) -> ProviderMutationResult {
-        if let Err(msg) = self.require_generation(req.expected_generation) {
+        self.save_with_credentials(req, &CredentialSlotUpdate::default(), None, None)
+    }
+
+    /// Save metadata + credential slots under one mutation lock.
+    ///
+    /// Order: generation check → validate secrets → single atomic TOML write
+    /// (including OpenRouter prefs) → credential writes → CAS generation bump.
+    /// No secret is written when the client generation is stale.
+    pub fn save_with_credentials(
+        &self,
+        req: ProviderSaveRequest,
+        credentials: &CredentialSlotUpdate,
+        application_secret: Option<&str>,
+        admin_secret: Option<&str>,
+    ) -> ProviderMutationResult {
+        let _lock = match self.acquire_mutation_lock() {
+            Ok(l) => l,
+            Err(e) => return err_result(&req.id, self.current_generation(), e),
+        };
+        if let Err(msg) = self.require_generation_locked(req.expected_generation) {
             return stale_result(&req.id, self.current_generation(), msg);
         }
         let detail = match self.detail(&req.id) {
@@ -303,9 +344,15 @@ impl ProviderManagementService {
             Ok(p) => p,
             Err(e) => return err_result(&req.id, self.current_generation(), e.to_string()),
         };
-        // Fail closed: refuse kind changes to unsupported values or destructive
-        // renorm of unknown kinds.
-        if let Some(ref k) = req.patch.kind {
+
+        // Built-in product providers: only enable + display_name (fail closed).
+        let mut patch = req.patch.clone();
+        if detail.is_built_in {
+            if let Err(e) = restrict_builtin_patch(&mut patch) {
+                return err_result(&req.id, self.current_generation(), e);
+            }
+        } else if let Some(ref k) = patch.kind {
+            // Fail closed: refuse kind changes to unsupported values.
             if normalize_kind_for_add(k).is_none() && k != &detail.kind {
                 return err_result(
                     &req.id,
@@ -314,17 +361,86 @@ impl ProviderManagementService {
                 );
             }
         }
-        let patch = save_patch_to_toml(&req.patch);
-        match apply_provider_patch(&self.config_path, &pid, &patch) {
-            Ok(()) => {
-                // OpenRouter policy nested tables.
-                if let Err(e) = apply_openrouter_policy_fields(&self.config_path, &pid, &req.patch)
-                {
-                    return err_result(pid.as_str(), self.current_generation(), e);
-                }
-                self.bump_ok(pid.as_str())
+
+        // Validate credential one-shots before any durable write (Issue 11).
+        if let Err(e) = validate_credential_one_shots(credentials, application_secret, admin_secret)
+        {
+            return err_result(&req.id, self.current_generation(), e);
+        }
+        // OAuth Clear for built-in OpenAI is not a silent no-op (Issue 10).
+        if matches!(credentials.oauth, SecretFieldUpdate::Clear) && req.id == "openai" {
+            return err_result(
+                &req.id,
+                self.current_generation(),
+                "OpenAI ChatGPT OAuth clear requires Disconnect / Logout Codex \
+                 (browser session path); refusing silent clear"
+                    .into(),
+            );
+        }
+
+        let toml_patch = save_patch_to_toml(&patch);
+        let or_prefs = openrouter_prefs_from_save(&patch);
+        let has_meta = !is_empty_toml_patch(&toml_patch) || or_prefs.is_some();
+        if has_meta {
+            if let Err(e) = apply_provider_patch_with_openrouter(
+                &self.config_path,
+                &pid,
+                &toml_patch,
+                or_prefs.as_ref(),
+            ) {
+                return err_result(pid.as_str(), self.current_generation(), e.to_string());
             }
-            Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
+        }
+
+        let creds_changed = credentials.application != SecretFieldUpdate::Preserve
+            || credentials.admin != SecretFieldUpdate::Preserve
+            || credentials.oauth != SecretFieldUpdate::Preserve;
+        if creds_changed {
+            if let Err(e) = self.apply_credential_updates_unlocked(
+                &req.id,
+                credentials,
+                application_secret,
+                admin_secret,
+            ) {
+                // Metadata may already be durable; always bump so clients reload.
+                let bumped = self.cas_bump_generation(req.expected_generation);
+                return ProviderMutationResult {
+                    ok: false,
+                    id: req.id.clone(),
+                    generation: RegistryGeneration(
+                        bumped.unwrap_or_else(|_| read_generation_raw(&self.home).0),
+                    ),
+                    error: Some(format!(
+                        "metadata saved but credential update failed: {e}. Reload and retry."
+                    )),
+                    stale: false,
+                    guidance: Some(STALE_GUIDANCE.into()),
+                };
+            }
+        }
+
+        if !has_meta && !creds_changed {
+            // No-op save: still OK, no bump required.
+            return ProviderMutationResult {
+                ok: true,
+                id: req.id,
+                generation: req.expected_generation,
+                error: None,
+                stale: false,
+                guidance: None,
+            };
+        }
+
+        match self.cas_bump_generation(req.expected_generation) {
+            Ok(next) => ProviderMutationResult {
+                ok: true,
+                id: pid.as_str().to_owned(),
+                generation: RegistryGeneration(next),
+                error: None,
+                stale: false,
+                guidance: None,
+            },
+            Err(msg) => stale_result(pid.as_str(), self.current_generation(), msg),
         }
     }
 
@@ -418,7 +534,11 @@ impl ProviderManagementService {
         enabled: bool,
         expected: RegistryGeneration,
     ) -> ProviderMutationResult {
-        if let Err(msg) = self.require_generation(expected) {
+        let _lock = match self.acquire_mutation_lock() {
+            Ok(l) => l,
+            Err(e) => return err_result(id, self.current_generation(), e),
+        };
+        if let Err(msg) = self.require_generation_locked(expected) {
             return stale_result(id, self.current_generation(), msg);
         }
         let pid = match ProviderId::new(id) {
@@ -431,7 +551,17 @@ impl ProviderManagementService {
             disable_provider(&self.config_path, &pid)
         };
         match result {
-            Ok(()) => self.bump_ok(pid.as_str()),
+            Ok(()) => match self.cas_bump_generation(expected) {
+                Ok(next) => ProviderMutationResult {
+                    ok: true,
+                    id: pid.as_str().to_owned(),
+                    generation: RegistryGeneration(next),
+                    error: None,
+                    stale: false,
+                    guidance: None,
+                },
+                Err(msg) => stale_result(pid.as_str(), self.current_generation(), msg),
+            },
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
     }
@@ -595,57 +725,70 @@ impl ProviderManagementService {
         presence
     }
 
-    /// Apply credential slot updates. Empty secret means preserve; Clear is explicit.
+    /// Apply credential slot updates under the mutation lock with generation gate.
     ///
-    /// `application_secret` / `admin_secret` are one-shot values that must not be
-    /// logged. Callers must drop them after this returns.
+    /// Prefer [`Self::save_with_credentials`] when metadata is also changing.
+    /// Empty secret means preserve; Clear is explicit. Callers must drop
+    /// one-shot secret values after this returns.
     pub fn apply_credential_updates(
+        &self,
+        id: &str,
+        expected: RegistryGeneration,
+        update: &CredentialSlotUpdate,
+        application_secret: Option<&str>,
+        admin_secret: Option<&str>,
+    ) -> ProviderMutationResult {
+        self.save_with_credentials(
+            ProviderSaveRequest {
+                id: id.to_owned(),
+                expected_generation: expected,
+                patch: ProviderSavePatch::default(),
+            },
+            update,
+            application_secret,
+            admin_secret,
+        )
+    }
+
+    fn apply_credential_updates_unlocked(
         &self,
         id: &str,
         update: &CredentialSlotUpdate,
         application_secret: Option<&str>,
         admin_secret: Option<&str>,
     ) -> Result<(), String> {
-        // Application
+        validate_credential_one_shots(update, application_secret, admin_secret)?;
         match update.application {
             SecretFieldUpdate::Preserve => {}
-            SecretFieldUpdate::Clear => {
-                self.clear_application_key(id)?;
-            }
+            SecretFieldUpdate::Clear => self.clear_application_key(id)?,
             SecretFieldUpdate::Set => {
                 let secret = application_secret
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        "application secret Set requires a non-empty one-shot value".to_owned()
-                    })?;
+                    .expect("validated");
                 self.store_application_key(id, secret)?;
             }
         }
         match update.admin {
             SecretFieldUpdate::Preserve => {}
-            SecretFieldUpdate::Clear => {
-                self.clear_admin_key(id)?;
-            }
+            SecretFieldUpdate::Clear => self.clear_admin_key(id)?,
             SecretFieldUpdate::Set => {
                 let secret = admin_secret
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        "admin secret Set requires a non-empty one-shot value".to_owned()
-                    })?;
+                    .expect("validated");
                 self.store_admin_key(id, secret)?;
             }
         }
         match update.oauth {
             SecretFieldUpdate::Preserve => {}
             SecretFieldUpdate::Clear => {
-                // Built-in OpenAI OAuth only via ProviderManager; configured OAuth clear.
                 if id == "openai" {
-                    let manager = ProviderManager::new(&self.home);
-                    // Best-effort sync clear of stored oauth (async logout is TUI path).
-                    let _ = manager;
-                } else if let Ok(pid) = ProviderId::new(id) {
+                    return Err(
+                        "OpenAI ChatGPT OAuth clear requires Disconnect / Logout Codex".into(),
+                    );
+                }
+                if let Ok(pid) = ProviderId::new(id) {
                     let _ =
                         crate::auth::clear_provider_api_key(&self.home, &oauth_scope_string(&pid));
                 }
@@ -1103,27 +1246,89 @@ impl ProviderManagementService {
     }
 
     fn require_generation(&self, expected: RegistryGeneration) -> Result<(), String> {
-        let current = self.current_generation();
-        if current.get() != expected.get() {
+        self.require_generation_locked(expected)
+    }
+
+    fn require_generation_locked(&self, expected: RegistryGeneration) -> Result<(), String> {
+        let current = self.reconcile_generation_with_config();
+        if current != expected.get() {
             return Err(format!(
                 "stale generation: client has {}, registry has {}. {STALE_GUIDANCE}",
                 expected.get(),
-                current.get()
+                current
             ));
         }
         Ok(())
     }
 
     fn bump_ok(&self, id: &str) -> ProviderMutationResult {
-        let next_gen = bump_generation(&self.home);
-        ProviderMutationResult {
-            ok: true,
-            id: id.to_owned(),
-            generation: RegistryGeneration(next_gen),
-            error: None,
-            stale: false,
-            guidance: None,
+        let expected = read_generation_raw(&self.home).0;
+        match self.cas_bump_generation(RegistryGeneration(expected)) {
+            Ok(next) => ProviderMutationResult {
+                ok: true,
+                id: id.to_owned(),
+                generation: RegistryGeneration(next),
+                error: None,
+                stale: false,
+                guidance: None,
+            },
+            Err(msg) => stale_result(id, self.current_generation(), msg),
         }
+    }
+
+    /// Exclusive flock for mutation serialization (concurrent same-generation writers).
+    fn acquire_mutation_lock(&self) -> Result<File, String> {
+        let path = self.home.join(LOCK_REL);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("provider lifecycle lock: {e}"))?;
+        file.lock_exclusive()
+            .map_err(|e| format!("provider lifecycle lock: {e}"))?;
+        Ok(file)
+    }
+
+    /// If config.toml hash diverged from the last recorded fingerprint, advance
+    /// generation so clients holding the old generation fail closed.
+    fn reconcile_generation_with_config(&self) -> u64 {
+        let (generation, stored_fp) = read_generation_raw(&self.home);
+        let live_fp = config_fingerprint(&self.config_path);
+        if stored_fp.is_empty() && generation == 0 {
+            // Fresh profile: record fingerprint without bumping.
+            write_generation_state(&self.home, generation, &live_fp);
+            return generation;
+        }
+        if stored_fp != live_fp {
+            let next = generation.saturating_add(1);
+            write_generation_state(&self.home, next, &live_fp);
+            return next;
+        }
+        generation
+    }
+
+    /// Compare-and-swap generation bump: only succeeds when the on-disk
+    /// generation still equals `expected`. Call under the mutation lock after
+    /// durable writes. Does **not** run fingerprint reconcile (that would race
+    /// with our own config write); it records the live config fingerprint with
+    /// the new generation.
+    fn cas_bump_generation(&self, expected: RegistryGeneration) -> Result<u64, String> {
+        let (current, _) = read_generation_raw(&self.home);
+        if current != expected.get() {
+            return Err(format!(
+                "stale generation: client has {}, registry has {}. {STALE_GUIDANCE}",
+                expected.get(),
+                current
+            ));
+        }
+        let next = current.saturating_add(1);
+        let fp = config_fingerprint(&self.config_path);
+        write_generation_state(&self.home, next, &fp);
+        Ok(next)
     }
 
     async fn probe_configured_models_list(&self, id: &str) -> Result<String, String> {
@@ -1309,12 +1514,7 @@ fn save_patch_to_toml(patch: &ProviderSavePatch) -> ProviderTomlPatch {
     }
 }
 
-fn apply_openrouter_policy_fields(
-    config_path: &Path,
-    provider_id: &ProviderId,
-    patch: &ProviderSavePatch,
-) -> Result<(), String> {
-    // Nested [model_providers.<id>.provider_preferences] via toml_edit.
+fn openrouter_prefs_from_save(patch: &ProviderSavePatch) -> Option<OpenRouterPrefsPatch> {
     let has_policy = patch.openrouter_data_collection.is_some()
         || patch.openrouter_require_parameters.is_some()
         || patch.openrouter_allow_fallbacks.is_some()
@@ -1325,44 +1525,145 @@ fn apply_openrouter_policy_fields(
         || patch.openrouter_quantizations.is_some()
         || patch.openrouter_sort.is_some();
     if !has_policy {
-        return Ok(());
+        return None;
     }
-    apply_openrouter_preferences(
-        config_path,
-        provider_id,
-        &OpenRouterPrefsPatch {
-            data_collection: patch.openrouter_data_collection.clone(),
-            require_parameters: patch.openrouter_require_parameters,
-            allow_fallbacks: patch.openrouter_allow_fallbacks,
-            zdr: patch.openrouter_zdr,
-            order: patch.openrouter_order.clone(),
-            only: patch.openrouter_only.clone(),
-            ignore: patch.openrouter_ignore.clone(),
-            quantizations: patch.openrouter_quantizations.clone(),
-            sort: patch.openrouter_sort.clone(),
-        },
-    )
-    .map_err(|e| e.to_string())
+    Some(OpenRouterPrefsPatch {
+        data_collection: patch.openrouter_data_collection.clone(),
+        require_parameters: patch.openrouter_require_parameters,
+        allow_fallbacks: patch.openrouter_allow_fallbacks,
+        zdr: patch.openrouter_zdr,
+        order: patch.openrouter_order.clone(),
+        only: patch.openrouter_only.clone(),
+        ignore: patch.openrouter_ignore.clone(),
+        quantizations: patch.openrouter_quantizations.clone(),
+        sort: patch.openrouter_sort.clone(),
+    })
 }
 
-fn read_generation(home: &Path) -> u64 {
+fn is_empty_toml_patch(p: &ProviderTomlPatch) -> bool {
+    p.display_name.is_none()
+        && p.kind.is_none()
+        && p.base_url.is_none()
+        && p.admin_base_url.is_none()
+        && p.enabled.is_none()
+        && p.default_backend.is_none()
+        && p.auth_scheme.is_none()
+        && p.env_key.is_none()
+        && p.admin_env_key.is_none()
+        && p.catalog_enabled.is_none()
+        && p.capability_mode.is_none()
+        && p.catalog_ttl_secs.is_none()
+        && p.request_timeout_secs.is_none()
+        && p.organization.is_none()
+        && p.project.is_none()
+        && p.extra_headers.is_none()
+        && p.capabilities.is_none()
+        && p.openrouter_fallback_models.is_none()
+        && p.openrouter_pacing.is_none()
+        && p.api_surface.is_none()
+        && p.credential_route.is_none()
+}
+
+fn restrict_builtin_patch(patch: &mut ProviderSavePatch) -> Result<(), String> {
+    // Whitelist: display_name + enabled only.
+    let mut clean = ProviderSavePatch::default();
+    clean.display_name = patch.display_name.clone();
+    clean.enabled = patch.enabled;
+    // Detect disallowed fields that were set.
+    let disallowed = patch.kind.is_some()
+        || patch.base_url.is_some()
+        || patch.admin_base_url.is_some()
+        || patch.default_backend.is_some()
+        || patch.auth_scheme.is_some()
+        || patch.env_key.is_some()
+        || patch.admin_env_key.is_some()
+        || patch.catalog_enabled.is_some()
+        || patch.capability_mode.is_some()
+        || patch.catalog_ttl_secs.is_some()
+        || patch.request_timeout_secs.is_some()
+        || patch.organization.is_some()
+        || patch.project.is_some()
+        || patch.api_surface.is_some()
+        || patch.credential_route.is_some()
+        || patch.extra_headers.is_some()
+        || patch.capabilities.is_some()
+        || patch.openrouter_fallback_models.is_some()
+        || patch.openrouter_data_collection.is_some()
+        || patch.openrouter_require_parameters.is_some()
+        || patch.openrouter_allow_fallbacks.is_some()
+        || patch.openrouter_zdr.is_some()
+        || patch.openrouter_order.is_some()
+        || patch.openrouter_only.is_some()
+        || patch.openrouter_ignore.is_some()
+        || patch.openrouter_quantizations.is_some()
+        || patch.openrouter_sort.is_some()
+        || patch.openrouter_pacing.is_some();
+    if disallowed {
+        return Err(
+            "built-in providers only allow enable and display_name edits; \
+             unsupported fields fail closed"
+                .into(),
+        );
+    }
+    *patch = clean;
+    Ok(())
+}
+
+fn validate_credential_one_shots(
+    update: &CredentialSlotUpdate,
+    application_secret: Option<&str>,
+    admin_secret: Option<&str>,
+) -> Result<(), String> {
+    if matches!(update.application, SecretFieldUpdate::Set)
+        && application_secret
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+    {
+        return Err("application secret Set requires a non-empty one-shot value".into());
+    }
+    if matches!(update.admin, SecretFieldUpdate::Set)
+        && admin_secret
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+    {
+        return Err("admin secret Set requires a non-empty one-shot value".into());
+    }
+    Ok(())
+}
+
+fn config_fingerprint(config_path: &Path) -> String {
+    match fs::read(config_path) {
+        Ok(bytes) => format!("{:x}", Sha256::digest(&bytes)),
+        Err(_) => String::new(),
+    }
+}
+
+fn read_generation_raw(home: &Path) -> (u64, String) {
     let path = home.join(GENERATION_REL);
     match fs::read_to_string(path) {
-        Ok(s) => s.trim().parse().unwrap_or(0),
-        Err(_) => 0,
+        Ok(s) => {
+            let mut lines = s.lines();
+            let generation = lines
+                .next()
+                .and_then(|l| l.trim().parse().ok())
+                .unwrap_or(0);
+            let fp = lines.next().unwrap_or("").trim().to_owned();
+            (generation, fp)
+        }
+        Err(_) => (0, String::new()),
     }
 }
 
-fn bump_generation(home: &Path) -> u64 {
-    let next = read_generation(home).saturating_add(1);
+fn write_generation_state(home: &Path, generation: u64, fingerprint: &str) {
     let path = home.join(GENERATION_REL);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    // Owner-only atomic write of generation counter.
     let tmp = path.with_extension("tmp");
     if let Ok(mut f) = fs::File::create(&tmp) {
-        let _ = write!(f, "{next}");
+        let _ = write!(f, "{generation}\n{fingerprint}\n");
         let _ = f.sync_all();
         #[cfg(unix)]
         {
@@ -1371,7 +1672,6 @@ fn bump_generation(home: &Path) -> u64 {
         }
         let _ = fs::rename(&tmp, &path);
     }
-    next
 }
 
 fn stale_result(id: &str, generation: RegistryGeneration, msg: String) -> ProviderMutationResult {
@@ -1476,16 +1776,17 @@ mod tests {
             expected_generation: g,
         });
         assert!(add.ok);
-        s.apply_credential_updates(
+        let set = s.apply_credential_updates(
             "work_openai",
+            s.current_generation(),
             &CredentialSlotUpdate {
                 application: SecretFieldUpdate::Set,
                 ..Default::default()
             },
             Some("sk-test-not-logged"),
             None,
-        )
-        .unwrap();
+        );
+        assert!(set.ok, "{:?}", set.error);
         assert!(s.credential_presence("work_openai").has_application_key);
 
         let cloned = s.clone_provider(ProviderCloneRequest {
@@ -1544,39 +1845,70 @@ mod tests {
             })
             .ok
         );
-        s.apply_credential_updates(
+        let set = s.apply_credential_updates(
             "p1",
+            s.current_generation(),
             &CredentialSlotUpdate {
                 application: SecretFieldUpdate::Set,
                 ..Default::default()
             },
             Some("sk-keep"),
             None,
-        )
-        .unwrap();
-        // Preserve does nothing.
-        s.apply_credential_updates(
+        );
+        assert!(set.ok, "{:?}", set.error);
+        // Preserve does nothing (no bump required).
+        let preserve = s.apply_credential_updates(
             "p1",
+            s.current_generation(),
             &CredentialSlotUpdate {
                 application: SecretFieldUpdate::Preserve,
                 ..Default::default()
             },
             None,
             None,
-        )
-        .unwrap();
+        );
+        assert!(preserve.ok, "{:?}", preserve.error);
         assert!(s.credential_presence("p1").has_application_key);
-        s.apply_credential_updates(
+        let clear = s.apply_credential_updates(
             "p1",
+            s.current_generation(),
             &CredentialSlotUpdate {
                 application: SecretFieldUpdate::Clear,
                 ..Default::default()
             },
             None,
             None,
-        )
-        .unwrap();
+        );
+        assert!(clear.ok, "{:?}", clear.error);
         assert!(!s.credential_presence("p1").has_application_key);
+
+        // Stale client cannot mutate credentials (Issue 1).
+        let stale = s.apply_credential_updates(
+            "p1",
+            RegistryGeneration(0),
+            &CredentialSlotUpdate {
+                application: SecretFieldUpdate::Set,
+                ..Default::default()
+            },
+            Some("sk-stale"),
+            None,
+        );
+        assert!(!stale.ok);
+        assert!(stale.stale);
+        assert!(!s.credential_presence("p1").has_application_key);
+
+        // Built-in whitelist: base_url edit fails closed (Issue 7).
+        let g = s.current_generation();
+        // Seed a built-in table via add is reserved; save on xai default.
+        let builtin = s.save(ProviderSaveRequest {
+            id: "xai".into(),
+            expected_generation: g,
+            patch: ProviderSavePatch {
+                base_url: Some("https://evil.example/v1".into()),
+                ..Default::default()
+            },
+        });
+        assert!(!builtin.ok, "built-in base_url must fail closed");
     }
 
     #[test]

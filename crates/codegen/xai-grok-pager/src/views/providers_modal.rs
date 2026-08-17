@@ -280,6 +280,17 @@ pub struct ProviderModalState {
     /// Banner / status from management mutations (secret-free).
     pub management_message: Option<String>,
     pub management_error: Option<String>,
+    /// Typed add draft (Issue 13) — not encoded into banner text.
+    pub pending_add: Option<PendingProviderAdd>,
+}
+
+/// Secret-free add draft carried until the dispatch effect runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProviderAdd {
+    pub id: String,
+    pub kind: String,
+    pub base_url: String,
+    pub display_name: Option<String>,
 }
 
 // Deliberately omit the line editor and submitted secret. App state is often
@@ -353,6 +364,7 @@ impl ProviderModalState {
             list_generation: 0,
             management_message: None,
             management_error: None,
+            pending_add: None,
         }
     }
 
@@ -712,6 +724,11 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
         KeyCode::Char('l') if key.modifiers.is_empty() => {
             ProviderModalOutcome::Command(ProviderCommand::LoadListSnapshot)
         }
+        // Browse clone: open editor clone flow with a suggested id suffix.
+        KeyCode::Char('o') if key.modifiers.is_empty() => {
+            let id = state.selected_provider().id_str().to_owned();
+            ProviderModalOutcome::Command(ProviderCommand::OpenEditor { provider_id: id })
+        }
         _ => ProviderModalOutcome::Unchanged,
     }
 }
@@ -777,14 +794,15 @@ fn handle_adding_mode(state: &mut ProviderModalState, key: &KeyEvent) -> Provide
                 ProviderModalOutcome::Changed
             }
             AddStep::Confirm => {
-                // Hand off to dispatch via AddConfigured with draft fields stored
-                // on message; effect reads from temporary state via special command.
-                // We encode id/url/kind into management_message as a structured
-                // payload is avoided for secrets; these are non-secret metadata.
                 let id = id_editor.text().trim().to_owned();
                 let base_url = url_editor.text().trim().to_owned();
                 let kind = ADD_KINDS[*kind_index].to_owned();
-                state.management_message = Some(format!("add:{id}:{kind}:{base_url}"));
+                state.pending_add = Some(PendingProviderAdd {
+                    id,
+                    kind,
+                    base_url,
+                    display_name: None,
+                });
                 state.mode = ProviderModalMode::Browse;
                 ProviderModalOutcome::Command(ProviderCommand::AddConfigured)
             }
@@ -902,6 +920,11 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         },
         Shortcut {
             label: "a add",
+            clickable: false,
+            id: 0,
+        },
+        Shortcut {
+            label: "y/n enable",
             clickable: false,
             id: 0,
         },

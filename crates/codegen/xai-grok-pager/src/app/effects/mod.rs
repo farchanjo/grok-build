@@ -4886,21 +4886,18 @@ async fn run_provider_operation(
             let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
             let app = application_key.map(|k| k.into_inner());
             let admin = admin_key.map(|k| k.into_inner());
-            if let Err(e) = svc.apply_credential_updates(
-                &id,
-                &credential_update,
-                app.as_deref(),
-                admin.as_deref(),
-            ) {
-                management = Some(actions::ProviderManagementResult::Error(e));
-            } else {
-                let result = svc.save(ProviderSaveRequest {
+            // Generation-gated metadata + credentials in one locked path (Issue 1).
+            let result = svc.save_with_credentials(
+                ProviderSaveRequest {
                     id: id.clone(),
                     expected_generation: RegistryGeneration(expected_generation),
                     patch,
-                });
-                management = Some(actions::ProviderManagementResult::Mutation(result));
-            }
+                },
+                &credential_update,
+                app.as_deref(),
+                admin.as_deref(),
+            );
+            management = Some(actions::ProviderManagementResult::Mutation(result));
             drop(app);
             drop(admin);
             (ProviderKind::Configured(id), ProviderStatus::Missing)

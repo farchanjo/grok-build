@@ -49,6 +49,10 @@ pub enum EditorField {
     OrSort,
     OrPacing,
     OrFallbacks,
+    OrOrder,
+    OrOnly,
+    OrIgnore,
+    OrQuantizations,
     AppKeySlot,
     AdminKeySlot,
     Save,
@@ -91,6 +95,10 @@ impl EditorField {
             Self::OrSort => "OR sort",
             Self::OrPacing => "OR pacing",
             Self::OrFallbacks => "OR fallback models",
+            Self::OrOrder => "OR order (slugs)",
+            Self::OrOnly => "OR only (slugs)",
+            Self::OrIgnore => "OR ignore (slugs)",
+            Self::OrQuantizations => "OR quantizations",
             Self::AppKeySlot => "Application key",
             Self::AdminKeySlot => "Admin key",
             Self::Save => "Save changes",
@@ -157,6 +165,10 @@ fn fields_for_page(page: ProviderEditorPage) -> &'static [EditorField] {
             EditorField::OrSort,
             EditorField::OrPacing,
             EditorField::OrFallbacks,
+            EditorField::OrOrder,
+            EditorField::OrOnly,
+            EditorField::OrIgnore,
+            EditorField::OrQuantizations,
             EditorField::Credits,
             EditorField::Save,
         ],
@@ -187,6 +199,8 @@ pub struct ProviderEditorState {
     pub clear_admin_key: bool,
     /// Clone id draft when Clone action is active.
     pub clone_id_draft: String,
+    /// Baseline detail used for dirty-field Save patches (Issue 8).
+    baseline: ProviderDetailDto,
 }
 
 impl std::fmt::Debug for ProviderEditorState {
@@ -209,40 +223,11 @@ impl std::fmt::Debug for ProviderEditorState {
 
 impl ProviderEditorState {
     pub fn new(detail: ProviderDetailDto) -> Self {
-        let draft = ProviderSavePatch {
-            display_name: detail.display_name.clone(),
-            kind: Some(detail.kind.clone()),
-            base_url: detail.base_url.clone(),
-            admin_base_url: detail.admin_base_url.clone(),
-            enabled: Some(detail.enabled),
-            default_backend: detail.default_backend.clone(),
-            auth_scheme: detail.auth_scheme.clone(),
-            env_key: detail.env_key.clone(),
-            admin_env_key: detail.admin_env_key.clone(),
-            catalog_enabled: Some(detail.catalog_enabled),
-            capability_mode: detail.capability_mode.clone(),
-            catalog_ttl_secs: detail.catalog_ttl_secs,
-            request_timeout_secs: detail.request_timeout_secs,
-            organization: detail.organization.clone(),
-            project: detail.project.clone(),
-            extra_headers: Some(detail.extra_headers.clone()),
-            capabilities: Some(detail.capabilities.clone()),
-            openrouter_fallback_models: Some(detail.openrouter_fallback_models.clone()),
-            openrouter_data_collection: Some(detail.openrouter_data_collection.clone()),
-            openrouter_require_parameters: Some(detail.openrouter_require_parameters),
-            openrouter_allow_fallbacks: Some(detail.openrouter_allow_fallbacks),
-            openrouter_zdr: Some(detail.openrouter_zdr),
-            openrouter_order: Some(detail.openrouter_order.clone()),
-            openrouter_only: Some(detail.openrouter_only.clone()),
-            openrouter_ignore: Some(detail.openrouter_ignore.clone()),
-            openrouter_quantizations: Some(detail.openrouter_quantizations.clone()),
-            openrouter_sort: Some(detail.openrouter_sort.clone()),
-            openrouter_pacing: Some(detail.openrouter_pacing),
-            ..Default::default()
-        };
+        let draft = draft_from_detail(&detail);
         Self {
             page: ProviderEditorPage::General,
             field_index: 0,
+            baseline: detail.clone(),
             detail,
             draft,
             status: None,
@@ -260,6 +245,24 @@ impl ProviderEditorState {
             clear_admin_key: false,
             clone_id_draft: String::new(),
         }
+    }
+
+    /// Reload after successful save (Issue 3).
+    pub fn reload_from_detail(&mut self, detail: ProviderDetailDto) {
+        self.draft = draft_from_detail(&detail);
+        self.baseline = detail.clone();
+        self.detail = detail;
+        self.submitted_app_secret = None;
+        self.submitted_admin_secret = None;
+        self.clear_app_key = false;
+        self.clear_admin_key = false;
+        self.message = Some("Saved".into());
+        self.error = None;
+    }
+
+    /// Save patch containing only dirty fields relative to baseline.
+    pub fn dirty_save_patch(&self) -> ProviderSavePatch {
+        dirty_patch_against_baseline(&self.baseline, &self.draft)
     }
 
     pub fn generation(&self) -> RegistryGeneration {
@@ -344,6 +347,30 @@ impl ProviderEditorState {
             EditorField::OrFallbacks => self
                 .draft
                 .openrouter_fallback_models
+                .clone()
+                .unwrap_or_default()
+                .join(", "),
+            EditorField::OrOrder => self
+                .draft
+                .openrouter_order
+                .clone()
+                .unwrap_or_default()
+                .join(", "),
+            EditorField::OrOnly => self
+                .draft
+                .openrouter_only
+                .clone()
+                .unwrap_or_default()
+                .join(", "),
+            EditorField::OrIgnore => self
+                .draft
+                .openrouter_ignore
+                .clone()
+                .unwrap_or_default()
+                .join(", "),
+            EditorField::OrQuantizations => self
+                .draft
+                .openrouter_quantizations
                 .clone()
                 .unwrap_or_default()
                 .join(", "),
@@ -465,13 +492,19 @@ impl ProviderEditorState {
                 });
             }
             EditorField::OrFallbacks => {
-                let models: Vec<String> = text
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-                self.draft.openrouter_fallback_models = Some(models);
+                self.draft.openrouter_fallback_models = Some(split_csv(&text));
+            }
+            EditorField::OrOrder => {
+                self.draft.openrouter_order = Some(split_csv(&text));
+            }
+            EditorField::OrOnly => {
+                self.draft.openrouter_only = Some(split_csv(&text));
+            }
+            EditorField::OrIgnore => {
+                self.draft.openrouter_ignore = Some(split_csv(&text));
+            }
+            EditorField::OrQuantizations => {
+                self.draft.openrouter_quantizations = Some(split_csv(&text));
             }
             EditorField::HeadersSummary => {
                 let mut map = indexmap::IndexMap::new();
@@ -618,6 +651,22 @@ pub fn handle_key(state: &mut ProviderEditorState, key: &KeyEvent) -> EditorOutc
         KeyCode::Char('r') if key.modifiers.is_empty() => {
             EditorOutcome::Command(EditorCommand::RefreshCatalog)
         }
+        // Explicit Clear for application/admin key slots (Issue 4).
+        KeyCode::Char('c') if key.modifiers.is_empty() => match state.focused_field() {
+            EditorField::AppKeySlot => {
+                state.clear_app_key = true;
+                state.submitted_app_secret = None;
+                state.message = Some("Application key will clear on Save".into());
+                EditorOutcome::Command(EditorCommand::ClearAppKey)
+            }
+            EditorField::AdminKeySlot => {
+                state.clear_admin_key = true;
+                state.submitted_admin_secret = None;
+                state.message = Some("Admin key will clear on Save".into());
+                EditorOutcome::Command(EditorCommand::ClearAdminKey)
+            }
+            _ => EditorOutcome::Unchanged,
+        },
         _ => EditorOutcome::Unchanged,
     }
 }
@@ -791,7 +840,7 @@ pub fn render_editor(buf: &mut Buffer, area: Rect, state: &ProviderEditorState, 
         buf,
         area,
         y,
-        "Tab/←→ pages · ↑↓ fields · Enter activate · s save · t test · r catalog · Esc back",
+        "Tab/←→ pages · ↑↓ fields · Enter activate · s save · t test · r catalog · c clear key · Esc back",
         Style::default().fg(theme.gray_dim),
     );
 
@@ -1047,6 +1096,12 @@ fn field_value_display(state: &ProviderEditorState, field: EditorField) -> Strin
                 .unwrap_or(0);
             format!("{n} fallback model(s)")
         }
+        EditorField::OrOrder => list_count_label(&state.draft.openrouter_order, "order"),
+        EditorField::OrOnly => list_count_label(&state.draft.openrouter_only, "only"),
+        EditorField::OrIgnore => list_count_label(&state.draft.openrouter_ignore, "ignore"),
+        EditorField::OrQuantizations => {
+            list_count_label(&state.draft.openrouter_quantizations, "quant")
+        }
         EditorField::AppKeySlot => {
             if state.clear_app_key {
                 "will clear".into()
@@ -1120,6 +1175,162 @@ fn put_line(buf: &mut Buffer, area: Rect, y: &mut u16, text: &str, style: Style)
         buf.set_string(area.x, *y, clipped, style);
         *y = y.saturating_add(1);
     }
+}
+
+fn split_csv(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn list_count_label(list: &Option<Vec<String>>, name: &str) -> String {
+    let n = list.as_ref().map(|v| v.len()).unwrap_or(0);
+    format!("{n} {name}")
+}
+
+fn draft_from_detail(detail: &ProviderDetailDto) -> ProviderSavePatch {
+    ProviderSavePatch {
+        display_name: detail.display_name.clone(),
+        kind: Some(detail.kind.clone()),
+        base_url: detail.base_url.clone(),
+        admin_base_url: detail.admin_base_url.clone(),
+        enabled: Some(detail.enabled),
+        default_backend: detail.default_backend.clone(),
+        auth_scheme: detail.auth_scheme.clone(),
+        env_key: detail.env_key.clone(),
+        admin_env_key: detail.admin_env_key.clone(),
+        catalog_enabled: Some(detail.catalog_enabled),
+        capability_mode: detail.capability_mode.clone(),
+        catalog_ttl_secs: detail.catalog_ttl_secs,
+        request_timeout_secs: detail.request_timeout_secs,
+        organization: detail.organization.clone(),
+        project: detail.project.clone(),
+        // Keep route fields in draft for display/preserve but dirty-save omits
+        // them unless changed (api_surface/credential_route are advanced).
+        api_surface: detail.api_surface.clone(),
+        credential_route: detail.credential_route.clone(),
+        extra_headers: Some(detail.extra_headers.clone()),
+        capabilities: Some(detail.capabilities.clone()),
+        openrouter_fallback_models: Some(detail.openrouter_fallback_models.clone()),
+        openrouter_data_collection: Some(detail.openrouter_data_collection.clone()),
+        openrouter_require_parameters: Some(detail.openrouter_require_parameters),
+        openrouter_allow_fallbacks: Some(detail.openrouter_allow_fallbacks),
+        openrouter_zdr: Some(detail.openrouter_zdr),
+        openrouter_order: Some(detail.openrouter_order.clone()),
+        openrouter_only: Some(detail.openrouter_only.clone()),
+        openrouter_ignore: Some(detail.openrouter_ignore.clone()),
+        openrouter_quantizations: Some(detail.openrouter_quantizations.clone()),
+        openrouter_sort: Some(detail.openrouter_sort.clone()),
+        openrouter_pacing: Some(detail.openrouter_pacing),
+        ..Default::default()
+    }
+}
+
+fn dirty_patch_against_baseline(
+    baseline: &ProviderDetailDto,
+    draft: &ProviderSavePatch,
+) -> ProviderSavePatch {
+    let mut out = ProviderSavePatch::default();
+    if draft.display_name != baseline.display_name {
+        out.display_name = draft.display_name.clone();
+    }
+    if draft.kind.as_deref() != Some(baseline.kind.as_str()) {
+        out.kind = draft.kind.clone();
+    }
+    if draft.base_url != baseline.base_url {
+        out.base_url = draft.base_url.clone();
+    }
+    if draft.admin_base_url != baseline.admin_base_url {
+        out.admin_base_url = draft.admin_base_url.clone();
+    }
+    if draft.enabled != Some(baseline.enabled) {
+        out.enabled = draft.enabled;
+    }
+    if draft.default_backend != baseline.default_backend {
+        out.default_backend = draft.default_backend.clone();
+    }
+    if draft.auth_scheme != baseline.auth_scheme {
+        out.auth_scheme = draft.auth_scheme.clone();
+    }
+    if draft.env_key != baseline.env_key {
+        out.env_key = draft.env_key.clone();
+    }
+    if draft.admin_env_key != baseline.admin_env_key {
+        out.admin_env_key = draft.admin_env_key.clone();
+    }
+    if draft.catalog_enabled != Some(baseline.catalog_enabled) {
+        out.catalog_enabled = draft.catalog_enabled;
+    }
+    if draft.capability_mode != baseline.capability_mode {
+        out.capability_mode = draft.capability_mode.clone();
+    }
+    if draft.catalog_ttl_secs != baseline.catalog_ttl_secs {
+        out.catalog_ttl_secs = draft.catalog_ttl_secs;
+    }
+    if draft.request_timeout_secs != baseline.request_timeout_secs {
+        out.request_timeout_secs = draft.request_timeout_secs;
+    }
+    if draft.organization != baseline.organization {
+        out.organization = draft.organization.clone();
+    }
+    if draft.project != baseline.project {
+        out.project = draft.project.clone();
+    }
+    if draft.extra_headers.as_ref() != Some(&baseline.extra_headers) {
+        out.extra_headers = draft.extra_headers.clone();
+    }
+    if draft.capabilities.as_ref() != Some(&baseline.capabilities) {
+        out.capabilities = draft.capabilities.clone();
+    }
+    if draft.openrouter_fallback_models.as_ref() != Some(&baseline.openrouter_fallback_models) {
+        out.openrouter_fallback_models = draft.openrouter_fallback_models.clone();
+    }
+    if draft
+        .openrouter_data_collection
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        != baseline.openrouter_data_collection.as_ref()
+    {
+        out.openrouter_data_collection = draft.openrouter_data_collection.clone();
+    }
+    if draft.openrouter_require_parameters != Some(baseline.openrouter_require_parameters) {
+        out.openrouter_require_parameters = draft.openrouter_require_parameters;
+    }
+    if draft.openrouter_allow_fallbacks != Some(baseline.openrouter_allow_fallbacks) {
+        out.openrouter_allow_fallbacks = draft.openrouter_allow_fallbacks;
+    }
+    if draft.openrouter_zdr != Some(baseline.openrouter_zdr) {
+        out.openrouter_zdr = draft.openrouter_zdr;
+    }
+    if draft.openrouter_order.as_ref() != Some(&baseline.openrouter_order) {
+        out.openrouter_order = draft.openrouter_order.clone();
+    }
+    if draft.openrouter_only.as_ref() != Some(&baseline.openrouter_only) {
+        out.openrouter_only = draft.openrouter_only.clone();
+    }
+    if draft.openrouter_ignore.as_ref() != Some(&baseline.openrouter_ignore) {
+        out.openrouter_ignore = draft.openrouter_ignore.clone();
+    }
+    if draft.openrouter_quantizations.as_ref() != Some(&baseline.openrouter_quantizations) {
+        out.openrouter_quantizations = draft.openrouter_quantizations.clone();
+    }
+    if draft.openrouter_sort.as_ref().and_then(|o| o.as_ref()) != baseline.openrouter_sort.as_ref()
+    {
+        out.openrouter_sort = draft.openrouter_sort.clone();
+    }
+    if draft.openrouter_pacing != Some(baseline.openrouter_pacing) {
+        out.openrouter_pacing = draft.openrouter_pacing;
+    }
+    // api_surface / credential_route: only when user changed them (advanced).
+    if draft.api_surface != baseline.api_surface {
+        out.api_surface = draft.api_surface.clone();
+    }
+    if draft.credential_route != baseline.credential_route {
+        out.credential_route = draft.credential_route.clone();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1219,5 +1430,38 @@ mod tests {
             handle_key(&mut state, &key(KeyCode::Char('s'))),
             EditorOutcome::Command(EditorCommand::Save)
         );
+    }
+
+    #[test]
+    fn clear_key_on_app_slot_sets_flag() {
+        let mut state = ProviderEditorState::new(sample_detail());
+        state.page = ProviderEditorPage::Authentication;
+        state.field_index = fields_for_page(ProviderEditorPage::Authentication)
+            .iter()
+            .position(|f| *f == EditorField::AppKeySlot)
+            .unwrap();
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('c'))),
+            EditorOutcome::Command(EditorCommand::ClearAppKey)
+        );
+        assert!(state.clear_app_key);
+        assert_eq!(
+            state.credential_slot_update().application,
+            SecretFieldUpdate::Clear
+        );
+    }
+
+    #[test]
+    fn dirty_patch_omits_unchanged_openrouter_lists() {
+        let state = ProviderEditorState::new(sample_detail());
+        let patch = state.dirty_save_patch();
+        assert!(patch.openrouter_order.is_none());
+        assert!(patch.display_name.is_none());
+        // Changing display name only dirties that field.
+        let mut dirty = state;
+        dirty.draft.display_name = Some("Changed".into());
+        let patch = dirty.dirty_save_patch();
+        assert_eq!(patch.display_name.as_deref(), Some("Changed"));
+        assert!(patch.openrouter_order.is_none());
     }
 }

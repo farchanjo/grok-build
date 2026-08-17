@@ -57,5 +57,6 @@ pub use secrets::{
 pub use service::{ProviderService, ProviderServiceError};
 pub use toml_edit::{
     OpenRouterPrefsPatch, ProviderTomlPatch, apply_openrouter_preferences, apply_provider_patch,
-    disable_provider, enable_provider, remove_provider, upsert_provider,
+    apply_provider_patch_with_openrouter, disable_provider, enable_provider, remove_provider,
+    upsert_provider,
 };

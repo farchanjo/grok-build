@@ -1321,7 +1321,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 _ => None,
             };
             let connected = matches!(status, ProviderStatus::Connected { .. });
-            let mut post_management_refresh = false;
+            let mut follow_up: Vec<crate::app::actions::Effect> = Vec::new();
             let applied = app.agents.get_mut(&agent_id).is_some_and(|agent| {
                 let Some(crate::views::modal::ActiveModal::Providers { state }) =
                     agent.active_modal.as_mut()
@@ -1339,7 +1339,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             state.management_error = None;
                         }
                         ProviderManagementResult::Detail(detail) => {
-                            state.open_editor(detail);
+                            // If editor already open for same id, reload in place (Issue 3).
+                            if let Some(ed) = state.editor_mut() {
+                                if ed.detail.id == detail.id {
+                                    ed.reload_from_detail(detail);
+                                } else {
+                                    state.open_editor(detail);
+                                }
+                            } else {
+                                state.open_editor(detail);
+                            }
                         }
                         ProviderManagementResult::Mutation(result) => {
                             if result.ok {
@@ -1350,14 +1359,26 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     result.generation.get()
                                 ));
                                 state.management_error = None;
-                                post_management_refresh = true;
-                                // Reload detail if still editing same id.
-                                if let Some(ed) = state.editor_mut() {
-                                    if ed.detail.id == result.id {
-                                        ed.detail.generation = result.generation;
-                                        ed.message = Some("Saved".into());
-                                        ed.error = None;
-                                    }
+                                follow_up.push(crate::app::actions::Effect::ProviderOperation {
+                                    agent_id,
+                                    operation:
+                                        crate::app::actions::ProviderOperation::LoadListSnapshot,
+                                    repair: None,
+                                });
+                                // Full detail reload clears credential pending flags (Issue 3).
+                                if state
+                                    .editor_mut()
+                                    .is_some_and(|ed| ed.detail.id == result.id)
+                                {
+                                    follow_up.push(
+                                        crate::app::actions::Effect::ProviderOperation {
+                                            agent_id,
+                                            operation: crate::app::actions::ProviderOperation::LoadEditorDetail {
+                                                provider_id: result.id.clone(),
+                                            },
+                                            repair: None,
+                                        },
+                                    );
                                 }
                             } else {
                                 let msg = result
@@ -1376,37 +1397,73 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                 }
                             }
                         }
+                        // Issue 5: ignore late results for wrong provider / older generation.
                         ProviderManagementResult::Status(snap) => {
                             if let Some(ed) = state.editor_mut() {
-                                ed.status = Some(snap.clone());
-                                ed.message = Some(snap.label.clone());
-                                ed.error = snap.error.clone();
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.status = Some(snap.clone());
+                                    ed.message = Some(snap.label.clone());
+                                    ed.error = snap.error.clone();
+                                }
                             }
                         }
                         ProviderManagementResult::Catalog(snap) => {
                             if let Some(ed) = state.editor_mut() {
-                                ed.catalog = Some(snap.clone());
-                                ed.message = Some("Catalog updated".into());
-                                ed.error = snap.error.clone();
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.catalog = Some(snap.clone());
+                                    ed.message = Some("Catalog updated".into());
+                                    ed.error = snap.error.clone();
+                                }
                             }
                         }
                         ProviderManagementResult::Capabilities(snap) => {
                             if let Some(ed) = state.editor_mut() {
-                                ed.capabilities = Some(snap.clone());
-                                ed.message = Some("Capabilities updated".into());
-                                ed.error = snap.error.clone();
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.capabilities = Some(snap.clone());
+                                    ed.message = Some("Capabilities updated".into());
+                                    ed.error = snap.error.clone();
+                                }
                             }
                         }
                         ProviderManagementResult::Credits(snap) => {
                             if let Some(ed) = state.editor_mut() {
-                                ed.credits = Some(snap.clone());
-                                ed.message = snap.summary.clone();
-                                ed.error = snap.error.clone();
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.credits = Some(snap.clone());
+                                    ed.message = snap.summary.clone();
+                                    ed.error = snap.error.clone();
+                                }
                             }
                         }
                         ProviderManagementResult::References(snap) => {
                             if let Some(ed) = state.editor_mut() {
-                                ed.references = Some(snap);
+                                if management_result_is_fresh(
+                                    &ed.detail.id,
+                                    ed.detail.generation.get(),
+                                    &snap.provider_id,
+                                    snap.generation.get(),
+                                ) {
+                                    ed.references = Some(snap);
+                                }
                             }
                         }
                         ProviderManagementResult::Error(err) => {
@@ -1422,12 +1479,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if !applied && let Some(error) = fallback_error {
                 app.show_toast(&format!("Provider action failed: {error}"));
             }
-            if post_management_refresh {
-                return vec![crate::app::actions::Effect::ProviderOperation {
-                    agent_id,
-                    operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
-                    repair: None,
-                }];
+            if !follow_up.is_empty() {
+                return follow_up;
             }
 
             // Resume only when completion echoes the immutable repair scope
@@ -1476,5 +1529,29 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             retry_effects
         }
+    }
+}
+
+/// Accept async management snapshots only for the open editor provider and when
+/// the result generation is not older than the editor's known generation.
+fn management_result_is_fresh(
+    editor_id: &str,
+    editor_generation: u64,
+    result_id: &str,
+    result_generation: u64,
+) -> bool {
+    editor_id == result_id && result_generation >= editor_generation
+}
+
+#[cfg(test)]
+mod management_result_tests {
+    use super::management_result_is_fresh;
+
+    #[test]
+    fn rejects_wrong_provider_and_older_generation() {
+        assert!(management_result_is_fresh("a", 3, "a", 3));
+        assert!(management_result_is_fresh("a", 3, "a", 4));
+        assert!(!management_result_is_fresh("a", 3, "b", 9));
+        assert!(!management_result_is_fresh("a", 5, "a", 4));
     }
 }

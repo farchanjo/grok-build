@@ -420,6 +420,42 @@ enabled = true
         assert!(text.contains("require_parameters"));
         assert!(text.contains("latency"));
     }
+
+    #[test]
+    fn combined_patch_and_openrouter_is_single_atomic_write() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[model_providers.or_work]
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+enabled = true
+"#,
+        )
+        .unwrap();
+        let id = ProviderId::new("or_work").unwrap();
+        apply_provider_patch_with_openrouter(
+            &path,
+            &id,
+            &ProviderTomlPatch {
+                display_name: Some("OR Work".into()),
+                ..Default::default()
+            },
+            Some(&OpenRouterPrefsPatch {
+                data_collection: Some(Some("deny".into())),
+                order: Some(vec!["openai".into()]),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("OR Work"));
+        assert!(text.contains("data_collection"));
+        assert!(text.contains("deny"));
+        assert!(text.contains("order"));
+    }
 }
 
 /// Nested OpenRouter `provider_preferences` field patch.
@@ -436,38 +472,14 @@ pub struct OpenRouterPrefsPatch {
     pub sort: Option<Option<String>>,
 }
 
-/// Nested OpenRouter `provider_preferences` patch applied under
-/// `[model_providers.<id>.provider_preferences]`.
-pub fn apply_openrouter_preferences(
-    config_path: &Path,
-    provider_id: &ProviderId,
-    patch: &OpenRouterPrefsPatch,
-) -> Result<(), ProviderLifecycleError> {
-    let mut doc = read_document(config_path)?;
-    let providers = ensure_model_providers(&mut doc);
-    if !providers.contains_key(provider_id.as_str()) {
-        return Err(ProviderLifecycleError::NotFound(
-            provider_id.as_str().to_owned(),
-        ));
-    }
-    let table = providers
-        .get_mut(provider_id.as_str())
-        .and_then(|i| i.as_table_mut())
-        .ok_or_else(|| {
-            ProviderLifecycleError::Validation(format!(
-                "model_providers.{} is not a table",
-                provider_id.as_str()
-            ))
-        })?;
+fn apply_openrouter_prefs_to_table(table: &mut toml_edit::Table, patch: &OpenRouterPrefsPatch) {
     if !table.contains_key("provider_preferences") {
         table["provider_preferences"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     let prefs = table
         .get_mut("provider_preferences")
         .and_then(|i| i.as_table_mut())
-        .ok_or_else(|| {
-            ProviderLifecycleError::Validation("provider_preferences is not a table".into())
-        })?;
+        .expect("provider_preferences table just ensured");
     if let Some(opt) = &patch.data_collection {
         match opt {
             Some(v) => prefs["data_collection"] = toml_edit::value(v.as_str()),
@@ -535,6 +547,52 @@ pub fn apply_openrouter_preferences(
             arr.push(o.as_str());
         }
         prefs["quantizations"] = toml_edit::Item::Value(toml_edit::Value::Array(arr));
+    }
+}
+
+/// Nested OpenRouter `provider_preferences` patch applied under
+/// `[model_providers.<id>.provider_preferences]`.
+pub fn apply_openrouter_preferences(
+    config_path: &Path,
+    provider_id: &ProviderId,
+    patch: &OpenRouterPrefsPatch,
+) -> Result<(), ProviderLifecycleError> {
+    apply_provider_patch_with_openrouter(
+        config_path,
+        provider_id,
+        &ProviderTomlPatch::default(),
+        Some(patch),
+    )
+}
+
+/// Apply top-level provider fields and optional OpenRouter preferences in **one**
+/// atomic document write (comment-preserving).
+pub fn apply_provider_patch_with_openrouter(
+    config_path: &Path,
+    provider_id: &ProviderId,
+    patch: &ProviderTomlPatch,
+    openrouter: Option<&OpenRouterPrefsPatch>,
+) -> Result<(), ProviderLifecycleError> {
+    validate_patch(patch)?;
+    let mut doc = read_document(config_path)?;
+    let providers = ensure_model_providers(&mut doc);
+    if !providers.contains_key(provider_id.as_str()) {
+        return Err(ProviderLifecycleError::NotFound(
+            provider_id.as_str().to_owned(),
+        ));
+    }
+    let table = providers
+        .get_mut(provider_id.as_str())
+        .and_then(|i| i.as_table_mut())
+        .ok_or_else(|| {
+            ProviderLifecycleError::Validation(format!(
+                "model_providers.{} is not a table",
+                provider_id.as_str()
+            ))
+        })?;
+    apply_patch_to_table(table, patch);
+    if let Some(or_patch) = openrouter {
+        apply_openrouter_prefs_to_table(table, or_patch);
     }
     atomic_write_document(config_path, &doc)
         .map_err(|e| ProviderLifecycleError::Validation(e.to_string()))
