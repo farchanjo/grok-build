@@ -138,14 +138,26 @@ pub fn reset_poll_state_for_tests() {
     }
 }
 
+/// Test helper: whether the gateway list mutex can be acquired without blocking
+/// (proves release-before-callback fanout when called from a forwarder body).
+#[cfg(test)]
+pub fn gateway_mutex_try_lock_ok_for_test() -> bool {
+    match gateways().try_lock() {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     #[test]
+    #[serial]
     fn forwarder_receives_method() {
         clear_retrieval_update_forwarders();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -160,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn notify_file_poll_coalesces() {
         reset_poll_state_for_tests();
         let dir = TempDir::new().unwrap();
@@ -170,5 +183,26 @@ mod tests {
         publish_retrieval_update(dir.path(), 5, &["prime".into()]);
         let second = poll_notify_file_if_newer(dir.path()).expect("second");
         assert_eq!(second["generation"], 5);
+    }
+
+    #[test]
+    #[serial]
+    fn forwarder_runs_after_gateway_mutex_release() {
+        clear_retrieval_update_forwarders();
+        let unlocked = Arc::new(AtomicUsize::new(0));
+        let unlocked2 = unlocked.clone();
+        register_retrieval_update_forwarder(Box::new(move |_n| {
+            // While this body runs the fanout must have released the list lock.
+            if gateway_mutex_try_lock_ok_for_test() {
+                unlocked2.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        try_forward_retrieval_update(&retrieval_update_params(1, &["prime".into()]));
+        assert_eq!(
+            unlocked.load(Ordering::SeqCst),
+            1,
+            "forwarder must run after gateway mutex release"
+        );
+        clear_retrieval_update_forwarders();
     }
 }

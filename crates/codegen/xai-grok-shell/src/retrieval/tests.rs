@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use xai_grok_config_types::RetrievalProfileConfig;
 use xai_grok_inference::RetrievalError;
 
-use super::clients::{FakeEmbedScript, FakeRerankScript, FakeRetrievalExecutor};
+use super::clients::{FakeEmbedScript, FakeRerankScript, FakeRetrievalExecutor, RetrievalExecutor};
 use super::clock::MockClock;
 use super::error::{DegradationKind, OrchestratorError, RouteFailureClass};
 use super::pipeline::{CandidateRow, PipelineOptions};
@@ -356,6 +356,194 @@ async fn hard_error_opt_in_on_semantic_failure() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn hard_retrieve_preserves_typed_deadline_error() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-hard-deadline", clock.clone());
+    let mut graph = test_graph_two_embed_routes();
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .deadline_ms = 50;
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_attempts = 10;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
+    );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    struct Adv {
+        clock: Arc<MockClock>,
+        inner: Arc<FakeRetrievalExecutor>,
+        done: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl super::clients::RetrievalExecutor for Adv {
+        async fn embed(
+            &self,
+            home: &std::path::Path,
+            model_id: &str,
+            config: &xai_grok_config_types::EmbeddingModelConfig,
+            pins: &super::clients::RouteCallPins,
+            inputs: Vec<String>,
+            cancel: CancellationToken,
+        ) -> xai_grok_inference::RetrievalResult<xai_grok_inference::EmbeddingResult> {
+            if !self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.clock.advance(Duration::from_secs(60));
+            }
+            self.inner
+                .embed(home, model_id, config, pins, inputs, cancel)
+                .await
+        }
+        async fn rerank(
+            &self,
+            home: &std::path::Path,
+            model_id: &str,
+            config: &xai_grok_config_types::RerankerModelConfig,
+            pins: &super::clients::RouteCallPins,
+            query: String,
+            documents: Vec<String>,
+            top_n: Option<u32>,
+            cancel: CancellationToken,
+        ) -> xai_grok_inference::RetrievalResult<xai_grok_inference::RerankResult> {
+            self.inner
+                .rerank(
+                    home, model_id, config, pins, query, documents, top_n, cancel,
+                )
+                .await
+        }
+    }
+    fake.set_embed("emb-a", FakeEmbedScript::Err(RetrievalError::Timeout));
+    fake.set_embed("emb-b", FakeEmbedScript::Ok { dims: 8, fill: 1.0 });
+    let adv = Arc::new(Adv {
+        clock,
+        inner: fake,
+        done: std::sync::atomic::AtomicBool::new(false),
+    });
+    let tel = Arc::new(RecordingTelemetrySink::new());
+    let svc = RetrievalService::new(reg)
+        .with_executor(adv)
+        .with_telemetry(tel);
+    let err = svc
+        .retrieve(
+            "default",
+            "q",
+            RetrieveCandidates::Explicit(vec![CandidateRow {
+                id: "1".into(),
+                text: "t".into(),
+                score: None,
+                metadata: None,
+            }]),
+            PipelineOptions {
+                hard_error_on_semantic_failure: true,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OrchestratorError::DeadlineExceeded { .. }),
+        "hard mode must preserve typed deadline, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn route_error_debug_redacts_adapter_message() {
+    let err = OrchestratorError::Route(RetrievalError::Http {
+        status: 500,
+        category: xai_grok_inference::RetrievalErrorCategory::Server,
+        message: "sk-SECRET adapter body".into(),
+        request_id: None,
+        provider_id: Some("acct".into()),
+    });
+    let dbg = format!("{err:?}");
+    let disp = format!("{err}");
+    assert!(!dbg.contains("sk-SECRET"), "{dbg}");
+    assert!(!disp.contains("sk-SECRET"), "{disp}");
+}
+
+#[tokio::test]
+async fn fake_zero_deadline_pin_enforced() {
+    let fake = FakeRetrievalExecutor::new();
+    fake.set_embed("m", FakeEmbedScript::Ok { dims: 2, fill: 0.0 });
+    let pins = super::clients::RouteCallPins {
+        provenance_incarnation: None,
+        session_registry_generation: None,
+        total_deadline: Some(Duration::ZERO),
+    };
+    let err = fake
+        .embed(
+            std::path::Path::new("/tmp"),
+            "m",
+            &xai_grok_config_types::EmbeddingModelConfig {
+                provider: "p".into(),
+                model: "m".into(),
+                ..Default::default()
+            },
+            &pins,
+            vec!["q".into()],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RetrievalError::DeadlineExceeded));
+}
+
+#[tokio::test]
+async fn bypass_missing_profile_still_bounds_candidates() {
+    let reg = RetrievalRegistry::disabled("/tmp/pr17-bypass-bound");
+    let svc = RetrievalService::new(reg);
+    let many: Vec<CandidateRow> = (0..20_000)
+        .map(|i| CandidateRow {
+            id: i.to_string(),
+            text: "x".into(),
+            score: None,
+            metadata: None,
+        })
+        .collect();
+    let out = svc
+        .retrieve(
+            "missing",
+            "q",
+            RetrieveCandidates::Explicit(many),
+            PipelineOptions {
+                bypass_semantic: true,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.candidates.len() <= 10_000);
+}
+
+#[test]
+fn stable_home_key_independent_of_directory_existence() {
+    let base = std::env::temp_dir().join(format!("pr17-home-key-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let key_before = super::stable_home_key(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let key_after = super::stable_home_key(&base);
+    assert_eq!(
+        key_before, key_after,
+        "key must not change when directory is created"
+    );
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[tokio::test]

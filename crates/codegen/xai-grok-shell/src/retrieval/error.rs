@@ -312,7 +312,11 @@ impl fmt::Debug for OrchestratorError {
                 .field("live", live)
                 .finish(),
             Self::InvalidRequest(m) => f.debug_tuple("InvalidRequest").field(m).finish(),
-            Self::Route(e) => f.debug_tuple("Route").field(e).finish(),
+            // Never forward adapter Http.message / Transport / Decode bodies.
+            Self::Route(e) => f
+                .debug_struct("Route")
+                .field("class", &RouteFailureClass::from_retrieval_error(e))
+                .finish(),
             Self::Config(m) => f.debug_tuple("Config").field(m).finish(),
         }
     }
@@ -379,7 +383,12 @@ impl fmt::Display for OrchestratorError {
                 "retrieval snapshot generation mismatch (expected {expected}, live {live})"
             ),
             Self::InvalidRequest(m) => write!(f, "invalid retrieval request: {m}"),
-            Self::Route(e) => write!(f, "{e}"),
+            // Classification only — never adapter message / body text.
+            Self::Route(e) => write!(
+                f,
+                "retrieval route failure ({})",
+                RouteFailureClass::from_retrieval_error(e).as_str()
+            ),
             Self::Config(m) => write!(f, "retrieval config: {m}"),
         }
     }

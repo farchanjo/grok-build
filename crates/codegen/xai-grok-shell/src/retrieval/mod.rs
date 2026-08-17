@@ -59,10 +59,11 @@ use std::sync::Arc;
 
 /// Home-keyed process registry map for multi-home / multi-agent composition.
 ///
-/// Each `GROK_HOME` (canonical path) owns at most one [`RetrievalRegistry`].
-/// Concurrent agents with different homes do not overwrite each other.
-/// Prefer holding an `Arc<RetrievalRegistry>` on the agent handle when possible;
-/// this map supports hot-reload from config/notify fans that only know the home.
+/// Each home key (stable absolute path; see [`stable_home_key`]) owns at most
+/// one [`RetrievalRegistry`]. Concurrent agents with different homes do not
+/// overwrite each other. Prefer holding an `Arc<RetrievalRegistry>` on the
+/// agent handle when possible; this map supports hot-reload from config/notify
+/// fans that only know the home.
 static HOME_REGISTRIES: std::sync::OnceLock<
     parking_lot::RwLock<HashMap<PathBuf, Arc<RetrievalRegistry>>>,
 > = std::sync::OnceLock::new();
@@ -71,8 +72,23 @@ fn home_map() -> &'static parking_lot::RwLock<HashMap<PathBuf, Arc<RetrievalRegi
     HOME_REGISTRIES.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
 }
 
-fn canonicalize_home(home: &Path) -> PathBuf {
-    std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf())
+/// Stable registry map key for a Grok home path.
+///
+/// Uses an absolute path form **without** `canonicalize` (which fails when the
+/// directory does not yet exist and can change after creation/symlink
+/// resolution). Keys are therefore stable across install-before-create and
+/// later lookup of the same logical home.
+pub fn stable_home_key(home: &Path) -> PathBuf {
+    let absolute = if home.is_absolute() {
+        home.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(home))
+            .unwrap_or_else(|_| home.to_path_buf())
+    };
+    // Collapse `..` / `.` without requiring the path to exist (dunce does not
+    // touch the filesystem for simplified absolute paths on Unix).
+    dunce::simplified(&absolute).to_path_buf()
 }
 
 /// Install (or replace) the registry for `home`. Returns the previous entry if any.
@@ -80,19 +96,19 @@ pub fn install_registry_for_home(
     home: impl AsRef<Path>,
     registry: Arc<RetrievalRegistry>,
 ) -> Option<Arc<RetrievalRegistry>> {
-    let key = canonicalize_home(home.as_ref());
+    let key = stable_home_key(home.as_ref());
     home_map().write().insert(key, registry)
 }
 
 /// Clone the registry for `home` if installed.
 pub fn registry_for_home(home: impl AsRef<Path>) -> Option<Arc<RetrievalRegistry>> {
-    let key = canonicalize_home(home.as_ref());
+    let key = stable_home_key(home.as_ref());
     home_map().read().get(&key).cloned()
 }
 
 /// Remove the registry for `home` (tests / shutdown).
 pub fn uninstall_registry_for_home(home: impl AsRef<Path>) -> Option<Arc<RetrievalRegistry>> {
-    let key = canonicalize_home(home.as_ref());
+    let key = stable_home_key(home.as_ref());
     home_map().write().remove(&key)
 }
 
@@ -118,30 +134,4 @@ pub fn reload_all_registries() -> Vec<(PathBuf, ReloadOutcome)> {
     regs.into_iter()
         .map(|(home, reg)| (home, reg.reload_from_home()))
         .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Compatibility aliases (single-home product path helpers)
-// ---------------------------------------------------------------------------
-
-/// Install under the registry's own home path.
-pub fn install_global_registry(registry: Arc<RetrievalRegistry>) {
-    let home = registry.home().to_path_buf();
-    install_registry_for_home(home, registry);
-}
-
-/// Clear all registries (alias).
-pub fn clear_global_registry() {
-    clear_all_registries();
-}
-
-/// First installed registry (tests/compat only; prefer [`registry_for_home`]).
-pub fn global_registry() -> Option<Arc<RetrievalRegistry>> {
-    home_map().read().values().next().cloned()
-}
-
-/// Reload all installed registries (compat with previous single-global API).
-pub fn reload_global_registry() -> Option<ReloadOutcome> {
-    let outcomes = reload_all_registries();
-    outcomes.into_iter().next().map(|(_, o)| o)
 }

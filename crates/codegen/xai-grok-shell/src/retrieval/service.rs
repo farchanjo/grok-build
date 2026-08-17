@@ -6,7 +6,13 @@
 //!
 //! One profile-wide [`ProfileBudgetTracker`] spans embed and rerank for
 //! `retrieve`, preserving absolute deadline, attempts, and input/output budgets.
+//!
+//! **Input budget semantics:** the tracker charges **per upstream request
+//! payload**. When both embed and rerank run, the query text is charged once
+//! for the embedding request and again for the rerank request (plus documents),
+//! because each HTTP call carries that payload independently.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,6 +34,9 @@ use super::telemetry::{TelemetrySink, TracingTelemetrySink};
 /// Callback that supplies local/lexical candidate rows (storage-agnostic).
 pub type CandidateProvider = Arc<dyn Fn(&str) -> Vec<CandidateRow> + Send + Sync>;
 
+/// Soft upper bound when profile is missing/disabled under bypass (safety net).
+const BYPASS_FALLBACK_MAX_RESULTS: usize = 10_000;
+
 /// Shell-facing retrieval service (cloneable Arc registry).
 #[derive(Clone)]
 pub struct RetrievalService {
@@ -38,7 +47,7 @@ pub struct RetrievalService {
 }
 
 impl std::fmt::Debug for RetrievalService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RetrievalService")
             .field("generation", &self.registry.generation())
             .field("home", &self.home)
@@ -135,9 +144,6 @@ impl RetrievalService {
     }
 
     /// Optional rerank of a bounded shortlist via a named profile.
-    ///
-    /// On total reranker failure returns [`RerankStageResult`] with
-    /// `preserved_pre_rerank_order = true` and no reordering applied.
     pub async fn rerank(
         &self,
         profile_id: &str,
@@ -159,12 +165,13 @@ impl RetrievalService {
 
     /// Generic orchestration: candidates from callback or explicit rows.
     ///
-    /// Does not own skill/memory storage. When semantic embedding fails,
-    /// returns lexical/native candidate order with a degradation notice
-    /// unless `hard_error_on_semantic_failure` is set.
-    ///
     /// **Budget continuity:** a single [`ProfileBudgetTracker`] covers embed
     /// and rerank for absolute deadline, attempts, and input/output limits.
+    ///
+    /// **Hard semantic mode:** when `hard_error_on_semantic_failure` is set,
+    /// typed deadline/attempt/input/output errors and `AllRoutesFailed`
+    /// propagate as their original variants (not collapsed). Soft mode maps
+    /// them to degradation notices so lexical order can continue.
     pub async fn retrieve(
         &self,
         profile_id: &str,
@@ -189,6 +196,8 @@ impl RetrievalService {
                 Ok(p) => p,
                 Err(OrchestratorError::ServiceDisabled)
                 | Err(OrchestratorError::ProfileMissing { .. }) => {
+                    // Always bound bypass output even when profile is missing.
+                    rows.truncate(BYPASS_FALLBACK_MAX_RESULTS.min(rows.len()));
                     return Ok(RetrieveResult {
                         candidates: rows,
                         embedding_space: None,
@@ -218,7 +227,6 @@ impl RetrievalService {
 
         let profile = self.resolve_profile(&snapshot, profile_id)?;
         let ctx = self.ctx(&snapshot, profile);
-        // Single profile-wide tracker for the entire retrieve (OI-1, OI-2, OI-5).
         let mut budget = ProfileBudgetTracker::new(
             &profile.id,
             profile.budgets.clone(),
@@ -227,43 +235,37 @@ impl RetrievalService {
         let mut degradations = Vec::new();
 
         let mut rows = candidates.into_rows(query);
+        // Limit overflow uses only hard_error_on_limit_exceeded (decoupled
+        // from hard_error_on_semantic_failure).
         if rows.len() > profile.budgets.max_candidates as usize {
-            if options.hard_error_on_limit_exceeded || options.hard_error_on_semantic_failure {
+            if options.hard_error_on_limit_exceeded {
                 budget.check_candidate_limit(rows.len())?;
             } else {
                 rows.truncate(budget.clamp_candidates(rows.len()));
             }
         }
 
-        let (embed, embed_deg, cancelled) = embed_or_degrade(
+        let (embed, embed_deg) = embed_or_degrade(
             &ctx,
             vec![query.to_owned()],
             &options,
             cancel.child_token(),
             &mut budget,
         )
-        .await;
-        if cancelled || cancel.is_cancelled() {
+        .await?;
+        if cancel.is_cancelled() {
             return Err(OrchestratorError::Cancelled {
                 profile_id: profile_id.to_owned(),
                 stage: RetrievalStage::Orchestrate,
             });
         }
         if let Some(d) = embed_deg {
-            if options.hard_error_on_semantic_failure {
-                return Err(OrchestratorError::AllRoutesFailed {
-                    profile_id: profile_id.to_owned(),
-                    stage: RetrievalStage::Embed,
-                    last_failure: d.last_failure,
-                });
-            }
+            // Soft mode only (hard mode already returned Err from embed_or_degrade).
             degradations.push(d);
         }
 
         let embedding_space = embed.as_ref().map(|e| e.embedding_space.clone());
 
-        // Rerank continues on the same budget (attempts/deadline/input carry forward
-        // even after soft embed degradation).
         let mut rerank_out = None;
         if !rows.is_empty() && !profile.reranker_route_ids.is_empty() {
             let docs: Vec<String> = rows.iter().map(|r| r.text.clone()).collect();
@@ -308,8 +310,8 @@ impl RetrievalService {
                     });
                 }
                 Err(e @ OrchestratorError::OutputBudgetExceeded { .. })
-                    if options.hard_error_on_semantic_failure
-                        || options.hard_error_on_limit_exceeded =>
+                    if options.hard_error_on_limit_exceeded
+                        || options.hard_error_on_semantic_failure =>
                 {
                     return Err(e);
                 }
@@ -332,8 +334,6 @@ impl RetrievalService {
             }
         }
 
-        // Soft result truncate is intentional for normal retrieve; hard path
-        // can opt into LimitExceeded via hard_error_on_limit_exceeded.
         if rows.len() > profile.budgets.max_results as usize {
             if options.hard_error_on_limit_exceeded {
                 budget.check_result_limit(rows.len())?;
@@ -355,9 +355,7 @@ impl RetrievalService {
 
 /// Candidate source for [`RetrievalService::retrieve`].
 pub enum RetrieveCandidates {
-    /// Explicit rows already gathered by the caller.
     Explicit(Vec<CandidateRow>),
-    /// Callback invoked with the query string.
     Provider(CandidateProvider),
 }
 

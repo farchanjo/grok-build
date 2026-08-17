@@ -264,11 +264,14 @@ pub fn origin_host_from_base_url(base_url: &str) -> String {
 }
 
 /// Content fingerprint over a validated graph + provider generation.
+///
+/// Fail-closed: serialization failure returns `Err` so callers never publish
+/// a generations-only weak digest (would collide distinct graphs).
 pub fn snapshot_fingerprint(
     graph: &RetrievalGraphConfig,
     provider_generation: u64,
     graph_generation: u64,
-) -> String {
+) -> Result<String, String> {
     let mut hasher = Sha256::new();
     hasher.update(b"retrieval-snap/v1\0");
     hasher.update(provider_generation.to_le_bytes());
@@ -276,11 +279,11 @@ pub fn snapshot_fingerprint(
     hasher.update(graph_generation.to_le_bytes());
     hasher.update(b"\0");
     // Stable serialization via JSON (maps preserve IndexMap order in serde).
-    if let Ok(bytes) = serde_json::to_vec(graph) {
-        hasher.update(&bytes);
-    }
+    let bytes = serde_json::to_vec(graph)
+        .map_err(|e| format!("retrieval snapshot fingerprint serialization failed: {e}"))?;
+    hasher.update(&bytes);
     let digest = hasher.finalize();
-    hex_encode(&digest[..16])
+    Ok(hex_encode(&digest[..16]))
 }
 
 /// Build embedding space id from a model config + resolved provider pins.

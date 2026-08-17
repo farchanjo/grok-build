@@ -151,9 +151,15 @@ struct HashMapLike(std::collections::HashMap<String, usize>);
 
 /// Fake executor for hermetic tests.
 ///
-/// Records [`RouteCallPins`] and enforces zero/expired `total_deadline` and
-/// cancellation so orchestrator pin/deadline invariants are testable without
-/// live HTTP.
+/// Records [`RouteCallPins`] and enforces:
+/// - cancellation (immediate or via `WaitForCancel`);
+/// - **zero** `total_deadline` → `DeadlineExceeded`.
+///
+/// It does **not** wall-clock-elapse a positive `total_deadline` (no MockClock
+/// coupling to PR16 transport `Instant`). Production deadline continuity is
+/// enforced by the orchestrator budget tracker + PR16 transport when using
+/// [`Pr16RetrievalExecutor`]. Hybrid Fake+elapsed-deadline is intentionally
+/// out of scope for PR17 (documented residual).
 pub struct FakeRetrievalExecutor {
     embed_scripts: Mutex<std::collections::HashMap<String, FakeEmbedScript>>,
     rerank_scripts: Mutex<std::collections::HashMap<String, FakeRerankScript>>,

@@ -3,6 +3,17 @@
 //! Parse/validate/resolve complete candidate off the write lock. Invalid
 //! syntax/semantic/provider refs retain prior working snapshot. Never publish
 //! a partial graph. Stale async rebuilds are rejected by generation check.
+//!
+//! ## Disabled / missing referenced provider (LKG product policy)
+//!
+//! When a candidate graph fails validation because a referenced provider is
+//! disabled, missing, tombstoned, or incapable, the builder returns
+//! [`SnapshotBuildError`] and the registry **retains the last working
+//! snapshot** (still `enabled=true` with that route listed). Call-time PR16
+//! resolve fails closed for that route and the orchestrator may fall through
+//! to the next **explicitly configured** route only — never a silent sibling
+//! retarget and never a partial “drop dead routes and publish” graph. This is
+//! deliberate no-partial-graph policy, not an automatic route rewrite.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -96,7 +107,9 @@ impl std::error::Error for SnapshotBuildError {}
 
 /// Build a complete immutable snapshot from validated inputs.
 ///
-/// Hard validation errors return `Err` so callers retain LKG.
+/// Hard validation errors return `Err` so callers retain LKG — including the
+/// case where a referenced provider is disabled/missing/tombstoned/incapable
+/// (see module docs: no partial graph publish; call-time PR16 still fail-closes).
 pub fn build_snapshot(
     input: SnapshotBuildInput,
     next_generation: u64,
@@ -189,7 +202,8 @@ pub fn build_snapshot(
         &input.graph,
         input.provider_generation,
         input.graph_generation,
-    );
+    )
+    .map_err(|e| SnapshotBuildError { reasons: vec![e] })?;
     let enabled = !profiles.is_empty();
     if !enabled {
         warnings.push("retrieval snapshot has no profiles; service disabled".into());
@@ -269,7 +283,6 @@ pub fn load_provider_context(
             },
         );
     }
-    let _ = lifecycle;
     Ok((generation, views, meta))
 }
 

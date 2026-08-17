@@ -211,11 +211,7 @@ impl RetrievalRegistry {
     /// disk update. Disk I/O never runs under the publish lock.
     pub fn reload_from_home(&self) -> ReloadOutcome {
         let _flight = self.reload_flight.lock();
-        let mut outcome = self.reload_from_home_once();
-        if matches!(outcome, ReloadOutcome::StaleDropped { .. }) {
-            outcome = self.reload_from_home_once();
-        }
-        outcome
+        reload_with_one_stale_retry(|| self.reload_from_home_once())
     }
 
     fn reload_from_home_once(&self) -> ReloadOutcome {
@@ -255,12 +251,22 @@ impl RetrievalRegistry {
     /// Uses the same single-flight + one stale retry as [`Self::reload_from_home`].
     pub fn reload_from_input(&self, input: SnapshotBuildInput) -> ReloadOutcome {
         let _flight = self.reload_flight.lock();
-        let mut outcome = self.publish_build_input(self.generation(), input.clone());
-        if matches!(outcome, ReloadOutcome::StaleDropped { .. }) {
-            outcome = self.publish_build_input(self.generation(), input);
-        }
-        outcome
+        reload_with_one_stale_retry(|| self.publish_build_input(self.generation(), input.clone()))
     }
+}
+
+/// Run `once`; if the outcome is [`ReloadOutcome::StaleDropped`], run `once`
+/// exactly one more time with a fresh expected generation (caller re-reads
+/// live state inside `once`). Deterministic, sleep-free helper used by
+/// production reload and unit-tested for convergence.
+pub(crate) fn reload_with_one_stale_retry(
+    mut once: impl FnMut() -> ReloadOutcome,
+) -> ReloadOutcome {
+    let mut outcome = once();
+    if matches!(outcome, ReloadOutcome::StaleDropped { .. }) {
+        outcome = once();
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -327,5 +333,57 @@ mod tests {
         let after = reg.load();
         assert!(Arc::ptr_eq(&good, &after) || after.generation == good.generation);
         assert_eq!(after.fingerprint, good.fingerprint);
+    }
+
+    #[test]
+    fn reload_with_one_stale_retry_converges() {
+        let mut n = 0u32;
+        let out = reload_with_one_stale_retry(|| {
+            n += 1;
+            if n == 1 {
+                ReloadOutcome::StaleDropped {
+                    expected_generation: 1,
+                    live_generation: 2,
+                }
+            } else {
+                ReloadOutcome::Published {
+                    generation: 3,
+                    fingerprint: "fp".into(),
+                    warnings: Vec::new(),
+                }
+            }
+        });
+        assert_eq!(n, 2);
+        assert!(matches!(
+            out,
+            ReloadOutcome::Published { generation: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn stale_then_reload_from_input_converges_without_churn() {
+        let reg = RetrievalRegistry::disabled("/tmp/retrieval-reg-stale-retry");
+        let input = sample_input();
+        assert!(matches!(
+            reg.publish_build_input(0, input.clone()),
+            ReloadOutcome::Published { .. }
+        ));
+        let gen_after = reg.generation();
+        let fp = reg.load().fingerprint.clone();
+        let stale = reg.publish_build_input(0, input.clone());
+        assert!(matches!(stale, ReloadOutcome::StaleDropped { .. }));
+        assert_eq!(reg.generation(), gen_after);
+        let out = reg.reload_from_input(input);
+        assert!(
+            matches!(
+                out,
+                ReloadOutcome::Unchanged { .. } | ReloadOutcome::Published { .. }
+            ),
+            "{out:?}"
+        );
+        assert_eq!(reg.load().fingerprint, fp);
+        if matches!(out, ReloadOutcome::Unchanged { .. }) {
+            assert_eq!(reg.generation(), gen_after);
+        }
     }
 }
