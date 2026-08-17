@@ -168,7 +168,8 @@ impl SessionActor {
             &self.models_manager,
             model_id.0.as_ref(),
             Some(home.as_path()),
-        );
+        )
+        .expect("provider route resolve");
         *self.route_context.borrow_mut() = Some(route.clone());
         let provenance = crate::session::storage::model_route::provenance_from_route_context(
             &route,

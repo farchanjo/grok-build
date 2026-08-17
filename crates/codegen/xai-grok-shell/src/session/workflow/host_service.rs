@@ -369,7 +369,8 @@ impl HostService {
             &self.params.models_manager,
             identity.canonical_id.as_str(),
             self.params.grok_home.as_deref(),
-        );
+        )
+        .expect("provider route resolve");
         let canonical = identity.canonical_id;
         let route =
             ExactRoute::new(canonical.clone(), identity.upstream_id, route).ok_or_else(|| {

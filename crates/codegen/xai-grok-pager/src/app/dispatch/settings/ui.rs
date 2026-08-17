@@ -281,31 +281,49 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::OpenEditor { provider_id } => {
                 ProviderOperation::LoadEditorDetail { provider_id }
             }
-            ProviderCommand::Enable { provider_id } => ProviderOperation::Enable {
-                provider_id,
-                expected_generation: state.list_generation,
-            },
-            ProviderCommand::Disable { provider_id } => ProviderOperation::Disable {
-                provider_id,
-                expected_generation: state.list_generation,
-            },
-            ProviderCommand::Clone { source_id, new_id } => ProviderOperation::CloneProvider {
-                source_id,
-                new_id,
-                expected_generation: state.list_generation,
-            },
+            ProviderCommand::Enable { provider_id } => {
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
+                ProviderOperation::Enable {
+                    provider_id,
+                    expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
+                }
+            }
+            ProviderCommand::Disable { provider_id } => {
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
+                ProviderOperation::Disable {
+                    provider_id,
+                    expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
+                }
+            }
+            ProviderCommand::Clone { source_id, new_id } => {
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
+                ProviderOperation::CloneProvider {
+                    source_id,
+                    new_id,
+                    expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
+                }
+            }
             ProviderCommand::AddConfigured => {
                 let Some(pending) = state.pending_add.take() else {
                     state.management_error =
                         Some("Add provider requires id, kind, and base URL".into());
                     return vec![];
                 };
+                let op_id = uuid::Uuid::new_v4().to_string();
+                state.pending_list_operation_id = Some(op_id.clone());
                 ProviderOperation::AddConfigured {
                     id: pending.id,
                     kind: pending.kind,
                     base_url: pending.base_url,
                     display_name: pending.display_name,
                     expected_generation: state.list_generation,
+                    operation_id: Some(op_id),
                 }
             }
             ProviderCommand::RefreshCatalog(provider) => ProviderOperation::RefreshCatalogId {
@@ -325,7 +343,6 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                     EditorCommand::Save => {
                         let id = editor.detail.id.clone();
                         let expected_generation = editor.generation().get();
-                        // Dirty-field patch only (Issue 8).
                         let patch = editor.dirty_save_patch();
                         let credential_update = editor.credential_slot_update();
                         let application_key = editor
@@ -334,6 +351,8 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                         let admin_key = editor
                             .take_admin_secret()
                             .map(crate::app::actions::ProviderApiKey::new);
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
                         ProviderOperation::SaveEditor {
                             id,
                             expected_generation,
@@ -341,6 +360,7 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                             credential_update,
                             application_key,
                             admin_key,
+                            operation_id: Some(op_id),
                         }
                     }
                     EditorCommand::Test => ProviderOperation::TestId {
@@ -360,23 +380,32 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                     EditorCommand::ToggleEnabled => {
                         let id = editor.detail.id.clone();
                         let expected = editor.generation().get();
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
                         if editor.detail.enabled {
                             ProviderOperation::Disable {
                                 provider_id: id,
                                 expected_generation: expected,
+                                operation_id: Some(op_id),
                             }
                         } else {
                             ProviderOperation::Enable {
                                 provider_id: id,
                                 expected_generation: expected,
+                                operation_id: Some(op_id),
                             }
                         }
                     }
-                    EditorCommand::Clone { new_id } => ProviderOperation::CloneProvider {
-                        source_id: editor.detail.id.clone(),
-                        new_id,
-                        expected_generation: editor.generation().get(),
-                    },
+                    EditorCommand::Clone { new_id } => {
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
+                        ProviderOperation::CloneProvider {
+                            source_id: editor.detail.id.clone(),
+                            new_id,
+                            expected_generation: editor.generation().get(),
+                            operation_id: Some(op_id),
+                        }
+                    }
                     EditorCommand::LoadReferences => ProviderOperation::LoadReferences {
                         provider_id: editor.detail.id.clone(),
                     },
@@ -408,10 +437,13 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                     }
                     EditorCommand::ConflictClone { new_id } => {
                         editor.conflict = None;
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
                         ProviderOperation::CloneProvider {
                             source_id: editor.detail.id.clone(),
                             new_id,
                             expected_generation: editor.generation().get(),
+                            operation_id: Some(op_id),
                         }
                     }
                     EditorCommand::ClearAppKey => {

@@ -796,7 +796,8 @@ fn production_freeze_preserves_instance_and_binding_not_legacy_host() {
         &mgr,
         "session-a",
         Some(dir.path()),
-    );
+    )
+    .expect("provider route resolve");
     // Not a kind-only legacy freeze.
     assert_ne!(frozen.instance_id(), "openai");
     assert_ne!(frozen.instance_id(), "open_ai_compatible");

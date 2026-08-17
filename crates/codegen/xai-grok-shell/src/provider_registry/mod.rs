@@ -14,6 +14,7 @@ pub mod management;
 pub mod notify;
 pub mod references;
 pub mod route_guard;
+pub mod runtime_cache;
 pub mod secrets;
 pub mod service;
 pub mod toml_edit;

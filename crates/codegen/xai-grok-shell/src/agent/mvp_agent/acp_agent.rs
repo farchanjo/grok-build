@@ -1966,7 +1966,7 @@ impl acp::Agent for MvpAgent {
                         &self.models_manager,
                         key.0.as_ref(),
                         Some(home.as_path()),
-                    );
+                    ).expect("provider route resolve");
                 let live_upstream = inference.model.as_str();
                 match crate::agent::model_identity::validate_companion_against_live_route(
                     companion,

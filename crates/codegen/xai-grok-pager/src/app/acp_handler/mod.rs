@@ -98,6 +98,14 @@ use settings::{
     handle_sessions_changed, handle_settings_update,
 };
 
+/// Local/`--no-leader` delivery of `x.ai/providers/update` (notify-file poll).
+pub(crate) fn deliver_providers_update_notification(
+    notif: &acp::ExtNotification,
+    app: &mut AppView,
+) -> bool {
+    handle_providers_update(notif, app)
+}
+
 // Test-only bare-name surface for `tests/*` (`use super::*`).
 #[cfg(test)]
 #[allow(unused_imports)]

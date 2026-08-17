@@ -114,7 +114,7 @@ pub(super) fn resolve_final_exact_route(
         &ctx.models_manager,
         model_id.0.as_ref(),
         Some(ctx.auth_manager.grok_home()),
-    );
+    ).expect("provider route resolve");
     xai_grok_models::CanonicalModelId::new(model_id.0.to_string())
         .ok()
         .and_then(|canonical| {

@@ -77,7 +77,7 @@ impl MvpAgent {
             &self.models_manager,
             selection_id.as_str(),
             Some(self.auth_manager.grok_home()),
-        );
+        ).expect("provider route resolve");
         let pair = crate::session::auxiliary_route::SessionTitleSamplerPairing::for_session_new(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {
                 purpose: crate::session::auxiliary_route::AuxiliaryPurpose::SessionTitle,
@@ -1458,7 +1458,7 @@ impl MvpAgent {
             &self.models_manager,
             selection_id.as_str(),
             Some(self.auth_manager.grok_home()),
-        );
+        ).expect("provider route resolve");
         let disable_api_key_auth = self.cfg.borrow().grok_com_config.api_key_auth_disabled();
         let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {
@@ -1558,6 +1558,15 @@ impl MvpAgent {
         models_manager: crate::agent::models::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
+        // Machine-wide provider registry broadcasts (PR13).
+        {
+            let gw = gateway.clone();
+            crate::provider_registry::notify::set_providers_update_forwarder(Some(Box::new(
+                move |notif| {
+                    gw.forward_fire_and_forget(notif);
+                },
+            )));
+        }
         let inference_config = models_manager.inference_config();
         if !cfg.grok_com_config.api_key_auth_disabled() {
             let models = models_manager.models();

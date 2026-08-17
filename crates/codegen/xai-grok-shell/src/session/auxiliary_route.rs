@@ -459,6 +459,10 @@ fn build_explicit_route(
         selection,
         inputs.grok_home,
     )
+    .map_err(|e| AuxiliaryRouteError::ConstructionFailed {
+        selection: selection.to_owned(),
+        detail: e.to_string(),
+    })?
     .with_operation_partition(inputs.purpose.operation_partition());
 
     Ok(ResolvedAuxiliaryRoute {

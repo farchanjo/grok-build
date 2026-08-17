@@ -114,39 +114,56 @@ pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut Ap
         changed = ?update.changed_ids,
         "providers updated via x.ai/providers/update"
     );
-    for agent in app.agents.values_mut() {
+    let mut effects = Vec::new();
+    for (agent_id, agent) in app.agents.iter_mut() {
         let Some(crate::views::modal::ActiveModal::Providers { state }) =
             agent.active_modal.as_mut()
         else {
             continue;
         };
-        // Dirty editor for a changed id → conflict, keep draft.
         if let Some(ed) = state.editor_mut() {
             let targets_this = update.changed_ids.is_empty()
                 || update.changed_ids.iter().any(|id| id == &ed.detail.id);
             let gen_advanced = update.generation > ed.detail.generation.get();
             if targets_this && gen_advanced {
-                ed.enter_conflict(
-                    xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo {
-                        provider_id: ed.detail.id.clone(),
-                        client_generation: ed.detail.generation,
-                        live_generation:
-                            xai_grok_shell::provider_registry::management::dto::RegistryGeneration(
-                                update.generation,
-                            ),
-                        changed_fields: update.changed_fields.clone(),
-                        guidance: "Registry generation advanced. Reload to discard local edits, or Clone into a new id.".into(),
-                    },
-                );
+                if ed.is_dirty() {
+                    // Dirty-only conflict: keep drafts intact.
+                    ed.enter_conflict(
+                        xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo {
+                            provider_id: ed.detail.id.clone(),
+                            client_generation: ed.detail.generation,
+                            live_generation:
+                                xai_grok_shell::provider_registry::management::dto::RegistryGeneration(
+                                    update.generation,
+                                ),
+                            changed_fields: update.changed_fields.clone(),
+                            guidance: "Registry generation advanced. Reload to discard local edits, or Clone into a new id.".into(),
+                        },
+                    );
+                } else {
+                    // Clean editor: auto reload detail.
+                    effects.push(crate::app::actions::Effect::ProviderOperation {
+                        agent_id: *agent_id,
+                        operation: crate::app::actions::ProviderOperation::LoadEditorDetail {
+                            provider_id: ed.detail.id.clone(),
+                        },
+                        repair: None,
+                    });
+                }
             }
         } else {
-            // Clean list: prompt reload (user presses r / reopens).
-            state.management_message = Some("Provider registry updated — press r to reload".into());
+            // Clean list: auto LoadListSnapshot.
+            effects.push(crate::app::actions::Effect::ProviderOperation {
+                agent_id: *agent_id,
+                operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+                repair: None,
+            });
         }
         if update.generation > 0 {
             state.list_generation = update.generation;
         }
     }
+    app.pending_effects.extend(effects);
     true
 }
 
@@ -668,5 +685,173 @@ mod presence_aware_dto_tests {
             Some(Some("always-approve".into())),
             "string must be Some(Some(_))"
         );
+    }
+}
+
+#[cfg(test)]
+mod providers_update_handler_tests {
+    use super::handle_providers_update;
+    use crate::app::agent::AgentId;
+    use crate::app::app_view::AppView;
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{ProviderModalMode, ProviderModalState};
+    use agent_client_protocol as acp;
+    use xai_grok_shell::provider_registry::management::dto::{
+        CredentialPresence, ProviderDetailDto, RegistryGeneration,
+    };
+
+    fn minimal_detail(id: &str, generation: u64) -> ProviderDetailDto {
+        ProviderDetailDto {
+            id: id.into(),
+            display_name: Some("Lab".into()),
+            kind: "openai_compatible".into(),
+            enabled: true,
+            is_built_in: false,
+            is_configured: true,
+            is_editable: true,
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            admin_base_url: None,
+            default_backend: None,
+            auth_scheme: None,
+            env_key: None,
+            admin_env_key: None,
+            catalog_enabled: false,
+            capability_mode: None,
+            catalog_ttl_secs: None,
+            request_timeout_secs: None,
+            organization: None,
+            project: None,
+            api_surface: None,
+            credential_route: None,
+            api_backend: None,
+            auth_provider: None,
+            extra_headers: Default::default(),
+            capabilities: Default::default(),
+            openrouter_fallback_models: vec![],
+            openrouter_data_collection: None,
+            openrouter_require_parameters: None,
+            openrouter_allow_fallbacks: None,
+            openrouter_zdr: None,
+            openrouter_order: vec![],
+            openrouter_only: vec![],
+            openrouter_ignore: vec![],
+            openrouter_quantizations: vec![],
+            openrouter_sort: None,
+            openrouter_pacing: false,
+            openrouter_plugin_ids: vec![],
+            credentials: CredentialPresence::default(),
+            generation: RegistryGeneration(generation),
+            warnings: vec![],
+            unsupported_edit_reason: None,
+            incarnation: None,
+            tombstone_blocks_readd: false,
+        }
+    }
+
+    fn notif(generation: u64, changed_ids: &[&str]) -> acp::ExtNotification {
+        let params = serde_json::json!({
+            "schema_version": 1,
+            "generation": generation,
+            "changed_ids": changed_ids,
+            "changed_fields": ["enabled"],
+        });
+        let raw = serde_json::value::to_raw_value(&params).unwrap();
+        acp::ExtNotification::new("x.ai/providers/update", raw.into())
+    }
+
+    #[test]
+    fn dirty_editor_conflicts_clean_list_auto_loads() {
+        use crate::acp::model_state::ModelState;
+        use crate::app::agent::{AgentSession, AgentState};
+        use crate::app::agent_view::AgentView;
+        use crate::scrollback::state::ScrollbackState;
+        use std::path::PathBuf;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+        let agent_id = AgentId(0);
+        let session = AgentSession {
+            id: agent_id,
+            acp_tx: tx,
+            session_id: Some(acp::SessionId::new("sess-providers")),
+            models: ModelState::default(),
+            state: AgentState::Idle,
+            tracker: crate::acp::tracker::AcpUpdateTracker::new(),
+            cwd: PathBuf::from("/tmp"),
+            is_worktree: false,
+            forked_from: None,
+            pending_prompts: std::collections::VecDeque::new(),
+            next_queue_id: 0,
+            yolo_mode: false,
+            auto_mode: false,
+            prompt_history: Vec::new(),
+            prompt_history_loading: false,
+            loading_replay: false,
+            restore_degree: None,
+            rate_limited: false,
+            model_incompatible: false,
+            credit_limit_blocked: false,
+            free_usage_blocked: false,
+            available_commands: Vec::new(),
+            available_commands_generation: 0,
+            available_tools: None,
+            model_switch_pending: false,
+            user_model_preference: None,
+            deferred_model_switch: None,
+            bg_tasks: std::collections::BTreeMap::new(),
+            bg_tool_call_to_task: std::collections::HashMap::new(),
+            scheduled_tasks: std::collections::HashMap::new(),
+            in_flight_prompt: None,
+            compact_held_prompt: None,
+            current_prompt_id: None,
+            created_via_new: false,
+        };
+        let mut agent = AgentView::new(session, ScrollbackState::new());
+        agent.active_modal = Some(ActiveModal::Providers {
+            state: Box::new(ProviderModalState::new()),
+        });
+        app.agents.insert(agent_id, agent);
+        crate::app::dispatch::switch_to_agent(
+            &mut app,
+            agent_id,
+            crate::app::dispatch::SwitchCause::New,
+        );
+        app.pending_effects.clear();
+        assert!(handle_providers_update(&notif(5, &["lab"]), &mut app));
+        assert!(
+            app.pending_effects.iter().any(|e| matches!(
+                e,
+                crate::app::actions::Effect::ProviderOperation {
+                    operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+                    ..
+                }
+            )),
+            "clean list must auto LoadListSnapshot"
+        );
+
+        // Dirty editor → conflict, drafts preserved.
+        {
+            let agent = app.agents.get_mut(&agent_id).unwrap();
+            let mut state = ProviderModalState::new();
+            state.open_editor(minimal_detail("lab", 1));
+            if let Some(ed) = state.editor_mut() {
+                ed.clone_id_draft = "dirty-draft".into();
+                assert!(ed.is_dirty());
+            }
+            agent.active_modal = Some(ActiveModal::Providers {
+                state: Box::new(state),
+            });
+        }
+        app.pending_effects.clear();
+        assert!(handle_providers_update(&notif(9, &["lab"]), &mut app));
+        let agent = app.agents.get(&agent_id).unwrap();
+        let ActiveModal::Providers { state } = agent.active_modal.as_ref().unwrap() else {
+            panic!("providers modal");
+        };
+        let ProviderModalMode::Editor(ed) = &state.mode else {
+            panic!("editor mode");
+        };
+        assert!(ed.conflict.is_some(), "dirty editor must enter conflict");
+        assert_eq!(ed.clone_id_draft, "dirty-draft", "drafts must stay intact");
     }
 }

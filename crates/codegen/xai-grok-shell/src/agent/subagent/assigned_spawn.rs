@@ -268,7 +268,8 @@ impl GoalAssignedSpawnSender {
             &self.models_manager,
             canonical.as_str(),
             self.grok_home.as_deref(),
-        );
+        )
+        .expect("provider route resolve");
         let route =
             ExactRoute::new(canonical.clone(), identity.upstream_id, context).ok_or_else(|| {
                 "goal role route did not match the resolved upstream model".to_string()

@@ -282,6 +282,8 @@ pub struct ProviderModalState {
     pub management_error: Option<String>,
     /// Typed add draft (Issue 13) — not encoded into banner text.
     pub pending_add: Option<PendingProviderAdd>,
+    /// List-level mutation operation id (Enable/Disable/Clone/Add) for late-async discard.
+    pub pending_list_operation_id: Option<String>,
 }
 
 /// Secret-free add draft carried until the dispatch effect runs.
@@ -365,6 +367,7 @@ impl ProviderModalState {
             management_message: None,
             management_error: None,
             pending_add: None,
+            pending_list_operation_id: None,
         }
     }
 

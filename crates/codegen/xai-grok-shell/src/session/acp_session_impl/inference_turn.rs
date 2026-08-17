@@ -664,7 +664,8 @@ impl SessionActor {
                 &self.models_manager,
                 selection_model_id.0.as_ref(),
                 grok_home,
-            );
+            )
+            .expect("provider route resolve");
         *self.route_context.borrow_mut() = Some(production_route.clone());
 
         // Exact-route credential for non-session routes: generation-gated.
@@ -1182,7 +1183,14 @@ impl SessionActor {
     /// newly issued session token. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
-    pub(crate) async fn prepare_sampler_for_turn(&self) {
+    /// Prepare sampler for the next turn. Returns `Err` when the live provider
+    /// route is unusable (disabled/tombstoned/corrupt). On error the prior
+    /// sampler is disarmed (route cleared + config with empty credentials) so
+    /// sampling cannot continue on a stale route.
+    pub(crate) async fn prepare_sampler_for_turn(
+        &self,
+        is_retry: bool,
+    ) -> Result<(), crate::provider_registry::route_guard::RouteGuardError> {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -1191,33 +1199,57 @@ impl SessionActor {
             sampler_config.doom_loop_recovery = None;
         }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
-        // Recompute from the newly selected model + live credential binding so
-        // a model/config switch never copies prior generations blindly.
         let grok_home = self.auth_manager.as_ref().map(|am| am.grok_home());
         let selection_model_id = self.selection_model_id.borrow().clone();
-        let route = crate::session::route_context::resolve_for_models_manager_with_selection(
-            &sampler_config,
-            &self.models_manager,
-            selection_model_id.0.as_ref(),
-            grok_home,
-        );
-        // Explicit next-turn boundary: re-check live registry before starting.
+        let route =
+            match crate::session::route_context::resolve_for_models_manager_with_selection_opts(
+                &sampler_config,
+                &self.models_manager,
+                selection_model_id.0.as_ref(),
+                grok_home,
+                is_retry,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.disarm_sampler_for_route_block(&e);
+                    return Err(e);
+                }
+            };
         if let Some(home) = grok_home
             && let Err(e) =
-                crate::session::route_context::assert_live_route_usable(home, &route, false)
+                crate::session::route_context::assert_live_route_usable(home, &route, is_retry)
         {
-            tracing::error!(
-                error = %e,
-                category = e.category().as_str(),
-                "provider route unusable for turn; sampler not updated"
-            );
-            // Do not install a blocked route for sampling.
-            return;
+            self.disarm_sampler_for_route_block(&e);
+            return Err(e);
         }
         *self.route_context.borrow_mut() = Some(route.clone());
         self.sampler_handle.update_config_with_route_context(
             sampler_config,
             xai_grok_inference::RouteContextUpdate::Replace(route),
+        );
+        Ok(())
+    }
+
+    /// Clear route context and install a non-callable sampler config so a
+    /// stale last-good route cannot service the next request.
+    fn disarm_sampler_for_route_block(
+        &self,
+        err: &crate::provider_registry::route_guard::RouteGuardError,
+    ) {
+        tracing::error!(
+            error = %err,
+            category = err.category().as_str(),
+            "provider route unusable; disarming sampler"
+        );
+        *self.route_context.borrow_mut() = None;
+        // Empty API key + empty base URL: inference fails closed on credentials.
+        let mut blocked = xai_grok_inference::InferenceConfig::default();
+        blocked.api_key = None;
+        blocked.base_url = String::new();
+        blocked.model = String::new();
+        self.sampler_handle.update_config_with_route_context(
+            blocked,
+            xai_grok_inference::RouteContextUpdate::DeriveLegacy,
         );
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, _message: &str) {
@@ -1787,8 +1819,10 @@ impl SessionActor {
                 if let Some(auth_provider) = self.model_auth_provider(&failed_model_id)
                     && self.try_provider_401_recovery(&auth_provider).await
                 {
-                    self.prepare_sampler_for_turn().await;
-                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                    if self.prepare_sampler_for_turn(true).await.is_ok() {
+                        return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                    }
+                    // Route blocked after remint — fall through to surface failure.
                 }
                 return self
                     .surface_provider_credential_failure(
@@ -1860,8 +1894,9 @@ impl SessionActor {
                         user_id = %auth.user_id,
                         "auth recovery: sampler 401, devbox re-mint, retrying"
                     );
-                    self.prepare_sampler_for_turn().await;
-                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                    if self.prepare_sampler_for_turn(true).await.is_ok() {
+                        return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1888,8 +1923,9 @@ impl SessionActor {
                     Some(self.session_info.id.0.as_ref()),
                     None,
                 );
-                self.prepare_sampler_for_turn().await;
-                return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                if self.prepare_sampler_for_turn(true).await.is_ok() {
+                    return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+                }
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
             xai_grok_telemetry::unified_log::warn(
@@ -1901,8 +1937,9 @@ impl SessionActor {
         if let Some(ref provider) = auth_provider
             && self.try_provider_401_recovery(provider).await
         {
-            self.prepare_sampler_for_turn().await;
-            return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+            if self.prepare_sampler_for_turn(true).await.is_ok() {
+                return Ok(InferenceFailureRecovery::RefreshAuthAndResubmit);
+            }
         }
         if matches!(error.kind, InferenceErrorKind::IdleTimeout) {
             self.signals_handle().record_idle_timeout();
@@ -2077,7 +2114,17 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<InferenceTurnOutcome, acp::Error> {
-        self.prepare_sampler_for_turn().await;
+        if let Err(e) = self.prepare_sampler_for_turn(false).await {
+            let msg = e.to_string();
+            self.log_terminal_failure_safe("provider_route_blocked", None, None);
+            return Err(acp::Error::internal_error().data(
+                crate::inference::error::terminal_error_data(
+                    msg,
+                    None,
+                    xai_grok_inference::InferenceErrorKind::Api,
+                ),
+            ));
+        }
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.turn_stream_drained.lock() = Some(tx);

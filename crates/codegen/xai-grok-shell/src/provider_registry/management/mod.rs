@@ -810,10 +810,14 @@ impl ProviderManagementService {
                 let live = self
                     .force_record_generation_after_commit()
                     .unwrap_or_else(|_| self.effective_generation_readonly());
+                let registry_gen = RegistryGeneration(live);
+                let changed = vec!["tombstone".into()];
+                // Partial commits still advance generation — notify all clients.
+                self.record_providers_update_notification(registry_gen, &[pid.as_str()], &changed);
                 ProviderMutationResult {
                     ok: false,
                     id: pid.as_str().to_owned(),
-                    generation: RegistryGeneration(live),
+                    generation: registry_gen,
                     error: Some(format!(
                         "tombstone recorded but config.toml remove failed: {e}. \
                          Provider id is blocked for ordinary re-add; secrets/caches were not cleared. Reload and retry remove or restore."
@@ -827,7 +831,7 @@ impl ProviderManagementService {
                     incarnation: Some(tombstoned.as_str().to_owned()),
                     operation_id: req.operation_id.clone(),
                     conflict: None,
-                    changed_fields: vec!["tombstone".into()],
+                    changed_fields: changed,
                 }
             }
         }
@@ -1516,6 +1520,12 @@ impl ProviderManagementService {
         if stored_fp != live_fp {
             let next = generation.saturating_add(1);
             write_generation_state(&self.home, next, &live_fp)?;
+            // External config edit advanced generation — notify clients.
+            self.record_providers_update_notification(
+                RegistryGeneration(next),
+                &[],
+                &["external_config".into()],
+            );
             return Ok(next);
         }
         Ok(generation)
@@ -1675,6 +1685,8 @@ impl ProviderManagementService {
                 let _ = fs::remove_file(&tmp);
             }
         }
+        // Invalidate hot-path runtime cache so next turn sees the mutation.
+        crate::provider_registry::runtime_cache::invalidate_for_home(&self.home);
         // Best-effort ACP ext notification for connected leader clients.
         crate::provider_registry::notify::try_forward_providers_update(&payload);
     }
@@ -2559,6 +2571,104 @@ mod tests {
         let raw = fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"generation\""));
         assert!(raw.contains("lab") || raw.contains("changed_ids"));
+    }
+
+    #[test]
+    fn mutation_broadcasts_to_two_registered_forwarders_and_notify_file() {
+        use crate::provider_registry::notify::{
+            clear_providers_update_forwarders, poll_notify_file_if_newer,
+            register_providers_update_forwarder, reset_poll_state_for_tests,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        clear_providers_update_forwarders();
+        reset_poll_state_for_tests();
+        let a = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(AtomicUsize::new(0));
+        let a2 = a.clone();
+        let b2 = b.clone();
+        register_providers_update_forwarder(Box::new(move |_| {
+            a2.fetch_add(1, Ordering::SeqCst);
+        }));
+        register_providers_update_forwarder(Box::new(move |_| {
+            b2.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        assert!(
+            s.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        assert_eq!(
+            a.load(Ordering::SeqCst),
+            1,
+            "client A must receive broadcast"
+        );
+        assert_eq!(
+            b.load(Ordering::SeqCst),
+            1,
+            "client B must receive broadcast"
+        );
+        // Local self-refresh path: notify file poll delivers the same generation.
+        let polled = poll_notify_file_if_newer(dir.path()).expect("notify file poll");
+        assert!(polled["generation"].as_u64().unwrap_or(0) > 0);
+        clear_providers_update_forwarders();
+    }
+
+    #[test]
+    fn external_config_fingerprint_change_notifies_on_reconcile() {
+        use crate::provider_registry::notify::{
+            clear_providers_update_forwarders, register_providers_update_forwarder,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        clear_providers_update_forwarders();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        register_providers_update_forwarder(Box::new(move |_| {
+            hits2.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        assert!(
+            s.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        let before = hits.load(Ordering::SeqCst);
+        // External edit: mutate config.toml outside management.
+        let mut text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        text.push_str("\n# external fingerprint drift\n");
+        fs::write(dir.path().join("config.toml"), text).unwrap();
+        // Next mutation path reconciles and must notify external_config.
+        let expected = s.current_generation();
+        let _ = s.set_enabled("lab", false, expected);
+        assert!(
+            hits.load(Ordering::SeqCst) > before,
+            "external fingerprint reconcile must notify clients"
+        );
+        clear_providers_update_forwarders();
     }
 
     #[test]

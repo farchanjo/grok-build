@@ -1351,22 +1351,26 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             }
                         }
                         ProviderManagementResult::Mutation(result) => {
-                            // Correlate by provider id (+ operation id when present).
+                            // Strict op-id correlation: exact match required when the
+                            // result carries an operation id. No `None => accept` for
+                            // historical/late results (PR13 Gate E).
                             let editor_matches = state.editor_mut().is_some_and(|ed| {
                                 if ed.detail.id != result.id {
                                     return false;
                                 }
-                                if let Some(ref op) = result.operation_id {
-                                    match ed.pending_operation_id.as_ref() {
-                                        Some(pending) if pending == op => true,
-                                        Some(_) => false, // late / wrong op
-                                        None => true,     // ops without id still apply by id
-                                    }
-                                } else {
-                                    true
-                                }
+                                mutation_operation_matches(
+                                    result.operation_id.as_deref(),
+                                    ed.pending_operation_id.as_deref(),
+                                )
                             });
-                            if result.ok {
+                            let list_matches = mutation_operation_matches(
+                                result.operation_id.as_deref(),
+                                state.pending_list_operation_id.as_deref(),
+                            );
+                            // Uncorrelated late/historical result: discard completely.
+                            if !editor_matches && !list_matches {
+                                // no-op
+                            } else if result.ok {
                                 state.list_generation = result.generation.get();
                                 let partial = if result.partial_commit {
                                     " (reload required)"
@@ -1393,6 +1397,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                             repair: None,
                                         },
                                     );
+                                }
+                                if list_matches {
+                                    state.pending_list_operation_id = None;
                                 }
                                 follow_up.push(crate::app::actions::Effect::ProviderOperation {
                                     agent_id,
@@ -1422,6 +1429,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                             }
                                         }
                                     }
+                                }
+                                if list_matches {
+                                    state.pending_list_operation_id = None;
                                 }
                             }
                         }
@@ -1571,9 +1581,25 @@ fn management_result_is_fresh(
     editor_id == result_id && result_generation >= editor_generation
 }
 
+/// Strict mutation operation correlation (PR13 Gate E).
+///
+/// Exact match of result op-id to pending draft epoch. No `None => accept`
+/// for historical results: missing pending or missing result op discards.
+pub(crate) fn mutation_operation_matches(
+    result_operation_id: Option<&str>,
+    pending_operation_id: Option<&str>,
+) -> bool {
+    match (result_operation_id, pending_operation_id) {
+        (Some(op), Some(pending)) if pending == op => true,
+        (Some(_), Some(_)) => false, // wrong incarnation / late op
+        (Some(_), None) => false,    // pending cleared; discard historical
+        (None, _) => false,          // modern mutations always carry op ids
+    }
+}
+
 #[cfg(test)]
 mod management_result_tests {
-    use super::management_result_is_fresh;
+    use super::{management_result_is_fresh, mutation_operation_matches};
 
     #[test]
     fn rejects_wrong_provider_and_older_generation() {
@@ -1581,5 +1607,18 @@ mod management_result_tests {
         assert!(management_result_is_fresh("a", 3, "a", 4));
         assert!(!management_result_is_fresh("a", 3, "b", 9));
         assert!(!management_result_is_fresh("a", 5, "a", 4));
+    }
+
+    #[test]
+    fn mutation_op_correlation_exact_match_only() {
+        // Late same-id equal-gen completion with matching op → accept.
+        assert!(mutation_operation_matches(Some("op-1"), Some("op-1")));
+        // Wrong incarnation / different op id → discard.
+        assert!(!mutation_operation_matches(Some("op-1"), Some("op-2")));
+        // Pending cleared (historical result arrives late) → discard.
+        assert!(!mutation_operation_matches(Some("op-1"), None));
+        // No op-id on result → discard (no None => accept).
+        assert!(!mutation_operation_matches(None, Some("op-1")));
+        assert!(!mutation_operation_matches(None, None));
     }
 }

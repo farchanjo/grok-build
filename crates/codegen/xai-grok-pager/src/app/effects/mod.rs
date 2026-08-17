@@ -4855,12 +4855,13 @@ async fn run_provider_operation(
             base_url,
             display_name,
             expected_generation,
+            operation_id,
         } => {
             use xai_grok_shell::provider_registry::management::dto::{
                 ProviderAddRequest, RegistryGeneration,
             };
             let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
-            let result = svc.add(ProviderAddRequest {
+            let mut result = svc.add(ProviderAddRequest {
                 id: id.clone(),
                 kind,
                 base_url,
@@ -4869,6 +4870,7 @@ async fn run_provider_operation(
                 enabled: true,
                 expected_generation: RegistryGeneration(expected_generation),
             });
+            result.operation_id = operation_id;
             management = Some(actions::ProviderManagementResult::Mutation(result));
             (ProviderKind::Configured(id), ProviderStatus::Missing)
         }
@@ -4879,6 +4881,7 @@ async fn run_provider_operation(
             credential_update,
             application_key,
             admin_key,
+            operation_id,
         } => {
             use xai_grok_shell::provider_registry::management::dto::{
                 ProviderSaveRequest, RegistryGeneration,
@@ -4887,7 +4890,7 @@ async fn run_provider_operation(
             let app = application_key.map(|k| k.into_inner());
             let admin = admin_key.map(|k| k.into_inner());
             // Generation-gated metadata + credentials in one locked path (Issue 1).
-            let result = svc.save_with_credentials(
+            let mut result = svc.save_with_credentials(
                 ProviderSaveRequest {
                     id: id.clone(),
                     expected_generation: RegistryGeneration(expected_generation),
@@ -4897,6 +4900,7 @@ async fn run_provider_operation(
                 app.as_deref(),
                 admin.as_deref(),
             );
+            result.operation_id = operation_id;
             management = Some(actions::ProviderManagementResult::Mutation(result));
             drop(app);
             drop(admin);
@@ -4905,28 +4909,32 @@ async fn run_provider_operation(
         ProviderOperation::Enable {
             provider_id,
             expected_generation,
+            operation_id,
         } => {
             use xai_grok_shell::provider_registry::management::dto::RegistryGeneration;
             let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
-            let result = svc.set_enabled(
+            let mut result = svc.set_enabled(
                 &provider_id,
                 true,
                 RegistryGeneration(expected_generation),
             );
+            result.operation_id = operation_id;
             management = Some(actions::ProviderManagementResult::Mutation(result));
             (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
         }
         ProviderOperation::Disable {
             provider_id,
             expected_generation,
+            operation_id,
         } => {
             use xai_grok_shell::provider_registry::management::dto::RegistryGeneration;
             let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
-            let result = svc.set_enabled(
+            let mut result = svc.set_enabled(
                 &provider_id,
                 false,
                 RegistryGeneration(expected_generation),
             );
+            result.operation_id = operation_id;
             management = Some(actions::ProviderManagementResult::Mutation(result));
             (ProviderKind::Configured(provider_id), ProviderStatus::Missing)
         }
@@ -4934,17 +4942,19 @@ async fn run_provider_operation(
             source_id,
             new_id,
             expected_generation,
+            operation_id,
         } => {
             use xai_grok_shell::provider_registry::management::dto::{
                 ProviderCloneRequest, RegistryGeneration,
             };
             let svc = xai_grok_shell::provider_registry::ProviderManagementService::from_grok_home();
-            let result = svc.clone_provider(ProviderCloneRequest {
+            let mut result = svc.clone_provider(ProviderCloneRequest {
                 source_id,
                 new_id: new_id.clone(),
                 display_name: None,
                 expected_generation: RegistryGeneration(expected_generation),
             });
+            result.operation_id = operation_id;
             management = Some(actions::ProviderManagementResult::Mutation(result));
             (ProviderKind::Configured(new_id), ProviderStatus::Missing)
         }

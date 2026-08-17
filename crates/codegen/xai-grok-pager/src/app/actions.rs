@@ -1455,6 +1455,7 @@ pub enum ProviderOperation {
         base_url: String,
         display_name: Option<String>,
         expected_generation: u64,
+        operation_id: Option<String>,
     },
     /// Save typed patch + optional credential slots (secrets redacted).
     SaveEditor {
@@ -1464,19 +1465,23 @@ pub enum ProviderOperation {
         credential_update: xai_grok_shell::provider_registry::management::dto::CredentialSlotUpdate,
         application_key: Option<ProviderApiKey>,
         admin_key: Option<ProviderApiKey>,
+        operation_id: Option<String>,
     },
     Enable {
         provider_id: String,
         expected_generation: u64,
+        operation_id: Option<String>,
     },
     Disable {
         provider_id: String,
         expected_generation: u64,
+        operation_id: Option<String>,
     },
     CloneProvider {
         source_id: String,
         new_id: String,
         expected_generation: u64,
+        operation_id: Option<String>,
     },
     RefreshCatalogId {
         provider_id: String,

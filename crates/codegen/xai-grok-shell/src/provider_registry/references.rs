@@ -203,22 +203,35 @@ fn scan_config_model_refs(
             return (refs, false, Some(format!("config.toml corrupt: {e}")));
         }
     };
+    // Catalog index: provider_id -> upstream slugs (from [model] entries + namespaced ids).
+    let catalog_by_provider = build_catalog_index_from_config(&val);
     if let Some(models) = val.get("model").and_then(|v| v.as_table()) {
         for (model_id, entry) in models {
-            if entry.get("model_provider").and_then(|v| v.as_str()) == Some(provider_id) {
-                if refs.len() >= MAX_REFS_PER_GROUP {
-                    truncated = true;
-                    break;
+            match model_entry_references_provider(
+                model_id,
+                entry,
+                provider_id,
+                &catalog_by_provider,
+            ) {
+                ModelRefHit::Yes => {
+                    if refs.len() >= MAX_REFS_PER_GROUP {
+                        truncated = true;
+                        break;
+                    }
+                    push_ref(
+                        &mut refs,
+                        ImpactGroupKind::ModelsAndDefaults,
+                        format!("model.{model_id}"),
+                    );
                 }
-                push_ref(
-                    &mut refs,
-                    ImpactGroupKind::ModelsAndDefaults,
-                    format!("model.{model_id}"),
-                );
+                ModelRefHit::No => {}
+                ModelRefHit::AmbiguousOrCorrupt(msg) => {
+                    return (refs, truncated, Some(msg));
+                }
             }
         }
     }
-    // default_model may be account-qualified: `provider:upstream`
+    // default_model may be account-qualified: `provider:upstream` or curated/user/legacy id.
     if let Some(dm) = val
         .get("default_model")
         .and_then(|v| v.as_str())
@@ -228,18 +241,161 @@ fn scan_config_model_refs(
                 .and_then(|v| v.as_str())
         })
     {
-        if dm == provider_id
-            || dm.starts_with(&format!("{provider_id}:"))
-            || dm.contains(&format!("provider={provider_id}"))
-        {
-            push_ref(
-                &mut refs,
-                ImpactGroupKind::ModelsAndDefaults,
-                format!("default_model={dm}"),
-            );
+        match resolve_model_id_to_provider(dm, provider_id, &catalog_by_provider) {
+            ModelRefHit::Yes => {
+                push_ref(
+                    &mut refs,
+                    ImpactGroupKind::ModelsAndDefaults,
+                    format!("default_model={dm}"),
+                );
+            }
+            ModelRefHit::No => {}
+            ModelRefHit::AmbiguousOrCorrupt(msg) => {
+                return (refs, truncated, Some(msg));
+            }
         }
     }
     (refs, truncated, None)
+}
+
+/// Result of resolving whether a model id/entry references a provider instance.
+#[derive(Debug)]
+enum ModelRefHit {
+    Yes,
+    No,
+    /// Fail closed: identity incomplete, ambiguous, or catalog corrupt.
+    AmbiguousOrCorrupt(String),
+}
+
+/// Build provider → slug catalog from config `[model.*]` entries for reverse-ref resolve.
+fn build_catalog_index_from_config(val: &toml::Value) -> indexmap::IndexMap<String, Vec<String>> {
+    let mut catalog: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
+    if let Some(models) = val.get("model").and_then(|v| v.as_table()) {
+        for (model_id, entry) in models {
+            let provider = entry
+                .get("model_provider")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned())
+                .or_else(|| {
+                    super::lifecycle::parse_namespaced_model_id(model_id)
+                        .map(|(pid, _)| pid.as_str().to_owned())
+                });
+            if let Some(pid) = provider {
+                let slug = entry
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned())
+                    .or_else(|| {
+                        super::lifecycle::parse_namespaced_model_id(model_id).map(|(_, slug)| slug)
+                    })
+                    .unwrap_or_else(|| model_id.clone());
+                catalog.entry(pid).or_default().push(slug);
+            }
+        }
+    }
+    // Ensure provider keys exist so namespaced ids still resolve against empty catalogs.
+    if let Some(providers) = val.get("model_providers").and_then(|v| v.as_table()) {
+        for (pid, _) in providers {
+            catalog.entry(pid.clone()).or_default();
+        }
+    }
+    catalog
+}
+
+fn model_entry_references_provider(
+    model_id: &str,
+    entry: &toml::Value,
+    provider_id: &str,
+    catalog: &indexmap::IndexMap<String, Vec<String>>,
+) -> ModelRefHit {
+    if entry.get("model_provider").and_then(|v| v.as_str()) == Some(provider_id) {
+        return ModelRefHit::Yes;
+    }
+    // Explicit wrong provider → no.
+    if let Some(mp) = entry.get("model_provider").and_then(|v| v.as_str()) {
+        if mp != provider_id {
+            return ModelRefHit::No;
+        }
+    }
+    resolve_model_id_to_provider(model_id, provider_id, catalog)
+}
+
+/// Canonical model-id → provider resolve for reverse refs.
+///
+/// Uses namespaced `provider:slug`, catalog-backed legacy alias resolve, and
+/// fail-closed ambiguity when a bare slug could belong to the target provider
+/// but identity cannot be confirmed.
+fn resolve_model_id_to_provider(
+    model_id: &str,
+    provider_id: &str,
+    catalog: &indexmap::IndexMap<String, Vec<String>>,
+) -> ModelRefHit {
+    if model_id.is_empty() {
+        return ModelRefHit::No;
+    }
+    // Namespaced curated/user id: `lab:gpt-4o`.
+    if let Some((pid, _slug)) = super::lifecycle::parse_namespaced_model_id(model_id) {
+        return if pid.as_str() == provider_id {
+            ModelRefHit::Yes
+        } else {
+            ModelRefHit::No
+        };
+    }
+    // Exact provider id as model field (legacy).
+    if model_id == provider_id {
+        return ModelRefHit::Yes;
+    }
+    // Legacy un-namespaced alias via catalog compatibility ids.
+    match super::lifecycle::resolve_legacy_model_alias(model_id, catalog) {
+        Some(ns) => {
+            if let Some((pid, _)) = super::lifecycle::parse_namespaced_model_id(&ns) {
+                return if pid.as_str() == provider_id {
+                    ModelRefHit::Yes
+                } else {
+                    ModelRefHit::No
+                };
+            }
+            ModelRefHit::AmbiguousOrCorrupt(format!(
+                "catalog resolve returned unparseable id `{ns}` for model `{model_id}`"
+            ))
+        }
+        None => {
+            // Ambiguous (0 or many). If the target provider advertises this slug,
+            // fail closed — do not claim zero refs with incomplete identity.
+            let advertised = catalog
+                .get(provider_id)
+                .map(|slugs| {
+                    slugs.iter().any(|s| {
+                        s == model_id
+                            || s.ends_with(&format!(":{model_id}"))
+                            || s == &format!("{provider_id}:{model_id}")
+                    })
+                })
+                .unwrap_or(false);
+            if advertised {
+                return ModelRefHit::AmbiguousOrCorrupt(format!(
+                    "model id `{model_id}` is ambiguous or incomplete relative to provider \
+                     `{provider_id}`; reverse-ref scan fail-closed"
+                ));
+            }
+            // Multi-provider claim without unique resolve — if any other provider also
+            // has the slug, and catalog is non-empty, still no unique mapping.
+            let claim_count = catalog
+                .iter()
+                .filter(|(_, slugs)| {
+                    slugs
+                        .iter()
+                        .any(|s| s == model_id || s.ends_with(&format!(":{model_id}")))
+                })
+                .count();
+            if claim_count > 1 {
+                return ModelRefHit::AmbiguousOrCorrupt(format!(
+                    "model id `{model_id}` claimed by {claim_count} providers; reverse-ref scan fail-closed"
+                ));
+            }
+            ModelRefHit::No
+        }
+    }
 }
 
 fn scan_session_refs(
@@ -307,30 +463,41 @@ fn scan_session_refs(
                     }
                 }
             }
-            // summary.json current model may embed provider
+            // summary.json current model may embed provider (namespaced or catalog-resolved).
             let summary_path = sess_path.join("summary.json");
             if summary_path.is_file() {
                 match read_bounded(&summary_path) {
                     Ok(bytes) => {
                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            let explicit = v.get("provider_instance_id").and_then(|x| x.as_str())
+                                == Some(provider_id);
                             let model = v
                                 .get("current_model_id")
                                 .or_else(|| v.get("model"))
                                 .and_then(|x| x.as_str())
                                 .unwrap_or("");
-                            if model.starts_with(&format!("{provider_id}:"))
-                                || v.get("provider_instance_id").and_then(|x| x.as_str())
-                                    == Some(provider_id)
-                            {
-                                if refs.len() >= MAX_REFS_PER_GROUP {
-                                    truncated = true;
-                                    return (refs, truncated, None);
+                            let catalog = indexmap::IndexMap::new();
+                            let hit = if explicit {
+                                ModelRefHit::Yes
+                            } else {
+                                resolve_model_id_to_provider(model, provider_id, &catalog)
+                            };
+                            match hit {
+                                ModelRefHit::Yes => {
+                                    if refs.len() >= MAX_REFS_PER_GROUP {
+                                        truncated = true;
+                                        return (refs, truncated, None);
+                                    }
+                                    push_ref(
+                                        &mut refs,
+                                        ImpactGroupKind::Sessions,
+                                        format!("session:{sid}/summary"),
+                                    );
                                 }
-                                push_ref(
-                                    &mut refs,
-                                    ImpactGroupKind::Sessions,
-                                    format!("session:{sid}/summary"),
-                                );
+                                ModelRefHit::No => {}
+                                ModelRefHit::AmbiguousOrCorrupt(msg) => {
+                                    return (refs, truncated, Some(msg));
+                                }
                             }
                         }
                     }
@@ -542,6 +709,13 @@ fn table_mentions_provider(val: &toml::Value, provider_id: &str) -> bool {
     }
 }
 
+/// Read a trusted scan path with hardlink/symlink policy.
+///
+/// **Hardlink policy (PR13):** ordinary durable files under `$GROK_HOME` have
+/// `nlink == 1` on APFS/HFS+/ext4 and are accepted. Planted hardlinks
+/// (`nlink > 1`) are refused fail-closed so a shared inode cannot smuggle
+/// secret-bearing content into the reverse-ref scan. Symlinks are always
+/// refused.
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     // Refuse symlink/hardlink targets under trusted roots.
     let meta = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -551,6 +725,7 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        // nlink == 1: normal file (accepted). nlink > 1: planted hardlink (rejected).
         if meta.nlink() > 1 {
             return Err(format!("{}: refusing hardlink", path.display()));
         }
@@ -566,6 +741,137 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
         return Ok(buf);
     }
     fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ordinary_nlink_one_file_accepted() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("summary.json");
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(f, r#"{{"current_model_id":"lab:gpt"}}"#).unwrap();
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(meta.nlink(), 1, "temp file must be ordinary nlink==1");
+        }
+        let bytes = read_bounded(&path).expect("ordinary nlink==1 file must be accepted");
+        assert!(bytes.starts_with(b"{"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_hardlink_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("summary.json");
+        let link = dir.path().join("summary.hardlink.json");
+        fs::write(&path, br#"{"current_model_id":"lab:gpt"}"#).unwrap();
+        std::fs::hard_link(&path, &link).expect("create hardlink");
+        use std::os::unix::fs::MetadataExt;
+        assert!(
+            fs::symlink_metadata(&link).unwrap().nlink() > 1,
+            "planted hardlink must have nlink>1"
+        );
+        let err = read_bounded(&link).expect_err("planted hardlink must be refused");
+        assert!(
+            err.contains("hardlink"),
+            "error must mention hardlink: {err}"
+        );
+    }
+
+    #[test]
+    fn reverse_ref_namespaced_and_legacy_model_ids() {
+        let dir = TempDir::new().unwrap();
+        let cfg = dir.path().join("config.toml");
+        fs::write(
+            &cfg,
+            r#"
+default_model = "lab:custom-slug"
+
+[model_providers.lab]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+
+[model.curated]
+model_provider = "lab"
+model = "gpt-4o"
+
+[model.user_lab_gpt]
+model_provider = "lab"
+model = "gpt-user"
+
+[model.legacy_alias]
+model_provider = "lab"
+model = "deepseek"
+"#,
+        )
+        .unwrap();
+        let (refs, trunc, err) = scan_config_model_refs(&cfg, "lab");
+        assert!(err.is_none(), "{err:?}");
+        assert!(!trunc);
+        let labels: Vec<_> = refs.iter().map(|r| r.label.as_str()).collect();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("default_model=lab:custom-slug")),
+            "namespaced default_model: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("model.curated")),
+            "curated model_provider: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("model.user_lab_gpt")),
+            "user model: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("model.legacy_alias")),
+            "legacy alias entry: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn reverse_ref_ambiguous_legacy_slug_fails_closed() {
+        let dir = TempDir::new().unwrap();
+        let cfg = dir.path().join("config.toml");
+        // Bare default_model slug advertised by two providers → fail closed.
+        fs::write(
+            &cfg,
+            r#"
+default_model = "shared-slug"
+
+[model_providers.lab]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+
+[model_providers.other]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8/v1"
+
+[model.a]
+model_provider = "lab"
+model = "shared-slug"
+
+[model.b]
+model_provider = "other"
+model = "shared-slug"
+"#,
+        )
+        .unwrap();
+        let (_refs, _trunc, err) = scan_config_model_refs(&cfg, "lab");
+        assert!(
+            err.as_ref()
+                .is_some_and(|e| e.contains("ambiguous") || e.contains("fail-closed")),
+            "expected fail-closed scan error, got {err:?}"
+        );
+    }
 }
 
 // Fix scan_workflows_and_goals to properly propagate errors.

@@ -324,6 +324,17 @@ impl ProviderEditorState {
         dirty_patch_against_baseline(&self.baseline, &self.draft)
     }
 
+    /// Whether the editor has unsaved field or credential pending changes.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty_save_patch() != ProviderSavePatch::default()
+            || self.clear_app_key
+            || self.clear_admin_key
+            || self.submitted_app_secret.is_some()
+            || self.submitted_admin_secret.is_some()
+            || !self.clone_id_draft.is_empty()
+            || !self.force_remove_typed_id.is_empty()
+    }
+
     pub fn generation(&self) -> RegistryGeneration {
         self.detail.generation
     }

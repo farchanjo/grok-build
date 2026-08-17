@@ -90,7 +90,7 @@ pub fn resolve_for_models_manager(
     inference: &xai_grok_inference::InferenceConfig,
     models_manager: &crate::agent::models::ModelsManager,
     grok_home: Option<&Path>,
-) -> ProviderRouteContext {
+) -> Result<ProviderRouteContext, crate::provider_registry::route_guard::RouteGuardError> {
     let selection = models_manager.current_model_id();
     resolve_for_models_manager_with_selection(
         inference,
@@ -102,17 +102,32 @@ pub fn resolve_for_models_manager(
 
 /// Production route resolution from an explicit **canonical selection** id.
 ///
-/// Catalog lookup is exact canonical first — never by upstream wire id in
-/// `InferenceConfig.model`. When the selection is present in the catalog, the
-/// selection's upstream wire model and provider origin are projected onto the
-/// inference inputs so a parent session's wire model / base URL cannot skew
-/// `model_partition`, origin, or surface selection for an explicit override.
+/// Returns `Err` when a configured provider is disabled, tombstoned,
+/// incarnation-mismatched, or lifecycle-corrupt. True legacy (no configured
+/// provider instance / no `grok_home`) still yields a non-authoritative context.
 pub fn resolve_for_models_manager_with_selection(
     inference: &xai_grok_inference::InferenceConfig,
     models_manager: &crate::agent::models::ModelsManager,
     canonical_selection_id: &str,
     grok_home: Option<&Path>,
-) -> ProviderRouteContext {
+) -> Result<ProviderRouteContext, crate::provider_registry::route_guard::RouteGuardError> {
+    resolve_for_models_manager_with_selection_opts(
+        inference,
+        models_manager,
+        canonical_selection_id,
+        grok_home,
+        false,
+    )
+}
+
+/// Same as [`resolve_for_models_manager_with_selection`] with explicit retry flag.
+pub fn resolve_for_models_manager_with_selection_opts(
+    inference: &xai_grok_inference::InferenceConfig,
+    models_manager: &crate::agent::models::ModelsManager,
+    canonical_selection_id: &str,
+    grok_home: Option<&Path>,
+    is_retry: bool,
+) -> Result<ProviderRouteContext, crate::provider_registry::route_guard::RouteGuardError> {
     let projected = project_inference_for_canonical_selection(
         inference,
         models_manager,
@@ -123,6 +138,7 @@ pub fn resolve_for_models_manager_with_selection(
         models_manager,
         canonical_selection_id,
         grok_home,
+        is_retry,
     )
 }
 
@@ -150,8 +166,6 @@ pub(crate) fn project_inference_for_canonical_selection(
         }
         Err(_) => {}
     }
-    // Prefer live credential-resolved base (ChatGPT OAuth Codex vs Platform)
-    // over a bare catalog URL so surface selection matches final resolve.
     let credentials = crate::agent::config::resolve_credentials(entry, None);
     if !credentials.base_url.is_empty() {
         projected.base_url = credentials.base_url;
@@ -166,7 +180,8 @@ fn resolve_for_models_manager_with_selection_projected(
     models_manager: &crate::agent::models::ModelsManager,
     canonical_selection_id: &str,
     grok_home: Option<&Path>,
-) -> ProviderRouteContext {
+    is_retry: bool,
+) -> Result<ProviderRouteContext, crate::provider_registry::route_guard::RouteGuardError> {
     let cfg = models_manager.config_snapshot();
     let models = models_manager.models();
     let entry = models
@@ -174,20 +189,27 @@ fn resolve_for_models_manager_with_selection_projected(
         .or_else(|| crate::agent::config::find_model_by_id(&models, canonical_selection_id));
     let resolved = entry.and_then(|m| m.model_provider.clone());
 
-    let service = ProviderService::from_model_providers(&cfg.model_providers)
-        .ok()
-        .map(|svc| {
-            if let Some(home) = grok_home {
-                let registry_gen = crate::provider_registry::ProviderManagementService::new(home)
-                    .current_generation()
-                    .get();
-                svc.with_lifecycle_incarnations(home)
-                    .with_generation(registry_gen)
-            } else {
-                svc
+    let (service, registry_generation) = if let Some(home) = grok_home {
+        match crate::provider_registry::runtime_cache::load_runtime(home) {
+            Ok((svc, _life, registry_gen)) => (Some(svc), registry_gen),
+            Err(_) if resolved.is_some() => {
+                return Err(
+                    crate::provider_registry::route_guard::RouteGuardError::LifecycleCorrupt {
+                        id: resolved
+                            .as_ref()
+                            .map(|r| r.id.clone())
+                            .unwrap_or_else(|| "unknown".into()),
+                    },
+                );
             }
-        });
-    let registry_generation = service.as_ref().map(|s| s.generation()).unwrap_or(0);
+            Err(_) => (None, 0),
+        }
+    } else {
+        (
+            ProviderService::from_model_providers(&cfg.model_providers).ok(),
+            0,
+        )
+    };
 
     let provider_id = resolved.as_ref().map(|r| r.id.clone());
     let descriptor = provider_id
@@ -195,19 +217,14 @@ fn resolve_for_models_manager_with_selection_projected(
         .and_then(|id| service.as_ref().and_then(|s| s.get(id)));
     let descriptor_incarnation =
         descriptor.and_then(|d| d.incarnation.as_ref().map(|i| i.as_str()));
-    // Surface-aware selection: Codex vs Platform API by live base URL, not
-    // primary-first (which would mis-attribute concurrent OAuth + API-key routes).
     let selected_route = descriptor.and_then(|d| select_descriptor_route(d, &inference.base_url));
     let (descriptor_api_surface, descriptor_credential_route) = selected_route
         .map(|r| (Some(r.api_surface), Some(r.credential_route)))
         .unwrap_or((None, None));
-
     let provider_config = provider_id
         .as_deref()
         .and_then(|id| cfg.model_providers.get(id));
 
-    // Shared production chokepoint: disabled/tombstoned/corrupt lifecycle fail
-    // closed for every main/auxiliary resolve that supplies grok_home.
     if let (Some(home), Some(svc), Some(pid)) =
         (grok_home, service.as_ref(), provider_id.as_deref())
     {
@@ -216,22 +233,17 @@ fn resolve_for_models_manager_with_selection_projected(
             provider_instance_id: pid,
             provenance_incarnation: descriptor_incarnation,
             session_registry_generation: Some(registry_generation).filter(|g| *g != 0),
-            is_retry: false,
+            is_retry,
         };
-        if let Err(e) = assert_route_usable(home, svc, &guard) {
-            tracing::warn!(
-                provider = %pid,
-                error = %e,
-                category = e.category().as_str(),
-                "provider route guard blocked route resolution"
-            );
-            // Return legacy non-authoritative context so callers cannot treat
-            // this as a live exact route for retries / matches_live.
-            return ProviderRouteContext::legacy_from_config(inference);
-        }
+        assert_route_usable(home, svc, &guard)?;
     }
 
-    resolve_production_route_context(RouteResolutionInputs {
+    // True legacy only when no configured provider instance is selected.
+    if resolved.is_none() {
+        return Ok(ProviderRouteContext::legacy_from_config(inference));
+    }
+
+    Ok(resolve_production_route_context(RouteResolutionInputs {
         inference,
         resolved: resolved.as_ref(),
         provider_config,
@@ -240,40 +252,19 @@ fn resolve_for_models_manager_with_selection_projected(
         descriptor_api_surface,
         descriptor_credential_route,
         grok_home,
-    })
+    }))
 }
 
-/// Explicit next-request / retry boundary check for an already-resolved route.
-///
-/// Call before starting a new turn or any inference retry. In-flight first
-/// attempts may finish without this; every retry and every subsequent turn
-/// must re-check.
+/// Explicit next-request / retry boundary using the cached runtime snapshot.
 pub fn assert_live_route_usable(
     home: &Path,
     route: &ProviderRouteContext,
     is_retry: bool,
 ) -> Result<(), crate::provider_registry::route_guard::RouteGuardError> {
-    use crate::agent::model_providers::parse_model_providers;
     use crate::provider_registry::route_guard::{RouteGuardRequest, assert_route_usable};
-    use crate::provider_registry::{ProviderManagementService, ProviderService};
-
-    let registry_gen = ProviderManagementService::new(home)
-        .current_generation()
-        .get();
-    let (entries, _) = match std::fs::read_to_string(home.join("config.toml")) {
-        Ok(raw) => match toml::from_str::<toml::Value>(&raw) {
-            Ok(val) => parse_model_providers(&val),
-            Err(_) => (indexmap::IndexMap::new(), Vec::new()),
-        },
-        Err(_) => (indexmap::IndexMap::new(), Vec::new()),
-    };
-    let service = ProviderService::from_model_providers(&entries)
-        .map(|s| {
-            s.with_lifecycle_incarnations(home)
-                .with_generation(registry_gen)
-        })
+    let (service, _life, _gen) = crate::provider_registry::runtime_cache::load_runtime(home)
         .map_err(
-            |_| crate::provider_registry::route_guard::RouteGuardError::ProviderMissing {
+            |_| crate::provider_registry::route_guard::RouteGuardError::LifecycleCorrupt {
                 id: route.instance_id().to_owned(),
             },
         )?;
@@ -664,19 +655,23 @@ mod tests {
             &manager,
             "session-a-selection",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         let session_b = resolve_for_models_manager_with_selection(
             &inference,
             &manager,
             "session-b-selection",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         assert_eq!(session_a_before.instance_id(), "account-a");
         assert_eq!(session_b.instance_id(), "account-b");
 
         manager.set_current_model_id(acp::ModelId::new("session-b-selection"));
         assert_eq!(
-            resolve_for_models_manager(&inference, &manager, Some(dir.path())).instance_id(),
+            resolve_for_models_manager(&inference, &manager, Some(dir.path()))
+                .expect("provider route resolve")
+                .instance_id(),
             "account-b",
             "compatibility resolution must demonstrate that the shared picker moved",
         );
@@ -685,7 +680,8 @@ mod tests {
             &manager,
             "session-a-selection",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         assert_eq!(session_a_after.instance_id(), "account-a");
         assert_eq!(session_a_after, session_a_before);
     }
@@ -892,7 +888,8 @@ mod tests {
             &manager,
             "openrouter:gpt-4o",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         assert_eq!(ctx.instance_id(), "openrouter");
         assert_eq!(ctx.model_partition(), Some("gpt-4o"));
         assert_eq!(ctx.provider_kind(), RouteProviderKind::OpenRouter);
@@ -953,7 +950,8 @@ mod tests {
         };
 
         let without_home =
-            resolve_for_models_manager_with_selection(&parent, &manager, "openrouter:gpt-4o", None);
+            resolve_for_models_manager_with_selection(&parent, &manager, "openrouter:gpt-4o", None)
+                .expect("provider route resolve");
         assert_eq!(without_home.binding_generation(), 0);
         assert_eq!(
             without_home.authority(),
@@ -967,7 +965,8 @@ mod tests {
             &manager,
             "openrouter:gpt-4o",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         assert_eq!(mint.credential_route(), RouteCredentialRoute::ApiKey);
         assert_eq!(mint.binding_generation(), generation);
         assert_eq!(mint.authority(), RouteAuthority::Authoritative);
@@ -978,7 +977,8 @@ mod tests {
             &manager,
             "openrouter:gpt-4o",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         assert_eq!(mint, final_live);
 
         let canonical = xai_grok_models::CanonicalModelId::new("openrouter:gpt-4o").unwrap();
@@ -1068,13 +1068,15 @@ mod tests {
             &manager,
             "work-openai:gpt-4o",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         let home = resolve_for_models_manager_with_selection(
             &parent_home,
             &manager,
             "home-openai:gpt-4o",
             Some(dir.path()),
-        );
+        )
+        .expect("provider route resolve");
         assert_eq!(work.instance_id(), "work-openai");
         assert_eq!(home.instance_id(), "home-openai");
         assert_ne!(work.instance_id(), home.instance_id());
@@ -1094,6 +1096,138 @@ mod tests {
         assert!(
             !work_route.matches_live(&home_route),
             "sibling account routes must not match_live each other"
+        );
+    }
+
+    /// PR13: enable → resolve ok → disable → next-turn assert / resolve fails closed
+    /// (no legacy remask into kind identity).
+    #[test]
+    fn enable_then_disable_blocks_next_turn_resolve_without_legacy_remask() {
+        use crate::provider_registry::management::ProviderManagementService;
+        use crate::provider_registry::management::dto::ProviderAddRequest;
+        use crate::provider_registry::runtime_cache;
+
+        let dir = tempdir().unwrap();
+        runtime_cache::invalidate_for_home(dir.path());
+        let svc = ProviderManagementService::new(dir.path());
+        let g0 = svc.current_generation();
+        assert!(
+            svc.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        runtime_cache::invalidate_for_home(dir.path());
+
+        let mut config = crate::agent::config::Config::default();
+        config.model_providers.insert(
+            "lab".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenAiCompatible,
+                base_url: Some("http://127.0.0.1:9/v1".into()),
+                enabled: true,
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "lab:gpt".to_owned(),
+            entry_on_provider(
+                "gpt",
+                "lab",
+                ModelProviderKind::OpenAiCompatible,
+                "http://127.0.0.1:9/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("lab:gpt"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let inference = InferenceConfig {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "gpt".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::Custom,
+            ..InferenceConfig::default()
+        };
+
+        let ok = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "lab:gpt",
+            Some(dir.path()),
+        )
+        .expect("enabled route must resolve");
+        assert_eq!(ok.instance_id(), "lab");
+        assert_live_route_usable(dir.path(), &ok, false).expect("enabled live assert");
+
+        // Disable → next turn must fail closed (not remask to legacy kind id).
+        assert!(svc.set_enabled("lab", false, svc.current_generation()).ok);
+        runtime_cache::invalidate_for_home(dir.path());
+
+        let err = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "lab:gpt",
+            Some(dir.path()),
+        )
+        .expect_err("disabled route must not resolve to legacy");
+        assert!(
+            err.to_string().contains("disabled") || err.to_string().contains("lab"),
+            "guard error must identify disabled provider, got {err}"
+        );
+        // Retry boundary also fails closed.
+        let err_retry = assert_live_route_usable(dir.path(), &ok, true).expect_err("retry");
+        assert!(
+            err_retry.to_string().contains("disabled") || err_retry.to_string().contains("lab"),
+            "retry assert must fail closed, got {err_retry}"
+        );
+    }
+
+    /// True legacy only when no configured provider instance is selected.
+    #[test]
+    fn true_legacy_only_without_configured_provider_selection() {
+        let dir = tempdir().unwrap();
+        let config = crate::agent::config::Config::default();
+        let models = indexmap::IndexMap::new();
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("orphan-model"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let inference = InferenceConfig {
+            base_url: "https://api.example.com/v1".into(),
+            model: "orphan-model".into(),
+            ..InferenceConfig::default()
+        };
+        // Selection not in catalog → no resolved provider → true legacy Ok.
+        let route = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "orphan-model",
+            Some(dir.path()),
+        )
+        .expect("true legacy must remain Ok when no configured route");
+        // legacy_from_config uses kind-level identity, not a configured instance.
+        assert!(
+            route.instance_id() != "lab",
+            "legacy must not invent configured instance id"
         );
     }
 }
