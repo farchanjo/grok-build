@@ -1601,9 +1601,14 @@ pub async fn run_leader(
                         ConfigUpdate::ModelsChanged => {
                             info!("Model config change detected — reloading agent model list");
                             // Provider registry generation change invalidates
-                            // exact retrieval pins; rebuild PR17 snapshot (LKG).
-                            if let Some(outcome) = crate::retrieval::reload_global_registry() {
-                                info!(?outcome, "retrieval registry reloaded after models change");
+                            // exact retrieval pins; rebuild all home-keyed PR17
+                            // snapshots (LKG retained on invalid candidates).
+                            for (home, outcome) in crate::retrieval::reload_all_registries() {
+                                info!(
+                                    ?home,
+                                    ?outcome,
+                                    "retrieval registry reloaded after models change"
+                                );
                             }
                             let line = internal_reload_request_line(
                                 "config-reload-models",
@@ -1684,10 +1689,10 @@ pub async fn run_leader(
                         }
                         ConfigUpdate::RetrievalGraphChanged => {
                             info!(
-                                "Retrieval graph config change detected — rebuilding PR17 registry"
+                                "Retrieval graph config change detected — rebuilding PR17 registries"
                             );
-                            if let Some(outcome) = crate::retrieval::reload_global_registry() {
-                                info!(?outcome, "retrieval registry reload outcome");
+                            for (home, outcome) in crate::retrieval::reload_all_registries() {
+                                info!(?home, ?outcome, "retrieval registry reload outcome");
                             }
                         }
                         ConfigUpdate::Compaction(compaction) => {

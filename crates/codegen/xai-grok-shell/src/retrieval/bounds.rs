@@ -1,8 +1,9 @@
 //! Strict profile-wide budget tracking.
 //!
-//! Budgets are aggregate across the ordered fallback chain: an arbitrary
-//! fallback list cannot multiply latency above the profile deadline or attempt
-//! budget. PR16 internal retries do not multiply the profile attempt counter.
+//! Budgets are aggregate across the ordered fallback chain **and** across
+//! embed+rerank stages of one `retrieve` call. An arbitrary fallback list
+//! cannot multiply latency above the profile deadline or attempt budget.
+//! PR16 internal retries do not multiply the profile attempt counter.
 
 use std::time::{Duration, Instant};
 
@@ -45,8 +46,8 @@ impl ProfileBudgetLimits {
         max_batch_documents: u32,
     ) -> Self {
         let deadline = Duration::from_millis(profile.deadline_ms.max(1));
-        // Response/output bytes: scale from max_output_tokens (~4 bytes/token)
-        // and clamp to PR16 default response ceiling.
+        // Response/output bytes: scale from max_output_tokens and clamp to
+        // PR16 default response ceiling.
         let max_response_bytes = (profile.max_output_tokens as usize)
             .saturating_mul(16)
             .clamp(
@@ -73,7 +74,7 @@ impl ProfileBudgetLimits {
     }
 }
 
-/// Mutable running budget for one pipeline invocation.
+/// Mutable running budget for one pipeline invocation (shared across stages).
 #[derive(Debug, Clone)]
 pub struct ProfileBudgetTracker {
     pub profile_id: String,
@@ -83,6 +84,7 @@ pub struct ProfileBudgetTracker {
     pub input_bytes_used: usize,
     pub input_tokens_used: u32,
     pub output_bytes_used: usize,
+    pub output_tokens_used: u32,
 }
 
 impl ProfileBudgetTracker {
@@ -95,6 +97,7 @@ impl ProfileBudgetTracker {
             input_bytes_used: 0,
             input_tokens_used: 0,
             output_bytes_used: 0,
+            output_tokens_used: 0,
         }
     }
 
@@ -172,26 +175,26 @@ impl ProfileBudgetTracker {
         Ok(())
     }
 
+    /// Charge cumulative response/output size. Fail closed when either
+    /// response-byte or output-token budget is exceeded.
     pub fn charge_output_bytes(&mut self, bytes: usize) -> OrchestratorResult<()> {
-        let next = self.output_bytes_used.saturating_add(bytes);
-        if next > self.limits.max_response_bytes {
+        let next_bytes = self.output_bytes_used.saturating_add(bytes);
+        if next_bytes > self.limits.max_response_bytes {
             return Err(OrchestratorError::OutputBudgetExceeded {
                 profile_id: self.profile_id.clone(),
                 kind: BudgetKind::ResponseBytes,
             });
         }
-        // Token-ish check against max_output_tokens.
         let tokens = estimate_tokens_from_bytes(bytes);
-        if tokens > self.limits.max_output_tokens
-            && self.output_bytes_used == 0
-            && bytes > self.limits.max_response_bytes
-        {
+        let next_tokens = self.output_tokens_used.saturating_add(tokens);
+        if next_tokens > self.limits.max_output_tokens {
             return Err(OrchestratorError::OutputBudgetExceeded {
                 profile_id: self.profile_id.clone(),
                 kind: BudgetKind::OutputTokens,
             });
         }
-        self.output_bytes_used = next;
+        self.output_bytes_used = next_bytes;
+        self.output_tokens_used = next_tokens;
         Ok(())
     }
 
@@ -307,6 +310,38 @@ mod tests {
             err,
             OrchestratorError::InputBudgetExceeded {
                 kind: BudgetKind::InputBytes,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn output_tokens_accumulate_and_fail_closed() {
+        let mut t = ProfileBudgetTracker::new("p", limits(), Instant::now());
+        // 50 tokens max; 200 bytes ≈ 50 tokens.
+        t.charge_output_bytes(200).unwrap();
+        let err = t.charge_output_bytes(8).unwrap_err();
+        assert!(matches!(
+            err,
+            OrchestratorError::OutputBudgetExceeded {
+                kind: BudgetKind::OutputTokens,
+                ..
+            }
+        ));
+        assert_eq!(t.output_tokens_used, 50);
+    }
+
+    #[test]
+    fn output_response_bytes_fail_closed() {
+        let mut lim = limits();
+        lim.max_response_bytes = 100;
+        lim.max_output_tokens = 10_000;
+        let mut t = ProfileBudgetTracker::new("p", lim, Instant::now());
+        let err = t.charge_output_bytes(101).unwrap_err();
+        assert!(matches!(
+            err,
+            OrchestratorError::OutputBudgetExceeded {
+                kind: BudgetKind::ResponseBytes,
                 ..
             }
         ));

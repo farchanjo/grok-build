@@ -1,9 +1,11 @@
 //! Ordered deterministic embedding/rerank fallback pipeline.
 //!
 //! Iterates only config-declared route IDs in declaration order. No implicit
-//! kind/host/sibling fallback. Profile budgets are aggregate. Cancellation
-//! stops outstanding work immediately.
+//! kind/host/sibling fallback. Profile budgets are aggregate across routes
+//! and across embed+rerank stages of one retrieve. Cancellation stops
+//! outstanding work immediately.
 
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,12 +29,15 @@ use super::telemetry::{
 /// Options for a single pipeline invocation.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
-    /// When true, semantic degradation becomes [`OrchestratorError::AllRoutesFailed`].
+    /// When true, semantic degradation becomes a hard orchestrator error.
     pub hard_error_on_semantic_failure: bool,
     /// When true, skip embedding/rerank entirely (native/hard-pinned path).
     pub bypass_semantic: bool,
     /// Optional generation pin; mismatch fails closed.
     pub pin_snapshot_generation: Option<u64>,
+    /// When true, candidate/result over-limit returns [`OrchestratorError::LimitExceeded`]
+    /// instead of soft truncation. Default soft-clamps to profile limits.
+    pub hard_error_on_limit_exceeded: bool,
 }
 
 /// Successful embedding stage outcome (one embedding space).
@@ -58,7 +63,9 @@ pub struct RerankStageResult {
 }
 
 /// Generic candidate row for orchestration (storage-agnostic).
-#[derive(Debug, Clone)]
+///
+/// Debug never prints full text (document/query-adjacent content).
+#[derive(Clone)]
 pub struct CandidateRow {
     pub id: String,
     pub text: String,
@@ -66,8 +73,21 @@ pub struct CandidateRow {
     pub metadata: Option<serde_json::Value>,
 }
 
+impl fmt::Debug for CandidateRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CandidateRow")
+            .field("id", &self.id)
+            .field("text_chars", &self.text.len())
+            .field("score", &self.score)
+            .field("has_metadata", &self.metadata.is_some())
+            .finish()
+    }
+}
+
 /// Result of full retrieve orchestration.
-#[derive(Debug, Clone)]
+///
+/// Debug omits candidate text bodies.
+#[derive(Clone)]
 pub struct RetrieveResult {
     pub candidates: Vec<CandidateRow>,
     pub embedding_space: Option<EmbeddingSpaceId>,
@@ -75,6 +95,19 @@ pub struct RetrieveResult {
     pub rerank: Option<RerankStageResult>,
     pub degradations: Vec<DegradationNotice>,
     pub snapshot_generation: u64,
+}
+
+impl fmt::Debug for RetrieveResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetrieveResult")
+            .field("candidate_count", &self.candidates.len())
+            .field("embedding_space", &self.embedding_space)
+            .field("embed", &self.embed)
+            .field("rerank", &self.rerank)
+            .field("degradations", &self.degradations)
+            .field("snapshot_generation", &self.snapshot_generation)
+            .finish()
+    }
 }
 
 /// Shared pipeline context.
@@ -88,12 +121,13 @@ pub struct PipelineContext<'a> {
     pub telemetry: Arc<dyn TelemetrySink>,
 }
 
-/// Embed texts via ordered embedding routes for the profile.
+/// Embed texts via ordered embedding routes, charging the shared budget.
 pub async fn embed_with_profile(
     ctx: &PipelineContext<'_>,
     texts: Vec<String>,
     options: &PipelineOptions,
     cancel: CancellationToken,
+    budget: &mut ProfileBudgetTracker,
 ) -> OrchestratorResult<EmbedStageResult> {
     if let Some(pin) = options.pin_snapshot_generation
         && pin != ctx.snapshot.generation
@@ -112,11 +146,6 @@ pub async fn embed_with_profile(
         ));
     }
 
-    let mut budget = ProfileBudgetTracker::new(
-        &ctx.profile.id,
-        ctx.profile.budgets.clone(),
-        ctx.clock.now(),
-    );
     budget.check_batch_documents(texts.len())?;
     let bytes = total_input_bytes(texts.iter().map(|s| s.as_str()));
     budget.charge_input(bytes, RetrievalStage::Embed)?;
@@ -130,12 +159,10 @@ pub async fn embed_with_profile(
 
     let route_ids = &ctx.profile.embedding_route_ids;
     if route_ids.is_empty() {
-        return semantic_fail(ctx, &budget, None, options);
+        return semantic_fail(ctx, budget, None);
     }
 
     let mut last_failure: Option<RouteFailureClass> = None;
-    // Partial vectors from a previous incomplete route are discarded on space change.
-    let mut _partial_discarded = false;
 
     for (idx, route_id) in route_ids.iter().enumerate() {
         if cancel.is_cancelled() {
@@ -151,7 +178,7 @@ pub async fn embed_with_profile(
                 Some(idx as u32),
                 Some(route_id),
                 None,
-                &budget,
+                budget,
                 BudgetFlags {
                     deadline_hit: true,
                     ..Default::default()
@@ -161,26 +188,18 @@ pub async fn embed_with_profile(
                 Some(texts.len() as u32),
                 None,
             );
-            return if options.hard_error_on_semantic_failure {
-                Err(e)
-            } else {
-                semantic_fail(ctx, &budget, last_failure, options)
-            };
+            // Preserve typed deadline so soft retrieve maps to BudgetExhausted.
+            return Err(e);
         }
         if budget.attempts_remaining() == 0 {
-            return if options.hard_error_on_semantic_failure {
-                Err(OrchestratorError::AttemptBudgetExceeded {
-                    profile_id: ctx.profile.id.clone(),
-                    stage: RetrievalStage::Embed,
-                    max_attempts: budget.limits.max_attempts,
-                })
-            } else {
-                semantic_fail(ctx, &budget, last_failure, options)
-            };
+            return Err(OrchestratorError::AttemptBudgetExceeded {
+                profile_id: ctx.profile.id.clone(),
+                stage: RetrievalStage::Embed,
+                max_attempts: budget.limits.max_attempts,
+            });
         }
 
         let Some(route) = ctx.snapshot.embedding_route(route_id) else {
-            // Missing route in snapshot: skip (should not happen after validation).
             last_failure = Some(RouteFailureClass::Config);
             continue;
         };
@@ -202,7 +221,7 @@ pub async fn embed_with_profile(
                 Some(idx as u32),
                 Some(route_id),
                 Some(&route.provider_instance_id),
-                &budget,
+                budget,
                 BudgetFlags {
                     cooldown_skip: true,
                     ..Default::default()
@@ -212,21 +231,28 @@ pub async fn embed_with_profile(
                 Some(texts.len() as u32),
                 None,
             );
-            last_failure = Some(RouteFailureClass::Timeout);
+            last_failure = Some(RouteFailureClass::Cooldown);
             continue;
         }
 
-        if budget.consume_attempt(RetrievalStage::Embed).is_err() {
-            break;
-        }
-
+        // Check effective timeout before consuming an attempt (OI-6).
         let effective = budget.effective_timeout(
             ctx.clock.now(),
             Duration::from_millis(route.request_timeout_ms.max(1)),
         );
         if effective.is_zero() {
-            last_failure = Some(RouteFailureClass::Deadline);
-            continue;
+            return Err(OrchestratorError::DeadlineExceeded {
+                profile_id: ctx.profile.id.clone(),
+                stage: RetrievalStage::Embed,
+            });
+        }
+
+        if budget.consume_attempt(RetrievalStage::Embed).is_err() {
+            return Err(OrchestratorError::AttemptBudgetExceeded {
+                profile_id: ctx.profile.id.clone(),
+                stage: RetrievalStage::Embed,
+                max_attempts: budget.limits.max_attempts,
+            });
         }
 
         let pins = RouteCallPins {
@@ -253,10 +279,9 @@ pub async fn embed_with_profile(
 
         match outcome {
             Ok(result) => {
-                // Pin this embedding space; discard any prior partials.
-                let _ = _partial_discarded;
+                // First successful route pins this embedding space only.
+                // Failed routes never retain vectors — no cross-space merge.
                 ctx.cooldown.record_success(&cd_key);
-                // Charge approximate output size (dims * n * 4).
                 let out_bytes = result
                     .vectors
                     .first()
@@ -267,7 +292,8 @@ pub async fn embed_with_profile(
                             .saturating_mul(4)
                     })
                     .unwrap_or(0);
-                let _ = budget.charge_output_bytes(out_bytes);
+                // Fail closed on output/response budget overflow (OI-3/OI-4).
+                budget.charge_output_bytes(out_bytes)?;
 
                 emit(
                     ctx,
@@ -275,7 +301,7 @@ pub async fn embed_with_profile(
                     Some(idx as u32),
                     Some(route_id),
                     Some(&route.provider_instance_id),
-                    &budget,
+                    budget,
                     BudgetFlags::default(),
                     TelemetryOutcome::Success,
                     Some(elapsed),
@@ -295,16 +321,16 @@ pub async fn embed_with_profile(
             Err(err) => {
                 let class = RouteFailureClass::from_retrieval_error(&err);
                 last_failure = Some(class);
+                // Auth/config permanent failures: skip route, no cooldown.
+                // Retryable classes may enter exact-route cooldown.
                 ctx.cooldown.record_failure(cd_key, class);
-                // Incomplete vectors from this route are discarded (never merged).
-                _partial_discarded = true;
                 emit(
                     ctx,
                     RetrievalStage::Embed,
                     Some(idx as u32),
                     Some(route_id),
                     Some(&route.provider_instance_id),
-                    &budget,
+                    budget,
                     BudgetFlags {
                         cancelled: matches!(class, RouteFailureClass::Cancelled),
                         deadline_hit: matches!(class, RouteFailureClass::Deadline),
@@ -324,20 +350,21 @@ pub async fn embed_with_profile(
                 if !class.allows_explicit_fallback() {
                     break;
                 }
-                // Terminal/auth/config: move to next explicitly configured route only.
+                // Terminal-for-route (auth/config/capability/guard/malformed)
+                // still may advance to the next explicitly configured route.
+                let _ = class.is_terminal_for_route();
                 continue;
             }
         }
     }
 
-    semantic_fail(ctx, &budget, last_failure, options)
+    semantic_fail(ctx, budget, last_failure)
 }
 
 fn semantic_fail(
     ctx: &PipelineContext<'_>,
     budget: &ProfileBudgetTracker,
     last_failure: Option<RouteFailureClass>,
-    options: &PipelineOptions,
 ) -> OrchestratorResult<EmbedStageResult> {
     emit(
         ctx,
@@ -352,13 +379,6 @@ fn semantic_fail(
         None,
         None,
     );
-    if options.hard_error_on_semantic_failure {
-        return Err(OrchestratorError::AllRoutesFailed {
-            profile_id: ctx.profile.id.clone(),
-            stage: RetrievalStage::Embed,
-            last_failure,
-        });
-    }
     Err(OrchestratorError::AllRoutesFailed {
         profile_id: ctx.profile.id.clone(),
         stage: RetrievalStage::Embed,
@@ -366,15 +386,17 @@ fn semantic_fail(
     })
 }
 
-/// Rerank documents; on total failure preserve pre-rerank order exactly.
+/// Rerank documents using the shared profile budget; on total failure preserve
+/// pre-rerank order exactly.
 pub async fn rerank_with_profile(
     ctx: &PipelineContext<'_>,
     query: String,
     documents: Vec<String>,
     options: &PipelineOptions,
     cancel: CancellationToken,
-    mut budget: ProfileBudgetTracker,
+    budget: &mut ProfileBudgetTracker,
 ) -> OrchestratorResult<RerankStageResult> {
+    let _ = options;
     let route_ids = &ctx.profile.reranker_route_ids;
     if route_ids.is_empty() {
         return Ok(RerankStageResult {
@@ -388,9 +410,7 @@ pub async fn rerank_with_profile(
     let shortlist_n = budget.clamp_rerank_shortlist(documents.len());
     let documents: Vec<String> = documents.into_iter().take(shortlist_n).collect();
     let bytes = query.len() + total_input_bytes(documents.iter().map(|s| s.as_str()));
-    if let Err(e) = budget.charge_input(bytes, RetrievalStage::Rerank) {
-        // Soft: preserve order.
-        let _ = e;
+    if let Err(_e) = budget.charge_input(bytes, RetrievalStage::Rerank) {
         return Ok(RerankStageResult {
             route_model_id: None,
             result: None,
@@ -435,11 +455,8 @@ pub async fn rerank_with_profile(
             route.config.protocol.as_str(),
         );
         if ctx.cooldown.is_cooling(&cd_key) {
-            last_failure = Some(RouteFailureClass::Timeout);
+            last_failure = Some(RouteFailureClass::Cooldown);
             continue;
-        }
-        if budget.consume_attempt(RetrievalStage::Rerank).is_err() {
-            break;
         }
         let effective = budget.effective_timeout(
             ctx.clock.now(),
@@ -447,7 +464,10 @@ pub async fn rerank_with_profile(
         );
         if effective.is_zero() {
             last_failure = Some(RouteFailureClass::Deadline);
-            continue;
+            break;
+        }
+        if budget.consume_attempt(RetrievalStage::Rerank).is_err() {
+            break;
         }
         let pins = RouteCallPins {
             provenance_incarnation: route.incarnation.clone(),
@@ -474,13 +494,18 @@ pub async fn rerank_with_profile(
         match outcome {
             Ok(result) => {
                 ctx.cooldown.record_success(&cd_key);
+                // Approximate output as hit count * 32 bytes for budget accounting.
+                let out_bytes = result.hits.len().saturating_mul(32);
+                if let Err(e) = budget.charge_output_bytes(out_bytes) {
+                    return Err(e);
+                }
                 emit(
                     ctx,
                     RetrievalStage::Rerank,
                     Some(idx as u32),
                     Some(route_id),
                     Some(&route.provider_instance_id),
-                    &budget,
+                    budget,
                     BudgetFlags::default(),
                     TelemetryOutcome::Success,
                     Some(elapsed),
@@ -504,7 +529,7 @@ pub async fn rerank_with_profile(
                     Some(idx as u32),
                     Some(route_id),
                     Some(&route.provider_instance_id),
-                    &budget,
+                    budget,
                     BudgetFlags::default(),
                     TelemetryOutcome::RouteFailure(class),
                     Some(elapsed),
@@ -517,13 +542,12 @@ pub async fn rerank_with_profile(
                         stage: RetrievalStage::Rerank,
                     });
                 }
+                let _ = class.is_terminal_for_route();
                 continue;
             }
         }
     }
 
-    // All rerankers failed or skipped: exact pre-rerank order.
-    let _ = options;
     Ok(RerankStageResult {
         route_model_id: None,
         result: None,
@@ -538,14 +562,18 @@ pub async fn rerank_with_profile(
 }
 
 /// Soft embed that maps total failure to a degradation notice for retrieve.
+/// Uses the shared budget so attempts/deadline/input survive into rerank.
 pub async fn embed_or_degrade(
     ctx: &PipelineContext<'_>,
     texts: Vec<String>,
     options: &PipelineOptions,
     cancel: CancellationToken,
-) -> (Option<EmbedStageResult>, Option<DegradationNotice>) {
-    match embed_with_profile(ctx, texts, options, cancel).await {
-        Ok(r) => (Some(r), None),
+    budget: &mut ProfileBudgetTracker,
+) -> (Option<EmbedStageResult>, Option<DegradationNotice>, bool) {
+    // Third value: true when cancelled (caller must hard-stop).
+    match embed_with_profile(ctx, texts, options, cancel, budget).await {
+        Ok(r) => (Some(r), None, false),
+        Err(OrchestratorError::Cancelled { .. }) => (None, None, true),
         Err(OrchestratorError::AllRoutesFailed {
             profile_id,
             last_failure,
@@ -558,10 +586,12 @@ pub async fn embed_or_degrade(
                 RetrievalStage::Embed,
                 last_failure,
             )),
+            false,
         ),
-        Err(OrchestratorError::Cancelled { .. }) => (None, None),
         Err(OrchestratorError::DeadlineExceeded { profile_id, .. })
-        | Err(OrchestratorError::AttemptBudgetExceeded { profile_id, .. }) => (
+        | Err(OrchestratorError::AttemptBudgetExceeded { profile_id, .. })
+        | Err(OrchestratorError::InputBudgetExceeded { profile_id, .. })
+        | Err(OrchestratorError::OutputBudgetExceeded { profile_id, .. }) => (
             None,
             Some(DegradationNotice::new(
                 DegradationKind::BudgetExhausted,
@@ -569,6 +599,7 @@ pub async fn embed_or_degrade(
                 RetrievalStage::Embed,
                 None,
             )),
+            false,
         ),
         Err(_) => (
             None,
@@ -578,6 +609,7 @@ pub async fn embed_or_degrade(
                 RetrievalStage::Embed,
                 None,
             )),
+            false,
         ),
     }
 }

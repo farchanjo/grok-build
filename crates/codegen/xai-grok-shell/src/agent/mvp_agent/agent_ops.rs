@@ -1569,32 +1569,48 @@ impl MvpAgent {
         models_manager: crate::agent::models::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
-        // Machine-wide provider registry broadcasts (PR13).
+        // Install shell-owned PR17 retrieval registry first (race-safe vs
+        // early notify). Home-keyed map supports multi-home composition.
+        let retrieval_home = xai_grok_config::grok_home();
+        {
+            let registry =
+                crate::retrieval::RetrievalRegistry::load_from_home(retrieval_home.clone());
+            crate::retrieval::install_registry_for_home(retrieval_home.clone(), registry);
+        }
+        // Machine-wide provider registry broadcasts (PR13). Use register_
+        // so multi-agent composition chains subscribers. Provider generation
+        // advances also rebuild the home's PR17 snapshot (M1).
         {
             let gw = gateway.clone();
-            crate::provider_registry::notify::set_providers_update_forwarder(Some(Box::new(
+            crate::provider_registry::notify::register_providers_update_forwarder(Box::new(
                 move |notif| {
                     gw.forward_fire_and_forget(notif);
                 },
-            )));
+            ));
+            let home = retrieval_home.clone();
+            crate::provider_registry::notify::register_providers_update_forwarder(Box::new(
+                move |_notif| {
+                    // Invoked after gateway list lock release (snapshot fanout).
+                    let _ = crate::retrieval::reload_registry_for_home(&home);
+                },
+            ));
         }
-        // Machine-wide retrieval graph broadcasts (PR15).
+        // Machine-wide retrieval graph broadcasts (PR15). Gateway fanout and
+        // registry reload are separate registered subscribers; reload runs
+        // after the notify lock is released (H2).
         {
             let gw = gateway.clone();
-            crate::retrieval_config::notify::set_retrieval_update_forwarder(Some(Box::new(
+            crate::retrieval_config::notify::register_retrieval_update_forwarder(Box::new(
                 move |notif| {
                     gw.forward_fire_and_forget(notif);
-                    // Management mutation advanced generation; rebuild PR17
-                    // runtime snapshot (LKG retained on invalid candidates).
-                    let _ = crate::retrieval::reload_global_registry();
                 },
-            )));
-        }
-        // Install shell-owned PR17 retrieval registry (disabled when no graph).
-        {
-            let home = xai_grok_config::grok_home();
-            let registry = crate::retrieval::RetrievalRegistry::load_from_home(home);
-            crate::retrieval::install_global_registry(registry);
+            ));
+            let home = retrieval_home.clone();
+            crate::retrieval_config::notify::register_retrieval_update_forwarder(Box::new(
+                move |_notif| {
+                    let _ = crate::retrieval::reload_registry_for_home(&home);
+                },
+            ));
         }
         let inference_config = models_manager.inference_config();
         if !cfg.grok_com_config.api_key_auth_disabled() {

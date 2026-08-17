@@ -167,6 +167,8 @@ pub enum RouteFailureClass {
     Malformed,
     Cancelled,
     Deadline,
+    /// Route skipped because it is on short cooldown (not a transport timeout).
+    Cooldown,
     Other,
 }
 
@@ -183,6 +185,7 @@ impl RouteFailureClass {
             Self::Malformed => "malformed",
             Self::Cancelled => "cancelled",
             Self::Deadline => "deadline",
+            Self::Cooldown => "cooldown",
             Self::Other => "other",
         }
     }

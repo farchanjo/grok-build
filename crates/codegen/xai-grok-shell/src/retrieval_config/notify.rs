@@ -15,7 +15,9 @@ use std::sync::{Mutex, OnceLock};
 
 use agent_client_protocol as acp;
 
-type GatewayFn = Box<dyn Fn(acp::ExtNotification) + Send + Sync>;
+/// Process-wide forwarder (Arc so fanout can snapshot under the lock and
+/// invoke after release — no disk I/O while holding the gateway list).
+type GatewayFn = std::sync::Arc<dyn Fn(acp::ExtNotification) + Send + Sync>;
 
 static GATEWAYS: OnceLock<Mutex<Vec<GatewayFn>>> = OnceLock::new();
 static POLL_STATE: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
@@ -28,18 +30,23 @@ fn poll_state() -> &'static Mutex<HashMap<PathBuf, u64>> {
     POLL_STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn set_retrieval_update_forwarder(forward: Option<GatewayFn>) {
+pub fn set_retrieval_update_forwarder(
+    forward: Option<Box<dyn Fn(acp::ExtNotification) + Send + Sync>>,
+) {
     if let Ok(mut slot) = gateways().lock() {
         slot.clear();
         if let Some(f) = forward {
-            slot.push(f);
+            slot.push(std::sync::Arc::from(f));
         }
     }
 }
 
-pub fn register_retrieval_update_forwarder(forward: GatewayFn) {
+/// Register an additional forwarder without replacing existing subscribers.
+pub fn register_retrieval_update_forwarder(
+    forward: Box<dyn Fn(acp::ExtNotification) + Send + Sync>,
+) {
     if let Ok(mut slot) = gateways().lock() {
-        slot.push(forward);
+        slot.push(std::sync::Arc::from(forward));
     }
 }
 
@@ -49,11 +56,17 @@ pub fn clear_retrieval_update_forwarders() {
     }
 }
 
+/// Snapshot forwarders under the lock, then invoke **after** release so
+/// subscribers may perform disk I/O / registry rebuild without holding the
+/// gateway list mutex (H2).
 pub fn try_forward_retrieval_update(params: &serde_json::Value) {
-    let Ok(slot) = gateways().lock() else {
-        return;
+    let snapshot: Vec<GatewayFn> = {
+        let Ok(slot) = gateways().lock() else {
+            return;
+        };
+        slot.iter().cloned().collect()
     };
-    for fwd in slot.iter() {
+    for fwd in snapshot {
         let Ok(raw) = serde_json::value::to_raw_value(params) else {
             continue;
         };

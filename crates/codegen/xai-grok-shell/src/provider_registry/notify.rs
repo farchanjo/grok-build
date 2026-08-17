@@ -29,7 +29,8 @@ use std::sync::{Mutex, OnceLock};
 
 use agent_client_protocol as acp;
 
-type GatewayFn = Box<dyn Fn(acp::ExtNotification) + Send + Sync>;
+/// Arc forwarders so fanout can snapshot under the lock and invoke after release.
+type GatewayFn = std::sync::Arc<dyn Fn(acp::ExtNotification) + Send + Sync>;
 
 static GATEWAYS: OnceLock<Mutex<Vec<GatewayFn>>> = OnceLock::new();
 static POLL_STATE: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
@@ -47,19 +48,23 @@ fn poll_state() -> &'static Mutex<HashMap<PathBuf, u64>> {
 /// Prefer [`register_providers_update_forwarder`] when multiple consumers
 /// (e.g. two connected clients / local self-refresh + gateway) must both hear
 /// the same mutation.
-pub fn set_providers_update_forwarder(forward: Option<GatewayFn>) {
+pub fn set_providers_update_forwarder(
+    forward: Option<Box<dyn Fn(acp::ExtNotification) + Send + Sync>>,
+) {
     if let Ok(mut slot) = gateways().lock() {
         slot.clear();
         if let Some(f) = forward {
-            slot.push(f);
+            slot.push(std::sync::Arc::from(f));
         }
     }
 }
 
 /// Register an additional process-wide forwarder (does not replace existing).
-pub fn register_providers_update_forwarder(forward: GatewayFn) {
+pub fn register_providers_update_forwarder(
+    forward: Box<dyn Fn(acp::ExtNotification) + Send + Sync>,
+) {
     if let Ok(mut slot) = gateways().lock() {
-        slot.push(forward);
+        slot.push(std::sync::Arc::from(forward));
     }
 }
 
@@ -71,11 +76,17 @@ pub fn clear_providers_update_forwarders() {
 }
 
 /// Fire-and-forget providers/update to every registered forwarder.
+///
+/// Snapshots the list under the lock and invokes after release so subscribers
+/// may perform disk I/O without holding the gateway mutex.
 pub fn try_forward_providers_update(params: &serde_json::Value) {
-    let Ok(slot) = gateways().lock() else {
-        return;
+    let snapshot: Vec<GatewayFn> = {
+        let Ok(slot) = gateways().lock() else {
+            return;
+        };
+        slot.iter().cloned().collect()
     };
-    for fwd in slot.iter() {
+    for fwd in snapshot {
         let Ok(raw) = serde_json::value::to_raw_value(params) else {
             continue;
         };

@@ -669,9 +669,17 @@ impl RetrievalManagementService {
         for desc in service.list() {
             let id = desc.id.as_str().to_owned();
             let meta = service.snapshot().get(&id);
+            // Align with runtime reload view (L4): blocking tombstone for id
+            // or incarnation-specific tombstone when present.
             let tombstoned = lifecycle
                 .as_ref()
-                .map(|st| st.tombstones.iter().any(|t| t.id.as_str() == id))
+                .map(|st| {
+                    st.has_blocking_tombstone_for_id(&id)
+                        || desc
+                            .incarnation
+                            .as_ref()
+                            .is_some_and(|inc| st.is_tombstoned(&id, inc))
+                })
                 .unwrap_or(false);
             let mut embeddings = None;
             let mut rerank = None;

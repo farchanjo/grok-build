@@ -28,6 +28,9 @@ struct PublishState {
 pub struct RetrievalRegistry {
     snapshot: ArcSwap<RetrievalSnapshot>,
     publish: Mutex<PublishState>,
+    /// Serializes reload so concurrent notify+watcher paths do not drop
+    /// a distinct update without a bounded retry (single-flight per registry).
+    reload_flight: Mutex<()>,
     /// Generation of the currently published snapshot (lock-free read).
     live_generation: AtomicU64,
     home: PathBuf,
@@ -59,6 +62,7 @@ impl RetrievalRegistry {
         Arc::new(Self {
             snapshot: ArcSwap::from(snap),
             publish: Mutex::new(PublishState { next_generation: 1 }),
+            reload_flight: Mutex::new(()),
             live_generation: AtomicU64::new(0),
             home,
             cooldown: Arc::new(CooldownTable::new(clock.clone())),
@@ -125,11 +129,13 @@ impl RetrievalRegistry {
                 fingerprint: current.fingerprint.clone(),
             };
         }
-        // Assign generation from CAS state (candidate.generation should match).
+        // Candidate generation is allocated by the builder under the same
+        // expected-generation CAS; advance next_generation past it.
         let published_generation = candidate.generation;
-        if published_generation < guard.next_generation && published_generation != 0 {
-            // Allow explicit generation from builder when it equals next-1 after load.
-        }
+        debug_assert!(
+            published_generation >= live || live == 0,
+            "candidate generation must not regress behind live"
+        );
         guard.next_generation = published_generation
             .saturating_add(1)
             .max(guard.next_generation);
@@ -198,7 +204,21 @@ impl RetrievalRegistry {
     }
 
     /// Reload from `$GROK_HOME` (or registry home). Retains LKG on failure.
+    ///
+    /// Single-flight per registry: concurrent callers serialize. On
+    /// [`ReloadOutcome::StaleDropped`] one bounded rebuild/retry is attempted
+    /// so overlapping notify+watcher events do not silently lose a distinct
+    /// disk update. Disk I/O never runs under the publish lock.
     pub fn reload_from_home(&self) -> ReloadOutcome {
+        let _flight = self.reload_flight.lock();
+        let mut outcome = self.reload_from_home_once();
+        if matches!(outcome, ReloadOutcome::StaleDropped { .. }) {
+            outcome = self.reload_from_home_once();
+        }
+        outcome
+    }
+
+    fn reload_from_home_once(&self) -> ReloadOutcome {
         let expected = self.generation();
         match load_build_input_from_home(&self.home) {
             Ok(input) => {
@@ -231,9 +251,15 @@ impl RetrievalRegistry {
     }
 
     /// Rebuild from an in-memory build input (composition / tests).
+    ///
+    /// Uses the same single-flight + one stale retry as [`Self::reload_from_home`].
     pub fn reload_from_input(&self, input: SnapshotBuildInput) -> ReloadOutcome {
-        let expected = self.generation();
-        self.publish_build_input(expected, input)
+        let _flight = self.reload_flight.lock();
+        let mut outcome = self.publish_build_input(self.generation(), input.clone());
+        if matches!(outcome, ReloadOutcome::StaleDropped { .. }) {
+            outcome = self.publish_build_input(self.generation(), input);
+        }
+        outcome
     }
 }
 

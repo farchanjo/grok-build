@@ -29,7 +29,7 @@ pub use clients::{
     FakeEmbedScript, FakeRerankScript, FakeRetrievalExecutor, Pr16RetrievalExecutor,
     RetrievalExecutor, RouteCallPins,
 };
-pub use clock::{Clock, ImmediateSleeper, MockClock, Sleeper, SystemClock, TokioSleeper};
+pub use clock::{Clock, MockClock, SystemClock};
 pub use cooldown::{CooldownKey, CooldownTable};
 pub use error::{
     BudgetKind, DegradationKind, DegradationNotice, LimitKind, OrchestratorError,
@@ -53,35 +53,95 @@ pub use telemetry::{
     TracingTelemetrySink,
 };
 
-/// Process-level default registry holder for agent composition (optional).
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Home-keyed process registry map for multi-home / multi-agent composition.
 ///
-/// Composition roots may install a registry for hot-reload integration. Tests
-/// should construct local registries instead of relying on the global.
-static GLOBAL_REGISTRY: std::sync::OnceLock<
-    parking_lot::RwLock<Option<std::sync::Arc<RetrievalRegistry>>>,
+/// Each `GROK_HOME` (canonical path) owns at most one [`RetrievalRegistry`].
+/// Concurrent agents with different homes do not overwrite each other.
+/// Prefer holding an `Arc<RetrievalRegistry>` on the agent handle when possible;
+/// this map supports hot-reload from config/notify fans that only know the home.
+static HOME_REGISTRIES: std::sync::OnceLock<
+    parking_lot::RwLock<HashMap<PathBuf, Arc<RetrievalRegistry>>>,
 > = std::sync::OnceLock::new();
 
-fn global_slot() -> &'static parking_lot::RwLock<Option<std::sync::Arc<RetrievalRegistry>>> {
-    GLOBAL_REGISTRY.get_or_init(|| parking_lot::RwLock::new(None))
+fn home_map() -> &'static parking_lot::RwLock<HashMap<PathBuf, Arc<RetrievalRegistry>>> {
+    HOME_REGISTRIES.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
 }
 
-/// Install the process-level retrieval registry (agent composition).
-pub fn install_global_registry(registry: std::sync::Arc<RetrievalRegistry>) {
-    *global_slot().write() = Some(registry);
+fn canonicalize_home(home: &Path) -> PathBuf {
+    std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf())
 }
 
-/// Clear the process-level registry (tests / shutdown).
-pub fn clear_global_registry() {
-    *global_slot().write() = None;
+/// Install (or replace) the registry for `home`. Returns the previous entry if any.
+pub fn install_registry_for_home(
+    home: impl AsRef<Path>,
+    registry: Arc<RetrievalRegistry>,
+) -> Option<Arc<RetrievalRegistry>> {
+    let key = canonicalize_home(home.as_ref());
+    home_map().write().insert(key, registry)
 }
 
-/// Clone the process-level registry if installed.
-pub fn global_registry() -> Option<std::sync::Arc<RetrievalRegistry>> {
-    global_slot().read().clone()
+/// Clone the registry for `home` if installed.
+pub fn registry_for_home(home: impl AsRef<Path>) -> Option<Arc<RetrievalRegistry>> {
+    let key = canonicalize_home(home.as_ref());
+    home_map().read().get(&key).cloned()
 }
 
-/// Reload the global registry from its home when installed.
-pub fn reload_global_registry() -> Option<ReloadOutcome> {
-    let reg = global_registry()?;
+/// Remove the registry for `home` (tests / shutdown).
+pub fn uninstall_registry_for_home(home: impl AsRef<Path>) -> Option<Arc<RetrievalRegistry>> {
+    let key = canonicalize_home(home.as_ref());
+    home_map().write().remove(&key)
+}
+
+/// Clear all home registries (tests).
+pub fn clear_all_registries() {
+    home_map().write().clear();
+}
+
+/// Reload the registry for a specific home (single-flight inside the registry).
+pub fn reload_registry_for_home(home: impl AsRef<Path>) -> Option<ReloadOutcome> {
+    let reg = registry_for_home(home)?;
     Some(reg.reload_from_home())
+}
+
+/// Reload every installed home registry. Used by process-wide notify/config
+/// hooks when the changed home is not known precisely.
+pub fn reload_all_registries() -> Vec<(PathBuf, ReloadOutcome)> {
+    let regs: Vec<(PathBuf, Arc<RetrievalRegistry>)> = home_map()
+        .read()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    regs.into_iter()
+        .map(|(home, reg)| (home, reg.reload_from_home()))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility aliases (single-home product path helpers)
+// ---------------------------------------------------------------------------
+
+/// Install under the registry's own home path.
+pub fn install_global_registry(registry: Arc<RetrievalRegistry>) {
+    let home = registry.home().to_path_buf();
+    install_registry_for_home(home, registry);
+}
+
+/// Clear all registries (alias).
+pub fn clear_global_registry() {
+    clear_all_registries();
+}
+
+/// First installed registry (tests/compat only; prefer [`registry_for_home`]).
+pub fn global_registry() -> Option<Arc<RetrievalRegistry>> {
+    home_map().read().values().next().cloned()
+}
+
+/// Reload all installed registries (compat with previous single-global API).
+pub fn reload_global_registry() -> Option<ReloadOutcome> {
+    let outcomes = reload_all_registries();
+    outcomes.into_iter().next().map(|(_, o)| o)
 }

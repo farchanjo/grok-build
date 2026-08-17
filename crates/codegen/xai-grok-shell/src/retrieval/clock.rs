@@ -58,41 +58,5 @@ impl Clock for MockClock {
     }
 }
 
-/// No-op sleeper trait for backoff (PR16 owns transport backoff; pipeline
-/// only needs cancellable wait hooks for tests).
-pub trait Sleeper: Send + Sync + 'static {
-    fn sleep(
-        &self,
-        duration: Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
-}
-
-/// Tokio sleeper (production).
-#[derive(Debug, Default)]
-pub struct TokioSleeper;
-
-impl Sleeper for TokioSleeper {
-    fn sleep(
-        &self,
-        duration: Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            if !duration.is_zero() {
-                tokio::time::sleep(duration).await;
-            }
-        })
-    }
-}
-
-/// Immediate sleeper (tests): does not wait wall clock.
-#[derive(Debug, Default)]
-pub struct ImmediateSleeper;
-
-impl Sleeper for ImmediateSleeper {
-    fn sleep(
-        &self,
-        _duration: Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async {})
-    }
-}
+// Note: orchestrator-layer sleepers were removed (OI-12). PR16 transport owns
+// retry backoff; the pipeline only uses cancel + deadline gates.

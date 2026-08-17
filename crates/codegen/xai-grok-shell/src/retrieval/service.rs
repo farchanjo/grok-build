@@ -3,6 +3,9 @@
 //! Suitable for PR18 skill inventory and PR21 memory without owning storage.
 //! Loads an Arc snapshot per call so in-flight work retains the old snapshot
 //! while the next call sees a newly published one.
+//!
+//! One profile-wide [`ProfileBudgetTracker`] spans embed and rerank for
+//! `retrieve`, preserving absolute deadline, attempts, and input/output budgets.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -123,7 +126,12 @@ impl RetrievalService {
         let snapshot = self.registry.load();
         let profile = self.resolve_profile(&snapshot, profile_id)?;
         let ctx = self.ctx(&snapshot, profile);
-        embed_with_profile(&ctx, texts, &options, cancel).await
+        let mut budget = ProfileBudgetTracker::new(
+            &profile.id,
+            profile.budgets.clone(),
+            self.registry.clock().now(),
+        );
+        embed_with_profile(&ctx, texts, &options, cancel, &mut budget).await
     }
 
     /// Optional rerank of a bounded shortlist via a named profile.
@@ -141,12 +149,12 @@ impl RetrievalService {
         let snapshot = self.registry.load();
         let profile = self.resolve_profile(&snapshot, profile_id)?;
         let ctx = self.ctx(&snapshot, profile);
-        let budget = ProfileBudgetTracker::new(
+        let mut budget = ProfileBudgetTracker::new(
             &profile.id,
             profile.budgets.clone(),
             self.registry.clock().now(),
         );
-        rerank_with_profile(&ctx, query, documents, &options, cancel, budget).await
+        rerank_with_profile(&ctx, query, documents, &options, cancel, &mut budget).await
     }
 
     /// Generic orchestration: candidates from callback or explicit rows.
@@ -154,6 +162,9 @@ impl RetrievalService {
     /// Does not own skill/memory storage. When semantic embedding fails,
     /// returns lexical/native candidate order with a degradation notice
     /// unless `hard_error_on_semantic_failure` is set.
+    ///
+    /// **Budget continuity:** a single [`ProfileBudgetTracker`] covers embed
+    /// and rerank for absolute deadline, attempts, and input/output limits.
     pub async fn retrieve(
         &self,
         profile_id: &str,
@@ -207,26 +218,32 @@ impl RetrievalService {
 
         let profile = self.resolve_profile(&snapshot, profile_id)?;
         let ctx = self.ctx(&snapshot, profile);
+        // Single profile-wide tracker for the entire retrieve (OI-1, OI-2, OI-5).
+        let mut budget = ProfileBudgetTracker::new(
+            &profile.id,
+            profile.budgets.clone(),
+            self.registry.clock().now(),
+        );
         let mut degradations = Vec::new();
 
         let mut rows = candidates.into_rows(query);
         if rows.len() > profile.budgets.max_candidates as usize {
-            if options.hard_error_on_semantic_failure {
-                return Err(OrchestratorError::LimitExceeded {
-                    profile_id: profile_id.to_owned(),
-                    kind: super::error::LimitKind::Candidates,
-                    limit: profile.budgets.max_candidates,
-                    actual: rows.len() as u32,
-                });
+            if options.hard_error_on_limit_exceeded || options.hard_error_on_semantic_failure {
+                budget.check_candidate_limit(rows.len())?;
+            } else {
+                rows.truncate(budget.clamp_candidates(rows.len()));
             }
-            rows.truncate(profile.budgets.max_candidates as usize);
         }
 
-        // Embed query (and optionally score docs later — PR18/21). For PR17 we
-        // pin embedding space on successful query embed and optionally rerank.
-        let (embed, embed_deg) =
-            embed_or_degrade(&ctx, vec![query.to_owned()], &options, cancel.child_token()).await;
-        if cancel.is_cancelled() {
+        let (embed, embed_deg, cancelled) = embed_or_degrade(
+            &ctx,
+            vec![query.to_owned()],
+            &options,
+            cancel.child_token(),
+            &mut budget,
+        )
+        .await;
+        if cancelled || cancel.is_cancelled() {
             return Err(OrchestratorError::Cancelled {
                 profile_id: profile_id.to_owned(),
                 stage: RetrievalStage::Orchestrate,
@@ -245,27 +262,18 @@ impl RetrievalService {
 
         let embedding_space = embed.as_ref().map(|e| e.embedding_space.clone());
 
-        // Rerank shortlist when we have documents and configured rerankers.
+        // Rerank continues on the same budget (attempts/deadline/input carry forward
+        // even after soft embed degradation).
         let mut rerank_out = None;
         if !rows.is_empty() && !profile.reranker_route_ids.is_empty() {
             let docs: Vec<String> = rows.iter().map(|r| r.text.clone()).collect();
-            let budget = ProfileBudgetTracker::new(
-                &profile.id,
-                profile.budgets.clone(),
-                self.registry.clock().now(),
-            );
-            // Continue attempt budget after embed attempts.
-            let mut budget = budget;
-            if let Some(ref e) = embed {
-                budget.attempts_used = e.attempts_used;
-            }
             match rerank_with_profile(
                 &ctx,
                 query.to_owned(),
                 docs,
                 &options,
                 cancel.child_token(),
-                budget,
+                &mut budget,
             )
             .await
             {
@@ -274,7 +282,6 @@ impl RetrievalService {
                         degradations.push(d.clone());
                     }
                     if let Some(ref result) = rr.result {
-                        // Reorder rows by hit index mapping.
                         let mut reordered = Vec::with_capacity(rows.len());
                         let mut used = vec![false; rows.len()];
                         for hit in &result.hits {
@@ -292,7 +299,6 @@ impl RetrievalService {
                         }
                         rows = reordered;
                     }
-                    // else: preserved pre-rerank order exactly
                     rerank_out = Some(rr);
                 }
                 Err(OrchestratorError::Cancelled { .. }) => {
@@ -300,6 +306,20 @@ impl RetrievalService {
                         profile_id: profile_id.to_owned(),
                         stage: RetrievalStage::Rerank,
                     });
+                }
+                Err(e @ OrchestratorError::OutputBudgetExceeded { .. })
+                    if options.hard_error_on_semantic_failure
+                        || options.hard_error_on_limit_exceeded =>
+                {
+                    return Err(e);
+                }
+                Err(OrchestratorError::OutputBudgetExceeded { .. }) => {
+                    degradations.push(DegradationNotice::new(
+                        DegradationKind::BudgetExhausted,
+                        profile_id,
+                        RetrievalStage::Rerank,
+                        None,
+                    ));
                 }
                 Err(_) => {
                     degradations.push(DegradationNotice::new(
@@ -312,7 +332,15 @@ impl RetrievalService {
             }
         }
 
-        rows.truncate(profile.budgets.max_results as usize);
+        // Soft result truncate is intentional for normal retrieve; hard path
+        // can opt into LimitExceeded via hard_error_on_limit_exceeded.
+        if rows.len() > profile.budgets.max_results as usize {
+            if options.hard_error_on_limit_exceeded {
+                budget.check_result_limit(rows.len())?;
+            } else {
+                rows.truncate(budget.clamp_results(rows.len()));
+            }
+        }
 
         Ok(RetrieveResult {
             candidates: rows,

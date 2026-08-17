@@ -161,7 +161,14 @@ async fn attempt_budget_across_routes_not_multiplied() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, OrchestratorError::AllRoutesFailed { .. }));
+    assert!(
+        matches!(
+            err,
+            OrchestratorError::AllRoutesFailed { .. }
+                | OrchestratorError::AttemptBudgetExceeded { .. }
+        ),
+        "{err:?}"
+    );
     // Only 2 attempts — emb-c never reached.
     assert_eq!(fake.embed_calls(), vec!["emb-a", "emb-b"]);
 }
@@ -183,9 +190,32 @@ async fn cancellation_during_attempt() {
         )
         .await
     });
-    tokio::task::yield_now().await;
+    // Poll until the worker is parked on cancel.cancelled() (no wall sleeps).
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
     cancel.cancel();
     let err = handle.await.unwrap().unwrap_err();
+    assert!(matches!(err, OrchestratorError::Cancelled { .. }));
+}
+
+#[tokio::test]
+async fn cancellation_before_start() {
+    let clock = Arc::new(MockClock::new());
+    let (reg, fake) = build_reg(clock);
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 8, fill: 0.1 });
+    let (svc, _) = service(reg, fake);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let err = svc
+        .embed(
+            "default",
+            vec!["q".into()],
+            PipelineOptions::default(),
+            cancel,
+        )
+        .await
+        .unwrap_err();
     assert!(matches!(err, OrchestratorError::Cancelled { .. }));
 }
 
@@ -750,6 +780,205 @@ impl super::clients::RetrievalExecutor for DeadlineAdvancingExecutor {
             )
             .await
     }
+}
+
+#[tokio::test]
+async fn retrieve_shares_deadline_and_attempts_across_embed_rerank() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-shared-budget", clock.clone());
+    let mut graph = test_graph_two_embed_routes();
+    // Two embed routes + one rerank; max_attempts=2 so after both embeds fail,
+    // rerank must not get a fresh attempt budget.
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_attempts = 2;
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .deadline_ms = 60_000;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
+    );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    fake.set_embed("emb-a", FakeEmbedScript::Err(RetrievalError::Timeout));
+    fake.set_embed("emb-b", FakeEmbedScript::Err(RetrievalError::Timeout));
+    fake.set_rerank("rr-a", FakeRerankScript::ReverseOrder);
+    let (svc, _) = service(reg, fake.clone());
+    let out = svc
+        .retrieve(
+            "default",
+            "q",
+            RetrieveCandidates::Explicit(vec![
+                CandidateRow {
+                    id: "1".into(),
+                    text: "a".into(),
+                    score: None,
+                    metadata: None,
+                },
+                CandidateRow {
+                    id: "2".into(),
+                    text: "b".into(),
+                    score: None,
+                    metadata: None,
+                },
+            ]),
+            PipelineOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.embed.is_none());
+    assert!(
+        out.degradations
+            .iter()
+            .any(|d| d.kind == DegradationKind::SemanticUnavailable)
+    );
+    // Rerank must not have been attempted — attempt budget exhausted by embeds.
+    assert!(
+        fake.rerank_calls().is_empty(),
+        "rerank calls: {:?}",
+        fake.rerank_calls()
+    );
+    // Lexical order preserved.
+    assert_eq!(
+        out.candidates
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["1", "2"]
+    );
+}
+
+#[tokio::test]
+async fn output_budget_overflow_fails_closed_on_embed() {
+    let clock = Arc::new(MockClock::new());
+    let reg = RetrievalRegistry::disabled_with_clock("/tmp/pr17-outbudget", clock);
+    let mut graph = test_graph_two_embed_routes();
+    // Tiny output token budget so a small vector batch overflows.
+    graph
+        .retrieval_profiles
+        .get_mut("default")
+        .unwrap()
+        .max_output_tokens = 1;
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    reg.publish_build_input(
+        0,
+        SnapshotBuildInput {
+            graph,
+            graph_generation: 1,
+            provider_generation: 1,
+            provider_views: views,
+            provider_meta: meta,
+            parse_warnings: Vec::new(),
+        },
+    );
+    let fake = Arc::new(FakeRetrievalExecutor::new());
+    // 64 dims * 1 vector * 4 bytes = 256 bytes ≈ 64 tokens > 1
+    fake.set_embed(
+        "emb-a",
+        FakeEmbedScript::Ok {
+            dims: 64,
+            fill: 0.1,
+        },
+    );
+    let (svc, _) = service(reg, fake);
+    let err = svc
+        .embed(
+            "default",
+            vec!["q".into()],
+            PipelineOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OrchestratorError::OutputBudgetExceeded { .. }),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn fake_records_route_pins_and_deadline() {
+    let clock = Arc::new(MockClock::new());
+    let (reg, fake) = build_reg(clock);
+    fake.set_embed("emb-a", FakeEmbedScript::Ok { dims: 8, fill: 0.1 });
+    let (svc, _) = service(reg, fake.clone());
+    let _ = svc
+        .embed(
+            "default",
+            vec!["q".into()],
+            PipelineOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let pins = fake.embed_pins_seen();
+    assert_eq!(pins.len(), 1);
+    assert_eq!(
+        pins[0].provenance_incarnation.as_deref(),
+        Some("inc-acct-a")
+    );
+    assert_eq!(pins[0].session_registry_generation, Some(9));
+    assert!(pins[0].total_deadline.is_some());
+    assert!(!pins[0].total_deadline.unwrap().is_zero());
+}
+
+#[test]
+fn multi_home_registries_are_isolated() {
+    super::clear_all_registries();
+    let dir_a = tempfile::TempDir::new().unwrap();
+    let dir_b = tempfile::TempDir::new().unwrap();
+    let reg_a = RetrievalRegistry::disabled(dir_a.path());
+    let reg_b = RetrievalRegistry::disabled(dir_b.path());
+    // Publish different fingerprints via force_publish generations.
+    let (views, meta) = test_provider_views_capable(&["acct-a", "acct-b"]);
+    let input = SnapshotBuildInput {
+        graph: test_graph_two_embed_routes(),
+        graph_generation: 1,
+        provider_generation: 1,
+        provider_views: views,
+        provider_meta: meta,
+        parse_warnings: Vec::new(),
+    };
+    assert!(matches!(
+        reg_a.publish_build_input(0, input.clone()),
+        ReloadOutcome::Published { .. }
+    ));
+    // Second home remains disabled until installed/published.
+    super::install_registry_for_home(dir_a.path(), reg_a.clone());
+    super::install_registry_for_home(dir_b.path(), reg_b.clone());
+    let loaded_a = super::registry_for_home(dir_a.path()).unwrap();
+    let loaded_b = super::registry_for_home(dir_b.path()).unwrap();
+    assert!(loaded_a.load().enabled);
+    assert!(!loaded_b.load().enabled);
+    assert!(!std::sync::Arc::ptr_eq(&loaded_a, &loaded_b));
+    super::clear_all_registries();
+}
+
+#[tokio::test]
+async fn candidate_row_debug_omits_text() {
+    let row = CandidateRow {
+        id: "x".into(),
+        text: "secret document body sk-ABC".into(),
+        score: Some(0.5),
+        metadata: None,
+    };
+    let dbg = format!("{row:?}");
+    assert!(!dbg.contains("secret document"));
+    assert!(!dbg.contains("sk-ABC"));
+    assert!(dbg.contains("text_chars"));
 }
 
 #[tokio::test]

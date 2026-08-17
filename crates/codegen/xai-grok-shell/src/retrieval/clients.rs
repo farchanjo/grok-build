@@ -139,6 +139,8 @@ pub enum FakeRerankScript {
 struct FakeState {
     embed_calls: Vec<String>,
     rerank_calls: Vec<String>,
+    embed_pins: Vec<RouteCallPins>,
+    rerank_pins: Vec<RouteCallPins>,
     /// model_id → remaining fail-then-ok counters
     fail_then_ok_left: HashMapLike,
 }
@@ -148,6 +150,10 @@ struct FakeState {
 struct HashMapLike(std::collections::HashMap<String, usize>);
 
 /// Fake executor for hermetic tests.
+///
+/// Records [`RouteCallPins`] and enforces zero/expired `total_deadline` and
+/// cancellation so orchestrator pin/deadline invariants are testable without
+/// live HTTP.
 pub struct FakeRetrievalExecutor {
     embed_scripts: Mutex<std::collections::HashMap<String, FakeEmbedScript>>,
     rerank_scripts: Mutex<std::collections::HashMap<String, FakeRerankScript>>,
@@ -188,6 +194,26 @@ impl FakeRetrievalExecutor {
     pub fn provider_ids_seen(&self) -> Vec<String> {
         self.resolve_provider_ids.lock().clone()
     }
+
+    pub fn embed_pins_seen(&self) -> Vec<RouteCallPins> {
+        self.state.lock().embed_pins.clone()
+    }
+
+    pub fn rerank_pins_seen(&self) -> Vec<RouteCallPins> {
+        self.state.lock().rerank_pins.clone()
+    }
+}
+
+fn enforce_pins(pins: &RouteCallPins, cancel: &CancellationToken) -> RetrievalResult<()> {
+    if cancel.is_cancelled() {
+        return Err(RetrievalError::Cancelled);
+    }
+    if let Some(d) = pins.total_deadline
+        && d.is_zero()
+    {
+        return Err(RetrievalError::DeadlineExceeded);
+    }
+    Ok(())
 }
 
 impl Default for FakeRetrievalExecutor {
@@ -203,14 +229,19 @@ impl RetrievalExecutor for FakeRetrievalExecutor {
         _home: &Path,
         model_id: &str,
         config: &EmbeddingModelConfig,
-        _pins: &RouteCallPins,
+        pins: &RouteCallPins,
         inputs: Vec<String>,
         cancel: CancellationToken,
     ) -> RetrievalResult<EmbeddingResult> {
         self.resolve_provider_ids
             .lock()
             .push(config.provider.clone());
-        self.state.lock().embed_calls.push(model_id.to_owned());
+        {
+            let mut st = self.state.lock();
+            st.embed_calls.push(model_id.to_owned());
+            st.embed_pins.push(pins.clone());
+        }
+        enforce_pins(pins, &cancel)?;
 
         let script =
             self.embed_scripts
@@ -260,6 +291,7 @@ impl RetrievalExecutor for FakeRetrievalExecutor {
                 ))
             }
             FakeEmbedScript::WaitForCancel => {
+                // Signal readiness so cancel tests can synchronize without races.
                 cancel.cancelled().await;
                 Err(RetrievalError::Cancelled)
             }
@@ -271,7 +303,7 @@ impl RetrievalExecutor for FakeRetrievalExecutor {
         _home: &Path,
         model_id: &str,
         config: &RerankerModelConfig,
-        _pins: &RouteCallPins,
+        pins: &RouteCallPins,
         _query: String,
         documents: Vec<String>,
         top_n: Option<u32>,
@@ -280,7 +312,12 @@ impl RetrievalExecutor for FakeRetrievalExecutor {
         self.resolve_provider_ids
             .lock()
             .push(config.provider.clone());
-        self.state.lock().rerank_calls.push(model_id.to_owned());
+        {
+            let mut st = self.state.lock();
+            st.rerank_calls.push(model_id.to_owned());
+            st.rerank_pins.push(pins.clone());
+        }
+        enforce_pins(pins, &cancel)?;
 
         let script = self
             .rerank_scripts
