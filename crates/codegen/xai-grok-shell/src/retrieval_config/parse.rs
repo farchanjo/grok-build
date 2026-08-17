@@ -90,7 +90,19 @@ fn parse_embedding_models(
         };
         match parse_embedding_entry(&id, entry, warnings) {
             Some(cfg) => {
-                out.insert(id, cfg);
+                if out.contains_key(&id) {
+                    warnings.push(ConfigWarning::embedding_model(
+                        &id,
+                        None,
+                        ConfigWarningKind::ConflictingFields,
+                        format!(
+                            "duplicate embedding model id after normalize (`{id}`); later entry \
+                             dropped to avoid silent overwrite"
+                        ),
+                    ));
+                } else {
+                    out.insert(id, cfg);
+                }
             }
             None => {
                 // warning already emitted
@@ -318,7 +330,19 @@ fn parse_reranker_models(
             continue;
         };
         if let Some(cfg) = parse_reranker_entry(&id, entry, warnings) {
-            out.insert(id, cfg);
+            if out.contains_key(&id) {
+                warnings.push(ConfigWarning::reranker_model(
+                    &id,
+                    None,
+                    ConfigWarningKind::ConflictingFields,
+                    format!(
+                        "duplicate reranker model id after normalize (`{id}`); later entry \
+                         dropped to avoid silent overwrite"
+                    ),
+                ));
+            } else {
+                out.insert(id, cfg);
+            }
         }
     }
     out
@@ -509,7 +533,19 @@ fn parse_retrieval_profiles(
             continue;
         };
         if let Some(cfg) = parse_profile_entry(&id, entry, warnings) {
-            out.insert(id, cfg);
+            if out.contains_key(&id) {
+                warnings.push(ConfigWarning::retrieval_profile(
+                    &id,
+                    None,
+                    ConfigWarningKind::ConflictingFields,
+                    format!(
+                        "duplicate retrieval profile id after normalize (`{id}`); later entry \
+                         dropped to avoid silent overwrite"
+                    ),
+                ));
+            } else {
+                out.insert(id, cfg);
+            }
         }
     }
     out
@@ -1140,19 +1176,6 @@ model = "r"
 [embedding_models.good]
 provider = "openai"
 model = "m"
-embedding_models = { bad = 1 }
-[embedding_models.bad]
-provider = "openai"
-"#,
-        );
-        // `bad` missing model → dropped; `good` survives.
-        // Wait - embedding_models nested wrong. Let me fix the test data.
-        let _ = p;
-        let p = parse(
-            r#"
-[embedding_models.good]
-provider = "openai"
-model = "m"
 
 [embedding_models.bad]
 provider = "openai"
@@ -1165,6 +1188,26 @@ provider = "openai"
                 &w.target,
                 WarningTarget::EmbeddingModel { id, .. } if id == "bad"
             )
+        }));
+    }
+
+    #[test]
+    fn normalized_id_collision_keeps_first_drops_later() {
+        let p = parse(
+            r#"
+[embedding_models.E1]
+provider = "openai"
+model = "first"
+
+[embedding_models.e1]
+provider = "openai"
+model = "second"
+"#,
+        );
+        assert_eq!(p.graph.embedding_models.len(), 1);
+        assert_eq!(p.graph.embedding_models["e1"].model, "first");
+        assert!(p.warnings.iter().any(|w| {
+            w.kind == ConfigWarningKind::ConflictingFields && w.reason.contains("duplicate")
         }));
     }
 

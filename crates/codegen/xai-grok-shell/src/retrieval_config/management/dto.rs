@@ -146,6 +146,8 @@ pub struct UpsertEmbeddingRequest {
     pub expected_generation: RegistryGeneration,
     pub id: String,
     pub config: EmbeddingModelConfig,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }
@@ -156,6 +158,8 @@ pub struct UpsertRerankerRequest {
     pub expected_generation: RegistryGeneration,
     pub id: String,
     pub config: RerankerModelConfig,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }
@@ -166,6 +170,8 @@ pub struct UpsertProfileRequest {
     pub expected_generation: RegistryGeneration,
     pub id: String,
     pub config: RetrievalProfileConfig,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }
@@ -178,6 +184,8 @@ pub struct CloneRetrievalEntityRequest {
     pub kind: String,
     pub source_id: String,
     pub new_id: String,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }
@@ -189,6 +197,8 @@ pub struct DeleteRetrievalEntityRequest {
     /// `embedding` | `reranker` | `profile`
     pub kind: String,
     pub id: String,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }
@@ -200,6 +210,31 @@ pub struct ReorderRetrievalRequest {
     /// `embedding` | `reranker` | `profile`
     pub kind: String,
     pub ordered_ids: Vec<String>,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+/// Prime save request with reindex confirm flag (prime cannot change embedding
+/// identity, but confirm is threaded for uniform mutation discipline).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavePrimeRequest {
+    pub expected_generation: RegistryGeneration,
+    pub prime: PrimeConfig,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+/// Memory profile selection save.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SaveMemoryProfileRequest {
+    pub expected_generation: RegistryGeneration,
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub confirm_memory_reindex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
 }

@@ -167,6 +167,52 @@ pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut Ap
     true
 }
 
+/// Handle `x.ai/retrieval/update` — retrieval graph generation broadcast (PR15).
+///
+/// Version-tolerant: unknown optional fields are ignored. Empty params tolerated.
+/// Dirty modal preserves draft and enters conflict; clean open modal enqueues
+/// `LoadSnapshot`. No raw config/content in the payload.
+pub(super) fn handle_retrieval_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    #[derive(Deserialize, Default)]
+    struct RetrievalUpdate {
+        #[serde(default)]
+        schema_version: u32,
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        changed_fields: Vec<String>,
+    }
+    let update: RetrievalUpdate = serde_json::from_str(notif.params.get()).unwrap_or_default();
+    tracing::info!(
+        generation = update.generation,
+        schema_version = update.schema_version,
+        changed = ?update.changed_fields,
+        "retrieval graph updated via x.ai/retrieval/update"
+    );
+    if update.generation == 0 {
+        return true;
+    }
+    let mut effects = Vec::new();
+    for (agent_id, agent) in app.agents.iter_mut() {
+        let Some(crate::views::modal::ActiveModal::RetrievalSettings { state }) =
+            agent.active_modal.as_mut()
+        else {
+            continue;
+        };
+        let live = xai_grok_shell::provider_registry::management::dto::RegistryGeneration(
+            update.generation,
+        );
+        if state.on_remote_generation(live, &update.changed_fields) {
+            effects.push(crate::app::actions::Effect::RetrievalOperation {
+                agent_id: *agent_id,
+                operation: crate::app::actions::RetrievalOperation::LoadSnapshot,
+            });
+        }
+    }
+    app.pending_effects.extend(effects);
+    true
+}
+
 /// Handle `x.ai/settings/update` — remote settings refreshed on `/new`.
 pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(update) = serde_json::from_str::<PagerSettingsUpdate>(notif.params.get()) else {

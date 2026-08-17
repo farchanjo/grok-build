@@ -184,6 +184,8 @@ pub enum ProviderCommand {
     },
     /// Editor-originated management ops (generation-tagged in effects).
     Editor(crate::views::provider_editor::EditorCommand),
+    /// Open `/retrieval-settings` (named retrieval graph editor).
+    OpenRetrievalSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -732,6 +734,8 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
             let id = state.selected_provider().id_str().to_owned();
             ProviderModalOutcome::Command(ProviderCommand::OpenEditor { provider_id: id })
         }
+        // Open named retrieval graph settings (PR15).
+        KeyCode::Char('R') => ProviderModalOutcome::Command(ProviderCommand::OpenRetrievalSettings),
         _ => ProviderModalOutcome::Unchanged,
     }
 }
@@ -928,6 +932,11 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         },
         Shortcut {
             label: "y/n enable",
+            clickable: false,
+            id: 0,
+        },
+        Shortcut {
+            label: "R retrieval",
             clickable: false,
             id: 0,
         },

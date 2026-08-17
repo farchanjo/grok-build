@@ -381,14 +381,13 @@ pub fn validate_relative_endpoint(path: &str) -> Result<(), String> {
         }
     }
     // Reject host-like prefixes (user@host or host:port without scheme).
-    if let Some(first) = p.trim_start_matches('/').split('/').next()
-        && (first.contains('@') || (first.contains(':') && !first.chars().all(|c| c != ':')))
-    {
-        // Allow pure numeric segments; reject host:port patterns.
-        if first.contains('@')
-            || first
-                .split_once(':')
-                .is_some_and(|(h, port)| !h.is_empty() && port.parse::<u16>().is_ok())
+    if let Some(first) = p.trim_start_matches('/').split('/').next() {
+        if first.contains('@') {
+            return Err("endpoint path must not include host or authority".into());
+        }
+        if first
+            .split_once(':')
+            .is_some_and(|(h, port)| !h.is_empty() && port.parse::<u16>().is_ok())
         {
             return Err("endpoint path must not include host or authority".into());
         }

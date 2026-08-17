@@ -72,49 +72,206 @@ impl RetrievalPage {
 }
 
 /// Safe reducer commands (no secrets).
+///
+/// Every mutation/preview carries the modal-loaded `expected_generation` and a
+/// fresh `operation_id` minted at the UI boundary. Effects must not replace
+/// generation with a live `current_generation()` read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RetrievalCommand {
     Reload,
-    SaveGraph,
+    /// Browse validate/reload only (no durable write, no generation churn).
+    ValidateAndReload,
     ValidatePreview {
         kind: String,
         id: String,
+        expected_generation: RegistryGeneration,
+        operation_id: String,
     },
     UpsertEmbedding {
         id: String,
         config: EmbeddingModelConfig,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
     UpsertReranker {
         id: String,
         config: RerankerModelConfig,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
     UpsertProfile {
         id: String,
         config: RetrievalProfileConfig,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
     CloneEntity {
         kind: String,
         source_id: String,
         new_id: String,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
     DeleteEntity {
         kind: String,
         id: String,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
     Reorder {
         kind: String,
         ordered_ids: Vec<String>,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
     SavePrime {
         prime: PrimeConfig,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
     SaveMemoryProfile {
         profile: Option<String>,
-        confirm_reindex: bool,
+        expected_generation: RegistryGeneration,
+        confirm_memory_reindex: bool,
+        operation_id: String,
     },
+    /// Retry the exact pending draft mutation with confirm_memory_reindex=true.
     ConfirmMemoryReindex,
     DismissConflictReload,
     DismissConflictKeepDraft,
+}
+
+impl RetrievalCommand {
+    /// Set confirm_memory_reindex on mutation variants (for reindex retry).
+    pub fn with_reindex_confirm(self, confirm: bool) -> Self {
+        match self {
+            Self::UpsertEmbedding {
+                id,
+                config,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::UpsertEmbedding {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            Self::UpsertReranker {
+                id,
+                config,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::UpsertReranker {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            Self::UpsertProfile {
+                id,
+                config,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::UpsertProfile {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            Self::CloneEntity {
+                kind,
+                source_id,
+                new_id,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::CloneEntity {
+                kind,
+                source_id,
+                new_id,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            Self::DeleteEntity {
+                kind,
+                id,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::DeleteEntity {
+                kind,
+                id,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            Self::Reorder {
+                kind,
+                ordered_ids,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::Reorder {
+                kind,
+                ordered_ids,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            Self::SavePrime {
+                prime,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::SavePrime {
+                prime,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            Self::SaveMemoryProfile {
+                profile,
+                expected_generation,
+                operation_id,
+                ..
+            } => Self::SaveMemoryProfile {
+                profile,
+                expected_generation,
+                confirm_memory_reindex: confirm,
+                operation_id,
+            },
+            other => other,
+        }
+    }
+
+    pub fn operation_id(&self) -> Option<&str> {
+        match self {
+            Self::ValidatePreview { operation_id, .. }
+            | Self::UpsertEmbedding { operation_id, .. }
+            | Self::UpsertReranker { operation_id, .. }
+            | Self::UpsertProfile { operation_id, .. }
+            | Self::CloneEntity { operation_id, .. }
+            | Self::DeleteEntity { operation_id, .. }
+            | Self::Reorder { operation_id, .. }
+            | Self::SavePrime { operation_id, .. }
+            | Self::SaveMemoryProfile { operation_id, .. } => Some(operation_id.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Editor sub-mode for adding/editing an entity.
@@ -163,6 +320,8 @@ pub struct RetrievalSettingsState {
     pub pending_operation_id: Option<String>,
     pub op_counter: u64,
     pub pending_memory_confirm: bool,
+    /// Exact draft mutation awaiting reindex confirmation (retry with confirm=true).
+    pub pending_reindex_command: Option<Box<RetrievalCommand>>,
 }
 
 impl Default for RetrievalSettingsState {
@@ -192,12 +351,33 @@ impl RetrievalSettingsState {
             pending_operation_id: None,
             op_counter: 0,
             pending_memory_confirm: false,
+            pending_reindex_command: None,
         }
     }
 
     fn next_op_id(&mut self) -> String {
         self.op_counter = self.op_counter.saturating_add(1);
         format!("retrieval-op-{}", self.op_counter)
+    }
+
+    /// Stamp generation + op-id, set pending correlation, stash for reindex retry.
+    fn stamp_mutation(&mut self, cmd: RetrievalCommand) -> RetrievalCommand {
+        if let Some(op) = cmd.operation_id() {
+            self.pending_operation_id = Some(op.to_owned());
+        }
+        // Stash for confirm-reindex retry (exact draft).
+        match &cmd {
+            RetrievalCommand::Reload
+            | RetrievalCommand::ValidateAndReload
+            | RetrievalCommand::ValidatePreview { .. }
+            | RetrievalCommand::ConfirmMemoryReindex
+            | RetrievalCommand::DismissConflictReload
+            | RetrievalCommand::DismissConflictKeepDraft => {}
+            _ => {
+                self.pending_reindex_command = Some(Box::new(cmd.clone()));
+            }
+        }
+        cmd
     }
 
     pub fn apply_snapshot(&mut self, snap: RetrievalGraphSnapshot) {
@@ -215,10 +395,13 @@ impl RetrievalSettingsState {
         self.clamp_selection();
     }
 
-    /// Multi-client generation update: dirty → conflict; clean → auto-reload flag.
-    pub fn on_remote_generation(&mut self, live: RegistryGeneration, changed: &[String]) {
+    /// Multi-client generation update.
+    ///
+    /// Returns `true` when the clean path should enqueue `LoadSnapshot`.
+    /// Dirty/non-browse enters conflict and preserves draft (returns false).
+    pub fn on_remote_generation(&mut self, live: RegistryGeneration, changed: &[String]) -> bool {
         if live.get() <= self.generation.get() {
-            return;
+            return false;
         }
         if self.dirty || !matches!(self.edit, RetrievalEditMode::Browse) {
             self.conflict = Some(RetrievalConflictInfo {
@@ -226,22 +409,32 @@ impl RetrievalSettingsState {
                 live_generation: live,
                 changed_fields: changed.to_vec(),
                 guidance: "Another client updated the retrieval graph. Reload to discard local \
-                           edits, or keep draft and re-save (may fail stale)."
+                           edits, or keep draft and re-save (stale CAS will reject)."
                     .into(),
             });
             self.status = Some("Conflict: remote graph advanced".into());
+            false
         } else {
             self.loading = true;
             self.status = Some("Remote update — reloading".into());
+            true
+        }
+    }
+
+    /// Strict op-id match (provider Gate E): mutation completes require Some/Some equal.
+    pub fn mutation_op_matches(pending: Option<&str>, echo: Option<&str>) -> bool {
+        match (pending, echo) {
+            (Some(p), Some(e)) if p == e => true,
+            _ => false,
         }
     }
 
     pub fn apply_mutation_result(&mut self, result: RetrievalMutationResult) {
-        if let (Some(pending), Some(echo)) = (
+        // Strict: None or mismatch ⇒ discard late/async results.
+        if !Self::mutation_op_matches(
             self.pending_operation_id.as_deref(),
             result.operation_id.as_deref(),
-        ) && pending != echo
-        {
+        ) {
             return;
         }
         self.pending_operation_id = None;
@@ -257,12 +450,16 @@ impl RetrievalSettingsState {
                 && impact.requires_confirmation
             {
                 self.edit = RetrievalEditMode::ConfirmMemoryReindex { impact };
+                // Keep pending_reindex_command for exact draft retry.
                 return;
             }
+            self.pending_reindex_command = None;
             self.error = result.error;
             self.status = Some("Save failed".into());
             return;
         }
+        self.pending_reindex_command = None;
+        self.pending_memory_confirm = false;
         if let Some(snap) = result.snapshot {
             self.apply_snapshot(snap);
         } else {
@@ -272,15 +469,13 @@ impl RetrievalSettingsState {
         }
         self.edit = RetrievalEditMode::Browse;
         self.status = Some("Saved".into());
-        self.pending_memory_confirm = false;
     }
 
     pub fn apply_preview(&mut self, preview: RetrievalPreviewResult) {
-        if let (Some(pending), Some(echo)) = (
+        if !Self::mutation_op_matches(
             self.pending_operation_id.as_deref(),
             preview.operation_id.as_deref(),
-        ) && pending != echo
-        {
+        ) {
             return;
         }
         self.pending_operation_id = None;
@@ -325,7 +520,14 @@ impl RetrievalSettingsState {
                     let kind = kind.clone();
                     let id = id.clone();
                     self.edit = RetrievalEditMode::Browse;
-                    Some(RetrievalCommand::DeleteEntity { kind, id })
+                    let op = self.next_op_id();
+                    Some(self.stamp_mutation(RetrievalCommand::DeleteEntity {
+                        kind,
+                        id,
+                        expected_generation: self.generation,
+                        confirm_memory_reindex: self.pending_memory_confirm,
+                        operation_id: op,
+                    }))
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.edit = RetrievalEditMode::Browse;
@@ -337,11 +539,17 @@ impl RetrievalSettingsState {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.pending_memory_confirm = true;
                     self.edit = RetrievalEditMode::Browse;
+                    // Retry exact pending draft with confirm=true.
+                    if let Some(cmd) = self.pending_reindex_command.take() {
+                        let confirmed = cmd.with_reindex_confirm(true);
+                        return Some(self.stamp_mutation(confirmed));
+                    }
                     Some(RetrievalCommand::ConfirmMemoryReindex)
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.edit = RetrievalEditMode::Browse;
                     self.pending_memory_confirm = false;
+                    self.pending_reindex_command = None;
                     None
                 }
                 _ => None,
@@ -357,11 +565,15 @@ impl RetrievalSettingsState {
                         self.status = Some("Clone id required".into());
                         None
                     } else {
-                        Some(RetrievalCommand::CloneEntity {
+                        let op = self.next_op_id();
+                        Some(self.stamp_mutation(RetrievalCommand::CloneEntity {
                             kind,
                             source_id,
                             new_id,
-                        })
+                            expected_generation: self.generation,
+                            confirm_memory_reindex: self.pending_memory_confirm,
+                            operation_id: op,
+                        }))
                     }
                 }
                 KeyCode::Esc => {
@@ -427,12 +639,18 @@ impl RetrievalSettingsState {
                 None
             }
             KeyCode::Char('r') => Some(RetrievalCommand::Reload),
-            KeyCode::Char('s') => Some(RetrievalCommand::SaveGraph),
+            // Browse "s" validates/reloads only — no durable rewrite or gen churn.
+            KeyCode::Char('s') => Some(RetrievalCommand::ValidateAndReload),
             KeyCode::Char('v') => {
                 let (kind, id) = self.selected_entity();
                 let op = self.next_op_id();
-                self.pending_operation_id = Some(op);
-                Some(RetrievalCommand::ValidatePreview { kind, id })
+                let cmd = RetrievalCommand::ValidatePreview {
+                    kind,
+                    id,
+                    expected_generation: self.generation,
+                    operation_id: op,
+                };
+                Some(self.stamp_mutation(cmd))
             }
             KeyCode::Char('a') => {
                 self.begin_add();
@@ -460,6 +678,7 @@ impl RetrievalSettingsState {
                 }
                 None
             }
+            // delete confirm handled above in ConfirmDelete arm
             KeyCode::Char('K') => self.reorder_selected(-1),
             KeyCode::Char('J') => self.reorder_selected(1),
             _ => None,
@@ -503,10 +722,14 @@ impl RetrievalSettingsState {
         ids.swap(i, j);
         self.selected = j;
         self.dirty = true;
-        Some(RetrievalCommand::Reorder {
+        let op = self.next_op_id();
+        Some(self.stamp_mutation(RetrievalCommand::Reorder {
             kind: kind.into(),
             ordered_ids: ids,
-        })
+            expected_generation: self.generation,
+            confirm_memory_reindex: self.pending_memory_confirm,
+            operation_id: op,
+        }))
     }
 
     fn selected_entity(&self) -> (String, String) {
@@ -773,6 +996,7 @@ impl RetrievalSettingsState {
                 let config = EmbeddingModelConfig {
                     provider: get("provider").trim().to_owned(),
                     model: get("model").trim().to_owned(),
+                    // v1: only openai_compatible (read-only in UI).
                     protocol: EmbeddingProtocol::OpenaiCompatible,
                     dimensions: get("dimensions").parse().ok(),
                     encoding: match get("encoding").as_str() {
@@ -783,7 +1007,14 @@ impl RetrievalSettingsState {
                     max_input_tokens: get("max_input_tokens").parse().unwrap_or(8192),
                 };
                 self.edit = RetrievalEditMode::Browse;
-                Some(RetrievalCommand::UpsertEmbedding { id: eid, config })
+                let op = self.next_op_id();
+                Some(self.stamp_mutation(RetrievalCommand::UpsertEmbedding {
+                    id: eid,
+                    config,
+                    expected_generation: self.generation,
+                    confirm_memory_reindex: self.pending_memory_confirm,
+                    operation_id: op,
+                }))
             }
             "reranker" => {
                 let mut rid = if is_new { get("id") } else { id.to_owned() };
@@ -809,7 +1040,14 @@ impl RetrievalSettingsState {
                     max_input_tokens: get("max_input_tokens").parse().unwrap_or(8192),
                 };
                 self.edit = RetrievalEditMode::Browse;
-                Some(RetrievalCommand::UpsertReranker { id: rid, config })
+                let op = self.next_op_id();
+                Some(self.stamp_mutation(RetrievalCommand::UpsertReranker {
+                    id: rid,
+                    config,
+                    expected_generation: self.generation,
+                    confirm_memory_reindex: self.pending_memory_confirm,
+                    operation_id: op,
+                }))
             }
             "profile" => {
                 let mut pid = if is_new { get("id") } else { id.to_owned() };
@@ -831,6 +1069,7 @@ impl RetrievalSettingsState {
                 let config = RetrievalProfileConfig {
                     embedding_models: emb,
                     reranker_models: rr,
+                    // v1: only deterministic (read-only in UI).
                     fallback_strategy: RetrievalFallbackStrategy::Deterministic,
                     max_candidates: get("max_candidates").parse().unwrap_or(50),
                     max_results: get("max_results").parse().unwrap_or(10),
@@ -841,7 +1080,14 @@ impl RetrievalSettingsState {
                     max_output_tokens: get("max_output_tokens").parse().unwrap_or(4096),
                 };
                 self.edit = RetrievalEditMode::Browse;
-                Some(RetrievalCommand::UpsertProfile { id: pid, config })
+                let op = self.next_op_id();
+                Some(self.stamp_mutation(RetrievalCommand::UpsertProfile {
+                    id: pid,
+                    config,
+                    expected_generation: self.generation,
+                    confirm_memory_reindex: self.pending_memory_confirm,
+                    operation_id: op,
+                }))
             }
             "prime" => {
                 let enabled = get("enabled") == "true" || get("enabled") == "1";
@@ -880,9 +1126,13 @@ impl RetrievalSettingsState {
                 }
                 self.dirty = true;
                 self.edit = RetrievalEditMode::Browse;
-                Some(RetrievalCommand::SavePrime {
+                let op = self.next_op_id();
+                Some(self.stamp_mutation(RetrievalCommand::SavePrime {
                     prime: self.draft_prime.clone(),
-                })
+                    expected_generation: self.generation,
+                    confirm_memory_reindex: self.pending_memory_confirm,
+                    operation_id: op,
+                }))
             }
             "memory" => {
                 let p = get("retrieval_profile");
@@ -894,10 +1144,13 @@ impl RetrievalSettingsState {
                 self.draft_memory_profile = profile.clone();
                 self.dirty = true;
                 self.edit = RetrievalEditMode::Browse;
-                Some(RetrievalCommand::SaveMemoryProfile {
+                let op = self.next_op_id();
+                Some(self.stamp_mutation(RetrievalCommand::SaveMemoryProfile {
                     profile,
-                    confirm_reindex: self.pending_memory_confirm,
-                })
+                    expected_generation: self.generation,
+                    confirm_memory_reindex: self.pending_memory_confirm,
+                    operation_id: op,
+                }))
             }
             _ => None,
         }
@@ -973,7 +1226,7 @@ impl RetrievalSettingsState {
                     id: 7,
                 },
                 Shortcut {
-                    label: "s Save",
+                    label: "s Validate",
                     clickable: false,
                     id: 8,
                 },
@@ -1264,28 +1517,50 @@ impl RetrievalSettingsState {
                 }
             }
             RetrievalPage::Prime => {
+                // Prefer draft while dirty so pending edits are visible.
+                let prime = if self.dirty {
+                    &self.draft_prime
+                } else {
+                    // snapshot prime is PrimeDto-compatible via fields
+                    // rebuild view from draft when empty snap
+                    &self.draft_prime
+                };
                 let skills_mark = if self.selected == 0 { ">" } else { " " };
                 let agents_mark = if self.selected == 1 { ">" } else { " " };
                 lines.push(Line::from(format!(
                     "{skills_mark} skills  enabled={} profile={:?} results={} degrade={}",
-                    snap.prime.skills.enabled,
-                    snap.prime.skills.retrieval_profile,
-                    snap.prime.skills.max_results,
-                    snap.prime.skills.degrade_on_error
+                    prime.skills.enabled,
+                    prime.skills.retrieval_profile,
+                    prime.skills.max_results,
+                    prime.skills.degrade_on_error
                 )));
                 lines.push(Line::from(format!(
                     "{agents_mark} agents  enabled={} profile={:?} results={} degrade={}",
-                    snap.prime.agents.enabled,
-                    snap.prime.agents.retrieval_profile,
-                    snap.prime.agents.max_results,
-                    snap.prime.agents.degrade_on_error
+                    prime.agents.enabled,
+                    prime.agents.retrieval_profile,
+                    prime.agents.max_results,
+                    prime.agents.degrade_on_error
                 )));
+                if self.dirty {
+                    lines.push(Line::from(Span::styled(
+                        "(draft — not yet saved)",
+                        Style::default().fg(theme.warning),
+                    )));
+                }
             }
             RetrievalPage::Memory => {
-                lines.push(Line::from(format!(
-                    "> retrieval_profile = {:?}",
-                    snap.memory_retrieval_profile
-                )));
+                let shown = if self.dirty {
+                    self.draft_memory_profile.as_ref()
+                } else {
+                    snap.memory_retrieval_profile.as_ref()
+                };
+                lines.push(Line::from(format!("> retrieval_profile = {:?}", shown)));
+                if self.dirty {
+                    lines.push(Line::from(Span::styled(
+                        "(draft — not yet saved)",
+                        Style::default().fg(theme.warning),
+                    )));
+                }
                 lines.push(Line::from(Span::styled(
                     "Legacy [memory.embedding]/[memory.search] remain readable and unchanged.",
                     Style::default().fg(theme.gray),
@@ -1345,7 +1620,8 @@ fn default_embedding_fields(existing: Option<&EmbeddingModelDto>) -> Vec<(String
             ("id".into(), String::new()),
             ("provider".into(), String::new()),
             ("model".into(), String::new()),
-            ("protocol".into(), "openai_compatible".into()),
+            // protocol is v1 single-value (read-only label; not free-form).
+            ("protocol (fixed)".into(), "openai_compatible".into()),
             ("dimensions".into(), String::new()),
             ("encoding".into(), "float".into()),
             ("batch_size".into(), "32".into()),
@@ -1355,7 +1631,7 @@ fn default_embedding_fields(existing: Option<&EmbeddingModelDto>) -> Vec<(String
             ("id".into(), e.id.clone()),
             ("provider".into(), e.config.provider.clone()),
             ("model".into(), e.config.model.clone()),
-            ("protocol".into(), e.config.protocol.as_str().into()),
+            ("protocol (fixed)".into(), e.config.protocol.as_str().into()),
             (
                 "dimensions".into(),
                 e.config
@@ -1408,7 +1684,7 @@ fn default_profile_fields(existing: Option<&RetrievalProfileDto>) -> Vec<(String
             ("id".into(), String::new()),
             ("embedding_models".into(), String::new()),
             ("reranker_models".into(), String::new()),
-            ("fallback_strategy".into(), "deterministic".into()),
+            ("fallback_strategy (fixed)".into(), "deterministic".into()),
             ("max_candidates".into(), "50".into()),
             ("max_results".into(), "10".into()),
             ("min_score".into(), "0.0".into()),
@@ -1425,7 +1701,7 @@ fn default_profile_fields(existing: Option<&RetrievalProfileDto>) -> Vec<(String
             ),
             ("reranker_models".into(), e.config.reranker_models.join(",")),
             (
-                "fallback_strategy".into(),
+                "fallback_strategy (fixed)".into(),
                 e.config.fallback_strategy.as_str().into(),
             ),
             ("max_candidates".into(), e.config.max_candidates.to_string()),
@@ -1525,23 +1801,23 @@ mod tests {
     }
 
     #[test]
-    fn dirty_conflict_vs_clean_reload() {
+    fn unit_dirty_conflict_vs_clean_reload_signal() {
         let mut s = RetrievalSettingsState::new();
         s.apply_snapshot(snap_with_emb());
         s.dirty = true;
-        s.on_remote_generation(RegistryGeneration(2), &["embedding_models".into()]);
+        assert!(!s.on_remote_generation(RegistryGeneration(2), &["embedding_models".into()]));
         assert!(s.conflict.is_some());
         assert!(!s.loading);
 
         let mut s2 = RetrievalSettingsState::new();
         s2.apply_snapshot(snap_with_emb());
-        s2.on_remote_generation(RegistryGeneration(2), &["prime".into()]);
+        assert!(s2.on_remote_generation(RegistryGeneration(2), &["prime".into()]));
         assert!(s2.loading);
         assert!(s2.conflict.is_none());
     }
 
     #[test]
-    fn stale_op_id_discarded() {
+    fn unit_stale_op_id_and_none_discarded() {
         let mut s = RetrievalSettingsState::new();
         s.apply_snapshot(snap_with_emb());
         s.pending_operation_id = Some("op-a".into());
@@ -1559,10 +1835,26 @@ mod tests {
         });
         assert_eq!(s.generation.get(), 1);
         assert_eq!(s.pending_operation_id.as_deref(), Some("op-a"));
+
+        // None echo discarded under strict Gate E matching.
+        s.apply_mutation_result(RetrievalMutationResult {
+            ok: true,
+            generation: RegistryGeneration(9),
+            error: None,
+            stale: false,
+            guidance: None,
+            conflict: None,
+            changed_fields: vec![],
+            operation_id: None,
+            memory_reindex: None,
+            snapshot: None,
+        });
+        assert_eq!(s.generation.get(), 1);
+        assert_eq!(s.pending_operation_id.as_deref(), Some("op-a"));
     }
 
     #[test]
-    fn add_edit_flow_emits_upsert() {
+    fn unit_add_edit_stamps_generation_and_op_id() {
         let mut s = RetrievalSettingsState::new();
         s.apply_snapshot(snap_with_emb());
         s.handle_key(key(KeyCode::Char('a')));
@@ -1581,10 +1873,64 @@ mod tests {
             }
         }
         let cmd = s.handle_key(key(KeyCode::Char('s')));
-        assert!(matches!(
-            cmd,
-            Some(RetrievalCommand::UpsertEmbedding { id, .. }) if id == "e2"
-        ));
+        match cmd {
+            Some(RetrievalCommand::UpsertEmbedding {
+                id,
+                expected_generation,
+                operation_id,
+                confirm_memory_reindex,
+                ..
+            }) => {
+                assert_eq!(id, "e2");
+                assert_eq!(expected_generation.get(), 1);
+                assert!(!operation_id.is_empty());
+                assert!(!confirm_memory_reindex);
+                assert_eq!(
+                    s.pending_operation_id.as_deref(),
+                    Some(operation_id.as_str())
+                );
+                assert!(s.pending_reindex_command.is_some());
+            }
+            other => panic!("expected stamped upsert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unit_confirm_reindex_retries_exact_draft() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        let draft = RetrievalCommand::SaveMemoryProfile {
+            profile: Some("p1".into()),
+            expected_generation: RegistryGeneration(1),
+            confirm_memory_reindex: false,
+            operation_id: "op-mem".into(),
+        };
+        s.pending_reindex_command = Some(Box::new(draft));
+        s.pending_operation_id = Some("op-mem".into());
+        s.edit = RetrievalEditMode::ConfirmMemoryReindex {
+            impact: MemoryReindexImpact {
+                requires_confirmation: true,
+                reason: "test".into(),
+                previous_fingerprint: None,
+                next_fingerprint: Some("x".into()),
+            },
+        };
+        let cmd = s.handle_key(key(KeyCode::Char('y')));
+        match cmd {
+            Some(RetrievalCommand::SaveMemoryProfile {
+                profile,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            }) => {
+                assert_eq!(profile.as_deref(), Some("p1"));
+                assert_eq!(expected_generation.get(), 1);
+                assert!(confirm_memory_reindex);
+                // New op-id stamped for the retry.
+                assert!(!operation_id.is_empty());
+            }
+            other => panic!("expected confirmed memory save, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1607,15 +1953,32 @@ mod tests {
     }
 
     #[test]
-    fn confirm_delete_flow() {
+    fn unit_confirm_delete_stamps_cas() {
         let mut s = RetrievalSettingsState::new();
         s.apply_snapshot(snap_with_emb());
         s.handle_key(key(KeyCode::Char('d')));
         assert!(matches!(s.edit, RetrievalEditMode::ConfirmDelete { .. }));
         let cmd = s.handle_key(key(KeyCode::Char('y')));
-        assert!(matches!(
-            cmd,
-            Some(RetrievalCommand::DeleteEntity { id, .. }) if id == "e1"
-        ));
+        match cmd {
+            Some(RetrievalCommand::DeleteEntity {
+                id,
+                expected_generation,
+                operation_id,
+                ..
+            }) => {
+                assert_eq!(id, "e1");
+                assert_eq!(expected_generation.get(), 1);
+                assert!(!operation_id.is_empty());
+            }
+            other => panic!("expected delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unit_browse_s_is_validate_not_save_graph() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        let cmd = s.handle_key(key(KeyCode::Char('s')));
+        assert!(matches!(cmd, Some(RetrievalCommand::ValidateAndReload)));
     }
 }

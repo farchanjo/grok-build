@@ -278,7 +278,9 @@ pub(in crate::app::dispatch) fn dispatch_retrieval_command(
     };
 
     match command {
-        RetrievalCommand::Reload | RetrievalCommand::DismissConflictReload => {
+        RetrievalCommand::Reload
+        | RetrievalCommand::ValidateAndReload
+        | RetrievalCommand::DismissConflictReload => {
             state.loading = true;
             state.conflict = None;
             state.dirty = false;
@@ -291,17 +293,20 @@ pub(in crate::app::dispatch) fn dispatch_retrieval_command(
             state.conflict = None;
             vec![]
         }
-        RetrievalCommand::ValidatePreview { kind, id } => {
-            let op_id = state.pending_operation_id.clone();
-            vec![Effect::RetrievalOperation {
-                agent_id,
-                operation: crate::app::actions::RetrievalOperation::Preview {
-                    kind,
-                    id,
-                    operation_id: op_id,
-                },
-            }]
-        }
+        RetrievalCommand::ValidatePreview {
+            kind,
+            id,
+            operation_id,
+            ..
+        } => vec![Effect::RetrievalOperation {
+            agent_id,
+            operation: crate::app::actions::RetrievalOperation::Preview {
+                kind,
+                id,
+                operation_id: Some(operation_id),
+            },
+        }],
+        // Mutations already carry expected_generation + operation_id from modal.
         other => vec![Effect::RetrievalOperation {
             agent_id,
             operation: crate::app::actions::RetrievalOperation::Command(other),
@@ -326,6 +331,9 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
     }
     if command == ProviderCommand::LogoutXai {
         return crate::app::dispatch::auth::dispatch_logout(app);
+    }
+    if command == ProviderCommand::OpenRetrievalSettings {
+        return dispatch_open_retrieval_settings(app);
     }
 
     let ActiveView::Agent(agent_id) = app.active_view else {
@@ -369,7 +377,9 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::Disconnect(provider) => ProviderOperation::Disconnect(provider),
             ProviderCommand::LoginCodex => ProviderOperation::LoginCodex,
             ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
-            ProviderCommand::LoginXai | ProviderCommand::LogoutXai => unreachable!(),
+            ProviderCommand::LoginXai
+            | ProviderCommand::LogoutXai
+            | ProviderCommand::OpenRetrievalSettings => unreachable!(),
             ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
             ProviderCommand::LoadListSnapshot => ProviderOperation::LoadListSnapshot,
             ProviderCommand::OpenEditor { provider_id } => {

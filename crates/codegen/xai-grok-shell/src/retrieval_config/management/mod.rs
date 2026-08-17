@@ -76,7 +76,7 @@ impl RetrievalManagementService {
     pub fn graph_snapshot(&self) -> Result<RetrievalGraphSnapshot, String> {
         let generation = self.current_generation();
         let (graph, warnings) = self.load_graph()?;
-        let providers = self.provider_capability_views();
+        let providers = self.provider_capability_views()?;
         let issues = validate_retrieval_graph_with_providers(&graph, &providers);
         Ok(self.snapshot_from(generation, graph, warnings, issues))
     }
@@ -178,7 +178,16 @@ impl RetrievalManagementService {
             };
         }
 
-        let providers = self.provider_capability_views();
+        let providers = match self.provider_capability_views() {
+            Ok(v) => v,
+            Err(e) => {
+                return err_result(
+                    self.current_generation(),
+                    format!("provider registry unavailable (fail closed): {e}"),
+                    req.operation_id.clone(),
+                );
+            }
+        };
         let issues = validate_retrieval_graph_with_providers(&graph, &providers);
         if has_hard_errors(&issues) {
             let msgs: Vec<String> = issues
@@ -248,77 +257,101 @@ impl RetrievalManagementService {
     }
 
     pub fn upsert_embedding(&self, req: UpsertEmbeddingRequest) -> RetrievalMutationResult {
-        self.mutate(req.expected_generation, req.operation_id, |graph| {
-            let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
-            graph.embedding_models.insert(id.clone(), req.config);
-            Ok(vec![format!("embedding_models.{id}")])
-        })
+        self.mutate(
+            req.expected_generation,
+            req.operation_id,
+            req.confirm_memory_reindex,
+            |graph| {
+                let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
+                graph.embedding_models.insert(id.clone(), req.config);
+                Ok(vec![format!("embedding_models.{id}")])
+            },
+        )
     }
 
     pub fn upsert_reranker(&self, req: UpsertRerankerRequest) -> RetrievalMutationResult {
-        self.mutate(req.expected_generation, req.operation_id, |graph| {
-            let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
-            graph.reranker_models.insert(id.clone(), req.config);
-            Ok(vec![format!("reranker_models.{id}")])
-        })
+        self.mutate(
+            req.expected_generation,
+            req.operation_id,
+            req.confirm_memory_reindex,
+            |graph| {
+                let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
+                graph.reranker_models.insert(id.clone(), req.config);
+                Ok(vec![format!("reranker_models.{id}")])
+            },
+        )
     }
 
     pub fn upsert_profile(&self, req: UpsertProfileRequest) -> RetrievalMutationResult {
-        self.mutate(req.expected_generation, req.operation_id, |graph| {
-            let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
-            graph.retrieval_profiles.insert(id.clone(), req.config);
-            Ok(vec![format!("retrieval_profiles.{id}")])
-        })
+        self.mutate(
+            req.expected_generation,
+            req.operation_id,
+            req.confirm_memory_reindex,
+            |graph| {
+                let id = normalize_retrieval_id(&req.id).map_err(|e| e)?;
+                graph.retrieval_profiles.insert(id.clone(), req.config);
+                Ok(vec![format!("retrieval_profiles.{id}")])
+            },
+        )
     }
 
     pub fn clone_entity(&self, req: CloneRetrievalEntityRequest) -> RetrievalMutationResult {
-        self.mutate(req.expected_generation, req.operation_id, |graph| {
-            let new_id = normalize_retrieval_id(&req.new_id)?;
-            let source = req.source_id.trim();
-            match req.kind.as_str() {
-                "embedding" => {
-                    let cfg = graph
-                        .embedding_models
-                        .get(source)
-                        .cloned()
-                        .ok_or_else(|| format!("embedding model `{source}` not found"))?;
-                    if graph.embedding_models.contains_key(&new_id) {
-                        return Err(format!("embedding model `{new_id}` already exists"));
+        self.mutate(
+            req.expected_generation,
+            req.operation_id,
+            req.confirm_memory_reindex,
+            |graph| {
+                let new_id = normalize_retrieval_id(&req.new_id)?;
+                let source = req.source_id.trim();
+                match req.kind.as_str() {
+                    "embedding" => {
+                        let cfg = graph
+                            .embedding_models
+                            .get(source)
+                            .cloned()
+                            .ok_or_else(|| format!("embedding model `{source}` not found"))?;
+                        if graph.embedding_models.contains_key(&new_id) {
+                            return Err(format!("embedding model `{new_id}` already exists"));
+                        }
+                        graph.embedding_models.insert(new_id.clone(), cfg);
+                        Ok(vec![format!("embedding_models.{new_id}")])
                     }
-                    graph.embedding_models.insert(new_id.clone(), cfg);
-                    Ok(vec![format!("embedding_models.{new_id}")])
-                }
-                "reranker" => {
-                    let cfg = graph
-                        .reranker_models
-                        .get(source)
-                        .cloned()
-                        .ok_or_else(|| format!("reranker model `{source}` not found"))?;
-                    if graph.reranker_models.contains_key(&new_id) {
-                        return Err(format!("reranker model `{new_id}` already exists"));
+                    "reranker" => {
+                        let cfg = graph
+                            .reranker_models
+                            .get(source)
+                            .cloned()
+                            .ok_or_else(|| format!("reranker model `{source}` not found"))?;
+                        if graph.reranker_models.contains_key(&new_id) {
+                            return Err(format!("reranker model `{new_id}` already exists"));
+                        }
+                        graph.reranker_models.insert(new_id.clone(), cfg);
+                        Ok(vec![format!("reranker_models.{new_id}")])
                     }
-                    graph.reranker_models.insert(new_id.clone(), cfg);
-                    Ok(vec![format!("reranker_models.{new_id}")])
-                }
-                "profile" => {
-                    let cfg = graph
-                        .retrieval_profiles
-                        .get(source)
-                        .cloned()
-                        .ok_or_else(|| format!("retrieval profile `{source}` not found"))?;
-                    if graph.retrieval_profiles.contains_key(&new_id) {
-                        return Err(format!("retrieval profile `{new_id}` already exists"));
+                    "profile" => {
+                        let cfg = graph
+                            .retrieval_profiles
+                            .get(source)
+                            .cloned()
+                            .ok_or_else(|| format!("retrieval profile `{source}` not found"))?;
+                        if graph.retrieval_profiles.contains_key(&new_id) {
+                            return Err(format!("retrieval profile `{new_id}` already exists"));
+                        }
+                        graph.retrieval_profiles.insert(new_id.clone(), cfg);
+                        Ok(vec![format!("retrieval_profiles.{new_id}")])
                     }
-                    graph.retrieval_profiles.insert(new_id.clone(), cfg);
-                    Ok(vec![format!("retrieval_profiles.{new_id}")])
+                    other => Err(format!("unknown clone kind `{other}`")),
                 }
-                other => Err(format!("unknown clone kind `{other}`")),
-            }
-        })
+            },
+        )
     }
 
     pub fn delete_entity(&self, req: DeleteRetrievalEntityRequest) -> RetrievalMutationResult {
-        self.mutate(req.expected_generation, req.operation_id, |graph| {
+        self.mutate(
+            req.expected_generation,
+            req.operation_id,
+            req.confirm_memory_reindex,
+            |graph| {
             let id = req.id.trim();
             match req.kind.as_str() {
                 "embedding" => {
@@ -374,13 +407,15 @@ impl RetrievalManagementService {
                 }
                 other => Err(format!("unknown delete kind `{other}`")),
             }
-        })
+        },
+        )
     }
 
     pub fn reorder(&self, req: ReorderRetrievalRequest) -> RetrievalMutationResult {
         self.mutate(
             req.expected_generation,
             req.operation_id,
+            req.confirm_memory_reindex,
             |graph| match req.kind.as_str() {
                 "embedding" => {
                     reorder_map(&mut graph.embedding_models, &req.ordered_ids)?;
@@ -404,9 +439,10 @@ impl RetrievalManagementService {
         &self,
         expected: RegistryGeneration,
         prime: PrimeConfig,
+        confirm_memory_reindex: bool,
         operation_id: Option<String>,
     ) -> RetrievalMutationResult {
-        self.mutate(expected, operation_id, |graph| {
+        self.mutate(expected, operation_id, confirm_memory_reindex, |graph| {
             graph.prime = prime;
             Ok(vec!["prime".into()])
         })
@@ -420,50 +456,10 @@ impl RetrievalManagementService {
         confirm_memory_reindex: bool,
         operation_id: Option<String>,
     ) -> RetrievalMutationResult {
-        let _lock = match self.acquire_mutation_lock() {
-            Ok(l) => l,
-            Err(e) => return err_result(self.current_generation(), e, operation_id),
-        };
-        if let Err(msg) = self.require_generation_locked(expected) {
-            return stale_result(
-                expected,
-                self.current_generation(),
-                vec!["generation".into()],
-                msg,
-                operation_id,
-            );
-        }
-        let (mut graph, _) = match self.load_graph() {
-            Ok(g) => g,
-            Err(e) => return err_result(self.current_generation(), e, operation_id),
-        };
-        let prior = graph.clone();
-        graph.memory_retrieval_profile = profile;
-        let reindex = compute_memory_reindex_impact(&prior, &graph);
-        if reindex.requires_confirmation && !confirm_memory_reindex {
-            return RetrievalMutationResult {
-                ok: false,
-                generation: self.current_generation(),
-                error: Some(
-                    "Memory reindex confirmation required for profile change that alters \
-                     embedding identity/dimensions. Reindex is not performed in this release."
-                        .into(),
-                ),
-                stale: false,
-                guidance: Some("Confirm memory reindex impact, then save again.".into()),
-                conflict: None,
-                changed_fields: Vec::new(),
-                operation_id,
-                memory_reindex: Some(reindex),
-                snapshot: None,
-            };
-        }
-        self.commit_graph_locked(
-            graph,
-            vec!["memory.retrieval_profile".into()],
-            operation_id,
-            Some(reindex),
-        )
+        self.mutate(expected, operation_id, confirm_memory_reindex, |graph| {
+            graph.memory_retrieval_profile = profile;
+            Ok(vec!["memory.retrieval_profile".into()])
+        })
     }
 
     // ----- internals -----
@@ -472,6 +468,7 @@ impl RetrievalManagementService {
         &self,
         expected: RegistryGeneration,
         operation_id: Option<String>,
+        confirm_memory_reindex: bool,
         apply: impl FnOnce(&mut RetrievalGraphConfig) -> Result<Vec<String>, String>,
     ) -> RetrievalMutationResult {
         let _lock = match self.acquire_mutation_lock() {
@@ -491,11 +488,34 @@ impl RetrievalManagementService {
             Ok(g) => g,
             Err(e) => return err_result(self.current_generation(), e, operation_id),
         };
+        let prior = graph.clone();
         let changed = match apply(&mut graph) {
             Ok(c) => c,
             Err(e) => return err_result(self.current_generation(), e, operation_id),
         };
-        self.commit_graph_locked(graph, changed, operation_id, None)
+        let reindex = compute_memory_reindex_impact(&prior, &graph);
+        if reindex.requires_confirmation && !confirm_memory_reindex {
+            return RetrievalMutationResult {
+                ok: false,
+                generation: self.current_generation(),
+                error: Some(
+                    "Memory reindex confirmation required: selected embedding identity or \
+                     dimensions would change. Confirm explicitly; reindex is not performed in \
+                     this release."
+                        .into(),
+                ),
+                stale: false,
+                guidance: Some(
+                    "Review Memory reindex impact, then save again with confirmation.".into(),
+                ),
+                conflict: None,
+                changed_fields: Vec::new(),
+                operation_id,
+                memory_reindex: Some(reindex),
+                snapshot: None,
+            };
+        }
+        self.commit_graph_locked(graph, changed, operation_id, Some(reindex))
     }
 
     fn commit_graph_locked(
@@ -505,7 +525,16 @@ impl RetrievalManagementService {
         operation_id: Option<String>,
         memory_reindex: Option<MemoryReindexImpact>,
     ) -> RetrievalMutationResult {
-        let providers = self.provider_capability_views();
+        let providers = match self.provider_capability_views() {
+            Ok(v) => v,
+            Err(e) => {
+                return err_result(
+                    self.current_generation(),
+                    format!("provider registry unavailable (fail closed): {e}"),
+                    operation_id,
+                );
+            }
+        };
         let issues = validate_retrieval_graph_with_providers(&graph, &providers);
         if has_hard_errors(&issues) {
             let msgs: Vec<String> = issues
@@ -621,18 +650,20 @@ impl RetrievalManagementService {
         }
     }
 
-    fn provider_capability_views(&self) -> Vec<ProviderCapabilityView> {
+    fn provider_capability_views(&self) -> Result<Vec<ProviderCapabilityView>, String> {
         let raw = match fs::read_to_string(&self.config_path) {
             Ok(t) => t,
-            Err(_) => String::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("read config for providers: {e}")),
         };
-        let value: toml::Value =
-            toml::from_str(&raw).unwrap_or(toml::Value::Table(Default::default()));
+        let value: toml::Value = if raw.trim().is_empty() {
+            toml::Value::Table(Default::default())
+        } else {
+            toml::from_str(&raw).map_err(|e| format!("parse config for providers: {e}"))?
+        };
         let (entries, _) = parse_model_providers(&value);
-        let service = match ProviderService::from_model_providers(&entries) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        let service = ProviderService::from_model_providers(&entries)
+            .map_err(|e| format!("provider registry build failed: {e}"))?;
         let lifecycle = load_lifecycle_state(&self.home).ok();
         let mut views = Vec::new();
         for desc in service.list() {
@@ -694,7 +725,7 @@ impl RetrievalManagementService {
                 api_surface,
             });
         }
-        views
+        Ok(views)
     }
 
     fn acquire_mutation_lock(&self) -> Result<File, String> {
@@ -769,6 +800,12 @@ fn normalize_graph_ids(graph: &mut RetrievalGraphConfig) -> Result<(), String> {
     let mut new_emb = IndexMap::new();
     for (id, cfg) in emb {
         let nid = normalize_retrieval_id(&id)?;
+        if new_emb.contains_key(&nid) {
+            return Err(format!(
+                "embedding model id collision after normalize: `{nid}` (rejecting save rather \
+                 than silent overwrite)"
+            ));
+        }
         new_emb.insert(nid, cfg);
     }
     graph.embedding_models = new_emb;
@@ -776,6 +813,12 @@ fn normalize_graph_ids(graph: &mut RetrievalGraphConfig) -> Result<(), String> {
     let mut new_rr = IndexMap::new();
     for (id, cfg) in rr {
         let nid = normalize_retrieval_id(&id)?;
+        if new_rr.contains_key(&nid) {
+            return Err(format!(
+                "reranker model id collision after normalize: `{nid}` (rejecting save rather \
+                 than silent overwrite)"
+            ));
+        }
         new_rr.insert(nid, cfg);
     }
     graph.reranker_models = new_rr;
@@ -783,6 +826,12 @@ fn normalize_graph_ids(graph: &mut RetrievalGraphConfig) -> Result<(), String> {
     let mut new_pr = IndexMap::new();
     for (id, cfg) in pr {
         let nid = normalize_retrieval_id(&id)?;
+        if new_pr.contains_key(&nid) {
+            return Err(format!(
+                "retrieval profile id collision after normalize: `{nid}` (rejecting save rather \
+                 than silent overwrite)"
+            ));
+        }
         new_pr.insert(nid, cfg);
     }
     graph.retrieval_profiles = new_pr;
@@ -1055,6 +1104,7 @@ mod tests {
                 dimensions: Some(1536),
                 ..Default::default()
             },
+            confirm_memory_reindex: false,
             operation_id: Some("op1".into()),
         });
         assert!(r.ok, "{:?}", r.error);
@@ -1080,6 +1130,7 @@ mod tests {
                     model: "m".into(),
                     ..Default::default()
                 },
+                confirm_memory_reindex: false,
                 operation_id: None,
             })
             .ok
@@ -1093,6 +1144,7 @@ mod tests {
                 model: "m2".into(),
                 ..Default::default()
             },
+            confirm_memory_reindex: false,
             operation_id: Some("stale-op".into()),
         });
         assert!(!r.ok);
@@ -1114,6 +1166,7 @@ mod tests {
                 model: "m".into(),
                 ..Default::default()
             },
+            confirm_memory_reindex: false,
             operation_id: None,
         });
         assert!(!r.ok);
@@ -1140,6 +1193,7 @@ mod tests {
                     model: "m".into(),
                     ..Default::default()
                 },
+                confirm_memory_reindex: false,
                 operation_id: None,
             })
             .ok
@@ -1150,6 +1204,7 @@ mod tests {
             kind: "embedding".into(),
             source_id: "e1".into(),
             new_id: "e1-copy".into(),
+            confirm_memory_reindex: false,
             operation_id: None,
         });
         assert!(r.ok, "{:?}", r.error);
@@ -1172,6 +1227,7 @@ mod tests {
                     model: "m".into(),
                     ..Default::default()
                 },
+                confirm_memory_reindex: false,
                 operation_id: None,
             })
             .ok
@@ -1187,6 +1243,7 @@ mod tests {
                     max_results: 5,
                     ..Default::default()
                 },
+                confirm_memory_reindex: false,
                 operation_id: None,
             })
             .ok
@@ -1196,6 +1253,7 @@ mod tests {
             expected_generation: g2,
             kind: "embedding".into(),
             id: "e1".into(),
+            confirm_memory_reindex: false,
             operation_id: None,
         });
         assert!(!r.ok);
@@ -1218,6 +1276,7 @@ mod tests {
                     dimensions: Some(1024),
                     ..Default::default()
                 },
+                confirm_memory_reindex: false,
                 operation_id: None,
             })
             .ok
@@ -1231,6 +1290,7 @@ mod tests {
                     embedding_models: vec!["e1".into()],
                     ..Default::default()
                 },
+                confirm_memory_reindex: false,
                 operation_id: None,
             })
             .ok
@@ -1278,6 +1338,7 @@ mod tests {
                     model: "m".into(),
                     ..Default::default()
                 },
+                confirm_memory_reindex: false,
                 operation_id: None,
             })
             .ok
@@ -1287,5 +1348,163 @@ mod tests {
         let snap = s2.graph_snapshot().unwrap();
         assert_eq!(snap.embedding_models.len(), 1);
         assert!(snap.generation.get() > 0);
+    }
+
+    #[test]
+    fn none_to_profile_requires_confirm_and_confirmed_writes() {
+        let dir = TempDir::new().unwrap();
+        seed_provider(&dir, "lab");
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        assert!(
+            s.upsert_embedding(UpsertEmbeddingRequest {
+                expected_generation: g0,
+                id: "e1".into(),
+                config: EmbeddingModelConfig {
+                    provider: "lab".into(),
+                    model: "m".into(),
+                    dimensions: Some(1024),
+                    ..Default::default()
+                },
+                confirm_memory_reindex: false,
+                operation_id: Some("op1".into()),
+            })
+            .ok
+        );
+        let g1 = s.current_generation();
+        assert!(
+            s.upsert_profile(UpsertProfileRequest {
+                expected_generation: g1,
+                id: "p1".into(),
+                config: RetrievalProfileConfig {
+                    embedding_models: vec!["e1".into()],
+                    ..Default::default()
+                },
+                confirm_memory_reindex: false,
+                operation_id: Some("op2".into()),
+            })
+            .ok
+        );
+        let g2 = s.current_generation();
+        let denied = s.save_memory_profile(g2, Some("p1".into()), false, Some("op3".into()));
+        assert!(!denied.ok, "none→profile must require confirm");
+        assert!(
+            denied
+                .memory_reindex
+                .as_ref()
+                .unwrap()
+                .requires_confirmation
+        );
+        // Disk unchanged.
+        assert!(
+            s.graph_snapshot()
+                .unwrap()
+                .memory_retrieval_profile
+                .is_none()
+        );
+        // Confirmed with exact draft profile writes.
+        let ok = s.save_memory_profile(g2, Some("p1".into()), true, Some("op4".into()));
+        assert!(ok.ok, "{:?}", ok.error);
+        assert_eq!(
+            s.graph_snapshot()
+                .unwrap()
+                .memory_retrieval_profile
+                .as_deref(),
+            Some("p1")
+        );
+        // No reindex side effect.
+        assert!(
+            !dir.path().join("memory").exists()
+                || fs::read_dir(dir.path().join("memory"))
+                    .map(|d| d.count() == 0)
+                    .unwrap_or(true)
+        );
+    }
+
+    #[test]
+    fn embedding_dimension_change_under_memory_profile_requires_confirm() {
+        let dir = TempDir::new().unwrap();
+        seed_provider(&dir, "lab");
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        assert!(
+            s.upsert_embedding(UpsertEmbeddingRequest {
+                expected_generation: g0,
+                id: "e1".into(),
+                config: EmbeddingModelConfig {
+                    provider: "lab".into(),
+                    model: "m".into(),
+                    dimensions: Some(1024),
+                    ..Default::default()
+                },
+                confirm_memory_reindex: false,
+                operation_id: None,
+            })
+            .ok
+        );
+        let g1 = s.current_generation();
+        assert!(
+            s.upsert_profile(UpsertProfileRequest {
+                expected_generation: g1,
+                id: "p1".into(),
+                config: RetrievalProfileConfig {
+                    embedding_models: vec!["e1".into()],
+                    ..Default::default()
+                },
+                confirm_memory_reindex: false,
+                operation_id: None,
+            })
+            .ok
+        );
+        let g2 = s.current_generation();
+        assert!(s.save_memory_profile(g2, Some("p1".into()), true, None).ok);
+        let g3 = s.current_generation();
+        let denied = s.upsert_embedding(UpsertEmbeddingRequest {
+            expected_generation: g3,
+            id: "e1".into(),
+            config: EmbeddingModelConfig {
+                provider: "lab".into(),
+                model: "m".into(),
+                dimensions: Some(1536),
+                ..Default::default()
+            },
+            confirm_memory_reindex: false,
+            operation_id: Some("dim".into()),
+        });
+        assert!(!denied.ok);
+        assert!(
+            denied
+                .memory_reindex
+                .as_ref()
+                .unwrap()
+                .requires_confirmation
+        );
+        // Disk dimensions unchanged.
+        assert_eq!(
+            s.graph_snapshot().unwrap().embedding_models[0]
+                .config
+                .dimensions,
+            Some(1024)
+        );
+        // Confirmed exact draft applies.
+        let ok = s.upsert_embedding(UpsertEmbeddingRequest {
+            expected_generation: g3,
+            id: "e1".into(),
+            config: EmbeddingModelConfig {
+                provider: "lab".into(),
+                model: "m".into(),
+                dimensions: Some(1536),
+                ..Default::default()
+            },
+            confirm_memory_reindex: true,
+            operation_id: Some("dim-ok".into()),
+        });
+        assert!(ok.ok, "{:?}", ok.error);
+        assert_eq!(
+            s.graph_snapshot().unwrap().embedding_models[0]
+                .config
+                .dimensions,
+            Some(1536)
+        );
     }
 }

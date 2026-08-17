@@ -397,6 +397,9 @@ fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
                 // /providers, /model, settings/search snapshots. Version-tolerant:
                 // unknown optional fields are ignored by old clients.
                 | "x.ai/providers/update"
+                // Retrieval graph generation: every client refreshes
+                // /retrieval-settings. Version-tolerant optional fields.
+                | "x.ai/retrieval/update"
         )
     )
 }

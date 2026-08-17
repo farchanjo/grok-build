@@ -88,12 +88,23 @@ impl ProviderCapabilityView {
     }
 }
 
-/// Validate the graph without provider registry context (structural only).
+/// Structural-only validation (no provider registry context).
+///
+/// **Unit-test helper only.** Does not skip provider checks by pretending the
+/// registry is empty: when any provider field is set, missing providers hard-error
+/// against an empty index. Prefer
+/// [`validate_retrieval_graph_with_providers`] for production.
 pub fn validate_retrieval_graph(graph: &RetrievalGraphConfig) -> Vec<GraphValidationIssue> {
+    // Empty slice still runs exact-ref checks: every non-empty provider id is
+    // "not registered" (fail closed). Never used to skip checks.
     validate_retrieval_graph_with_providers(graph, &[])
 }
 
 /// Full graph validation including exact provider reference checks.
+///
+/// Empty `providers` does **not** skip checks: every referenced provider id is
+/// reported missing. Production callers must supply capability views or a hard
+/// registry-error issue via [`GraphValidationIssue`].
 pub fn validate_retrieval_graph_with_providers(
     graph: &RetrievalGraphConfig,
     providers: &[ProviderCapabilityView],
@@ -121,7 +132,6 @@ pub fn validate_retrieval_graph_with_providers(
             &format!("embedding_models.\"{id}\".provider"),
             emb.provider.trim(),
             &provider_index,
-            providers.is_empty(),
             ProviderNeed::Embeddings,
             emb.protocol,
             None,
@@ -155,9 +165,8 @@ pub fn validate_retrieval_graph_with_providers(
             &format!("reranker_models.\"{id}\".provider"),
             rr.provider.trim(),
             &provider_index,
-            providers.is_empty(),
             ProviderNeed::Rerank,
-            EmbeddingProtocol::OpenaiCompatible, // unused for rerank protocol branch
+            EmbeddingProtocol::OpenaiCompatible,
             Some(rr.protocol),
         );
     }
@@ -256,16 +265,15 @@ fn check_provider_ref(
     path: &str,
     provider_id: &str,
     index: &std::collections::HashMap<&str, &ProviderCapabilityView>,
-    skip_provider_checks: bool,
     need: ProviderNeed,
     emb_protocol: EmbeddingProtocol,
     rr_protocol: Option<RerankerProtocol>,
 ) {
-    if skip_provider_checks || provider_id.is_empty() {
+    if provider_id.is_empty() {
         return;
     }
     let Some(view) = index.get(provider_id).copied() else {
-        // Not in index: treat as missing when a non-empty registry was supplied.
+        // Not in index: always fail closed (empty registry ⇒ every id missing).
         issues.push(GraphValidationIssue::error(
             path,
             format!(
@@ -314,8 +322,6 @@ fn check_provider_ref(
                     ),
                 ));
             }
-            // Protocol surface: openai_compatible is the only embedding protocol;
-            // incompatible api_surface is a hard error when explicitly incompatible.
             if let Some(surface) = view.api_surface.as_deref() {
                 let surface_l = surface.to_ascii_lowercase();
                 if matches!(emb_protocol, EmbeddingProtocol::OpenaiCompatible)
@@ -342,8 +348,35 @@ fn check_provider_ref(
                     ),
                 ));
             }
-            let _ = rr_protocol;
+            if let Some(protocol) = rr_protocol {
+                check_reranker_protocol_surface(issues, path, provider_id, view, protocol);
+            }
         }
+    }
+}
+
+/// Fail closed: reject anthropic/messages surfaces for both reranker protocols.
+fn check_reranker_protocol_surface(
+    issues: &mut Vec<GraphValidationIssue>,
+    path: &str,
+    provider_id: &str,
+    view: &ProviderCapabilityView,
+    protocol: RerankerProtocol,
+) {
+    let kind = view
+        .api_surface
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if kind.contains("anthropic") || kind == "messages" {
+        issues.push(GraphValidationIssue::error(
+            path,
+            format!(
+                "provider `{provider_id}` api_surface `{kind}` is incompatible with \
+                 reranker protocol {}",
+                protocol.as_str()
+            ),
+        ));
     }
 }
 

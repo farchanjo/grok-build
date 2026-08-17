@@ -554,6 +554,11 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::OpenProviders,
         },
         PaletteEntry {
+            label: "Retrieval settings".into(),
+            shortcut: "/retrieval-settings".into(),
+            command: PaletteCommand::SlashCommand("/retrieval-settings".into()),
+        },
+        PaletteEntry {
             label: "Keyboard Shortcuts".into(),
             shortcut: if crate::actions::ctrl_dot_unreliable() {
                 "Ctrl+X".into()

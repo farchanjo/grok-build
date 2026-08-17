@@ -723,20 +723,21 @@ fn scan_retrieval_refs(
     };
 
     // Embedding models that exact-reference this provider.
+    // Always collect membership ids fully; only truncate displayed rows.
     let mut emb_ids_for_provider: Vec<String> = Vec::new();
     if let Some(table) = val.get("embedding_models").and_then(|v| v.as_table()) {
         for (id, entry) in table {
             if entry.get("provider").and_then(|v| v.as_str()) == Some(provider_id) {
-                if embeddings.len() >= MAX_REFS_PER_GROUP {
-                    truncated = true;
-                    break;
-                }
                 emb_ids_for_provider.push(id.clone());
-                push_ref(
-                    &mut embeddings,
-                    ImpactGroupKind::EmbeddingModels,
-                    format!("embedding_models.\"{id}\""),
-                );
+                if embeddings.len() < MAX_REFS_PER_GROUP {
+                    push_ref(
+                        &mut embeddings,
+                        ImpactGroupKind::EmbeddingModels,
+                        format!("embedding_models.\"{id}\""),
+                    );
+                } else {
+                    truncated = true;
+                }
             }
         }
     }
@@ -746,16 +747,16 @@ fn scan_retrieval_refs(
     if let Some(table) = val.get("reranker_models").and_then(|v| v.as_table()) {
         for (id, entry) in table {
             if entry.get("provider").and_then(|v| v.as_str()) == Some(provider_id) {
-                if rerankers.len() >= MAX_REFS_PER_GROUP {
-                    truncated = true;
-                    break;
-                }
                 rr_ids_for_provider.push(id.clone());
-                push_ref(
-                    &mut rerankers,
-                    ImpactGroupKind::RerankerModels,
-                    format!("reranker_models.\"{id}\""),
-                );
+                if rerankers.len() < MAX_REFS_PER_GROUP {
+                    push_ref(
+                        &mut rerankers,
+                        ImpactGroupKind::RerankerModels,
+                        format!("reranker_models.\"{id}\""),
+                    );
+                } else {
+                    truncated = true;
+                }
             }
         }
     }

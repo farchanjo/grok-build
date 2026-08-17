@@ -1578,6 +1578,15 @@ impl MvpAgent {
                 },
             )));
         }
+        // Machine-wide retrieval graph broadcasts (PR15).
+        {
+            let gw = gateway.clone();
+            crate::retrieval_config::notify::set_retrieval_update_forwarder(Some(Box::new(
+                move |notif| {
+                    gw.forward_fire_and_forget(notif);
+                },
+            )));
+        }
         let inference_config = models_manager.inference_config();
         if !cfg.grok_com_config.api_key_auth_disabled() {
             let models = models_manager.models();

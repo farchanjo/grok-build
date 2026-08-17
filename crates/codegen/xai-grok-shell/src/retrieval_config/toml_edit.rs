@@ -42,6 +42,7 @@ fn apply_graph_to_document(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGr
         "embedding_models",
         &graph.embedding_models,
         write_embedding_table,
+        EMBEDDING_KNOWN_KEYS,
     );
     // reranker_models
     write_map_section(
@@ -49,6 +50,7 @@ fn apply_graph_to_document(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGr
         "reranker_models",
         &graph.reranker_models,
         write_reranker_table,
+        RERANKER_KNOWN_KEYS,
     );
     // retrieval_profiles
     write_map_section(
@@ -56,6 +58,7 @@ fn apply_graph_to_document(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGr
         "retrieval_profiles",
         &graph.retrieval_profiles,
         write_profile_table,
+        PROFILE_KNOWN_KEYS,
     );
     // prime
     write_prime(doc, &graph.prime);
@@ -63,11 +66,45 @@ fn apply_graph_to_document(doc: &mut toml_edit::DocumentMut, graph: &RetrievalGr
     write_memory_retrieval_profile(doc, graph.memory_retrieval_profile.as_deref());
 }
 
+/// Known keys for embedding model tables (optional None values are cleared).
+const EMBEDDING_KNOWN_KEYS: &[&str] = &[
+    "provider",
+    "model",
+    "protocol",
+    "dimensions",
+    "encoding",
+    "batch_size",
+    "max_input_tokens",
+];
+/// Known keys for reranker model tables.
+const RERANKER_KNOWN_KEYS: &[&str] = &[
+    "provider",
+    "model",
+    "protocol",
+    "endpoint",
+    "batch_size",
+    "max_input_tokens",
+];
+/// Known keys for retrieval profile tables.
+const PROFILE_KNOWN_KEYS: &[&str] = &[
+    "embedding_models",
+    "reranker_models",
+    "fallback_strategy",
+    "max_candidates",
+    "max_results",
+    "min_score",
+    "deadline_ms",
+    "max_attempts",
+    "max_input_tokens",
+    "max_output_tokens",
+];
+
 fn write_map_section<T>(
     doc: &mut toml_edit::DocumentMut,
     key: &str,
     map: &IndexMap<String, T>,
     write_entry: fn(&T) -> toml_edit::Table,
+    known_keys: &[&str],
 ) {
     if map.is_empty() {
         // Remove empty section entirely so we do not leave a hollow table.
@@ -78,7 +115,8 @@ fn write_map_section<T>(
     section.set_implicit(true);
     for (id, cfg) in map {
         let mut entry = write_entry(cfg);
-        // Preserve unknown fields already on disk when possible.
+        // Preserve only *unknown* keys already on disk. Known optional fields
+        // omitted as None must stay cleared (not resurrected from disk).
         if let Some(existing) = doc
             .get(key)
             .and_then(|i| i.as_table())
@@ -86,7 +124,7 @@ fn write_map_section<T>(
             .and_then(|i| i.as_table())
         {
             for (k, v) in existing.iter() {
-                if !entry.contains_key(k) {
+                if !known_keys.contains(&k) && !entry.contains_key(k) {
                     entry.insert(k, v.clone());
                 }
             }
@@ -330,5 +368,60 @@ x = 1
         assert!(text.contains("future_knob"));
         assert!(text.contains("[other]") || text.contains("x = 1"));
         assert!(text.contains("m2"));
+    }
+
+    #[test]
+    fn clears_optional_dimensions_and_endpoint_when_none() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[embedding_models.e1]
+provider = "openai"
+model = "m"
+dimensions = 1536
+future_knob = 9
+
+[reranker_models.r1]
+provider = "openai"
+model = "rr"
+endpoint = "v1/rerank"
+"#,
+        )
+        .unwrap();
+        let mut graph = RetrievalGraphConfig::default();
+        graph.embedding_models.insert(
+            "e1".into(),
+            EmbeddingModelConfig {
+                provider: "openai".into(),
+                model: "m".into(),
+                dimensions: None,
+                ..Default::default()
+            },
+        );
+        graph.reranker_models.insert(
+            "r1".into(),
+            xai_grok_config_types::RerankerModelConfig {
+                provider: "openai".into(),
+                model: "rr".into(),
+                endpoint: None,
+                ..Default::default()
+            },
+        );
+        write_retrieval_graph(&path, &graph).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("dimensions"),
+            "cleared dimensions must not resurrect: {text}"
+        );
+        assert!(
+            !text.contains("endpoint"),
+            "cleared endpoint must not resurrect: {text}"
+        );
+        assert!(
+            text.contains("future_knob"),
+            "unknown fields must remain: {text}"
+        );
     }
 }

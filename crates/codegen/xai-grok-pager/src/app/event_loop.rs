@@ -2116,6 +2116,14 @@ pub(crate) async fn run(
                                 break;
                             }
                         }
+                        if poll_retrieval_notify_file(&mut app)
+                            && !app.pending_effects.is_empty()
+                        {
+                            let more = std::mem::take(&mut app.pending_effects);
+                            if process_effects(more, &mut tasks, &mut app, &progress_tx) {
+                                break;
+                            }
+                        }
                         schedule_tick(&mut animation_tick_at, &app, tick_interval);
                         resize_debounce_at = None;
 
@@ -2265,6 +2273,15 @@ pub(crate) async fn run(
                 // PR13: `--no-leader` / local self-refresh for providers/update
                 // via generation-coalescing notify file poll.
                 if poll_providers_notify_file(&mut app) {
+                    if !app.pending_effects.is_empty() {
+                        let effs = std::mem::take(&mut app.pending_effects);
+                        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                            break;
+                        }
+                    }
+                    presenter.request(false);
+                }
+                if poll_retrieval_notify_file(&mut app) {
                     if !app.pending_effects.is_empty() {
                         let effs = std::mem::take(&mut app.pending_effects);
                         if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
@@ -2909,6 +2926,21 @@ fn poll_providers_notify_file(app: &mut AppView) -> bool {
     };
     let notif = acp::ExtNotification::new("x.ai/providers/update", raw.into());
     acp_handler::deliver_providers_update_notification(&notif, app)
+}
+
+/// Poll `$GROK_HOME/state/retrieval_graph_notify.json` and deliver a synthetic
+/// `x.ai/retrieval/update` when generation advanced (PR15 local/self-refresh).
+fn poll_retrieval_notify_file(app: &mut AppView) -> bool {
+    let home = xai_grok_tools::util::grok_home::grok_home();
+    let Some(params) = xai_grok_shell::retrieval_config::notify::poll_notify_file_if_newer(&home)
+    else {
+        return false;
+    };
+    let Ok(raw) = serde_json::value::to_raw_value(&params) else {
+        return false;
+    };
+    let notif = acp::ExtNotification::new("x.ai/retrieval/update", raw.into());
+    acp_handler::deliver_retrieval_update_notification(&notif, app)
 }
 
 /// Schedule the next animation tick when demanded and none is pending.
