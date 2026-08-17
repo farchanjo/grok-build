@@ -21,11 +21,10 @@
 //! upper bound against an arbitrary future tokenizer: `estimate_tokens =
 //! bytes ÷ TOKEN_BYTES` is a documented heuristic that comfortably covers the
 //! tokenizers in use (CJK ≈1 token/3 bytes, English ≈1 token/4 bytes, escaped
-//! entities expand bytes) but makes no absolute guarantee. The token cap
-//! applies to **body rows only** — the constant wrapper header/footer are
-//! excluded from the body token budget. `max_tokens = Some(0)` renders **no
-//! body rows** (the constant wrapper may still be emitted). Aggregated counts
-//! are exposed in [`RenderedSkills`].
+//! entities expand bytes) but makes no absolute guarantee. The token cap and
+//! `RenderedSkills::tokens_est` both apply to **body rows only** — the constant
+//! wrapper header/footer are excluded. `max_tokens = Some(0)` renders **no body
+//! rows** (the constant wrapper may still be emitted).
 
 use xai_grok_tools::implementations::skills::types::SkillScope;
 
@@ -81,7 +80,11 @@ impl std::fmt::Debug for LoadedSkill {
 #[derive(Clone, Default)]
 pub struct RenderedSkills {
     pub text: String,
+    /// Unicode character count of `text` (wrapper + body rows).
     pub chars: usize,
+    /// Body-row token estimate (`bytes ÷ TOKEN_BYTES` heuristic for the body
+    /// rows only; the constant wrapper header/footer are excluded, matching the
+    /// body-row token budget semantics).
     pub tokens_est: usize,
     pub truncated_bodies: usize,
     pub dropped_for_aggregate: usize,
@@ -234,11 +237,12 @@ pub fn render_skills(loaded: &[LoadedSkill], budgets: &RenderBudgets) -> Rendere
     text.push_str(footer);
 
     let chars = used_chars.saturating_add(footer_chars);
-    let bytes = text.len();
     RenderedSkills {
         text,
         chars,
-        tokens_est: estimate_tokens(bytes),
+        // Body-row token estimate (wrapper header/footer excluded), aligned with
+        // the body-row token budget semantics.
+        tokens_est: estimate_tokens(used_body_bytes),
         truncated_bodies,
         dropped_for_aggregate,
     }
@@ -390,13 +394,17 @@ mod tests {
     #[test]
     fn token_budget_caps_content_rows() {
         // The token budget applies to body rows only (the constant wrapper
-        // header/footer are excluded): a cap below the row's own token estimate
-        // drops the row.
-        let body_tokens = estimate_tokens("hello world".len());
+        // header/footer are excluded). Each "body row" includes its per-skill
+        // markup (`<skill_source ...>...</skill_source>`); the wrapper header
+        // and footer are constant and excluded.
+        let expected_row = format!(
+            "<skill_source name=\"a\" scope=\"repo\" source=\"/r/x\">hello world</skill_source>\n"
+        );
+        let row_tokens = estimate_tokens(expected_row.len());
         let tight = RenderBudgets {
             per_body_chars: 100_000,
             max_total_chars: 100_000,
-            max_tokens: Some(body_tokens - 1),
+            max_tokens: Some(row_tokens - 1),
         };
         let out = render_skills(&[lm("a", SkillScope::Repo, "/r/x", "hello world")], &tight);
         assert!(
@@ -404,19 +412,19 @@ mod tests {
             "row must be dropped at tight cap"
         );
 
-        // A generous cap lets the row through, and the final token estimate is
-        // the documented bytes÷2 heuristic.
+        // A generous cap lets the row through, and the token estimate is the
+        // documented bytes÷2 heuristic for that row.
         let loose = RenderBudgets {
             per_body_chars: 100_000,
             max_total_chars: 100_000,
-            max_tokens: Some(body_tokens.saturating_add(100)),
+            max_tokens: Some(row_tokens.saturating_add(100)),
         };
         let out2 = render_skills(&[lm("a", SkillScope::Repo, "/r/x", "hello world")], &loose);
         assert!(out2.text.contains("hello world"));
         assert_eq!(
             out2.tokens_est,
-            estimate_tokens(out2.text.as_bytes().len()),
-            "tokens_est is bytes÷2"
+            estimate_tokens(expected_row.len()),
+            "tokens_est is the body-row estimate (wrapper header/footer excluded)"
         );
     }
 
@@ -440,6 +448,11 @@ mod tests {
         // Header+footer present, no body row, nothing over budget.
         assert!(!out.text.contains("hello"));
         assert!(out.text.contains("</skill_prime>"));
+        // Body-row token estimate is zero (wrapper excluded).
+        assert_eq!(
+            out.tokens_est, 0,
+            "no body rows ⇒ zero body-row token estimate"
+        );
     }
 
     #[test]

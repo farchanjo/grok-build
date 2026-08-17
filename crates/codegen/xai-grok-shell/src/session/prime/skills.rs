@@ -310,17 +310,18 @@ fn metadata_text(s: &SkillInfo) -> String {
     cap_chars(&joined, MAX_METADATA_TOTAL_CHARS)
 }
 
-/// Unique, path-free CandidateRow identifier (`scope|name|#hash`). The hash is a
-/// stable SHA-256 digest of the absolute path, so no absolute path (or home
-/// path) ever appears in candidate ids or `CandidateRow::Debug`.
+/// Unique, path-free CandidateRow identifier (`scope|name|#sha256`). The hash is
+/// the **full** SHA-256 digest (64 hex chars) of the absolute path, so no
+/// absolute/home path ever appears in candidate ids or `CandidateRow::Debug`,
+/// and same-name collisions across scopes/paths remain distinct.
 fn candidate_id(s: &SkillInfo) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"prime-candidate/v1\0");
     hasher.update(s.path.as_bytes());
     let digest = hasher.finalize();
-    let mut hex = String::with_capacity(16);
-    for b in &digest[..8] {
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in &digest[..] {
         hex.push_str(&format!("{b:02x}"));
     }
     format!("{}|{}|#{hex}", scope_label(s.scope), s.name)
@@ -487,31 +488,18 @@ pub async fn semantic_fill(
 }
 
 /// Trim `buf` to at most `max` bytes while preserving UTF-8 validity: backs up
-/// to the previous character boundary so a multibyte code point is never split.
+/// over continuation bytes (10xxxxxx) so a multibyte code point is never split.
+///
+/// After the back-up `end` is always a valid character boundary (either the
+/// start of the next code point, or `max` when `max` already lands on a
+/// boundary), so a complete preceding multibyte character is never truncated.
 fn utf8_prefix_trim(buf: &mut Vec<u8>, max: usize) {
     if buf.len() <= max {
         return;
     }
     let mut end = max;
-    // Back up over continuation bytes (10xxxxxx).
     while end > 0 && (buf[end] & 0xC0) == 0x80 {
         end -= 1;
-    }
-    if end > 0 {
-        let lead = buf[end - 1];
-        let need = if lead < 0x80 {
-            1
-        } else if lead < 0xE0 {
-            2
-        } else if lead < 0xF0 {
-            3
-        } else {
-            4
-        };
-        // If the lead byte does not fit within `max`, drop it entirely.
-        if (end - 1) + need > max {
-            end -= 1;
-        }
     }
     buf.truncate(end);
 }
@@ -980,6 +968,10 @@ mod tests {
         assert!(!id.contains("local/commit"), "path leaked into id: {id}");
         assert!(!id.contains("SKILL.md"), "path leaked into id: {id}");
         assert!(!id.starts_with('/'), "path leaked into id: {id}");
+        // Full SHA-256 digest (64 hex chars) for collision resistance.
+        assert!(id.contains('#'), "digest marker missing: {id}");
+        let hex_len = id.rsplit_once('#').map(|(_, h)| h.len()).unwrap_or(0);
+        assert_eq!(hex_len, 64, "full SHA-256 digest expected, got {id}");
     }
 
     // ── Semantic fill ─────────────────────────────────────────────────
@@ -1560,6 +1552,57 @@ mod tests {
         assert!(batch.loaded.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn openat_walk_rejects_intermediate_dir_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("SKILL.md"), "outside").unwrap();
+        let sub_dir = root.join("skills");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        // `skills/sub` is a symlink to an external directory.
+        symlink(outside.path(), sub_dir.join("sub")).unwrap();
+
+        let rel = Path::new("skills/sub/SKILL.md");
+        let fallback = root.join("skills/sub/SKILL.md");
+        let res = read_body_bounded(&root, rel, &fallback);
+        assert!(
+            res.is_err(),
+            "an intermediate-directory symlink must fail O_NOFOLLOW in the openat walk"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn intermediate_symlinked_dir_skill_refused_via_snapshot() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("SKILL.md"), "outside secret").unwrap();
+        let sub_dir = root.join("skills");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        symlink(outside.path(), sub_dir.join("sub")).unwrap();
+
+        let skills = vec![SkillInfo {
+            name: "sub".into(),
+            path: root
+                .join("skills/sub/SKILL.md")
+                .to_string_lossy()
+                .to_string(),
+            scope: SkillScope::Local,
+            ..SkillInfo::default()
+        }];
+        let refresh = refresher(skills.clone());
+        let cancel = CancellationToken::new();
+        let batch = load_and_revalidate(&skills, &[0], 1, &refresh, &[root.clone()], &cancel).await;
+        // The canonical path resolves outside the trusted root → refused.
+        assert_eq!(batch.drop_reasons, vec![PrimeDropReason::NotContained]);
+        assert!(batch.loaded.is_empty());
+    }
+
     #[test]
     fn utf8_prefix_trim_preserves_valid_utf8_at_cap_boundary() {
         let max = MAX_LOADED_BODY_BYTES as usize;
@@ -1571,6 +1614,37 @@ mod tests {
         utf8_prefix_trim(&mut buf, max);
         assert_eq!(buf.len(), max - 2, "must back up to a char boundary");
         assert!(String::from_utf8(buf).is_ok(), "result must be valid UTF-8");
+    }
+
+    #[test]
+    fn utf8_prefix_trim_exact_boundaries_2_3_4_byte_chars() {
+        // Helper: trim `bytes` at `max` and return the valid prefix as a String.
+        let trim = |bytes: &[u8], max: usize| {
+            let mut buf = bytes.to_vec();
+            utf8_prefix_trim(&mut buf, max);
+            String::from_utf8(buf).expect("trim must yield valid UTF-8")
+        };
+
+        // 2-byte char at the exact boundary: "éa" (C3 A9 61), max=2 → "é".
+        assert_eq!(trim("éa".as_bytes(), 2), "é");
+        // 3-byte char at the exact boundary: "你a" (E4 BD A0 61), max=3 → "你".
+        assert_eq!(trim("你a".as_bytes(), 3), "你");
+        // 4-byte char at the exact boundary: "🙂a" (F0 9F 99 82 61), max=4 → "🙂".
+        assert_eq!(trim("🙂a".as_bytes(), 4), "🙂");
+
+        // Mid-codepoint caps back up to the previous boundary without dropping a
+        // complete preceding multibyte char.
+        // 3-byte char split mid-codepoint: "你" (3 bytes), max=2 → "".
+        assert_eq!(trim("你".as_bytes(), 2), "");
+        // 4-byte char split mid-codepoint: "a🙂" (61 F0 9F 99 82), max=3 → "a".
+        assert_eq!(trim("a🙂".as_bytes(), 3), "a");
+        // 2-byte char split mid-codepoint: "é" (C3 A9), max=1 → "".
+        assert_eq!(trim("é".as_bytes(), 1), "");
+        // Complete preceding multibyte char is never truncated at a mid-cap after it:
+        // "éa" with max=2 keeps the full "é" (2 bytes), never just its lead byte.
+        let mut buf = "éa".as_bytes().to_vec();
+        utf8_prefix_trim(&mut buf, 2);
+        assert_eq!(buf, vec![0xC3, 0xA9], "complete 2-byte char must be kept");
     }
 
     #[tokio::test]

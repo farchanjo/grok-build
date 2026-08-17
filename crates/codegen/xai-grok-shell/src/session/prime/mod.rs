@@ -277,6 +277,10 @@ impl Drop for PrimeGate {
 }
 
 /// Run the bounded blocking inventory walk off the async executor, cancel-aware.
+///
+/// On cancellation the join-handle result is discarded; the detached blocking
+/// task still completes in the background but is hard-bounded (walk limits),
+/// performs no unsafe shared mutation, and its result is never used.
 async fn build_inventory_guarded(
     root: &Path,
     gate: &PrimeGate,
@@ -294,6 +298,45 @@ async fn build_inventory_guarded(
             Err(e) => Err(format!("inventory walk task error: {e}")),
         },
     }
+}
+
+/// Validate the caller-provided trusted roots concretely against the
+/// authoritative eligible skill snapshot.
+///
+/// Each root is canonicalized, must resolve to an absolute **directory**, and is
+/// deduplicated. A root is kept only if it is an ancestor of at least one
+/// eligible skill path from the authoritative snapshot — so the workspace root
+/// is trusted only when it actually contains an authoritative eligible
+/// `SKILL.md`, and an unrelated caller-supplied root cannot authorize any load.
+fn validated_roots(
+    trusted_roots: &[PathBuf],
+    workspace_root: &Path,
+    eligible_skills: &[SkillInfo],
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen = HashSet::new();
+    for r in trusted_roots
+        .iter()
+        .map(|r| r.as_path())
+        .chain(std::iter::once(workspace_root))
+    {
+        let canon = dunce::canonicalize(r).unwrap_or_else(|_| r.to_path_buf());
+        if !canon.is_absolute() || !canon.is_dir() {
+            continue;
+        }
+        if seen.insert(canon.clone()) {
+            roots.push(canon);
+        }
+    }
+    if roots.is_empty() {
+        return roots;
+    }
+    let skill_paths: Vec<PathBuf> = eligible_skills
+        .iter()
+        .map(|s| dunce::canonicalize(&s.path).unwrap_or_else(|_| PathBuf::from(&s.path)))
+        .collect();
+    roots.retain(|r| skill_paths.iter().any(|p| p.starts_with(r)));
+    roots
 }
 
 /// Run deterministic selection + safe render within `config` budgets.
@@ -397,15 +440,11 @@ pub async fn run_prime_selection(
 
     // ── Revalidate against a fresh snapshot + bounded body load (with
     //    backfill) ─────────────────────────────────────────────────────────
-    let canonical_roots: Vec<PathBuf> = input
-        .trusted_roots
-        .iter()
-        .map(|r| dunce::canonicalize(r).unwrap_or_else(|_| r.clone()))
-        .chain(std::iter::once(
-            dunce::canonicalize(input.workspace_root)
-                .unwrap_or_else(|_| input.workspace_root.to_path_buf()),
-        ))
-        .collect();
+    let canonical_roots = validated_roots(
+        input.trusted_roots,
+        input.workspace_root,
+        input.eligible_skills,
+    );
     let batch = skills::load_and_revalidate(
         input.eligible_skills,
         &order,
@@ -580,5 +619,57 @@ mod tests {
             .unwrap();
         assert_eq!(sel.budget_state.selected_names, vec!["a".to_string()]);
         assert!(sel.budget_state.dropped >= 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_config_returns_empty_not_cancelled() {
+        // PrimeInput::default() has enabled = false.
+        let input = PrimeInput::default();
+        let sel = run_prime_selection(&input, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!sel.cancelled, "disabled must not report cancelled");
+        assert!(sel.selected.is_empty());
+        assert!(sel.rendered.is_none());
+        assert!(sel.degradations.is_empty());
+    }
+
+    #[test]
+    fn validated_roots_ignore_unrelated_and_non_ancestors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let sdir = root.join("skills").join("a");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(sdir.join("SKILL.md"), "# A\n").unwrap();
+        let path = sdir.join("SKILL.md").to_string_lossy().to_string();
+        let a = SkillInfo {
+            name: "a".into(),
+            path,
+            ..SkillInfo::default()
+        };
+
+        // An unrelated trusted root is not an ancestor of any eligible skill →
+        // it is dropped; the workspace root (an ancestor) is retained.
+        let unrelated = tempfile::tempdir().unwrap();
+        let roots = validated_roots(
+            &[dunce::canonicalize(unrelated.path()).unwrap()],
+            &root,
+            &[a.clone()],
+        );
+        assert_eq!(roots, vec![root.clone()], "unrelated root must be dropped");
+
+        // The workspace root alone is retained only when it is an ancestor.
+        let roots = validated_roots(&[], &root, &[a.clone()]);
+        assert_eq!(roots, vec![root.clone()]);
+
+        // A workspace root that is not an ancestor of any eligible skill is
+        // dropped → nothing is loadable.
+        let other = tempfile::tempdir().unwrap();
+        let other_root = dunce::canonicalize(other.path()).unwrap();
+        let roots = validated_roots(&[], &other_root, &[a]);
+        assert!(
+            roots.is_empty(),
+            "non-ancestor workspace root must be dropped"
+        );
     }
 }
