@@ -201,6 +201,10 @@ pub struct ProviderMutationResult {
     /// When generation was stale, shell guidance for the client.
     pub stale: bool,
     pub guidance: Option<String>,
+    /// True when config and/or secrets were already durable but generation
+    /// bookkeeping failed or had to be force-reconciled. Clients must reload.
+    #[serde(default)]
+    pub partial_commit: bool,
 }
 
 /// Catalog summary for the Catalog page (secret-free).

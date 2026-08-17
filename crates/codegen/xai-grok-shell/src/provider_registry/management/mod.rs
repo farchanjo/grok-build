@@ -70,13 +70,15 @@ impl ProviderManagementService {
         &self.config_path
     }
 
-    /// Current durable generation (0 when missing).
+    /// Current effective generation (0 when missing).
     ///
-    /// Observes external `config.toml` changes: if the config fingerprint no
-    /// longer matches the value recorded at the last management bump, generation
-    /// is force-advanced so stale clients fail closed.
+    /// **Read-only:** never writes the generation sidecar. When `config.toml`
+    /// fingerprint diverges from the last recorded value, returns
+    /// `stored_generation + 1` so clients fail closed without racing a mutator
+    /// that already holds the lifecycle lock. Durable fingerprint advancement
+    /// happens only under the mutation lock.
     pub fn current_generation(&self) -> RegistryGeneration {
-        RegistryGeneration(self.reconcile_generation_with_config())
+        RegistryGeneration(self.effective_generation_readonly())
     }
 
     /// Load a secret-free list snapshot for the browse UI / CLI.
@@ -288,17 +290,9 @@ impl ProviderManagementService {
             ..Default::default()
         };
         match upsert_provider(&self.config_path, &pid, &patch, false) {
-            Ok(()) => match self.cas_bump_generation(req.expected_generation) {
-                Ok(next) => ProviderMutationResult {
-                    ok: true,
-                    id: pid.as_str().to_owned(),
-                    generation: RegistryGeneration(next),
-                    error: None,
-                    stale: false,
-                    guidance: None,
-                },
-                Err(msg) => stale_result(pid.as_str(), self.current_generation(), msg),
-            },
+            Ok(()) => {
+                self.finalize_after_durable_write(pid.as_str(), req.expected_generation, true)
+            }
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
     }
@@ -402,52 +396,52 @@ impl ProviderManagementService {
                 application_secret,
                 admin_secret,
             ) {
-                // Metadata may already be durable; always bump so clients reload.
-                let bumped = self.cas_bump_generation(req.expected_generation);
+                // Metadata may already be durable; force-record generation and
+                // return partial-commit (never pure stale).
+                let finalized =
+                    self.finalize_after_durable_write(&req.id, req.expected_generation, true);
                 return ProviderMutationResult {
                     ok: false,
                     id: req.id.clone(),
-                    generation: RegistryGeneration(
-                        bumped.unwrap_or_else(|_| read_generation_raw(&self.home).0),
-                    ),
+                    generation: finalized.generation,
                     error: Some(format!(
                         "metadata saved but credential update failed: {e}. Reload and retry."
                     )),
                     stale: false,
                     guidance: Some(STALE_GUIDANCE.into()),
+                    partial_commit: true,
                 };
             }
         }
 
         if !has_meta && !creds_changed {
             // No-op save: still OK, no bump required.
-            return ProviderMutationResult {
-                ok: true,
-                id: req.id,
-                generation: req.expected_generation,
-                error: None,
-                stale: false,
-                guidance: None,
-            };
+            return ok_result(req.id, req.expected_generation);
         }
 
-        match self.cas_bump_generation(req.expected_generation) {
-            Ok(next) => ProviderMutationResult {
-                ok: true,
-                id: pid.as_str().to_owned(),
-                generation: RegistryGeneration(next),
-                error: None,
-                stale: false,
-                guidance: None,
-            },
-            Err(msg) => stale_result(pid.as_str(), self.current_generation(), msg),
-        }
+        self.finalize_after_durable_write(
+            pid.as_str(),
+            req.expected_generation,
+            has_meta || creds_changed,
+        )
     }
 
     /// Clone metadata into a new id. Secrets and caches are never copied.
+    ///
+    /// Generation precheck is read-only here; nested `add`/`save` acquire the
+    /// mutation lock and re-validate under lock (no recursive flock).
     pub fn clone_provider(&self, req: ProviderCloneRequest) -> ProviderMutationResult {
-        if let Err(msg) = self.require_generation(req.expected_generation) {
-            return stale_result(&req.new_id, self.current_generation(), msg);
+        let current = self.current_generation();
+        if current.get() != req.expected_generation.get() {
+            return stale_result(
+                &req.new_id,
+                current,
+                format!(
+                    "stale generation: client has {}, registry has {}. {STALE_GUIDANCE}",
+                    req.expected_generation.get(),
+                    current.get()
+                ),
+            );
         }
         let source = match self.detail(&req.source_id) {
             Ok(d) => d,
@@ -551,17 +545,7 @@ impl ProviderManagementService {
             disable_provider(&self.config_path, &pid)
         };
         match result {
-            Ok(()) => match self.cas_bump_generation(expected) {
-                Ok(next) => ProviderMutationResult {
-                    ok: true,
-                    id: pid.as_str().to_owned(),
-                    generation: RegistryGeneration(next),
-                    error: None,
-                    stale: false,
-                    guidance: None,
-                },
-                Err(msg) => stale_result(pid.as_str(), self.current_generation(), msg),
-            },
+            Ok(()) => self.finalize_after_durable_write(pid.as_str(), expected, true),
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
     }
@@ -641,6 +625,9 @@ impl ProviderManagementService {
 
     /// Optional metadata remove for configured providers when impact allows.
     /// Does not auto-delete secrets/caches (never rename/delete legacy caches).
+    ///
+    /// Uses the same exclusive lifecycle lock + generation precheck + CAS bump
+    /// as add/save/enable.
     pub fn remove_metadata(
         &self,
         id: &str,
@@ -654,7 +641,11 @@ impl ProviderManagementService {
                 "refusing to remove without confirmation".into(),
             );
         }
-        if let Err(msg) = self.require_generation(expected) {
+        let _lock = match self.acquire_mutation_lock() {
+            Ok(l) => l,
+            Err(e) => return err_result(id, self.current_generation(), e),
+        };
+        if let Err(msg) = self.require_generation_locked(expected) {
             return stale_result(id, self.current_generation(), msg);
         }
         let impact = match self.reference_impact(id) {
@@ -675,7 +666,7 @@ impl ProviderManagementService {
             Err(e) => return err_result(id, self.current_generation(), e.to_string()),
         };
         match remove_provider(&self.config_path, &pid) {
-            Ok(()) => self.bump_ok(pid.as_str()),
+            Ok(()) => self.finalize_after_durable_write(pid.as_str(), expected, true),
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
     }
@@ -1245,12 +1236,9 @@ impl ProviderManagementService {
         }
     }
 
-    fn require_generation(&self, expected: RegistryGeneration) -> Result<(), String> {
-        self.require_generation_locked(expected)
-    }
-
     fn require_generation_locked(&self, expected: RegistryGeneration) -> Result<(), String> {
-        let current = self.reconcile_generation_with_config();
+        // Under lock: materialize any external fingerprint drift, then compare.
+        let current = self.reconcile_generation_locked()?;
         if current != expected.get() {
             return Err(format!(
                 "stale generation: client has {}, registry has {}. {STALE_GUIDANCE}",
@@ -1261,22 +1249,8 @@ impl ProviderManagementService {
         Ok(())
     }
 
-    fn bump_ok(&self, id: &str) -> ProviderMutationResult {
-        let expected = read_generation_raw(&self.home).0;
-        match self.cas_bump_generation(RegistryGeneration(expected)) {
-            Ok(next) => ProviderMutationResult {
-                ok: true,
-                id: id.to_owned(),
-                generation: RegistryGeneration(next),
-                error: None,
-                stale: false,
-                guidance: None,
-            },
-            Err(msg) => stale_result(id, self.current_generation(), msg),
-        }
-    }
-
     /// Exclusive flock for mutation serialization (concurrent same-generation writers).
+    /// Callers must keep the returned `File` alive for the duration of the critical section.
     fn acquire_mutation_lock(&self) -> Result<File, String> {
         let path = self.home.join(LOCK_REL);
         if let Some(parent) = path.parent() {
@@ -1293,29 +1267,44 @@ impl ProviderManagementService {
         Ok(file)
     }
 
-    /// If config.toml hash diverged from the last recorded fingerprint, advance
-    /// generation so clients holding the old generation fail closed.
-    fn reconcile_generation_with_config(&self) -> u64 {
+    /// Read-only effective generation for list/detail/UI (never writes).
+    ///
+    /// When config fingerprint diverges, returns `stored + 1` so clients that
+    /// still hold the stored generation fail closed. Durable advancement is
+    /// deferred to the mutation lock.
+    fn effective_generation_readonly(&self) -> u64 {
         let (generation, stored_fp) = read_generation_raw(&self.home);
         let live_fp = config_fingerprint(&self.config_path);
         if stored_fp.is_empty() && generation == 0 {
-            // Fresh profile: record fingerprint without bumping.
-            write_generation_state(&self.home, generation, &live_fp);
-            return generation;
+            return 0;
         }
         if stored_fp != live_fp {
-            let next = generation.saturating_add(1);
-            write_generation_state(&self.home, next, &live_fp);
-            return next;
+            return generation.saturating_add(1);
         }
         generation
     }
 
-    /// Compare-and-swap generation bump: only succeeds when the on-disk
-    /// generation still equals `expected`. Call under the mutation lock after
-    /// durable writes. Does **not** run fingerprint reconcile (that would race
-    /// with our own config write); it records the live config fingerprint with
-    /// the new generation.
+    /// Under mutation lock: if fingerprint diverged, advance and persist generation.
+    fn reconcile_generation_locked(&self) -> Result<u64, String> {
+        let (generation, stored_fp) = read_generation_raw(&self.home);
+        let live_fp = config_fingerprint(&self.config_path);
+        if stored_fp.is_empty() && generation == 0 {
+            // First observation: record fingerprint without bumping.
+            write_generation_state(&self.home, generation, &live_fp)?;
+            return Ok(generation);
+        }
+        if stored_fp != live_fp {
+            let next = generation.saturating_add(1);
+            write_generation_state(&self.home, next, &live_fp)?;
+            return Ok(next);
+        }
+        Ok(generation)
+    }
+
+    /// Compare-and-swap generation bump after durable mutation. Call under lock.
+    ///
+    /// Records live config fingerprint with the new generation. Propagates I/O
+    /// failures from the generation sidecar write.
     fn cas_bump_generation(&self, expected: RegistryGeneration) -> Result<u64, String> {
         let (current, _) = read_generation_raw(&self.home);
         if current != expected.get() {
@@ -1327,7 +1316,62 @@ impl ProviderManagementService {
         }
         let next = current.saturating_add(1);
         let fp = config_fingerprint(&self.config_path);
-        write_generation_state(&self.home, next, &fp);
+        write_generation_state(&self.home, next, &fp)?;
+        Ok(next)
+    }
+
+    /// After config and/or secrets were durably mutated under the lock, advance
+    /// generation. Never reports pure stale for a write that already committed:
+    /// on CAS/I/O failure, force-records a live generation and marks partial_commit.
+    fn finalize_after_durable_write(
+        &self,
+        id: &str,
+        expected: RegistryGeneration,
+        durable_changed: bool,
+    ) -> ProviderMutationResult {
+        if !durable_changed {
+            return ok_result(id.to_owned(), expected);
+        }
+        match self.cas_bump_generation(expected) {
+            Ok(next) => ok_result(id.to_owned(), RegistryGeneration(next)),
+            Err(msg) => {
+                // Durable state already changed under the lock. Force-record so
+                // clients must reload rather than treating this as a no-op stale miss.
+                match self.force_record_generation_after_commit() {
+                    Ok(live) => ProviderMutationResult {
+                        ok: true,
+                        id: id.to_owned(),
+                        generation: RegistryGeneration(live),
+                        error: None,
+                        stale: false,
+                        guidance: Some(format!(
+                            "Mutation committed; generation bookkeeping recovered after: {msg}. Reload."
+                        )),
+                        partial_commit: true,
+                    },
+                    Err(io_err) => ProviderMutationResult {
+                        ok: false,
+                        id: id.to_owned(),
+                        generation: RegistryGeneration(self.effective_generation_readonly()),
+                        error: Some(format!(
+                            "Mutation may be durable but generation sidecar update failed: \
+                             {msg}; recovery write failed: {io_err}. Reload and inspect."
+                        )),
+                        stale: false,
+                        guidance: Some(STALE_GUIDANCE.into()),
+                        partial_commit: true,
+                    },
+                }
+            }
+        }
+    }
+
+    /// Force-write next generation with live fingerprint under the mutation lock.
+    fn force_record_generation_after_commit(&self) -> Result<u64, String> {
+        let (current, _) = read_generation_raw(&self.home);
+        let next = current.saturating_add(1);
+        let fp = config_fingerprint(&self.config_path);
+        write_generation_state(&self.home, next, &fp)?;
         Ok(next)
     }
 
@@ -1656,21 +1700,60 @@ fn read_generation_raw(home: &Path) -> (u64, String) {
     }
 }
 
-fn write_generation_state(home: &Path, generation: u64, fingerprint: &str) {
+/// Durable generation sidecar write. Propagates create/write/sync/rename errors.
+/// Uses a unique temp name (pid + nonce) so concurrent writers never share `.tmp`.
+fn write_generation_state(home: &Path, generation: u64, fingerprint: &str) -> Result<(), String> {
     let path = home.join(GENERATION_REL);
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|e| format!("create generation parent: {e}"))?;
     }
-    let tmp = path.with_extension("tmp");
-    if let Ok(mut f) = fs::File::create(&tmp) {
-        let _ = write!(f, "{generation}\n{fingerprint}\n");
-        let _ = f.sync_all();
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), nonce));
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        let _ = fs::rename(&tmp, &path);
+        let mut f = options
+            .open(&tmp)
+            .map_err(|e| format!("create generation temp: {e}"))?;
+        write!(f, "{generation}\n{fingerprint}\n")
+            .map_err(|e| format!("write generation temp: {e}"))?;
+        f.flush()
+            .map_err(|e| format!("flush generation temp: {e}"))?;
+        f.sync_all()
+            .map_err(|e| format!("sync generation temp: {e}"))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs::metadata(&tmp).map_err(|e| format!("stat generation temp: {e}"))?;
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o777 != 0o600 {
+            perms.set_mode(0o600);
+            fs::set_permissions(&tmp, perms).map_err(|e| format!("chmod generation temp: {e}"))?;
+        }
+    }
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("rename generation sidecar: {e}")
+    })?;
+    Ok(())
+}
+
+fn ok_result(id: String, generation: RegistryGeneration) -> ProviderMutationResult {
+    ProviderMutationResult {
+        ok: true,
+        id,
+        generation,
+        error: None,
+        stale: false,
+        guidance: None,
+        partial_commit: false,
     }
 }
 
@@ -1682,6 +1765,7 @@ fn stale_result(id: &str, generation: RegistryGeneration, msg: String) -> Provid
         error: Some(msg),
         stale: true,
         guidance: Some(STALE_GUIDANCE.into()),
+        partial_commit: false,
     }
 }
 
@@ -1693,6 +1777,7 @@ fn err_result(id: &str, generation: RegistryGeneration, msg: String) -> Provider
         error: Some(msg),
         stale: false,
         guidance: None,
+        partial_commit: false,
     }
 }
 
@@ -1826,6 +1911,110 @@ mod tests {
         let impact = s.reference_impact("lab").unwrap();
         assert!(impact.can_remove);
         assert!(!impact.secrets_present);
+    }
+
+    #[test]
+    fn readonly_generation_does_not_write_on_external_config_edit() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        assert!(
+            s.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        let after_add = s.current_generation().get();
+        let (disk_gen, disk_fp) = read_generation_raw(dir.path());
+        assert_eq!(disk_gen, after_add);
+        assert!(!disk_fp.is_empty());
+
+        // External edit of config without going through management.
+        let cfg = dir.path().join("config.toml");
+        let mut text = fs::read_to_string(&cfg).unwrap();
+        text.push_str("\n# external\n");
+        fs::write(&cfg, text).unwrap();
+
+        // Read-only path reports advanced generation but does not rewrite sidecar.
+        let logical = s.current_generation().get();
+        assert_eq!(logical, after_add + 1);
+        let (disk_gen2, disk_fp2) = read_generation_raw(dir.path());
+        assert_eq!(
+            disk_gen2, after_add,
+            "readonly must not mutate generation file"
+        );
+        assert_eq!(disk_fp2, disk_fp);
+
+        // Mutator with stale expected fails closed without writing secrets/metadata.
+        let stale = s.save(ProviderSaveRequest {
+            id: "lab".into(),
+            expected_generation: RegistryGeneration(after_add),
+            patch: ProviderSavePatch {
+                display_name: Some("nope".into()),
+                ..Default::default()
+            },
+        });
+        assert!(!stale.ok);
+        assert!(stale.stale);
+
+        // Mutator with logical generation materializes under lock and succeeds.
+        let ok = s.save(ProviderSaveRequest {
+            id: "lab".into(),
+            expected_generation: RegistryGeneration(logical),
+            patch: ProviderSavePatch {
+                display_name: Some("yes".into()),
+                ..Default::default()
+            },
+        });
+        assert!(ok.ok, "{:?}", ok.error);
+        assert!(!ok.partial_commit);
+        assert_eq!(
+            s.detail("lab").unwrap().display_name.as_deref(),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn remove_metadata_uses_lock_and_generation() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        assert!(
+            s.add(ProviderAddRequest {
+                id: "gone".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        let g = s.current_generation();
+        let removed = s.remove_metadata("gone", g, true);
+        assert!(removed.ok, "{:?}", removed.error);
+        assert!(s.detail("gone").is_err());
+        // Stale remove fails closed.
+        let again = s.remove_metadata("gone", g, true);
+        assert!(!again.ok);
+    }
+
+    #[test]
+    fn generation_write_error_propagates_not_fake_success() {
+        // Exercise write_generation_state error path via invalid parent simulation:
+        // write into a path where home is a file, not a directory.
+        let dir = TempDir::new().unwrap();
+        let file_home = dir.path().join("not_a_dir");
+        fs::write(&file_home, b"x").unwrap();
+        let err = write_generation_state(&file_home, 1, "abc");
+        assert!(err.is_err(), "must fail when home is not a directory");
     }
 
     #[test]
