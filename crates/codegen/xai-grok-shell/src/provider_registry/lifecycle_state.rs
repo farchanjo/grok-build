@@ -271,13 +271,18 @@ pub fn lifecycle_state_path(home: &Path) -> PathBuf {
     home.join(LIFECYCLE_STATE_REL)
 }
 
-/// Load lifecycle state (empty when missing). Corrupt files fail closed.
+/// Load lifecycle state (empty when missing). Corrupt/symlink files fail closed.
 pub fn load_lifecycle_state(home: &Path) -> Result<ProviderLifecycleState, LifecycleStateError> {
     let path = lifecycle_state_path(home);
-    match fs::metadata(&path) {
+    match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(ProviderLifecycleState::empty()),
         Err(e) => Err(LifecycleStateError::Io(e.to_string())),
         Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(LifecycleStateError::Io(
+                    "refusing to read lifecycle state through a symlink".into(),
+                ));
+            }
             if meta.len() > MAX_STATE_BYTES {
                 return Err(LifecycleStateError::Corrupt(format!(
                     "state file exceeds {} bytes",
@@ -361,9 +366,24 @@ pub fn store_lifecycle_state(
     Ok(())
 }
 
-/// Load-or-empty, apply `f`, store when `f` returns Ok(true) or always stores
-/// when the mutation returns a value requiring persistence.
+/// Load-or-empty, apply `f`, store when dirty. Takes the shared lifecycle flock
+/// so concurrent writers (CLI + TUI + leader) cannot lose updates even if they
+/// bypass `ProviderManagementService` (self-enforcing lock).
+///
+/// Do **not** call this while already holding `ProviderManagementService`'s
+/// mutation lock (same flock path) — use [`with_lifecycle_state_mut_unlocked`]
+/// under that lock to avoid deadlock.
 pub fn with_lifecycle_state_mut<T>(
+    home: &Path,
+    f: impl FnOnce(&mut ProviderLifecycleState) -> Result<(T, bool), LifecycleStateError>,
+) -> Result<T, LifecycleStateError> {
+    let _lock = acquire_lifecycle_flock(home)?;
+    with_lifecycle_state_mut_unlocked(home, f)
+}
+
+/// Same as [`with_lifecycle_state_mut`] but assumes the caller already holds
+/// the shared lifecycle flock (management mutation lock).
+pub fn with_lifecycle_state_mut_unlocked<T>(
     home: &Path,
     f: impl FnOnce(&mut ProviderLifecycleState) -> Result<(T, bool), LifecycleStateError>,
 ) -> Result<T, LifecycleStateError> {
@@ -373,6 +393,25 @@ pub fn with_lifecycle_state_mut<T>(
         store_lifecycle_state(home, &state)?;
     }
     Ok(out)
+}
+
+fn acquire_lifecycle_flock(home: &Path) -> Result<std::fs::File, LifecycleStateError> {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    let lock_path = home.join("state/provider_lifecycle.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| LifecycleStateError::Io(e.to_string()))?;
+    }
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| LifecycleStateError::Io(format!("lifecycle lock: {e}")))?;
+    lock_file
+        .lock_exclusive()
+        .map_err(|e| LifecycleStateError::Io(format!("lifecycle lock: {e}")))?;
+    Ok(lock_file)
 }
 
 /// Stable built-in incarnation for product providers.

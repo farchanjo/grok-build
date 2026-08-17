@@ -417,11 +417,15 @@ async fn run_provider_cli(args: &ProviderCliArgs) -> Result<()> {
                     yes,
                     remove_secrets,
                     remove_caches,
+                    force,
+                    typed_id,
                 } => ProviderLifecycleCommand::Remove {
                     id: id.clone(),
                     config: None,
                     remove_secrets: *remove_secrets,
                     remove_caches: *remove_caches,
+                    force: *force,
+                    typed_id: typed_id.clone(),
                     yes: *yes,
                 },
                 ProviderCliCommand::SetKey { id, from_env } => ProviderLifecycleCommand::SetKey {

@@ -174,7 +174,19 @@ fn resolve_for_models_manager_with_selection_projected(
         .or_else(|| crate::agent::config::find_model_by_id(&models, canonical_selection_id));
     let resolved = entry.and_then(|m| m.model_provider.clone());
 
-    let service = ProviderService::from_model_providers(&cfg.model_providers).ok();
+    let service = ProviderService::from_model_providers(&cfg.model_providers)
+        .ok()
+        .map(|svc| {
+            if let Some(home) = grok_home {
+                let registry_gen = crate::provider_registry::ProviderManagementService::new(home)
+                    .current_generation()
+                    .get();
+                svc.with_lifecycle_incarnations(home)
+                    .with_generation(registry_gen)
+            } else {
+                svc
+            }
+        });
     let registry_generation = service.as_ref().map(|s| s.generation()).unwrap_or(0);
 
     let provider_id = resolved.as_ref().map(|r| r.id.clone());
@@ -194,6 +206,31 @@ fn resolve_for_models_manager_with_selection_projected(
         .as_deref()
         .and_then(|id| cfg.model_providers.get(id));
 
+    // Shared production chokepoint: disabled/tombstoned/corrupt lifecycle fail
+    // closed for every main/auxiliary resolve that supplies grok_home.
+    if let (Some(home), Some(svc), Some(pid)) =
+        (grok_home, service.as_ref(), provider_id.as_deref())
+    {
+        use crate::provider_registry::route_guard::{RouteGuardRequest, assert_route_usable};
+        let guard = RouteGuardRequest {
+            provider_instance_id: pid,
+            provenance_incarnation: descriptor_incarnation,
+            session_registry_generation: Some(registry_generation).filter(|g| *g != 0),
+            is_retry: false,
+        };
+        if let Err(e) = assert_route_usable(home, svc, &guard) {
+            tracing::warn!(
+                provider = %pid,
+                error = %e,
+                category = e.category().as_str(),
+                "provider route guard blocked route resolution"
+            );
+            // Return legacy non-authoritative context so callers cannot treat
+            // this as a live exact route for retries / matches_live.
+            return ProviderRouteContext::legacy_from_config(inference);
+        }
+    }
+
     resolve_production_route_context(RouteResolutionInputs {
         inference,
         resolved: resolved.as_ref(),
@@ -204,6 +241,49 @@ fn resolve_for_models_manager_with_selection_projected(
         descriptor_credential_route,
         grok_home,
     })
+}
+
+/// Explicit next-request / retry boundary check for an already-resolved route.
+///
+/// Call before starting a new turn or any inference retry. In-flight first
+/// attempts may finish without this; every retry and every subsequent turn
+/// must re-check.
+pub fn assert_live_route_usable(
+    home: &Path,
+    route: &ProviderRouteContext,
+    is_retry: bool,
+) -> Result<(), crate::provider_registry::route_guard::RouteGuardError> {
+    use crate::agent::model_providers::parse_model_providers;
+    use crate::provider_registry::route_guard::{RouteGuardRequest, assert_route_usable};
+    use crate::provider_registry::{ProviderManagementService, ProviderService};
+
+    let registry_gen = ProviderManagementService::new(home)
+        .current_generation()
+        .get();
+    let (entries, _) = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(raw) => match toml::from_str::<toml::Value>(&raw) {
+            Ok(val) => parse_model_providers(&val),
+            Err(_) => (indexmap::IndexMap::new(), Vec::new()),
+        },
+        Err(_) => (indexmap::IndexMap::new(), Vec::new()),
+    };
+    let service = ProviderService::from_model_providers(&entries)
+        .map(|s| {
+            s.with_lifecycle_incarnations(home)
+                .with_generation(registry_gen)
+        })
+        .map_err(
+            |_| crate::provider_registry::route_guard::RouteGuardError::ProviderMissing {
+                id: route.instance_id().to_owned(),
+            },
+        )?;
+    let req = RouteGuardRequest {
+        provider_instance_id: route.instance_id(),
+        provenance_incarnation: route.incarnation(),
+        session_registry_generation: Some(route.registry_generation()).filter(|g| *g != 0),
+        is_retry,
+    };
+    assert_route_usable(home, &service, &req)
 }
 
 /// Pick the descriptor route that matches the live API surface / base URL.

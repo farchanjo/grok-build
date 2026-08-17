@@ -66,6 +66,7 @@ pub enum EditorField {
     ForceRemove,
     ClearAppOnRemove,
     ClearAdminOnRemove,
+    ClearOauthOnRemove,
     ClearCacheOnRemove,
     ConfirmTypedId,
     ConflictReload,
@@ -119,6 +120,7 @@ impl EditorField {
             Self::ForceRemove => "Force remove (typed id)",
             Self::ClearAppOnRemove => "Clear application key on force remove",
             Self::ClearAdminOnRemove => "Clear admin key on force remove",
+            Self::ClearOauthOnRemove => "Clear OAuth slot on force remove",
             Self::ClearCacheOnRemove => "Clear caches on force remove",
             Self::ConfirmTypedId => "Type exact provider id to force remove",
             Self::ConflictReload => "Reload (discard local edits)",
@@ -191,6 +193,7 @@ fn fields_for_page(page: ProviderEditorPage) -> &'static [EditorField] {
             EditorField::ForceRemove,
             EditorField::ClearAppOnRemove,
             EditorField::ClearAdminOnRemove,
+            EditorField::ClearOauthOnRemove,
             EditorField::ClearCacheOnRemove,
             EditorField::ConfirmTypedId,
             EditorField::Clone,
@@ -229,7 +232,10 @@ pub struct ProviderEditorState {
     pub force_remove_typed_id: String,
     pub force_clear_app: bool,
     pub force_clear_admin: bool,
+    pub force_clear_oauth: bool,
     pub force_clear_cache: bool,
+    /// Outstanding mutation operation id (late-async discard).
+    pub pending_operation_id: Option<String>,
     /// Stale multi-client conflict (safe field names only).
     pub conflict: Option<xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo>,
 }
@@ -280,8 +286,10 @@ impl ProviderEditorState {
             force_remove_typed_id: String::new(),
             force_clear_app: false,
             force_clear_admin: false,
+            force_clear_oauth: false,
             force_clear_cache: false,
             conflict: None,
+            pending_operation_id: None,
         }
     }
 
@@ -628,6 +636,7 @@ pub enum EditorCommand {
         typed_id: String,
         clear_app: bool,
         clear_admin: bool,
+        clear_oauth: bool,
         clear_cache: bool,
     },
     ConflictReload,
@@ -752,6 +761,7 @@ fn activate_field(state: &mut ProviderEditorState) -> EditorOutcome {
                 | EditorField::ForceRemove
                 | EditorField::ClearAppOnRemove
                 | EditorField::ClearAdminOnRemove
+                | EditorField::ClearOauthOnRemove
                 | EditorField::ClearCacheOnRemove
                 | EditorField::ConfirmTypedId
                 | EditorField::ConflictReload
@@ -819,6 +829,10 @@ fn activate_field(state: &mut ProviderEditorState) -> EditorOutcome {
             state.force_clear_admin = !state.force_clear_admin;
             EditorOutcome::Changed
         }
+        EditorField::ClearOauthOnRemove => {
+            state.force_clear_oauth = !state.force_clear_oauth;
+            EditorOutcome::Changed
+        }
         EditorField::ClearCacheOnRemove => {
             state.force_clear_cache = !state.force_clear_cache;
             EditorOutcome::Changed
@@ -842,6 +856,7 @@ fn activate_field(state: &mut ProviderEditorState) -> EditorOutcome {
                 typed_id: state.force_remove_typed_id.clone(),
                 clear_app: state.force_clear_app,
                 clear_admin: state.force_clear_admin,
+                clear_oauth: state.force_clear_oauth,
                 clear_cache: state.force_clear_cache,
             })
         }
@@ -1331,6 +1346,7 @@ fn field_value_display(state: &ProviderEditorState, field: EditorField) -> Strin
         }
         EditorField::ClearAppOnRemove => yn(state.force_clear_app).into(),
         EditorField::ClearAdminOnRemove => yn(state.force_clear_admin).into(),
+        EditorField::ClearOauthOnRemove => yn(state.force_clear_oauth).into(),
         EditorField::ClearCacheOnRemove => yn(state.force_clear_cache).into(),
         EditorField::ConfirmTypedId => {
             if state.force_remove_typed_id.is_empty() {

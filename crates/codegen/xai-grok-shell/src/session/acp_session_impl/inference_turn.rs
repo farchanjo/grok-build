@@ -1201,6 +1201,19 @@ impl SessionActor {
             selection_model_id.0.as_ref(),
             grok_home,
         );
+        // Explicit next-turn boundary: re-check live registry before starting.
+        if let Some(home) = grok_home
+            && let Err(e) =
+                crate::session::route_context::assert_live_route_usable(home, &route, false)
+        {
+            tracing::error!(
+                error = %e,
+                category = e.category().as_str(),
+                "provider route unusable for turn; sampler not updated"
+            );
+            // Do not install a blocked route for sampling.
+            return;
+        }
         *self.route_context.borrow_mut() = Some(route.clone());
         self.sampler_handle.update_config_with_route_context(
             sampler_config,

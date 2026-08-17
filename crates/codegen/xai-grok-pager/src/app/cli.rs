@@ -59,6 +59,12 @@ pub enum ProviderCliCommand {
         remove_secrets: bool,
         #[arg(long)]
         remove_caches: bool,
+        /// Forced remove with incarnation tombstone (requires `--typed-id`).
+        #[arg(long)]
+        force: bool,
+        /// Exact typed provider id for `--force` (must equal `id`).
+        #[arg(long)]
+        typed_id: Option<String>,
     },
     /// Connect or re-authenticate a provider (opens interactive auth when needed).
     Connect {

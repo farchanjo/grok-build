@@ -90,6 +90,66 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
     }
 }
 
+/// Handle `x.ai/providers/update` — registry generation broadcast.
+///
+/// Version-tolerant: unknown optional fields are ignored. Clean `/providers`
+/// list reloads the shell snapshot; a dirty open editor enters conflict mode
+/// without clobbering local drafts.
+pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    #[derive(Deserialize, Default)]
+    struct ProvidersUpdate {
+        #[serde(default)]
+        schema_version: u32,
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        changed_ids: Vec<String>,
+        #[serde(default)]
+        changed_fields: Vec<String>,
+    }
+    let update: ProvidersUpdate = serde_json::from_str(notif.params.get()).unwrap_or_default();
+    tracing::info!(
+        generation = update.generation,
+        schema_version = update.schema_version,
+        changed = ?update.changed_ids,
+        "providers updated via x.ai/providers/update"
+    );
+    for agent in app.agents.values_mut() {
+        let Some(crate::views::modal::ActiveModal::Providers { state }) =
+            agent.active_modal.as_mut()
+        else {
+            continue;
+        };
+        // Dirty editor for a changed id → conflict, keep draft.
+        if let Some(ed) = state.editor_mut() {
+            let targets_this = update.changed_ids.is_empty()
+                || update.changed_ids.iter().any(|id| id == &ed.detail.id);
+            let gen_advanced = update.generation > ed.detail.generation.get();
+            if targets_this && gen_advanced {
+                ed.enter_conflict(
+                    xai_grok_shell::provider_registry::management::dto::ProviderConflictInfo {
+                        provider_id: ed.detail.id.clone(),
+                        client_generation: ed.detail.generation,
+                        live_generation:
+                            xai_grok_shell::provider_registry::management::dto::RegistryGeneration(
+                                update.generation,
+                            ),
+                        changed_fields: update.changed_fields.clone(),
+                        guidance: "Registry generation advanced. Reload to discard local edits, or Clone into a new id.".into(),
+                    },
+                );
+            }
+        } else {
+            // Clean list: prompt reload (user presses r / reopens).
+            state.management_message = Some("Provider registry updated — press r to reload".into());
+        }
+        if update.generation > 0 {
+            state.list_generation = update.generation;
+        }
+    }
+    true
+}
+
 /// Handle `x.ai/settings/update` — remote settings refreshed on `/new`.
 pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(update) = serde_json::from_str::<PagerSettingsUpdate>(notif.params.get()) else {

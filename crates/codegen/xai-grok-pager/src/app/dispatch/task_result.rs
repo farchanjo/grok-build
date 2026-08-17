@@ -1351,6 +1351,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             }
                         }
                         ProviderManagementResult::Mutation(result) => {
+                            // Correlate by provider id (+ operation id when present).
+                            let editor_matches = state.editor_mut().is_some_and(|ed| {
+                                if ed.detail.id != result.id {
+                                    return false;
+                                }
+                                if let Some(ref op) = result.operation_id {
+                                    match ed.pending_operation_id.as_ref() {
+                                        Some(pending) if pending == op => true,
+                                        Some(_) => false, // late / wrong op
+                                        None => true,     // ops without id still apply by id
+                                    }
+                                } else {
+                                    true
+                                }
+                            });
                             if result.ok {
                                 state.list_generation = result.generation.get();
                                 let partial = if result.partial_commit {
@@ -1364,20 +1379,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     result.generation.get()
                                 ));
                                 state.management_error = None;
-                                if let Some(ed) = state.editor_mut() {
-                                    ed.conflict = None;
-                                }
-                                follow_up.push(crate::app::actions::Effect::ProviderOperation {
-                                    agent_id,
-                                    operation:
-                                        crate::app::actions::ProviderOperation::LoadListSnapshot,
-                                    repair: None,
-                                });
-                                // Full detail reload clears credential pending flags (Issue 3).
-                                if state
-                                    .editor_mut()
-                                    .is_some_and(|ed| ed.detail.id == result.id)
-                                {
+                                if editor_matches {
+                                    if let Some(ed) = state.editor_mut() {
+                                        ed.conflict = None;
+                                        ed.pending_operation_id = None;
+                                    }
                                     follow_up.push(
                                         crate::app::actions::Effect::ProviderOperation {
                                             agent_id,
@@ -1388,6 +1394,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                         },
                                     );
                                 }
+                                follow_up.push(crate::app::actions::Effect::ProviderOperation {
+                                    agent_id,
+                                    operation:
+                                        crate::app::actions::ProviderOperation::LoadListSnapshot,
+                                    repair: None,
+                                });
                             } else {
                                 let msg = result
                                     .error
@@ -1400,10 +1412,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                                     format!("{msg} — {guidance}")
                                 };
                                 state.management_error = Some(full.clone());
-                                if let Some(ed) = state.editor_mut() {
-                                    ed.error = Some(full);
-                                    if let Some(conflict) = result.conflict.clone() {
-                                        ed.enter_conflict(conflict);
+                                if editor_matches {
+                                    if let Some(ed) = state.editor_mut() {
+                                        ed.error = Some(full);
+                                        ed.pending_operation_id = None;
+                                        if let Some(conflict) = result.conflict.clone() {
+                                            if conflict.provider_id == ed.detail.id {
+                                                ed.enter_conflict(conflict);
+                                            }
+                                        }
                                     }
                                 }
                             }

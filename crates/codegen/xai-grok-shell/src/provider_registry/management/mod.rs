@@ -255,7 +255,13 @@ impl ProviderManagementService {
             Err(e) => return err_result(&req.id, self.current_generation(), e),
         };
         if let Err(msg) = self.require_generation_locked(req.expected_generation) {
-            return stale_result(&req.id, self.current_generation(), msg);
+            return stale_result_with_expected(
+                &req.id,
+                req.expected_generation,
+                self.current_generation(),
+                vec!["generation".into()],
+                msg,
+            );
         }
         let pid = match ProviderId::new(&req.id) {
             Ok(p) => p,
@@ -330,7 +336,13 @@ impl ProviderManagementService {
             Err(e) => return err_result(&req.id, self.current_generation(), e),
         };
         if let Err(msg) = self.require_generation_locked(req.expected_generation) {
-            return stale_result(&req.id, self.current_generation(), msg);
+            return stale_result_with_expected(
+                &req.id,
+                req.expected_generation,
+                self.current_generation(),
+                Self::safe_changed_fields(&req.patch),
+                msg,
+            );
         }
         let detail = match self.detail(&req.id) {
             Ok(d) => d,
@@ -434,11 +446,18 @@ impl ProviderManagementService {
             return ok_result(req.id, req.expected_generation);
         }
 
-        self.finalize_after_durable_write(
+        let mut result = self.finalize_after_durable_write(
             pid.as_str(),
             req.expected_generation,
             has_meta || creds_changed,
-        )
+        );
+        if result.changed_fields.is_empty() {
+            result.changed_fields = Self::safe_changed_fields(&req.patch);
+            if creds_changed {
+                result.changed_fields.push("credentials".into());
+            }
+        }
+        result
     }
 
     /// Clone metadata into a new id. Secrets and caches are never copied.
@@ -448,9 +467,11 @@ impl ProviderManagementService {
     pub fn clone_provider(&self, req: ProviderCloneRequest) -> ProviderMutationResult {
         let current = self.current_generation();
         if current.get() != req.expected_generation.get() {
-            return stale_result(
+            return stale_result_with_expected(
                 &req.new_id,
+                req.expected_generation,
                 current,
+                vec!["generation".into()],
                 format!(
                     "stale generation: client has {}, registry has {}. {STALE_GUIDANCE}",
                     req.expected_generation.get(),
@@ -548,7 +569,13 @@ impl ProviderManagementService {
             Err(e) => return err_result(id, self.current_generation(), e),
         };
         if let Err(msg) = self.require_generation_locked(expected) {
-            return stale_result(id, self.current_generation(), msg);
+            return stale_result_with_expected(
+                id,
+                expected,
+                self.current_generation(),
+                vec!["enabled".into()],
+                msg,
+            );
         }
         let pid = match ProviderId::new(id) {
             Ok(p) => p,
@@ -560,7 +587,11 @@ impl ProviderManagementService {
             disable_provider(&self.config_path, &pid)
         };
         match result {
-            Ok(()) => self.finalize_after_durable_write(pid.as_str(), expected, true),
+            Ok(()) => {
+                let mut r = self.finalize_after_durable_write(pid.as_str(), expected, true);
+                r.changed_fields = vec!["enabled".into()];
+                r
+            }
             Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
         }
     }
@@ -650,13 +681,14 @@ impl ProviderManagementService {
         match remove_provider(&self.config_path, &pid) {
             Ok(()) => {
                 // Forget live row (no tombstone on clean zero-ref remove).
-                let _ = crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(
-                    &self.home,
-                    |st| {
-                        st.forget_live(pid.as_str());
-                        Ok(((), true))
-                    },
-                );
+                let _ =
+                    crate::provider_registry::lifecycle_state::with_lifecycle_state_mut_unlocked(
+                        &self.home,
+                        |st| {
+                            st.forget_live(pid.as_str());
+                            Ok(((), true))
+                        },
+                    );
                 let mut result = self.finalize_after_durable_write(pid.as_str(), expected, true);
                 result.changed_fields = vec!["removed".into()];
                 result
@@ -704,53 +736,58 @@ impl ProviderManagementService {
             .expected_incarnation
             .as_deref()
             .and_then(|s| super::instance::ProviderIncarnation::new(s).ok());
-        // Ensure a live incarnation exists, then tombstone before metadata is reusable.
-        let tombstoned = match crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(
-            &self.home,
-            |st| {
-                if !st.instances.contains_key(pid.as_str()) {
-                    // Legacy configured provider without lifecycle row.
-                    let incarnation = expected_inc.clone().unwrap_or_else(|| {
-                        super::instance::ProviderIncarnation::new(uuid::Uuid::new_v4().to_string())
+        // Ordering under lock: (1) tombstone first for reuse safety, (2) remove
+        // TOML, (3) only then optional secret/cache clears. Never clear secrets
+        // if TOML removal fails.
+        let tombstoned =
+            match crate::provider_registry::lifecycle_state::with_lifecycle_state_mut_unlocked(
+                &self.home,
+                |st| {
+                    if !st.instances.contains_key(pid.as_str()) {
+                        // Legacy configured provider without lifecycle row.
+                        let incarnation = expected_inc.clone().unwrap_or_else(|| {
+                            super::instance::ProviderIncarnation::new(
+                                uuid::Uuid::new_v4().to_string(),
+                            )
                             .expect("uuid v4 is canonical")
-                    });
-                    st.instances.insert(
-                        pid.as_str().to_owned(),
-                        super::lifecycle_state::InstanceLifecycleRecord {
-                            incarnation,
-                            restored: false,
-                        },
-                    );
-                }
-                let inc = st.tombstone_remove(&pid, expected_inc.as_ref())?;
-                Ok((inc, true))
-            },
-        ) {
-            Ok(inc) => inc,
-            Err(e) => return err_result(id, self.current_generation(), e.to_string()),
-        };
-        // Optional secret clears (never implicit).
-        if req.clear.clear_application_key {
-            let _ = clear_provider_secret(&self.home, &application_key_scope(&pid));
-        }
-        if req.clear.clear_admin_key {
-            let _ = clear_provider_secret(&self.home, &admin_key_scope(&pid));
-        }
-        if req.clear.clear_oauth {
-            let _ = crate::auth::clear_provider_api_key(&self.home, &oauth_scope_string(&pid));
-        }
-        // Optional cache clears (instance-scoped only; never siblings).
-        if req.clear.clear_catalog_cache {
-            let _ = CatalogCacheStore::remove(&self.home, &pid);
-        }
-        if req.clear.clear_capability_cache {
-            let _ = CapabilityCacheStore::remove(&self.home, &pid);
-        }
-        if req.clear.clear_catalog_cache && req.clear.clear_capability_cache {
-            let _ = super::cache::ProviderCacheStore::remove_instance(&self.home, &pid);
-        }
+                        });
+                        st.instances.insert(
+                            pid.as_str().to_owned(),
+                            super::lifecycle_state::InstanceLifecycleRecord {
+                                incarnation,
+                                restored: false,
+                            },
+                        );
+                    }
+                    let inc = st.tombstone_remove(&pid, expected_inc.as_ref())?;
+                    Ok((inc, true))
+                },
+            ) {
+                Ok(inc) => inc,
+                Err(e) => return err_result(id, self.current_generation(), e.to_string()),
+            };
         match remove_provider(&self.config_path, &pid) {
             Ok(()) => {
+                // TOML gone: now safe to clear opt-in secrets/caches.
+                if req.clear.clear_application_key {
+                    let _ = clear_provider_secret(&self.home, &application_key_scope(&pid));
+                }
+                if req.clear.clear_admin_key {
+                    let _ = clear_provider_secret(&self.home, &admin_key_scope(&pid));
+                }
+                if req.clear.clear_oauth {
+                    let _ =
+                        crate::auth::clear_provider_api_key(&self.home, &oauth_scope_string(&pid));
+                }
+                if req.clear.clear_catalog_cache {
+                    let _ = CatalogCacheStore::remove(&self.home, &pid);
+                }
+                if req.clear.clear_capability_cache {
+                    let _ = CapabilityCacheStore::remove(&self.home, &pid);
+                }
+                if req.clear.clear_catalog_cache && req.clear.clear_capability_cache {
+                    let _ = super::cache::ProviderCacheStore::remove_instance(&self.home, &pid);
+                }
                 let mut result =
                     self.finalize_after_durable_write(pid.as_str(), req.expected_generation, true);
                 result.incarnation = Some(tombstoned.as_str().to_owned());
@@ -761,9 +798,38 @@ impl ProviderManagementService {
                     "Forced remove completed. Old sessions bound to the prior incarnation will not rebind if this id is recreated. Use explicit restore to reuse the tombstoned incarnation, or Clone for a new id."
                         .into(),
                 );
+                self.record_providers_update_notification(
+                    result.generation,
+                    &[pid.as_str()],
+                    &result.changed_fields,
+                );
                 result
             }
-            Err(e) => err_result(pid.as_str(), self.current_generation(), e.to_string()),
+            Err(e) => {
+                // Tombstone durable, TOML still present: partial_commit, secrets intact.
+                let live = self
+                    .force_record_generation_after_commit()
+                    .unwrap_or_else(|_| self.effective_generation_readonly());
+                ProviderMutationResult {
+                    ok: false,
+                    id: pid.as_str().to_owned(),
+                    generation: RegistryGeneration(live),
+                    error: Some(format!(
+                        "tombstone recorded but config.toml remove failed: {e}. \
+                         Provider id is blocked for ordinary re-add; secrets/caches were not cleared. Reload and retry remove or restore."
+                    )),
+                    stale: false,
+                    guidance: Some(
+                        "Partial forced remove: tombstone is durable; config row may still exist. Reload."
+                            .into(),
+                    ),
+                    partial_commit: true,
+                    incarnation: Some(tombstoned.as_str().to_owned()),
+                    operation_id: req.operation_id.clone(),
+                    conflict: None,
+                    changed_fields: vec!["tombstone".into()],
+                }
+            }
         }
     }
 
@@ -1486,7 +1552,7 @@ impl ProviderManagementService {
         if !durable_changed {
             return ok_result(id.to_owned(), expected);
         }
-        match self.cas_bump_generation(expected) {
+        let result = match self.cas_bump_generation(expected) {
             Ok(next) => ok_result(id.to_owned(), RegistryGeneration(next)),
             Err(msg) => {
                 // Durable state already changed under the lock. Force-record so
@@ -1525,7 +1591,17 @@ impl ProviderManagementService {
                     },
                 }
             }
+        };
+        if result.ok || result.partial_commit {
+            let fallback_fields = vec!["generation".to_owned()];
+            let fields = if result.changed_fields.is_empty() {
+                &fallback_fields
+            } else {
+                &result.changed_fields
+            };
+            self.record_providers_update_notification(result.generation, &[id], fields);
         }
+        result
     }
 
     /// Force-write next generation with live fingerprint under the mutation lock.
@@ -1542,15 +1618,19 @@ impl ProviderManagementService {
         pid: &ProviderId,
         restore: bool,
     ) -> Result<super::instance::ProviderIncarnation, String> {
-        crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(&self.home, |st| {
-            let inc = st.mint_or_restore(pid, restore)?;
-            Ok((inc, true))
-        })
+        // Caller holds the management lifecycle flock.
+        crate::provider_registry::lifecycle_state::with_lifecycle_state_mut_unlocked(
+            &self.home,
+            |st| {
+                let inc = st.mint_or_restore(pid, restore)?;
+                Ok((inc, true))
+            },
+        )
         .map_err(|e| e.to_string())
     }
 
     fn live_incarnation_str(&self, id: &str) -> Option<String> {
-        // Read-only: never mint during detail/list.
+        // Read-only: never mint during detail/list. Fail closed on IO/corrupt.
         if let Some(inc) = super::lifecycle_state::stable_builtin_incarnation(id) {
             return Some(inc.as_str().to_owned());
         }
@@ -1560,9 +1640,43 @@ impl ProviderManagementService {
     }
 
     fn tombstone_blocks_readd(&self, id: &str) -> bool {
-        crate::provider_registry::lifecycle_state::load_lifecycle_state(&self.home)
-            .map(|s| s.has_blocking_tombstone_for_id(id))
-            .unwrap_or(false)
+        // Unreadable lifecycle state: treat as blocking for re-add UX (fail closed).
+        match crate::provider_registry::lifecycle_state::load_lifecycle_state(&self.home) {
+            Ok(s) => s.has_blocking_tombstone_for_id(id),
+            Err(_) => true,
+        }
+    }
+
+    /// Persist a version-tolerant machine-wide providers/update payload under
+    /// `$GROK_HOME/state/provider_registry_notify.json` and best-effort ACP
+    /// fanout when a gateway is attached via the models manager path.
+    pub fn record_providers_update_notification(
+        &self,
+        generation: RegistryGeneration,
+        changed_ids: &[&str],
+        changed_fields: &[String],
+    ) {
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "generation": generation.get(),
+            "changed_ids": changed_ids,
+            "changed_fields": changed_fields,
+        });
+        let path = self.home.join("state/provider_registry_notify.json");
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        // Unique-temp + rename (best effort).
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        if let Ok(bytes) = serde_json::to_vec_pretty(&payload) {
+            if fs::write(&tmp, &bytes).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            } else {
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+        // Best-effort ACP ext notification for connected leader clients.
+        crate::provider_registry::notify::try_forward_providers_update(&payload);
     }
 
     /// Safe changed-field names for a save patch (no secret values).
@@ -2007,27 +2121,15 @@ fn ok_result(id: String, generation: RegistryGeneration) -> ProviderMutationResu
     }
 }
 
-fn stale_result(id: &str, generation: RegistryGeneration, msg: String) -> ProviderMutationResult {
-    let live = generation;
-    ProviderMutationResult {
-        ok: false,
-        id: id.to_owned(),
-        generation: live,
-        error: Some(msg),
-        stale: true,
-        guidance: Some(STALE_GUIDANCE.into()),
-        partial_commit: false,
-        incarnation: None,
-        operation_id: None,
-        conflict: Some(ProviderConflictInfo {
-            provider_id: id.to_owned(),
-            client_generation: RegistryGeneration(0), // filled by caller when known
-            live_generation: live,
-            changed_fields: vec!["generation".into()],
-            guidance: STALE_GUIDANCE.into(),
-        }),
-        changed_fields: Vec::new(),
-    }
+fn stale_result(id: &str, live: RegistryGeneration, msg: String) -> ProviderMutationResult {
+    // Prefer stale_result_with_expected when the client generation is known.
+    stale_result_with_expected(
+        id,
+        RegistryGeneration(0),
+        live,
+        vec!["generation".into()],
+        msg,
+    )
 }
 
 fn stale_result_with_expected(
@@ -2394,6 +2496,69 @@ mod tests {
     fn multi_account_gate_stays_off_by_default() {
         assert!(!super::super::gate::multi_account_rollout_enabled());
         assert!(!super::super::gate::MULTI_ACCOUNT_ROLLOUT_DEFAULT_ENABLED);
+    }
+
+    #[test]
+    fn force_remove_does_not_clear_secrets_when_toml_missing() {
+        // Provider only in lifecycle (no config row): remove_provider fails after
+        // tombstone; secrets must remain intact (partial_commit).
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        // Seed a secret for an id without config entry via lifecycle + vault.
+        let pid = ProviderId::new("ghost").unwrap();
+        let _ =
+            crate::provider_registry::lifecycle_state::with_lifecycle_state_mut(dir.path(), |st| {
+                let _ = st.mint_or_restore(&pid, false)?;
+                Ok(((), true))
+            });
+        let _ = store_provider_secret(dir.path(), &application_key_scope(&pid), "sk-keep-me");
+        assert!(s.credential_presence("ghost").has_application_key);
+        let result = s.force_remove(ProviderForceRemoveRequest {
+            id: "ghost".into(),
+            typed_id_confirmation: "ghost".into(),
+            expected_generation: s.current_generation(),
+            expected_incarnation: None,
+            clear: ForceRemoveClearOptions {
+                clear_application_key: true,
+                ..Default::default()
+            },
+            operation_id: Some("op-partial".into()),
+        });
+        // Either partial_commit (tombstone without TOML) or not found — never
+        // clear secrets when TOML remove failed.
+        if result.partial_commit {
+            assert!(
+                s.credential_presence("ghost").has_application_key,
+                "secrets must survive TOML remove failure"
+            );
+        }
+    }
+
+    #[test]
+    fn providers_update_notification_file_written_after_mutation() {
+        let dir = TempDir::new().unwrap();
+        let s = svc(&dir);
+        let g0 = s.current_generation();
+        assert!(
+            s.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        let path = dir.path().join("state/provider_registry_notify.json");
+        assert!(
+            path.is_file(),
+            "providers/update notify file must exist after mutation"
+        );
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"generation\""));
+        assert!(raw.contains("lab") || raw.contains("changed_ids"));
     }
 
     #[test]

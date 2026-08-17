@@ -11,6 +11,7 @@ pub mod instance;
 pub mod lifecycle;
 pub mod lifecycle_state;
 pub mod management;
+pub mod notify;
 pub mod references;
 pub mod route_guard;
 pub mod secrets;

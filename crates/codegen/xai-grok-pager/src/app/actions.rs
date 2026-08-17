@@ -1500,6 +1500,7 @@ pub enum ProviderOperation {
         expected_incarnation: Option<String>,
         clear_app: bool,
         clear_admin: bool,
+        clear_oauth: bool,
         clear_cache: bool,
         operation_id: Option<String>,
     },

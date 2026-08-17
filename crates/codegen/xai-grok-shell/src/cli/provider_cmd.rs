@@ -6,7 +6,6 @@ use crate::provider_registry::secrets::{
     ProviderCredentialKind, admin_key_scope, application_key_scope, clear_provider_secret,
     store_provider_secret,
 };
-use crate::provider_registry::toml_edit::remove_provider;
 use crate::provider_registry::{CatalogCacheStore, remove_all_provider_caches};
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -71,7 +70,11 @@ pub enum ProviderLifecycleCommand {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Remove provider metadata from config.toml (secrets/caches optional).
+    /// Remove provider metadata via the generation-safe management API.
+    ///
+    /// Default: blocked while reverse references exist. Use `--force` plus
+    /// `--typed-id` (exact id) for forced remove with incarnation tombstone.
+    /// Secret/cache clears remain independent opt-in flags (never implicit).
     Remove {
         id: String,
         #[arg(long)]
@@ -80,6 +83,14 @@ pub enum ProviderLifecycleCommand {
         remove_secrets: bool,
         #[arg(long)]
         remove_caches: bool,
+        /// Forced remove: creates an incarnation tombstone and allows removal
+        /// even when reverse references exist. Requires `--typed-id` matching
+        /// the provider id exactly.
+        #[arg(long)]
+        force: bool,
+        /// Exact typed provider id confirmation for `--force` (must equal `id`).
+        #[arg(long)]
+        typed_id: Option<String>,
         #[arg(long)]
         yes: bool,
     },
@@ -313,6 +324,8 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
             config,
             remove_secrets,
             remove_caches,
+            force,
+            typed_id,
             yes,
         } => {
             if !yes {
@@ -320,21 +333,63 @@ async fn run_inner(args: ProviderLifecycleArgs) -> Result<i32, String> {
                     "refusing to remove provider without --yes (shared-state mutation)".into(),
                 );
             }
-            let pid = ProviderId::new(&id).map_err(|e| e.to_string())?;
-            remove_provider(&config_path(config), &pid).map_err(|e| e.to_string())?;
-            let home = grok_home();
-            if remove_secrets {
-                let _ = clear_provider_secret(&home, &application_key_scope(&pid));
-                let _ = clear_provider_secret(&home, &admin_key_scope(&pid));
-            }
-            if remove_caches {
-                let _ = remove_all_provider_caches(&home, &pid);
+            let home = config
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(grok_home);
+            let svc = ProviderManagementService::new(home);
+            let expected = svc.current_generation();
+            let result = if force {
+                let typed = typed_id.ok_or_else(|| {
+                    "forced remove requires --typed-id equal to the provider id".to_string()
+                })?;
+                use crate::provider_registry::management::dto::{
+                    ForceRemoveClearOptions, ProviderForceRemoveRequest,
+                };
+                svc.force_remove(ProviderForceRemoveRequest {
+                    id: id.clone(),
+                    typed_id_confirmation: typed,
+                    expected_generation: expected,
+                    expected_incarnation: svc.detail(&id).ok().and_then(|d| d.incarnation),
+                    clear: ForceRemoveClearOptions {
+                        clear_application_key: remove_secrets,
+                        clear_admin_key: remove_secrets,
+                        clear_oauth: remove_secrets,
+                        clear_catalog_cache: remove_caches,
+                        clear_capability_cache: remove_caches,
+                    },
+                    operation_id: None,
+                })
+            } else {
+                // Normal remove: impact + generation gated; no tombstone.
+                // Secrets/caches are not cleared implicitly on clean remove.
+                let mut result = svc.remove_metadata(&id, expected, true);
+                if result.ok && (remove_secrets || remove_caches) {
+                    // Only after successful metadata remove (same as force path ordering).
+                    if let Ok(pid) = ProviderId::new(&id) {
+                        if remove_secrets {
+                            let _ = clear_provider_secret(svc.home(), &application_key_scope(&pid));
+                            let _ = clear_provider_secret(svc.home(), &admin_key_scope(&pid));
+                        }
+                        if remove_caches {
+                            let _ = remove_all_provider_caches(svc.home(), &pid);
+                        }
+                    }
+                }
+                result
+            };
+            if !result.ok {
+                return Err(result.error.unwrap_or_else(|| "remove failed".into()));
             }
             crate::cli::output::write_json(&json!({
                 "ok": true,
-                "id": pid.as_str(),
-                "secrets_removed": remove_secrets,
-                "caches_removed": remove_caches,
+                "id": id,
+                "forced": force,
+                "generation": result.generation.get(),
+                "incarnation": result.incarnation,
+                "partial_commit": result.partial_commit,
+                "secrets_removed": remove_secrets && result.ok,
+                "caches_removed": remove_caches && result.ok,
             }))
             .map_err(|e| e.to_string())?;
             Ok(0)

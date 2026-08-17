@@ -4996,6 +4996,7 @@ async fn run_provider_operation(
             expected_incarnation,
             clear_app,
             clear_admin,
+            clear_oauth,
             clear_cache,
             operation_id,
         } => {
@@ -5011,7 +5012,7 @@ async fn run_provider_operation(
                 clear: ForceRemoveClearOptions {
                     clear_application_key: clear_app,
                     clear_admin_key: clear_admin,
-                    clear_oauth: false,
+                    clear_oauth,
                     clear_catalog_cache: clear_cache,
                     clear_capability_cache: clear_cache,
                 },

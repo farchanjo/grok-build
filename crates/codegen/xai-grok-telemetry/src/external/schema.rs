@@ -1010,6 +1010,7 @@ fn sanitize_error_category(raw: &str) -> Option<&'static str> {
         "tombstoned" => Some("tombstoned"),
         "generation_replaced" => Some("generation_replaced"),
         "sibling_isolation" => Some("sibling_isolation"),
+        "lifecycle_corrupt" => Some("lifecycle_corrupt"),
         _ => None,
     }
 }

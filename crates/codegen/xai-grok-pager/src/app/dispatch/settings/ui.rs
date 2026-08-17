@@ -384,17 +384,23 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
                         typed_id,
                         clear_app,
                         clear_admin,
+                        clear_oauth,
                         clear_cache,
-                    } => ProviderOperation::ForceRemove {
-                        provider_id: editor.detail.id.clone(),
-                        typed_id,
-                        expected_generation: editor.generation().get(),
-                        expected_incarnation: editor.detail.incarnation.clone(),
-                        clear_app,
-                        clear_admin,
-                        clear_cache,
-                        operation_id: Some(uuid::Uuid::new_v4().to_string()),
-                    },
+                    } => {
+                        let op_id = uuid::Uuid::new_v4().to_string();
+                        editor.pending_operation_id = Some(op_id.clone());
+                        ProviderOperation::ForceRemove {
+                            provider_id: editor.detail.id.clone(),
+                            typed_id,
+                            expected_generation: editor.generation().get(),
+                            expected_incarnation: editor.detail.incarnation.clone(),
+                            clear_app,
+                            clear_admin,
+                            clear_oauth,
+                            clear_cache,
+                            operation_id: Some(op_id),
+                        }
+                    }
                     EditorCommand::ConflictReload => {
                         let id = editor.detail.id.clone();
                         editor.conflict = None;

@@ -73,17 +73,26 @@ pub fn build_reference_impact(
 
     let total_refs: usize = groups.iter().map(|(_, r)| r.len()).sum();
     let scan_failed = !scan_errors.is_empty();
+    // Truncation is incomplete scan: block default removal fail-closed.
+    if truncated && !scan_failed {
+        push_err(
+            &mut scan_errors,
+            Some("reference scan truncated at safety bounds; treat as incomplete".into()),
+        );
+    }
+    let scan_incomplete = !scan_errors.is_empty() || truncated;
 
     let (can_remove, blocked_reason) = if is_built_in {
         (
             false,
             Some("Built-in product providers cannot be removed from the registry.".into()),
         )
-    } else if scan_failed {
+    } else if scan_incomplete {
         (
             false,
             Some(format!(
-                "Reference scan incomplete ({} error(s)); remove is blocked fail-closed. {}",
+                "Reference scan incomplete (truncated={}, errors={}); remove is blocked fail-closed. {}",
+                truncated,
                 scan_errors.len(),
                 scan_errors.first().cloned().unwrap_or_default()
             )),
@@ -534,9 +543,19 @@ fn table_mentions_provider(val: &toml::Value, provider_id: &str) -> bool {
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Refuse symlink/hardlink targets under trusted roots.
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{}: refusing symlink", path.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            return Err(format!("{}: refusing hardlink", path.display()));
+        }
+    }
     if meta.len() > MAX_SCAN_BYTES {
-        // Read only the prefix for matching.
         use std::io::Read;
         let mut f = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut buf = vec![0u8; MAX_SCAN_BYTES as usize];
