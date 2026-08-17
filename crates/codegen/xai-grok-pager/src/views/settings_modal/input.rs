@@ -705,6 +705,12 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
             if state.try_enter_editing_value() {
                 return SettingsKeyOutcome::Changed;
             }
+            // Action deep-link rows (Status kind): open other surfaces.
+            if let Some((key, _)) = state.focused_setting()
+                && key == "open_retrieval_settings"
+            {
+                return SettingsKeyOutcome::Action(Action::OpenRetrievalSettings);
+            }
             SettingsKeyOutcome::Unchanged
         }
         // `i` aliases `/` (vim-nav "press i to search").

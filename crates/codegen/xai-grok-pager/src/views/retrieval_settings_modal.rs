@@ -258,6 +258,126 @@ impl RetrievalCommand {
         }
     }
 
+    /// Replace operation_id only (preserve draft payload + expected_generation).
+    pub fn with_operation_id(self, operation_id: String) -> Self {
+        match self {
+            Self::ValidatePreview {
+                kind,
+                id,
+                expected_generation,
+                ..
+            } => Self::ValidatePreview {
+                kind,
+                id,
+                expected_generation,
+                operation_id,
+            },
+            Self::UpsertEmbedding {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::UpsertEmbedding {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            Self::UpsertReranker {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::UpsertReranker {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            Self::UpsertProfile {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::UpsertProfile {
+                id,
+                config,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            Self::CloneEntity {
+                kind,
+                source_id,
+                new_id,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::CloneEntity {
+                kind,
+                source_id,
+                new_id,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            Self::DeleteEntity {
+                kind,
+                id,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::DeleteEntity {
+                kind,
+                id,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            Self::Reorder {
+                kind,
+                ordered_ids,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::Reorder {
+                kind,
+                ordered_ids,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            Self::SavePrime {
+                prime,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::SavePrime {
+                prime,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            Self::SaveMemoryProfile {
+                profile,
+                expected_generation,
+                confirm_memory_reindex,
+                ..
+            } => Self::SaveMemoryProfile {
+                profile,
+                expected_generation,
+                confirm_memory_reindex,
+                operation_id,
+            },
+            other => other,
+        }
+    }
+
     pub fn operation_id(&self) -> Option<&str> {
         match self {
             Self::ValidatePreview { operation_id, .. }
@@ -319,8 +439,9 @@ pub struct RetrievalSettingsState {
     pub last_preview: Option<RetrievalPreviewResult>,
     pub pending_operation_id: Option<String>,
     pub op_counter: u64,
-    pub pending_memory_confirm: bool,
     /// Exact draft mutation awaiting reindex confirmation (retry with confirm=true).
+    /// Confirmation is derived solely via `with_reindex_confirm(true)` on this
+    /// command — never a sticky global flag that could leak to later mutations.
     pub pending_reindex_command: Option<Box<RetrievalCommand>>,
 }
 
@@ -350,7 +471,6 @@ impl RetrievalSettingsState {
             last_preview: None,
             pending_operation_id: None,
             op_counter: 0,
-            pending_memory_confirm: false,
             pending_reindex_command: None,
         }
     }
@@ -439,6 +559,8 @@ impl RetrievalSettingsState {
         }
         self.pending_operation_id = None;
         if result.stale {
+            // Terminal for this attempt — do not keep a half-confirmed draft.
+            self.pending_reindex_command = None;
             if let Some(c) = result.conflict {
                 self.conflict = Some(c);
             }
@@ -450,16 +572,17 @@ impl RetrievalSettingsState {
                 && impact.requires_confirmation
             {
                 self.edit = RetrievalEditMode::ConfirmMemoryReindex { impact };
-                // Keep pending_reindex_command for exact draft retry.
+                // Keep pending_reindex_command for exact draft retry only.
                 return;
             }
+            // Validation / I/O / other non-reindex failure: clear stash so the
+            // next mutation is never pre-confirmed.
             self.pending_reindex_command = None;
             self.error = result.error;
             self.status = Some("Save failed".into());
             return;
         }
         self.pending_reindex_command = None;
-        self.pending_memory_confirm = false;
         if let Some(snap) = result.snapshot {
             self.apply_snapshot(snap);
         } else {
@@ -525,7 +648,7 @@ impl RetrievalSettingsState {
                         kind,
                         id,
                         expected_generation: self.generation,
-                        confirm_memory_reindex: self.pending_memory_confirm,
+                        confirm_memory_reindex: false,
                         operation_id: op,
                     }))
                 }
@@ -537,18 +660,18 @@ impl RetrievalSettingsState {
             },
             RetrievalEditMode::ConfirmMemoryReindex { .. } => match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => {
-                    self.pending_memory_confirm = true;
                     self.edit = RetrievalEditMode::Browse;
-                    // Retry exact pending draft with confirm=true.
+                    // Retry exact pending draft only — confirmation is on that
+                    // command, never a sticky modal-wide flag.
                     if let Some(cmd) = self.pending_reindex_command.take() {
-                        let confirmed = cmd.with_reindex_confirm(true);
+                        let op = self.next_op_id();
+                        let confirmed = cmd.with_reindex_confirm(true).with_operation_id(op);
                         return Some(self.stamp_mutation(confirmed));
                     }
                     Some(RetrievalCommand::ConfirmMemoryReindex)
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.edit = RetrievalEditMode::Browse;
-                    self.pending_memory_confirm = false;
                     self.pending_reindex_command = None;
                     None
                 }
@@ -571,7 +694,7 @@ impl RetrievalSettingsState {
                             source_id,
                             new_id,
                             expected_generation: self.generation,
-                            confirm_memory_reindex: self.pending_memory_confirm,
+                            confirm_memory_reindex: false,
                             operation_id: op,
                         }))
                     }
@@ -727,7 +850,7 @@ impl RetrievalSettingsState {
             kind: kind.into(),
             ordered_ids: ids,
             expected_generation: self.generation,
-            confirm_memory_reindex: self.pending_memory_confirm,
+            confirm_memory_reindex: false,
             operation_id: op,
         }))
     }
@@ -922,10 +1045,11 @@ impl RetrievalSettingsState {
                 None
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if let RetrievalEditMode::EditFields { field_idx, .. } = &mut self.edit
-                    && *field_idx > 0
+                if let RetrievalEditMode::EditFields {
+                    fields, field_idx, ..
+                } = &mut self.edit
                 {
-                    *field_idx -= 1;
+                    *field_idx = prev_editable_field_idx(fields, *field_idx);
                 }
                 None
             }
@@ -933,9 +1057,8 @@ impl RetrievalSettingsState {
                 if let RetrievalEditMode::EditFields {
                     fields, field_idx, ..
                 } = &mut self.edit
-                    && *field_idx + 1 < fields.len()
                 {
-                    *field_idx += 1;
+                    *field_idx = next_editable_field_idx(fields, *field_idx);
                 }
                 None
             }
@@ -947,7 +1070,10 @@ impl RetrievalSettingsState {
                     ..
                 } = &mut self.edit
                 {
-                    if let Some(f) = fields.get(*field_idx) {
+                    // Fixed enum rows are display-only — never free-form edit.
+                    if let Some(f) = fields.get(*field_idx)
+                        && !is_fixed_field_label(&f.0)
+                    {
                         self.line_editor.set_text(&f.1);
                         *editing_value = true;
                     }
@@ -1012,7 +1138,7 @@ impl RetrievalSettingsState {
                     id: eid,
                     config,
                     expected_generation: self.generation,
-                    confirm_memory_reindex: self.pending_memory_confirm,
+                    confirm_memory_reindex: false,
                     operation_id: op,
                 }))
             }
@@ -1045,7 +1171,7 @@ impl RetrievalSettingsState {
                     id: rid,
                     config,
                     expected_generation: self.generation,
-                    confirm_memory_reindex: self.pending_memory_confirm,
+                    confirm_memory_reindex: false,
                     operation_id: op,
                 }))
             }
@@ -1085,7 +1211,7 @@ impl RetrievalSettingsState {
                     id: pid,
                     config,
                     expected_generation: self.generation,
-                    confirm_memory_reindex: self.pending_memory_confirm,
+                    confirm_memory_reindex: false,
                     operation_id: op,
                 }))
             }
@@ -1130,7 +1256,7 @@ impl RetrievalSettingsState {
                 Some(self.stamp_mutation(RetrievalCommand::SavePrime {
                     prime: self.draft_prime.clone(),
                     expected_generation: self.generation,
-                    confirm_memory_reindex: self.pending_memory_confirm,
+                    confirm_memory_reindex: false,
                     operation_id: op,
                 }))
             }
@@ -1148,7 +1274,7 @@ impl RetrievalSettingsState {
                 Some(self.stamp_mutation(RetrievalCommand::SaveMemoryProfile {
                     profile,
                     expected_generation: self.generation,
-                    confirm_memory_reindex: self.pending_memory_confirm,
+                    confirm_memory_reindex: false,
                     operation_id: op,
                 }))
             }
@@ -1221,12 +1347,14 @@ impl RetrievalSettingsState {
                     id: 6,
                 },
                 Shortcut {
-                    label: "v Validate",
+                    // Synthetic network-free validation preview (not a disk reload).
+                    label: "v Preview",
                     clickable: false,
                     id: 7,
                 },
                 Shortcut {
-                    label: "s Validate",
+                    // Browse `s` → ValidateAndReload / LoadSnapshot (no gen churn).
+                    label: "s Refresh",
                     clickable: false,
                     id: 8,
                 },
@@ -1383,13 +1511,24 @@ impl RetrievalSettingsState {
                     if id.is_empty() { "(new)" } else { id }
                 )));
                 for (i, (k, v)) in fields.iter().enumerate() {
-                    let mark = if i == *field_idx { ">" } else { " " };
-                    let val = if i == *field_idx && *editing_value {
+                    let fixed = is_fixed_field_label(k);
+                    let mark = if fixed {
+                        " "
+                    } else if i == *field_idx {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    let val = if i == *field_idx && *editing_value && !fixed {
                         format!("{}█", self.line_editor.text())
                     } else {
                         truncate_id(v, area.width.saturating_sub(24) as usize)
                     };
-                    lines.push(Line::from(format!("{mark} {k}: {val}")));
+                    if fixed {
+                        lines.push(Line::from(format!("  {k}: {val}  [read-only]")));
+                    } else {
+                        lines.push(Line::from(format!("{mark} {k}: {val}")));
+                    }
                 }
             }
             RetrievalEditMode::ConfirmDelete { kind, id } => {
@@ -1612,6 +1751,36 @@ fn truncate_id(s: &str, max: usize) -> String {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{t}…")
     }
+}
+
+/// v1 single-value enum rows labeled `(fixed)` — not free-form editable.
+fn is_fixed_field_label(label: &str) -> bool {
+    label.contains("(fixed)")
+}
+
+fn next_editable_field_idx(fields: &[(String, String)], from: usize) -> usize {
+    let mut i = from.saturating_add(1);
+    while i < fields.len() {
+        if !is_fixed_field_label(&fields[i].0) {
+            return i;
+        }
+        i += 1;
+    }
+    from
+}
+
+fn prev_editable_field_idx(fields: &[(String, String)], from: usize) -> usize {
+    if from == 0 {
+        return from;
+    }
+    let mut i = from;
+    while i > 0 {
+        i -= 1;
+        if !is_fixed_field_label(&fields[i].0) {
+            return i;
+        }
+    }
+    from
 }
 
 fn default_embedding_fields(existing: Option<&EmbeddingModelDto>) -> Vec<(String, String)> {
@@ -1980,5 +2149,230 @@ mod tests {
         s.apply_snapshot(snap_with_emb());
         let cmd = s.handle_key(key(KeyCode::Char('s')));
         assert!(matches!(cmd, Some(RetrievalCommand::ValidateAndReload)));
+    }
+
+    /// Confirmed reindex retry that fails/stales must not leave a sticky
+    /// pre-confirm on the next unrelated mutation (Round 2 Issue 13).
+    #[test]
+    fn unit_confirmed_retry_failure_does_not_preconfirm_next_mutation() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        let draft = RetrievalCommand::SaveMemoryProfile {
+            profile: Some("p1".into()),
+            expected_generation: RegistryGeneration(1),
+            confirm_memory_reindex: false,
+            operation_id: "op-mem".into(),
+        };
+        s.pending_reindex_command = Some(Box::new(draft));
+        s.pending_operation_id = Some("op-mem".into());
+        s.edit = RetrievalEditMode::ConfirmMemoryReindex {
+            impact: MemoryReindexImpact {
+                requires_confirmation: true,
+                reason: "test".into(),
+                previous_fingerprint: None,
+                next_fingerprint: Some("x".into()),
+            },
+        };
+        let confirmed = s.handle_key(key(KeyCode::Char('y')));
+        let confirmed_op = match confirmed {
+            Some(RetrievalCommand::SaveMemoryProfile {
+                confirm_memory_reindex: true,
+                operation_id,
+                profile,
+                expected_generation,
+            }) => {
+                assert_eq!(profile.as_deref(), Some("p1"));
+                assert_eq!(expected_generation.get(), 1);
+                operation_id
+            }
+            other => panic!("expected confirmed memory save, got {other:?}"),
+        };
+        // Simulate confirmed retry terminal failure (validation / I/O).
+        s.apply_mutation_result(RetrievalMutationResult {
+            ok: false,
+            generation: RegistryGeneration(1),
+            error: Some("validation hard-error".into()),
+            stale: false,
+            guidance: None,
+            conflict: None,
+            changed_fields: vec![],
+            operation_id: Some(confirmed_op),
+            memory_reindex: None,
+            snapshot: None,
+        });
+        assert!(s.pending_reindex_command.is_none());
+
+        // Next unrelated mutation must not be pre-confirmed.
+        s.handle_key(key(KeyCode::Char('a')));
+        if let RetrievalEditMode::EditFields { fields, .. } = &mut s.edit {
+            for (k, v) in fields.iter_mut() {
+                match k.as_str() {
+                    "id" => *v = "e-next".into(),
+                    "provider" => *v = "lab".into(),
+                    "model" => *v = "m-next".into(),
+                    _ => {}
+                }
+            }
+        }
+        let next = s.handle_key(key(KeyCode::Char('s')));
+        match next {
+            Some(RetrievalCommand::UpsertEmbedding {
+                confirm_memory_reindex,
+                id,
+                ..
+            }) => {
+                assert_eq!(id, "e-next");
+                assert!(
+                    !confirm_memory_reindex,
+                    "next mutation must still hit the reindex barrier"
+                );
+            }
+            other => panic!("expected unconfirmed upsert, got {other:?}"),
+        }
+
+        // Stale path also clears stash and must not pre-confirm.
+        let mut s2 = RetrievalSettingsState::new();
+        s2.apply_snapshot(snap_with_emb());
+        let draft2 = RetrievalCommand::UpsertEmbedding {
+            id: "e1".into(),
+            config: EmbeddingModelConfig {
+                provider: "lab".into(),
+                model: "m".into(),
+                dimensions: Some(64),
+                ..Default::default()
+            },
+            expected_generation: RegistryGeneration(1),
+            confirm_memory_reindex: true,
+            operation_id: "op-stale".into(),
+        };
+        s2.pending_reindex_command = Some(Box::new(draft2));
+        s2.pending_operation_id = Some("op-stale".into());
+        s2.apply_mutation_result(RetrievalMutationResult {
+            ok: false,
+            generation: RegistryGeneration(2),
+            error: Some("stale".into()),
+            stale: true,
+            guidance: None,
+            conflict: None,
+            changed_fields: vec![],
+            operation_id: Some("op-stale".into()),
+            memory_reindex: None,
+            snapshot: None,
+        });
+        assert!(s2.pending_reindex_command.is_none());
+        s2.handle_key(key(KeyCode::Char('a')));
+        if let RetrievalEditMode::EditFields { fields, .. } = &mut s2.edit {
+            for (k, v) in fields.iter_mut() {
+                match k.as_str() {
+                    "id" => *v = "e-stale".into(),
+                    "provider" => *v = "lab".into(),
+                    "model" => *v = "m2".into(),
+                    _ => {}
+                }
+            }
+        }
+        match s2.handle_key(key(KeyCode::Char('s'))) {
+            Some(RetrievalCommand::UpsertEmbedding {
+                confirm_memory_reindex: false,
+                ..
+            }) => {}
+            other => panic!("stale terminal must not pre-confirm next: {other:?}"),
+        }
+    }
+
+    /// Fixed enum rows are not free-form editable (Round 2 Issue 12).
+    #[test]
+    fn unit_fixed_enum_rows_not_editable() {
+        let mut s = RetrievalSettingsState::new();
+        s.apply_snapshot(snap_with_emb());
+        s.handle_key(key(KeyCode::Char('a')));
+        let (proto_idx, dims_idx) = match &s.edit {
+            RetrievalEditMode::EditFields { fields, .. } => {
+                let p = fields
+                    .iter()
+                    .position(|(k, _)| k == "protocol (fixed)")
+                    .expect("protocol fixed row");
+                let d = fields
+                    .iter()
+                    .position(|(k, _)| k == "dimensions")
+                    .expect("dimensions row");
+                assert!(is_fixed_field_label("protocol (fixed)"));
+                assert!(!is_fixed_field_label("dimensions"));
+                (p, d)
+            }
+            other => panic!("expected edit fields, got {other:?}"),
+        };
+        // Land on protocol (fixed) then Enter must not open free-form edit.
+        if let RetrievalEditMode::EditFields { field_idx, .. } = &mut s.edit {
+            *field_idx = proto_idx;
+        }
+        s.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(
+                s.edit,
+                RetrievalEditMode::EditFields {
+                    editing_value: false,
+                    ..
+                }
+            ),
+            "fixed row must not enter free-form edit"
+        );
+        // j from the field before fixed should skip over it.
+        if let RetrievalEditMode::EditFields { field_idx, .. } = &mut s.edit {
+            *field_idx = proto_idx.saturating_sub(1);
+        }
+        s.handle_key(key(KeyCode::Char('j')));
+        match &s.edit {
+            RetrievalEditMode::EditFields {
+                field_idx, fields, ..
+            } => {
+                assert_ne!(*field_idx, proto_idx, "j must skip fixed protocol row");
+                assert_eq!(*field_idx, dims_idx);
+                assert!(!is_fixed_field_label(&fields[*field_idx].0));
+            }
+            other => panic!("expected edit fields, got {other:?}"),
+        }
+        // Profile fallback_strategy (fixed) same contract.
+        s.edit = RetrievalEditMode::Browse;
+        s.page = RetrievalPage::Profiles;
+        s.handle_key(key(KeyCode::Char('a')));
+        if let RetrievalEditMode::EditFields {
+            fields, field_idx, ..
+        } = &mut s.edit
+        {
+            let fb = fields
+                .iter()
+                .position(|(k, _)| k == "fallback_strategy (fixed)")
+                .expect("fallback fixed row");
+            *field_idx = fb;
+        }
+        s.handle_key(key(KeyCode::Char('e')));
+        assert!(matches!(
+            s.edit,
+            RetrievalEditMode::EditFields {
+                editing_value: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unit_footer_disambiguates_preview_and_refresh() {
+        let s = RetrievalSettingsState::new();
+        let labels: Vec<&str> = s.footer_shortcuts().iter().map(|sc| sc.label).collect();
+        assert!(
+            labels.contains(&"v Preview"),
+            "footer must label synthetic validate as Preview: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"s Refresh"),
+            "footer must label LoadSnapshot path as Refresh: {labels:?}"
+        );
+        assert!(
+            !labels
+                .iter()
+                .any(|l| *l == "v Validate" || *l == "s Validate"),
+            "duplicate Validate labels removed: {labels:?}"
+        );
     }
 }

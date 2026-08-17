@@ -26,6 +26,44 @@ fn make_state() -> SettingsModalState {
     )
 }
 
+/// `/settings` deep-link row maps Enter → OpenRetrievalSettings (Round 2 Issue 13).
+#[test]
+fn open_retrieval_settings_row_dispatches_action() {
+    let mut s = make_state();
+    let reg = SettingsRegistry::defaults();
+    let meta = reg
+        .find("open_retrieval_settings")
+        .expect("open_retrieval_settings registered");
+    assert!(
+        matches!(meta.kind, SettingKind::Status),
+        "deep-link row must be non-editable Status kind"
+    );
+    let row_idx = s
+        .rows
+        .iter()
+        .position(|r| {
+            matches!(
+                r,
+                RowEntry::Setting {
+                    key: "open_retrieval_settings",
+                    ..
+                }
+            )
+        })
+        .expect("open_retrieval_settings row present in models section");
+    s.selected = row_idx;
+    let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(
+            out,
+            SettingsKeyOutcome::Action(Action::OpenRetrievalSettings)
+        ),
+        "Enter on retrieval deep-link must open retrieval settings, got {out:?}"
+    );
+    // Status rows stay in Browse (no free-form editor).
+    assert!(matches!(s.mode(), SettingsModalMode::Browse));
+}
+
 /// The contextual-hints group renders as a single top-level row (children
 /// hidden); Enter opens the sub-sheet, Space there toggles the focused
 /// child via the typed action, and Esc returns to Browse.

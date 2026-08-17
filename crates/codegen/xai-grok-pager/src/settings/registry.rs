@@ -1071,6 +1071,10 @@ pub fn current_value_for(
         "media_audio_model" => Some(SettingValue::String(pager.media_audio_model.clone())),
         "media_video_model" => Some(SettingValue::String(pager.media_video_model.clone())),
         "media_status" => Some(SettingValue::String(pager.media_status.clone())),
+        // Action deep-link row (Status kind); Enter opens retrieval modal.
+        "open_retrieval_settings" => {
+            Some(SettingValue::String("Open /retrieval-settings".to_string()))
+        }
 
         _ => None,
     }
@@ -1614,6 +1618,7 @@ mod tests {
                     );
                 }
                 ("media_status", SettingKind::Status) => {}
+                ("open_retrieval_settings", SettingKind::Status) => {}
 
                 _ => panic!(
                     "settings::defs::default_settings() contains entry `{}` with no \
@@ -1673,6 +1678,8 @@ mod tests {
                         "media_status default drifts from PagerLocalSnapshot::default()"
                     );
                 }
+                // Action deep-link; no pager scalar to align.
+                ("open_retrieval_settings", SettingKind::Status) => {}
                 _ => panic!(
                     "settings::defs::default_settings() contains PAGER entry `{}` with no \
                      matching arm in defaults_match_pager_state. Add an arm.",
