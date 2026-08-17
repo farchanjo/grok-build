@@ -1584,8 +1584,17 @@ impl MvpAgent {
             crate::retrieval_config::notify::set_retrieval_update_forwarder(Some(Box::new(
                 move |notif| {
                     gw.forward_fire_and_forget(notif);
+                    // Management mutation advanced generation; rebuild PR17
+                    // runtime snapshot (LKG retained on invalid candidates).
+                    let _ = crate::retrieval::reload_global_registry();
                 },
             )));
+        }
+        // Install shell-owned PR17 retrieval registry (disabled when no graph).
+        {
+            let home = xai_grok_config::grok_home();
+            let registry = crate::retrieval::RetrievalRegistry::load_from_home(home);
+            crate::retrieval::install_global_registry(registry);
         }
         let inference_config = models_manager.inference_config();
         if !cfg.grok_com_config.api_key_auth_disabled() {

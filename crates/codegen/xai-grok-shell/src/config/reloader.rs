@@ -80,6 +80,11 @@ pub enum ConfigUpdate {
     /// band count, and model routes. Broadcasts to all sessions for
     /// live policy mutation.
     Compaction(Box<crate::agent::config::CompactionConfig>),
+    /// Named retrieval graph sections changed (`embedding_models`,
+    /// `reranker_models`, `retrieval_profiles`, `prime`, or
+    /// `[memory] retrieval_profile`). Agent rebuilds the PR17 registry
+    /// snapshot (last-known-good retained on invalid candidates).
+    RetrievalGraphChanged,
 }
 
 /// Runs on `tokio::spawn` (`Send`). Receives raw [`ConfigChangeEvent`]s from
@@ -424,6 +429,15 @@ impl ConfigReloader {
 
         self.maybe_reload_compaction(&new_global);
 
+        // Named retrieval graph (PR15/PR17). Provider changes already fire
+        // ModelsChanged; this covers retrieval-only section edits.
+        if retrieval_graph_sections_changed(&self.last_global_config, &new_global) {
+            info!("retrieval graph config change detected");
+            let _ = self
+                .config_update_tx
+                .send(ConfigUpdate::RetrievalGraphChanged);
+        }
+
         self.last_global_config = new_global;
         Ok(())
     }
@@ -472,6 +486,25 @@ impl ConfigReloader {
 ///
 /// Order-preserving de-dup (a `Vec` rather than a `HashSet`) so the
 /// downstream emit order is deterministic in tests.
+/// Whether any PR15 named retrieval section differs between two config roots.
+fn retrieval_graph_sections_changed(old: &toml::Value, new: &toml::Value) -> bool {
+    const KEYS: &[&str] = &[
+        "embedding_models",
+        "reranker_models",
+        "retrieval_profiles",
+        "prime",
+    ];
+    for key in KEYS {
+        if old.get(*key) != new.get(*key) {
+            return true;
+        }
+    }
+    // Optional additive memory profile selection only.
+    let old_mem = old.get("memory").and_then(|m| m.get("retrieval_profile"));
+    let new_mem = new.get("memory").and_then(|m| m.get("retrieval_profile"));
+    old_mem != new_mem
+}
+
 fn collect_project_cwds(batch: &[ConfigChangeEvent]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for evt in batch {
