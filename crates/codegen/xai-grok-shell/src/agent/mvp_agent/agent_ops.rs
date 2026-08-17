@@ -72,12 +72,19 @@ impl MvpAgent {
         // Production seam: exact session route freeze (not legacy_from_config)
         // + SessionTitleSamplerPairing; soft-fallback keeps primary route+purpose.
         let selection_id = self.models_manager.current_model_id().0.to_string();
-        let frozen = crate::session::route_context::resolve_for_models_manager_with_selection(
+        let frozen = match crate::session::route_context::resolve_for_models_manager_with_selection(
             primary,
             &self.models_manager,
             selection_id.as_str(),
             Some(self.auth_manager.grok_home()),
-        ).expect("provider route resolve");
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(acp::Error::internal_error().data(format!(
+                    "provider route unusable for session title: {e}"
+                )));
+            }
+        };
         let pair = crate::session::auxiliary_route::SessionTitleSamplerPairing::for_session_new(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {
                 purpose: crate::session::auxiliary_route::AuxiliaryPurpose::SessionTitle,
@@ -1458,7 +1465,11 @@ impl MvpAgent {
             &self.models_manager,
             selection_id.as_str(),
             Some(self.auth_manager.grok_home()),
-        ).expect("provider route resolve");
+        )
+        .map_err(|e| {
+            tracing::warn!(error = %e, "web search: provider route unusable");
+        })
+        .ok()?;
         let disable_api_key_auth = self.cfg.borrow().grok_com_config.api_key_auth_disabled();
         let mut resolved = crate::session::auxiliary_route::resolve_auxiliary_route(
             crate::session::auxiliary_route::AuxiliaryRouteInputs {

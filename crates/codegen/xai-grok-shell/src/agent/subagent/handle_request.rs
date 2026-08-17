@@ -105,23 +105,23 @@ pub(super) fn resolve_final_exact_route(
     inference_config: &xai_grok_inference::InferenceConfig,
     ctx: &SubagentSpawnContext,
     model_id: &acp::ModelId,
-) -> Option<ExactRoute> {
+) -> Result<Option<ExactRoute>, crate::provider_registry::route_guard::RouteGuardError> {
     if !required {
-        return None;
+        return Ok(None);
     }
     let live_context = crate::session::route_context::resolve_for_models_manager_with_selection(
         inference_config,
         &ctx.models_manager,
         model_id.0.as_ref(),
         Some(ctx.auth_manager.grok_home()),
-    ).expect("provider route resolve");
-    xai_grok_models::CanonicalModelId::new(model_id.0.to_string())
+    )?;
+    Ok(xai_grok_models::CanonicalModelId::new(model_id.0.to_string())
         .ok()
         .and_then(|canonical| {
             xai_grok_models::UpstreamModelId::new(inference_config.model.clone())
                 .ok()
                 .and_then(|upstream| ExactRoute::new(canonical, upstream, live_context))
-        })
+        }))
 }
 
 /// This is a free async function, NOT a method on MvpAgent. It receives
@@ -773,12 +773,21 @@ pub(crate) async fn handle_assigned_subagent_request(
         || resume_source
             .as_ref()
             .is_some_and(|source| source.assigned_owner.is_some());
-    let resolved_final_live_route = resolve_final_exact_route(
+    let resolved_final_live_route = match resolve_final_exact_route(
         assigned_identity_requires_validation,
         &effective_inference_config,
         &ctx,
         &effective_model_id,
-    );
+    ) {
+        Ok(route) => route,
+        Err(e) => {
+            send_failure(
+                request,
+                &format!("Assigned exact model route unusable: {e}"),
+            );
+            return;
+        }
+    };
     if !assigned_route_matches_final(assigned_route.as_ref(), resolved_final_live_route.as_ref()) {
         send_failure(
             request,

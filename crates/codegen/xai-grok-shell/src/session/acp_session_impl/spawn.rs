@@ -1148,7 +1148,11 @@ pub(crate) async fn spawn_session_actor(
             session_model_id.0.as_ref(),
             grok_home,
         )
-        .expect("provider route resolve")
+        .map_err(|e| {
+            xai_grok_agent::AgentBuildError::InvalidConfig(format!(
+                "provider route unusable at session spawn: {e}"
+            ))
+        })?
     };
     let workflow_inference_config = inference_config_initial.clone();
     let sampler_handle = xai_grok_inference::InferenceActor::spawn_with_route_context(

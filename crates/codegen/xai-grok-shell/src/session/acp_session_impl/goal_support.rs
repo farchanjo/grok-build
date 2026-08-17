@@ -1098,7 +1098,13 @@ impl SessionActor {
         // `GOAL_PLANNER_MAX_RUNS` is telemetry-only; resume retries are unbounded.
         let attempt = 1u32;
 
-        let inference_config = self.reconstruct_full_config().await;
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "goal planner: provider route unusable");
+                return;
+            }
+        };
         let model_id = inference_config.model.clone();
         // Fork owns history; fail-open stays OBJECTIVE-only (no last-assistant CONTEXT).
         let context = String::new();
@@ -1277,7 +1283,13 @@ impl SessionActor {
         let session_traces_dir = crate::session::persistence::session_dir(&self.session_info);
         let scratch_root = crate::session::goal_tracker::goal_scratch_root(&verifier_id);
 
-        let inference_config = self.reconstruct_full_config().await;
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "goal strategist: provider route unusable");
+                return;
+            }
+        };
         let model_id = inference_config.model.clone();
 
         let task_tool_name = self.resolve_goal_tool_names().await.task;
@@ -1388,7 +1400,13 @@ impl SessionActor {
         };
 
         let session_traces_dir = crate::session::persistence::session_dir(&self.session_info);
-        let inference_config = self.reconstruct_full_config().await;
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "goal summarizer: provider route unusable");
+                return;
+            }
+        };
         let model_id = inference_config.model.clone();
         let task_tool_name = self.resolve_goal_tool_names().await.task;
         let parent_prompt_id = self

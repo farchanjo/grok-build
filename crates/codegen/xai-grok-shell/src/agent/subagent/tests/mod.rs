@@ -97,6 +97,7 @@ fn final_route_resolution_observes_post_resolution_config_mutation() {
     let mut matching_config = ctx.inference_config.clone();
     matching_config.model = "test".into();
     let assigned = resolve_final_exact_route(true, &matching_config, &ctx, &ctx.model_id)
+        .expect("route resolve ok")
         .expect("test config produces a route");
     let assigned_route = AssignedRoute::new(
         assignment::AssignmentKey::workflow("run", 2).unwrap(),
@@ -105,6 +106,7 @@ fn final_route_resolution_observes_post_resolution_config_mutation() {
     let mut drifted_config = matching_config;
     drifted_config.model = "post-resolution-drift".into();
     let drifted = resolve_final_exact_route(true, &drifted_config, &ctx, &ctx.model_id)
+        .expect("route resolve ok")
         .expect("post-resolution config produces a different live route");
     assert!(!assigned_route_matches_final(
         Some(&assigned_route),

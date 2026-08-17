@@ -469,7 +469,13 @@ impl SessionActor {
     /// the actor's `InferenceConfig` and `Credentials`. Folds in the
     /// URL-derived headers (cli-chat-proxy auth, the staging auth header)
     /// so the sampler crate stays URL-agnostic.
-    pub(super) async fn reconstruct_full_config(&self) -> InferenceConfig {
+    /// Rebuild the full sampler `InferenceConfig` and freeze the production route.
+    ///
+    /// Returns `Err` when the selected configured provider is disabled, tombstoned,
+    /// or lifecycle-corrupt — never panics on route-guard failure (PR13).
+    pub(super) async fn reconstruct_full_config(
+        &self,
+    ) -> Result<InferenceConfig, crate::provider_registry::route_guard::RouteGuardError> {
         #[allow(clippy::items_after_statements)]
         #[derive(Debug)]
         struct TraceContextInjector;
@@ -664,8 +670,7 @@ impl SessionActor {
                 &self.models_manager,
                 selection_model_id.0.as_ref(),
                 grok_home,
-            )
-            .expect("provider route resolve");
+            )?;
         *self.route_context.borrow_mut() = Some(production_route.clone());
 
         // Exact-route credential for non-session routes: generation-gated.
@@ -708,7 +713,7 @@ impl SessionActor {
                 None
             };
 
-        InferenceConfig {
+        Ok(InferenceConfig {
             // Prefer exact-route key when resolved; else chat-state snapshot.
             api_key: route_api_key.or(creds.api_key),
             base_url: cfg.base_url,
@@ -772,7 +777,7 @@ impl SessionActor {
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
-        }
+        })
     }
     /// Install auto-mode permission classifier with a live LLM side-query
     /// (laziness-classifier pattern: `prepare_chat_completion` +
@@ -913,7 +918,12 @@ impl SessionActor {
         crate::session::auxiliary_route::ResolvedAuxiliaryRoute,
         crate::session::auxiliary_route::AuxiliaryRouteError,
     > {
-        let active = self.reconstruct_full_config().await;
+        let active = self.reconstruct_full_config().await.map_err(|e| {
+            crate::session::auxiliary_route::AuxiliaryRouteError::ConstructionFailed {
+                selection: slug.to_owned(),
+                detail: e.to_string(),
+            }
+        })?;
         let creds = self.chat_state_handle.get_credentials().await;
         let session_key = self
             .auth_manager
@@ -1022,7 +1032,9 @@ impl SessionActor {
         crate::session::media_stt::AudioSttError,
     > {
         crate::session::media_stt::validate_audio_stt_route(audio_model_pin).map_err(|e| e)?;
-        let active = self.reconstruct_full_config().await;
+        let active = self.reconstruct_full_config().await.map_err(|e| {
+            crate::session::media_stt::AudioSttError::UnsupportedRoute(e.to_string())
+        })?;
         let creds = self.chat_state_handle.get_credentials().await;
         let session_key = self
             .auth_manager
@@ -1166,7 +1178,13 @@ impl SessionActor {
         force_http1: bool,
     ) -> Result<xai_grok_inference::InferenceClient, acp::Error> {
         self.refresh_token_if_expired().await;
-        let mut full_config = self.reconstruct_full_config().await;
+        let mut full_config = self.reconstruct_full_config().await.map_err(|e| {
+            acp::Error::internal_error().data(crate::inference::error::terminal_error_data(
+                e.to_string(),
+                None,
+                xai_grok_inference::InferenceErrorKind::Api,
+            ))
+        })?;
         full_config.force_http1 = force_http1;
         let sampling_client = xai_grok_inference::InferenceClient::new(full_config)
             .map_err(|e| self.to_acp_error(e))?;
@@ -1192,7 +1210,13 @@ impl SessionActor {
         is_retry: bool,
     ) -> Result<(), crate::provider_registry::route_guard::RouteGuardError> {
         self.refresh_token_if_expired().await;
-        let mut sampler_config = self.reconstruct_full_config().await;
+        let mut sampler_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.disarm_sampler_for_route_block(&e);
+                return Err(e);
+            }
+        };
         if self.tool_context.task_output_token_budget.is_some()
             || self.tool_context.sampler_retry_only_before_output
         {
@@ -1572,9 +1596,11 @@ impl SessionActor {
         let mut provider_kind = resolved.map(|p| p.kind);
 
         // Reconstruct only when catalog miss — prefer catalog identity.
+        // Route-guard failure: leave identity as Custom (fail closed for remint).
         if entry.is_none() {
-            let cfg = self.reconstruct_full_config().await;
-            if !matches!(cfg.provider_identity, ProviderIdentity::Custom) {
+            if let Ok(cfg) = self.reconstruct_full_config().await
+                && !matches!(cfg.provider_identity, ProviderIdentity::Custom)
+            {
                 identity = cfg.provider_identity;
             }
         }

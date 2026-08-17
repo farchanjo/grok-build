@@ -370,7 +370,9 @@ impl HostService {
             identity.canonical_id.as_str(),
             self.params.grok_home.as_deref(),
         )
-        .expect("provider route resolve");
+        .map_err(|e| {
+            HostError::Failed(format!("provider route unusable for workflow model: {e}"))
+        })?;
         let canonical = identity.canonical_id;
         let route =
             ExactRoute::new(canonical.clone(), identity.upstream_id, route).ok_or_else(|| {

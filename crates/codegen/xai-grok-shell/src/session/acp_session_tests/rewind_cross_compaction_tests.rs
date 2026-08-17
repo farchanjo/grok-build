@@ -339,6 +339,7 @@ async fn run_clears_marker_scenario() {
     let header = actor
         .reconstruct_full_config()
         .await
+        .expect("reconstruct")
         .extra_headers
         .get("x-compactions-remaining")
         .cloned();

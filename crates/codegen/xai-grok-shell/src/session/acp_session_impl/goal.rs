@@ -558,7 +558,16 @@ impl SessionActor {
             (composed.to_send, composed.to_persist)
         };
 
-        let inference_config = self.reconstruct_full_config().await;
+        let inference_config = match self.reconstruct_full_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "verification stage: provider route unusable");
+                return GoalClassifierOutcome::FailOpenAchieved {
+                    reason: GoalClassifierFailOpenReason::InferenceError,
+                    details_path: String::new(),
+                };
+            }
+        };
         let model_id = inference_config.model.clone();
 
         let Some(event_tx) = self.tool_context.subagent_event_tx.clone() else {

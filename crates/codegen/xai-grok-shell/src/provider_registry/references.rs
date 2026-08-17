@@ -267,6 +267,18 @@ enum ModelRefHit {
     AmbiguousOrCorrupt(String),
 }
 
+/// Load reverse-ref catalog index from `$GROK_HOME/config.toml` once per scan.
+fn load_home_catalog_index(home: &Path) -> indexmap::IndexMap<String, Vec<String>> {
+    let config_path = home.join("config.toml");
+    match fs::read_to_string(&config_path) {
+        Ok(raw) => match toml::from_str::<toml::Value>(&raw) {
+            Ok(val) => build_catalog_index_from_config(&val),
+            Err(_) => indexmap::IndexMap::new(),
+        },
+        Err(_) => indexmap::IndexMap::new(),
+    }
+}
+
 /// Build provider → slug catalog from config `[model.*]` entries for reverse-ref resolve.
 fn build_catalog_index_from_config(val: &toml::Value) -> indexmap::IndexMap<String, Vec<String>> {
     let mut catalog: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
@@ -408,6 +420,8 @@ fn scan_session_refs(
     if !sessions_root.is_dir() {
         return (refs, false, None);
     }
+    // Load config catalog once for bare curated/user/legacy model ids in summaries.
+    let catalog = load_home_catalog_index(home);
     let mut visited = 0usize;
     let walk = match fs::read_dir(&sessions_root) {
         Ok(w) => w,
@@ -476,10 +490,11 @@ fn scan_session_refs(
                                 .or_else(|| v.get("model"))
                                 .and_then(|x| x.as_str())
                                 .unwrap_or("");
-                            let catalog = indexmap::IndexMap::new();
                             let hit = if explicit {
                                 ModelRefHit::Yes
                             } else {
+                                // Bare curated/user/legacy ids resolve via home config catalog.
+                                // Unresolved bare slugs that could refer to target fail closed.
                                 resolve_model_id_to_provider(model, provider_id, &catalog)
                             };
                             match hit {
@@ -870,6 +885,80 @@ model = "shared-slug"
             err.as_ref()
                 .is_some_and(|e| e.contains("ambiguous") || e.contains("fail-closed")),
             "expected fail-closed scan error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn session_summary_bare_model_id_uses_home_catalog() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        fs::write(
+            home.join("config.toml"),
+            r#"
+[model_providers.lab]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+
+[model.curated]
+model_provider = "lab"
+model = "deepseek-coder"
+"#,
+        )
+        .unwrap();
+        // Session summary holds only a bare curated/legacy slug (no provider field).
+        let sess = home.join("sessions/cwd/sess-bare");
+        fs::create_dir_all(&sess).unwrap();
+        fs::write(
+            sess.join("summary.json"),
+            br#"{"current_model_id":"deepseek-coder"}"#,
+        )
+        .unwrap();
+        let (refs, trunc, err) = scan_session_refs(home, "lab");
+        assert!(err.is_none(), "{err:?}");
+        assert!(!trunc);
+        assert!(
+            refs.iter().any(|r| r.label.contains("sess-bare")),
+            "bare summary model must resolve via config catalog: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn session_summary_ambiguous_bare_model_fails_closed() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        fs::write(
+            home.join("config.toml"),
+            r#"
+[model_providers.lab]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+
+[model_providers.other]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8/v1"
+
+[model.a]
+model_provider = "lab"
+model = "shared"
+
+[model.b]
+model_provider = "other"
+model = "shared"
+"#,
+        )
+        .unwrap();
+        let sess = home.join("sessions/cwd/sess-amb");
+        fs::create_dir_all(&sess).unwrap();
+        fs::write(
+            sess.join("summary.json"),
+            br#"{"current_model_id":"shared"}"#,
+        )
+        .unwrap();
+        let (_refs, _trunc, err) = scan_session_refs(home, "lab");
+        assert!(
+            err.as_ref()
+                .is_some_and(|e| e.contains("ambiguous") || e.contains("fail-closed")),
+            "ambiguous bare session model must fail closed: {err:?}"
         );
     }
 }

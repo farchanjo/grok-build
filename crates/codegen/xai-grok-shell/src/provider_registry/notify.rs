@@ -4,11 +4,21 @@
 //! generation), emit `x.ai/providers/update` with only safe optional fields:
 //! `schema_version`, `generation`, `changed_ids`, `changed_fields`.
 //!
-//! Delivery:
-//! 1. Atomic shared-file under `$GROK_HOME/state/provider_registry_notify.json`
-//!    (written by management; generation-coalescing poller/watchers read it).
-//! 2. Multi-subscriber ACP gateway fanout when forwarders are registered
-//!    (leader composition root + optional local self-refresh for `--no-leader`).
+//! # Delivery architecture
+//!
+//! 1. **Atomic notify file** under `$GROK_HOME/state/provider_registry_notify.json`
+//!    (unique-temp + rename). Written by `ProviderManagementService` after every
+//!    durable mutation, partial force-remove, and external fingerprint reconcile.
+//! 2. **Multi-subscriber gateway fanout** via
+//!    [`register_providers_update_forwarder`] / [`try_forward_providers_update`].
+//!    The MvpAgent composition root registers the ACP gateway so leader clients
+//!    receive the ext notification when the mutation runs in the agent process.
+//! 3. **File-poll for TUI / `--no-leader`**: pager mutations run
+//!    `ProviderManagementService` **in the pager process**. Peer agents and
+//!    local self-refresh observe advances by polling the notify file
+//!    ([`poll_notify_file_if_newer`] / [`poll_notify_file_with_cursor`]).
+//!    Each consumer keeps an independent generation cursor so the same write
+//!    is delivered once per consumer and coalesced until the generation bumps.
 //!
 //! Writes use unique-temp + rename. Pollers skip redelivery when the payload
 //! generation is not newer than the last observed generation (coalescing).
@@ -99,21 +109,34 @@ pub fn notify_file_path(home: &Path) -> PathBuf {
 /// the same generation is not redelivered. Used by `--no-leader` self-refresh
 /// and dual-client file bridges.
 pub fn poll_notify_file_if_newer(home: &Path) -> Option<serde_json::Value> {
+    let home_key = home.to_path_buf();
+    let mut cursor = poll_state()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&home_key).copied())
+        .unwrap_or(0);
+    let val = poll_notify_file_with_cursor(home, &mut cursor)?;
+    if let Ok(mut map) = poll_state().lock() {
+        map.insert(home_key, cursor);
+    }
+    Some(val)
+}
+
+/// Independent consumer poll: compare file generation against a caller-owned
+/// cursor (not process-global). Two clients each keep their own `cursor` and
+/// both observe the same mutation write once, with generation coalescing.
+///
+/// This is the multi-client file-poll contract for pager-local mutations under
+/// `--no-leader` and for tests that model two isolated consumers.
+pub fn poll_notify_file_with_cursor(home: &Path, last_seen: &mut u64) -> Option<serde_json::Value> {
     let path = notify_file_path(home);
     let raw = std::fs::read_to_string(&path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let registry_gen = val.get("generation").and_then(|g| g.as_u64()).unwrap_or(0);
-    if registry_gen == 0 {
+    if registry_gen == 0 || registry_gen <= *last_seen {
         return None;
     }
-    let home_key = home.to_path_buf();
-    if let Ok(mut map) = poll_state().lock() {
-        let prev = map.get(&home_key).copied().unwrap_or(0);
-        if registry_gen <= prev {
-            return None;
-        }
-        map.insert(home_key, registry_gen);
-    }
+    *last_seen = registry_gen;
     Some(val)
 }
 
@@ -199,5 +222,58 @@ mod tests {
         std::fs::rename(&tmp2, &path).unwrap();
         let second = poll_notify_file_if_newer(home).expect("newer generation delivers");
         assert_eq!(second["generation"], 5);
+    }
+
+    /// Two independent consumers (separate cursors) both observe a pager-local
+    /// style mutation write with generation coalescing — Gate D multi-client proof.
+    #[test]
+    fn two_independent_poll_consumers_observe_same_mutation_write() {
+        use crate::provider_registry::management::ProviderManagementService;
+        use crate::provider_registry::management::dto::ProviderAddRequest;
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // Consumer A and B start with independent cursors (not process-global).
+        let mut cursor_a: u64 = 0;
+        let mut cursor_b: u64 = 0;
+        assert!(
+            poll_notify_file_with_cursor(home, &mut cursor_a).is_none(),
+            "no file yet"
+        );
+        assert!(poll_notify_file_with_cursor(home, &mut cursor_b).is_none());
+
+        // Mutation in this "pager process" (management service writes notify file).
+        let svc = ProviderManagementService::new(home);
+        let g0 = svc.current_generation();
+        assert!(
+            svc.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+
+        let a = poll_notify_file_with_cursor(home, &mut cursor_a)
+            .expect("consumer A must observe mutation");
+        let b = poll_notify_file_with_cursor(home, &mut cursor_b)
+            .expect("consumer B must observe mutation");
+        assert_eq!(a["generation"], b["generation"]);
+        assert!(a["generation"].as_u64().unwrap_or(0) > 0);
+        // Coalesce: same generation not redelivered to either cursor.
+        assert!(poll_notify_file_with_cursor(home, &mut cursor_a).is_none());
+        assert!(poll_notify_file_with_cursor(home, &mut cursor_b).is_none());
+
+        // Second mutation: both independent consumers observe the bump once.
+        let g1 = svc.current_generation();
+        assert!(svc.set_enabled("lab", false, g1).ok);
+        let a2 = poll_notify_file_with_cursor(home, &mut cursor_a).expect("A sees disable");
+        let b2 = poll_notify_file_with_cursor(home, &mut cursor_b).expect("B sees disable");
+        assert_eq!(a2["generation"], b2["generation"]);
+        assert!(a2["generation"].as_u64().unwrap() > a["generation"].as_u64().unwrap());
     }
 }

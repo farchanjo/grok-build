@@ -169,7 +169,10 @@ impl SessionActor {
             model_id.0.as_ref(),
             Some(home.as_path()),
         )
-        .expect("provider route resolve");
+        .map_err(|e| {
+            acp::Error::invalid_params()
+                .data(format!("provider route unusable for model switch: {e}"))
+        })?;
         *self.route_context.borrow_mut() = Some(route.clone());
         let provenance = crate::session::storage::model_route::provenance_from_route_context(
             &route,

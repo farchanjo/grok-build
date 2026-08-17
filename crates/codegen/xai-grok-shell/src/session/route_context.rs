@@ -1195,6 +1195,188 @@ mod tests {
         );
     }
 
+    /// Controlled error mapping for workflow/model-switch style callers:
+    /// guard failure becomes typed Err, never panic.
+    #[test]
+    fn route_guard_err_maps_to_controlled_caller_errors() {
+        use crate::provider_registry::management::ProviderManagementService;
+        use crate::provider_registry::management::dto::ProviderAddRequest;
+        use crate::provider_registry::runtime_cache;
+
+        let dir = tempdir().unwrap();
+        runtime_cache::invalidate_for_home(dir.path());
+        let svc = ProviderManagementService::new(dir.path());
+        let g0 = svc.current_generation();
+        assert!(
+            svc.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        assert!(svc.set_enabled("lab", false, svc.current_generation()).ok);
+        runtime_cache::invalidate_for_home(dir.path());
+
+        let mut config = crate::agent::config::Config::default();
+        config.model_providers.insert(
+            "lab".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenAiCompatible,
+                base_url: Some("http://127.0.0.1:9/v1".into()),
+                enabled: false,
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "lab:gpt".to_owned(),
+            entry_on_provider(
+                "gpt",
+                "lab",
+                ModelProviderKind::OpenAiCompatible,
+                "http://127.0.0.1:9/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("lab:gpt"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let inference = InferenceConfig {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "gpt".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::Custom,
+            ..InferenceConfig::default()
+        };
+        let err = resolve_for_models_manager_with_selection(
+            &inference,
+            &manager,
+            "lab:gpt",
+            Some(dir.path()),
+        )
+        .expect_err("disabled must be Err");
+        // Workflow host mapping.
+        let host_msg = format!("provider route unusable for workflow model: {err}");
+        assert!(host_msg.contains("lab") || host_msg.contains("disabled"));
+        // Model-switch mapping.
+        let switch_msg = format!("provider route unusable for model switch: {err}");
+        assert!(switch_msg.contains("lab") || switch_msg.contains("disabled"));
+        // Assigned spawn mapping.
+        let spawn_msg = format!("provider route unusable for assigned spawn: {err}");
+        assert!(spawn_msg.contains("lab") || spawn_msg.contains("disabled"));
+    }
+
+    /// Re-enable after disable: resolve succeeds again (session re-enableable).
+    #[test]
+    fn disable_then_reenable_allows_subsequent_resolve() {
+        use crate::provider_registry::management::ProviderManagementService;
+        use crate::provider_registry::management::dto::ProviderAddRequest;
+        use crate::provider_registry::runtime_cache;
+
+        let dir = tempdir().unwrap();
+        runtime_cache::invalidate_for_home(dir.path());
+        let svc = ProviderManagementService::new(dir.path());
+        let g0 = svc.current_generation();
+        assert!(
+            svc.add(ProviderAddRequest {
+                id: "lab".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                display_name: None,
+                admin_base_url: None,
+                enabled: true,
+                expected_generation: g0,
+            })
+            .ok
+        );
+        runtime_cache::invalidate_for_home(dir.path());
+
+        let mut config = crate::agent::config::Config::default();
+        config.model_providers.insert(
+            "lab".to_owned(),
+            ModelProviderConfig {
+                kind: ModelProviderKind::OpenAiCompatible,
+                base_url: Some("http://127.0.0.1:9/v1".into()),
+                enabled: true,
+                ..ModelProviderConfig::default()
+            },
+        );
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "lab:gpt".to_owned(),
+            entry_on_provider(
+                "gpt",
+                "lab",
+                ModelProviderKind::OpenAiCompatible,
+                "http://127.0.0.1:9/v1",
+            ),
+        );
+        let manager = crate::agent::models::ModelsManager::new(
+            None,
+            models,
+            acp::ModelId::new("lab:gpt"),
+            std::sync::Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::GrokComConfig::default(),
+            )),
+            config,
+        );
+        let inference = InferenceConfig {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "gpt".into(),
+            provider_identity: xai_grok_inference::config::ProviderIdentity::Custom,
+            ..InferenceConfig::default()
+        };
+
+        assert!(
+            resolve_for_models_manager_with_selection(
+                &inference,
+                &manager,
+                "lab:gpt",
+                Some(dir.path()),
+            )
+            .is_ok()
+        );
+        assert!(svc.set_enabled("lab", false, svc.current_generation()).ok);
+        runtime_cache::invalidate_for_home(dir.path());
+        assert!(
+            resolve_for_models_manager_with_selection(
+                &inference,
+                &manager,
+                "lab:gpt",
+                Some(dir.path()),
+            )
+            .is_err()
+        );
+        // Re-enable: subsequent prepare/resolve must succeed.
+        assert!(svc.set_enabled("lab", true, svc.current_generation()).ok);
+        runtime_cache::invalidate_for_home(dir.path());
+        // Config snapshot in models_manager still has enabled:true from construction;
+        // live assert uses runtime_cache / config.toml which was re-enabled.
+        assert_live_route_usable(
+            dir.path(),
+            &resolve_for_models_manager_with_selection(
+                &inference,
+                &manager,
+                "lab:gpt",
+                Some(dir.path()),
+            )
+            .expect("re-enable must allow resolve"),
+            false,
+        )
+        .expect("re-enable must allow live assert");
+    }
+
     /// True legacy only when no configured provider instance is selected.
     #[test]
     fn true_legacy_only_without_configured_provider_selection() {

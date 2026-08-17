@@ -1961,12 +1961,22 @@ impl acp::Agent for MvpAgent {
                 let inference =
                     self.prepare_inference_config_for_model(entry, origin_client);
                 let live =
-                    crate::session::route_context::resolve_for_models_manager_with_selection(
+                    match crate::session::route_context::resolve_for_models_manager_with_selection(
                         &inference,
                         &self.models_manager,
                         key.0.as_ref(),
                         Some(home.as_path()),
-                    ).expect("provider route resolve");
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(
+                                session_id = %session_id.0,
+                                error = %e,
+                                "load_session: provider route unusable; companion not accepted"
+                            );
+                            return false;
+                        }
+                    };
                 let live_upstream = inference.model.as_str();
                 match crate::agent::model_identity::validate_companion_against_live_route(
                     companion,
