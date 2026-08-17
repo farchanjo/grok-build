@@ -223,6 +223,15 @@ pub struct OpenRouterNativeCliArgs {
     pub dry_run: bool,
     #[arg(long)]
     pub yes: bool,
+    /// Emit NDJSON for streaming / SSE operations.
+    #[arg(long)]
+    pub stream: bool,
+    /// Write binary responses to this path (required for binary ops on TTY).
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Multipart file field bindings as `field=/path/to/file` (repeatable).
+    #[arg(long = "file", value_name = "FIELD=PATH")]
+    pub files: Vec<String>,
     #[command(subcommand)]
     pub command: OpenRouterNativeCommand,
 }

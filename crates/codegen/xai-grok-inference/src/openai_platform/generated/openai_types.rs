@@ -13112,6 +13112,12 @@ pub struct CreateCompletionParams {
     pub body: CreateCompletionRequest,
 }
 
+/// SSE event stream for `createCompletion` (all frames preserved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateCompletionSseResult {
+    pub events: Vec<SseEvent>,
+}
+
 /// Generated object `CreateCompletionRequest`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreateCompletionRequest {
@@ -15543,6 +15549,12 @@ pub struct CreateRunParams {
     pub body: CreateRunRequest,
 }
 
+/// SSE event stream for `createRun` (all frames preserved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRunSseResult {
+    pub events: Vec<SseEvent>,
+}
+
 /// Generated string enum `CreateRunParamsIncludeItemEnum`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CreateRunParamsIncludeItemEnum {
@@ -15848,6 +15860,12 @@ pub struct CreateSpeechSseResult {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreateThreadAndRunParams {
     pub body: CreateThreadAndRunRequest,
+}
+
+/// SSE event stream for `createThreadAndRun` (all frames preserved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateThreadAndRunSseResult {
+    pub events: Vec<SseEvent>,
 }
 
 /// Generated object `CreateThreadAndRunRequest`.
@@ -21474,11 +21492,11 @@ pub struct GetSkillContentParams {
     pub skill_id: String,
 }
 
-/// Text result for `GetSkillContent`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
+/// Binary result for `GetSkillContent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetSkillContentResult {
-    pub body: String,
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
 }
 
 /// Typed params for `GET /skills/{skill_id}` (`GetSkill`).
@@ -21501,11 +21519,11 @@ pub struct GetSkillVersionContentParams {
     pub version: String,
 }
 
-/// Text result for `GetSkillVersionContent`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
+/// Binary result for `GetSkillVersionContent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetSkillVersionContentResult {
-    pub body: String,
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
 }
 
 /// Typed params for `GET /skills/{skill_id}/versions/{version}` (`GetSkillVersion`).
@@ -31372,6 +31390,12 @@ pub struct SubmitToolOuputsToRunParams {
     pub thread_id: String,
     pub run_id: String,
     pub body: SubmitToolOutputsRunRequest,
+}
+
+/// SSE event stream for `submitToolOuputsToRun` (all frames preserved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubmitToolOuputsToRunSseResult {
+    pub events: Vec<SseEvent>,
 }
 
 /// JSON result for `submitToolOuputsToRun`.

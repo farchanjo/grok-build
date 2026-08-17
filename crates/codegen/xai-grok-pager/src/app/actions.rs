@@ -1442,6 +1442,57 @@ pub enum ProviderOperation {
     Disconnect(crate::views::providers_modal::ProviderKind),
     LoginCodex,
     LogoutCodex,
+    /// Shell-authoritative list snapshot (generation-tagged, secret-free).
+    LoadListSnapshot,
+    /// Load typed editor detail for one provider id.
+    LoadEditorDetail {
+        provider_id: String,
+    },
+    /// Add configured instance (metadata only).
+    AddConfigured {
+        id: String,
+        kind: String,
+        base_url: String,
+        display_name: Option<String>,
+        expected_generation: u64,
+    },
+    /// Save typed patch + optional credential slots (secrets redacted).
+    SaveEditor {
+        id: String,
+        expected_generation: u64,
+        patch: xai_grok_shell::provider_registry::management::dto::ProviderSavePatch,
+        credential_update: xai_grok_shell::provider_registry::management::dto::CredentialSlotUpdate,
+        application_key: Option<ProviderApiKey>,
+        admin_key: Option<ProviderApiKey>,
+    },
+    Enable {
+        provider_id: String,
+        expected_generation: u64,
+    },
+    Disable {
+        provider_id: String,
+        expected_generation: u64,
+    },
+    CloneProvider {
+        source_id: String,
+        new_id: String,
+        expected_generation: u64,
+    },
+    RefreshCatalogId {
+        provider_id: String,
+    },
+    RefreshCapabilitiesId {
+        provider_id: String,
+    },
+    TestId {
+        provider_id: String,
+    },
+    CreditsId {
+        provider_id: String,
+    },
+    LoadReferences {
+        provider_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -2484,6 +2535,8 @@ pub enum TaskResult {
         /// the credential (`None` when the op did not write a durable binding
         /// generation — resume fails closed).
         credential_write_receipt: Option<crate::app::agent::CredentialWriteReceipt>,
+        /// Optional shell management result payload (secret-free).
+        management: Option<ProviderManagementResult>,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {
@@ -2958,6 +3011,20 @@ pub enum TaskResult {
         shell: crate::diagnostics::ShellKind,
         result: Result<crate::diagnostics::FixOutcome, String>,
     },
+}
+
+/// Secret-free management result applied by the reducer after async work.
+#[derive(Debug, Clone)]
+pub enum ProviderManagementResult {
+    List(xai_grok_shell::provider_registry::management::dto::ProviderListSnapshot),
+    Detail(xai_grok_shell::provider_registry::management::dto::ProviderDetailDto),
+    Mutation(xai_grok_shell::provider_registry::management::dto::ProviderMutationResult),
+    Status(xai_grok_shell::provider_registry::management::dto::ProviderStatusSnapshot),
+    Catalog(xai_grok_shell::provider_registry::management::dto::CatalogStatusSnapshot),
+    Capabilities(xai_grok_shell::provider_registry::management::dto::CapabilityStatusSnapshot),
+    Credits(xai_grok_shell::provider_registry::management::dto::ProviderCreditsSnapshot),
+    References(xai_grok_shell::provider_registry::management::dto::ReferenceImpactSnapshot),
+    Error(String),
 }
 #[cfg(test)]
 mod tests {

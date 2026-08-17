@@ -497,4 +497,78 @@ mod tests {
         let frames = split_sse_data_frames(": comment\n\ndata: {\"a\":1}\n\n");
         assert_eq!(frames, vec![r#"{"a":1}"#]);
     }
+
+    #[tokio::test]
+    async fn binary_sink_is_owner_only_durable() {
+        let (addr, server) = spawn(Router::new().route(
+            "/v1/audio",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "audio/mpeg")],
+                    vec![7u8, 8, 9, 10],
+                )
+            }),
+        ))
+        .await;
+        let transport = transport(&format!("http://{addr}/v1"));
+        let dir = std::env::temp_dir().join(format!(
+            "grok-bin-sink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sink = dir.join("out.bin");
+        let mut spec = get_spec("/audio");
+        spec.expect_binary = true;
+        let (bytes, _) = transport.execute_binary(spec, Some(&sink)).await.unwrap();
+        assert_eq!(bytes, vec![7, 8, 9, 10]);
+        assert_eq!(std::fs::read(&sink).unwrap(), vec![7, 8, 9, 10]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&sink).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "binary sink must be owner-only");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn binary_sink_refuses_symlink() {
+        let (addr, server) =
+            spawn(Router::new().route("/v1/audio", get(|| async { vec![1u8, 2, 3] }))).await;
+        let transport = transport(&format!("http://{addr}/v1"));
+        let dir = std::env::temp_dir().join(format!(
+            "grok-bin-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.bin");
+        std::fs::write(&real, b"keep").unwrap();
+        let link = dir.join("link.bin");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let mut spec = get_spec("/audio");
+            spec.expect_binary = true;
+            let err = transport
+                .execute_binary(spec, Some(&link))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, PlatformError::Transport(_)),
+                "expected transport error for symlink sink, got {err:?}"
+            );
+            assert_eq!(std::fs::read(&real).unwrap(), b"keep");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        server.abort();
+    }
 }

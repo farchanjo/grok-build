@@ -39,8 +39,8 @@ trait PrimaryExt {
 
 impl PrimaryExt for &&OperationBinding {
     fn primary_or_default(self) -> bool {
-        // Stream companions use operation_id suffix; still valid coverage for SSE.
-        true
+        // Inventory coverage is primary-only; SSE companions share the same METHOD+path.
+        self.is_primary
     }
 }
 
@@ -76,11 +76,14 @@ pub fn semantic_defects(b: &OperationBinding) -> Vec<String> {
         defects.push("binary_flag_without_transport".into());
     }
     // Admin credential class.
-    if b.is_admin && b.provider != "openai_admin" && !b.path.starts_with("/organization") {
-        // openrouter admin is separate namespace
-    }
     if b.provider == "openai_admin" && !b.is_admin {
         defects.push("openai_admin_without_admin_flag".into());
+    }
+    if b.provider == "openrouter" {
+        let want_admin = super::generated::openrouter_path_is_admin(b.path);
+        if want_admin != b.is_admin {
+            defects.push("openrouter_admin_class_mismatch".into());
+        }
     }
     // Unknown method is not allowed.
     if !matches!(
@@ -199,15 +202,9 @@ pub fn coverage_report_json() -> Result<Value, String> {
     }))
 }
 
-/// Lookup a binding by provider + operation_id.
-pub fn find_binding(provider: &str, operation_id: &str) -> Option<&'static OperationBinding> {
-    OPERATION_BINDINGS
-        .iter()
-        .find(|b| b.provider == provider && b.operation_id == operation_id)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::generated::find_binding;
     use super::*;
 
     #[test]
@@ -273,5 +270,85 @@ mod tests {
                 b.operation_id
             );
         }
+    }
+
+    #[test]
+    fn truthful_primary_and_companion_counts() {
+        use super::super::generated::{
+            BINARY_PRIMARY_COUNT, OPENAI_PRIMARY_COUNT, OPENROUTER_PRIMARY_COUNT,
+            SSE_COMPANION_COUNT,
+        };
+        let openai_primaries = OPERATION_BINDINGS
+            .iter()
+            .filter(|b| (b.provider == "openai" || b.provider == "openai_admin") && b.is_primary)
+            .count();
+        let or_primaries = OPERATION_BINDINGS
+            .iter()
+            .filter(|b| b.provider == "openrouter" && b.is_primary)
+            .count();
+        let sse = OPERATION_BINDINGS.iter().filter(|b| b.is_sse).count();
+        let binary = OPERATION_BINDINGS
+            .iter()
+            .filter(|b| b.is_binary && b.is_primary)
+            .count();
+        assert_eq!(openai_primaries, 287);
+        assert_eq!(or_primaries, 89);
+        assert_eq!(sse, 20);
+        assert_eq!(binary, 7);
+        assert_eq!(OPENAI_PRIMARY_COUNT, 287);
+        assert_eq!(OPENROUTER_PRIMARY_COUNT, 89);
+        assert_eq!(SSE_COMPANION_COUNT, 20);
+        assert_eq!(BINARY_PRIMARY_COUNT, 7);
+    }
+
+    #[test]
+    fn skill_zip_endpoints_are_typed_binary() {
+        for oid in ["GetSkillContent", "GetSkillVersionContent"] {
+            let b = find_binding("openai", oid).expect(oid);
+            assert!(b.is_binary, "{oid}");
+            assert!(b.transports.contains(&"http_binary"), "{oid}");
+        }
+    }
+
+    #[test]
+    fn openrouter_get_key_is_application_not_admin() {
+        let b = OPERATION_BINDINGS
+            .iter()
+            .find(|b| b.provider == "openrouter" && b.path == "/key" && b.method == "GET")
+            .expect("GET /key");
+        assert!(!b.is_admin);
+        assert_eq!(b.credential_class, "application");
+    }
+
+    #[test]
+    fn openrouter_management_surfaces_are_admin() {
+        for b in OPERATION_BINDINGS
+            .iter()
+            .filter(|b| b.provider == "openrouter" && b.is_primary)
+        {
+            let want = super::super::generated::openrouter_path_is_admin(b.path);
+            assert_eq!(b.is_admin, want, "{} {}", b.operation_id, b.path);
+            assert_eq!(
+                b.credential_class,
+                if want { "admin" } else { "application" },
+                "{} {}",
+                b.operation_id,
+                b.path
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_and_ops_primary_reconciliation() {
+        let openai = openai_inventory();
+        let openrouter = openrouter_inventory();
+        assert_eq!(openai.endpoints.len(), 287);
+        assert_eq!(openrouter.endpoints.len(), 89);
+        let missing = uncovered_operations().expect("coverage");
+        assert!(
+            missing.is_empty(),
+            "inventory/ops mismatch: {:?}",
+            missing.iter().take(10).collect::<Vec<_>>()
+        );
     }
 }

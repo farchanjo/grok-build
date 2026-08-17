@@ -199,28 +199,19 @@ pub(in crate::app::dispatch) fn dispatch_open_providers(app: &mut AppView) -> Ve
         return effects;
     }
     let mut state = ProviderModalState::new();
-    // Load configured provider rows from config.toml (best effort).
-    let path = xai_grok_config::grok_home().join("config.toml");
-    if let Ok(raw) = std::fs::read_to_string(path)
-        && let Ok(val) = raw.parse::<toml::Value>()
-        && let Some(table) = val.get("model_providers").and_then(|v| v.as_table())
-    {
-        let configured: Vec<String> = table.keys().cloned().collect();
-        state.set_configured_providers(configured);
-    }
     // Focus xAI row so connect/disconnect is one Enter away from welcome.
+    // Configured rows come only from the shell management list snapshot —
+    // never from a direct config.toml read in the pager.
     state.selected = 0;
-    let refresh_rows = state.rows.clone();
     agent.active_modal = Some(ActiveModal::Providers {
         state: Box::new(state),
     });
-    effects.extend(refresh_rows.into_iter().map(|provider| {
-        Effect::ProviderOperation {
-            agent_id: id,
-            operation: crate::app::actions::ProviderOperation::Refresh(provider),
-            repair: None, // status refresh never resumes a stash
-        }
-    }));
+    // Shell-authoritative list (generation-tagged) + per-row status refresh.
+    effects.push(Effect::ProviderOperation {
+        agent_id: id,
+        operation: crate::app::actions::ProviderOperation::LoadListSnapshot,
+        repair: None,
+    });
     effects
 }
 
@@ -286,11 +277,118 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::LogoutCodex => ProviderOperation::LogoutCodex,
             ProviderCommand::LoginXai | ProviderCommand::LogoutXai => unreachable!(),
             ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
-            ProviderCommand::AddConfigured
-            | ProviderCommand::RefreshCatalog(_)
-            | ProviderCommand::RefreshCapabilities(_) => {
-                // Config editor / capability refresh: no secret path.
-                return vec![];
+            ProviderCommand::LoadListSnapshot => ProviderOperation::LoadListSnapshot,
+            ProviderCommand::OpenEditor { provider_id } => {
+                ProviderOperation::LoadEditorDetail { provider_id }
+            }
+            ProviderCommand::Enable { provider_id } => ProviderOperation::Enable {
+                provider_id,
+                expected_generation: state.list_generation,
+            },
+            ProviderCommand::Disable { provider_id } => ProviderOperation::Disable {
+                provider_id,
+                expected_generation: state.list_generation,
+            },
+            ProviderCommand::Clone { source_id, new_id } => ProviderOperation::CloneProvider {
+                source_id,
+                new_id,
+                expected_generation: state.list_generation,
+            },
+            ProviderCommand::AddConfigured => {
+                let Some(pending) = state.pending_add.take() else {
+                    state.management_error =
+                        Some("Add provider requires id, kind, and base URL".into());
+                    return vec![];
+                };
+                ProviderOperation::AddConfigured {
+                    id: pending.id,
+                    kind: pending.kind,
+                    base_url: pending.base_url,
+                    display_name: pending.display_name,
+                    expected_generation: state.list_generation,
+                }
+            }
+            ProviderCommand::RefreshCatalog(provider) => ProviderOperation::RefreshCatalogId {
+                provider_id: provider.id_str().to_owned(),
+            },
+            ProviderCommand::RefreshCapabilities(provider) => {
+                ProviderOperation::RefreshCapabilitiesId {
+                    provider_id: provider.id_str().to_owned(),
+                }
+            }
+            ProviderCommand::Editor(cmd) => {
+                use crate::views::provider_editor::EditorCommand;
+                let Some(editor) = state.editor_mut() else {
+                    return vec![];
+                };
+                match cmd {
+                    EditorCommand::Save => {
+                        let id = editor.detail.id.clone();
+                        let expected_generation = editor.generation().get();
+                        // Dirty-field patch only (Issue 8).
+                        let patch = editor.dirty_save_patch();
+                        let credential_update = editor.credential_slot_update();
+                        let application_key = editor
+                            .take_app_secret()
+                            .map(crate::app::actions::ProviderApiKey::new);
+                        let admin_key = editor
+                            .take_admin_secret()
+                            .map(crate::app::actions::ProviderApiKey::new);
+                        ProviderOperation::SaveEditor {
+                            id,
+                            expected_generation,
+                            patch,
+                            credential_update,
+                            application_key,
+                            admin_key,
+                        }
+                    }
+                    EditorCommand::Test => ProviderOperation::TestId {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::RefreshCatalog => ProviderOperation::RefreshCatalogId {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::RefreshCapabilities => {
+                        ProviderOperation::RefreshCapabilitiesId {
+                            provider_id: editor.detail.id.clone(),
+                        }
+                    }
+                    EditorCommand::Credits => ProviderOperation::CreditsId {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::ToggleEnabled => {
+                        let id = editor.detail.id.clone();
+                        let expected = editor.generation().get();
+                        if editor.detail.enabled {
+                            ProviderOperation::Disable {
+                                provider_id: id,
+                                expected_generation: expected,
+                            }
+                        } else {
+                            ProviderOperation::Enable {
+                                provider_id: id,
+                                expected_generation: expected,
+                            }
+                        }
+                    }
+                    EditorCommand::Clone { new_id } => ProviderOperation::CloneProvider {
+                        source_id: editor.detail.id.clone(),
+                        new_id,
+                        expected_generation: editor.generation().get(),
+                    },
+                    EditorCommand::LoadReferences => ProviderOperation::LoadReferences {
+                        provider_id: editor.detail.id.clone(),
+                    },
+                    EditorCommand::ClearAppKey => {
+                        editor.clear_app_key = true;
+                        return vec![];
+                    }
+                    EditorCommand::ClearAdminKey => {
+                        editor.clear_admin_key = true;
+                        return vec![];
+                    }
+                }
             }
         }
     };

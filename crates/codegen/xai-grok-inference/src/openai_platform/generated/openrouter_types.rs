@@ -1044,6 +1044,12 @@ pub struct CreatePresetsChatCompletionsParams {
     pub body: OrChatRequest,
 }
 
+/// SSE event stream for `createPresetsChatCompletions` (all frames preserved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePresetsChatCompletionsSseResult {
+    pub events: Vec<SseEvent>,
+}
+
 /// JSON result for `createPresetsChatCompletions`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreatePresetsChatCompletionsResult {
@@ -1058,6 +1064,12 @@ pub struct CreatePresetsMessagesParams {
     pub body: OrMessagesRequest,
 }
 
+/// SSE event stream for `createPresetsMessages` (all frames preserved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePresetsMessagesSseResult {
+    pub events: Vec<SseEvent>,
+}
+
 /// JSON result for `createPresetsMessages`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreatePresetsMessagesResult {
@@ -1070,6 +1082,12 @@ pub struct CreatePresetsMessagesResult {
 pub struct CreatePresetsResponsesParams {
     pub slug: String,
     pub body: OrResponsesRequest,
+}
+
+/// SSE event stream for `createPresetsResponses` (all frames preserved).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePresetsResponsesSseResult {
+    pub events: Vec<SseEvent>,
 }
 
 /// JSON result for `createPresetsResponses`.

@@ -9,6 +9,7 @@ pub mod gate;
 pub mod id;
 pub mod instance;
 pub mod lifecycle;
+pub mod management;
 pub mod secrets;
 pub mod service;
 pub mod toml_edit;
@@ -38,6 +39,16 @@ pub use lifecycle::{
     ProviderLifecycleError, ProviderMetadata, ProviderRegistrySnapshot, namespaced_model_id,
     parse_namespaced_model_id, resolve_legacy_model_alias,
 };
+pub use management::{
+    ProviderManagementService,
+    dto::{
+        CapabilityStatusSnapshot, CatalogStatusSnapshot, CredentialPresence, CredentialSlotUpdate,
+        ProviderAddRequest, ProviderCloneRequest, ProviderCreditsSnapshot, ProviderDetailDto,
+        ProviderEditorPage, ProviderListRow, ProviderListSnapshot, ProviderMutationResult,
+        ProviderSavePatch, ProviderSaveRequest, ProviderStatusSnapshot, ReferenceImpactSnapshot,
+        RegistryGeneration, SecretFieldUpdate,
+    },
+};
 pub use secrets::{
     ProviderCredentialKind, ProviderOAuthBinding, ProviderSecretScope, admin_key_scope,
     application_key_scope, clear_provider_secret, is_allowed_oauth_scope, oauth_scope_string,
@@ -45,6 +56,7 @@ pub use secrets::{
 };
 pub use service::{ProviderService, ProviderServiceError};
 pub use toml_edit::{
-    ProviderTomlPatch, apply_provider_patch, disable_provider, enable_provider, remove_provider,
+    OpenRouterPrefsPatch, ProviderTomlPatch, apply_openrouter_preferences, apply_provider_patch,
+    apply_provider_patch_with_openrouter, disable_provider, enable_provider, remove_provider,
     upsert_provider,
 };

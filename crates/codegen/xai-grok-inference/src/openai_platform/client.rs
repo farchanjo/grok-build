@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Configuration shared by platform clients.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PlatformClientConfig {
     pub provider_id: String,
     pub display_name: String,
@@ -21,6 +21,27 @@ pub struct PlatformClientConfig {
     pub admin_token: Option<String>,
     pub extra_headers: ExtraHeaders,
     pub policy: TransportPolicy,
+}
+
+impl std::fmt::Debug for PlatformClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformClientConfig")
+            .field("provider_id", &self.provider_id)
+            .field("display_name", &self.display_name)
+            .field("base_url", &self.base_url)
+            .field("admin_base_url", &self.admin_base_url)
+            .field(
+                "application_token",
+                &self.application_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "admin_token",
+                &self.admin_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("extra_headers", &self.extra_headers)
+            .field("policy", &self.policy)
+            .finish()
+    }
 }
 
 impl PlatformClientConfig {
@@ -129,9 +150,9 @@ impl OpenAiAdminClient {
             .admin_base_url
             .as_deref()
             .unwrap_or(config.base_url.as_str());
-        // Admin client is constructed with ONLY the admin token in the
-        // application slot of StaticCredentials so accidental Application
-        // credential kind still cannot reach the user API key.
+        // Admin client uses AdminOnlyCredentials: Admin kind serves the admin
+        // token; Application kind fails closed so it can never inject a user
+        // application key (even by accidental CredentialKind::Application).
         let admin_only = Arc::new(AdminOnlyCredentials {
             admin: config.admin_token,
         });
@@ -162,9 +183,11 @@ impl OpenRouterClient {
         cancel: CancellationToken,
     ) -> PlatformResult<Self> {
         config.validate()?;
+        // Provider-native dual slot: application and management/admin keys are
+        // both available, but CredentialKind selection never borrows the other.
         let creds = Arc::new(StaticCredentials {
             application: config.application_token,
-            admin: None,
+            admin: config.admin_token,
         });
         let transport = PlatformTransport::new(
             &config.base_url,
@@ -243,6 +266,113 @@ mod tests {
         ));
         // Structural: admin key is never returned for Application.
         assert!(!format!("{err:?}").contains("admin-key"));
+    }
+
+    #[test]
+    fn openrouter_client_keeps_dual_slots_without_borrow() {
+        let cfg = PlatformClientConfig {
+            provider_id: "openrouter".into(),
+            display_name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            admin_base_url: None,
+            application_token: Some("app-key".into()),
+            admin_token: Some("admin-key".into()),
+            extra_headers: Default::default(),
+            policy: TransportPolicy::default(),
+        };
+        let client = OpenRouterClient::from_config(cfg.clone(), CancellationToken::new()).unwrap();
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Application)
+                .unwrap()
+                .as_deref(),
+            Some("app-key")
+        );
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Admin)
+                .unwrap()
+                .as_deref(),
+            Some("admin-key")
+        );
+    }
+
+    #[test]
+    fn debug_redacts_application_and_admin_token_literals() {
+        let marker_app = "super-secret-app-token-XYZ";
+        let marker_admin = "super-secret-admin-token-ABC";
+        let cfg = PlatformClientConfig {
+            provider_id: "openrouter".into(),
+            display_name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            admin_base_url: None,
+            application_token: Some(marker_app.into()),
+            admin_token: Some(marker_admin.into()),
+            extra_headers: Default::default(),
+            policy: TransportPolicy::default(),
+        };
+        let dbg_cfg = format!("{cfg:?}");
+        assert!(
+            !dbg_cfg.contains(marker_app),
+            "PlatformClientConfig Debug leaked app token: {dbg_cfg}"
+        );
+        assert!(
+            !dbg_cfg.contains(marker_admin),
+            "PlatformClientConfig Debug leaked admin token: {dbg_cfg}"
+        );
+        assert!(dbg_cfg.contains("provider_id"));
+        assert!(dbg_cfg.contains("<redacted>"));
+
+        let creds = StaticCredentials {
+            application: Some(marker_app.into()),
+            admin: Some(marker_admin.into()),
+        };
+        let dbg_creds = format!("{creds:?}");
+        assert!(
+            !dbg_creds.contains(marker_app),
+            "StaticCredentials Debug leaked app token: {dbg_creds}"
+        );
+        assert!(
+            !dbg_creds.contains(marker_admin),
+            "StaticCredentials Debug leaked admin token: {dbg_creds}"
+        );
+        assert!(dbg_creds.contains("<redacted>"));
+    }
+
+    #[test]
+    fn openrouter_admin_missing_does_not_borrow_application() {
+        let cfg = PlatformClientConfig {
+            provider_id: "openrouter".into(),
+            display_name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            admin_base_url: None,
+            application_token: Some("app-key".into()),
+            admin_token: None,
+            extra_headers: Default::default(),
+            policy: TransportPolicy::default(),
+        };
+        let client = OpenRouterClient::from_config(cfg, CancellationToken::new()).unwrap();
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Admin)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            client
+                .transport()
+                .credentials
+                .resolve(CredentialKind::Application)
+                .unwrap()
+                .as_deref(),
+            Some("app-key")
+        );
     }
 
     #[test]

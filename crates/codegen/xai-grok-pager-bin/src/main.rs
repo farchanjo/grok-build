@@ -241,6 +241,9 @@ async fn run_openrouter_native_cli(args: &xai_grok_pager::app::OpenRouterNativeC
         provider: args.provider.clone(),
         dry_run: args.dry_run,
         yes: args.yes,
+        stream: args.stream,
+        output: args.output.clone(),
+        files: args.files.clone(),
         command: match &args.command {
             OpenRouterNativeCommand::Ops => shell_or::OpenRouterCliCommand::Ops,
             OpenRouterNativeCommand::Call {
