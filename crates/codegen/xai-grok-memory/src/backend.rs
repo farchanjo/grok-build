@@ -119,13 +119,23 @@ fn legacy_source_spec(
         provider_instance_id: "legacy:memory.embedding".to_owned(),
         incarnation: None,
         origin_host: origin_host(base_url),
-        embedding_path: "/v1/embeddings".to_owned(),
+        // Canonical embedding endpoint path shared with the named-profile
+        // facade so the same logical endpoint never fingerprints differently
+        // purely from the hardcoded literal (A7/#6).
+        embedding_path: canonical_embedding_path(),
         protocol: "openai_compatible".to_owned(),
         model: model.to_owned(),
         dimensions: cfg.dimensions,
         encoding: "float".to_owned(),
         normalization: super::fingerprint::NORMALIZATION_NONE.to_owned(),
     })
+}
+
+/// The canonical embedding endpoint path used in both named-profile and
+/// legacy source identity, matching the wire path the providers hit.
+fn canonical_embedding_path() -> String {
+    use xai_grok_inference::DEFAULT_EMBEDDINGS_PATH;
+    DEFAULT_EMBEDDINGS_PATH.to_owned()
 }
 
 /// All configuration needed to build a fully-wired [`MemoryBackendImpl`] for a live session.
@@ -164,6 +174,13 @@ pub struct MemoryBackendParams {
     /// shell-synthesized legacy source) instead of the legacy
     /// `[memory.embedding]` provider. `None` keeps the legacy path.
     pub retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
+    /// The exact `MemoryIndexConfig` every chunk writer uses. Both the vector
+    /// fingerprint's doc-preparation determinant and the search index must use
+    /// this one value (A8/#5); a non-default prep change therefore rebuilds.
+    pub index_config: xai_grok_config_types::MemoryIndexConfig,
+    /// Seconds to back off between failed vector-rebuild attempts (FTS-only
+    /// while backing off), so repeated failures do not rebuild on every search.
+    pub rebuild_backoff_secs: i64,
 }
 
 impl MemoryBackendParams {
@@ -251,6 +268,8 @@ pub struct MemoryBackendImpl {
     pub search_counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
     embedding_credentials: EndpointScopedCredentials,
     retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
+    index_config: xai_grok_config_types::MemoryIndexConfig,
+    rebuild_backoff_secs: i64,
 }
 
 impl MemoryBackendImpl {
@@ -270,6 +289,8 @@ impl MemoryBackendImpl {
             search_source: "tool",
             embedding_credentials: EndpointScopedCredentials::none(),
             retrieval: None,
+            index_config: xai_grok_config_types::MemoryIndexConfig::default(),
+            rebuild_backoff_secs: 0,
             search_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -341,6 +362,8 @@ impl MemoryBackendImpl {
         }
         backend.embedding_credentials = params.embedding_credentials.clone();
         backend.retrieval = params.retrieval.clone();
+        backend.index_config = params.index_config.clone();
+        backend.rebuild_backoff_secs = params.rebuild_backoff_secs;
         backend
     }
 
@@ -411,7 +434,9 @@ impl MemoryBackend for MemoryBackendImpl {
         // Resolve the effective embedding source (named profile via the
         // credential-free facade, or a synthesized legacy `[memory.embedding]`
         // source) and the pinned vector space.
-        let index_config = xai_grok_config_types::MemoryIndexConfig::default();
+        // The real index config used by every chunk writer drives both the
+        // fingerprint's doc-preparation determinant and the chunker (A8/#5).
+        let index_config = self.index_config.clone();
         let (spec, embed_dims) = self.effective_embedding_spec();
         // Build an embedder for the pinned source (None ⇒ no vectors / FTS-only).
         let embedder: Option<std::sync::Arc<dyn super::embedding::EmbeddingProvider>> =
@@ -436,8 +461,12 @@ impl MemoryBackend for MemoryBackendImpl {
                 None
             };
         // Cancel token for the vector rebuild loop (search has no external
-        // cancellation; the loop only checks this to stay cooperative).
+        // cancellation; the loop only checks this to stay cooperative). The
+        // rebuild is throttled by a persisted back-off and a per-search batch
+        // cap so pending searches stay FTS-only-cheap (A12/#8).
         let rebuild_cancel = tokio_util::sync::CancellationToken::new();
+        let rebuild_backoff_secs = self.rebuild_backoff_secs;
+        let rebuild_batches_per_call = 4usize;
         // Reconcile / transactionally rebuild vectors through the pinned source.
         let readiness = match &spec {
             Some(s) => {
@@ -448,6 +477,8 @@ impl MemoryBackend for MemoryBackendImpl {
                     s,
                     embedder.clone(),
                     self.stale_claim_secs,
+                    rebuild_backoff_secs,
+                    Some(rebuild_batches_per_call),
                     rebuild_cancel,
                 )
                 .await
@@ -468,14 +499,16 @@ impl MemoryBackend for MemoryBackendImpl {
 
         // ── Sync phase 1: reindex dirty files, collect chunks needing embeddings ──
         let mut reindex_chunks: Vec<(String, String)> = Vec::new();
-        let mut needs_release = false;
+        // Owner token for the reindex claim; release is owner-scoped so a
+        // stolen (stale-window) claim is never cleared by the loser.
+        let mut reindex_claim: Option<String> = None;
         // Watcher-sync telemetry data (populated inside the claim guard below).
         let mut watcher_sync_stats: Option<(usize, usize, std::time::Instant)> = None;
         if let Some(ref watcher) = self.watcher
             && watcher.is_dirty()
-            && index.try_claim_reindex(self.stale_claim_secs)
+            && let Some(claim) = index.try_claim_reindex_owned(self.stale_claim_secs)
         {
-            needs_release = true;
+            reindex_claim = Some(claim);
             let sync_start = std::time::Instant::now();
             let dirty_files = watcher.take_dirty();
             let dirty_count = dirty_files.len();
@@ -541,8 +574,10 @@ impl MemoryBackend for MemoryBackendImpl {
             }
             embedded_count = upserts.len();
         }
-        if needs_release {
-            index.release_claim();
+        if let Some(claim) = reindex_claim {
+            // Owner-scoped release: never clears a claim stolen via the stale
+            // window while we were working.
+            index.release_claim(&claim);
             // Fire watcher-sync telemetry now that we know the embedded count.
             if let Some((dirty_count, reindexed_count, sync_start)) = watcher_sync_stats {
                 xai_grok_telemetry::session_ctx::log_event(
@@ -745,6 +780,8 @@ mod factory_tests {
             search_source: "tool",
             embedding_credentials: EndpointScopedCredentials::none(),
             retrieval: None,
+            index_config: xai_grok_config_types::MemoryIndexConfig::default(),
+            rebuild_backoff_secs: 0,
         }
     }
 
@@ -1355,6 +1392,8 @@ mod factory_tests {
                 Some(probe),
             ),
             retrieval: None,
+            index_config: xai_grok_config_types::MemoryIndexConfig::default(),
+            rebuild_backoff_secs: 0,
         };
 
         let provider = params.make_embedding_provider().await;
@@ -1800,6 +1839,90 @@ mod tests {
         assert!(
             has_workspace,
             "workspace MEMORY.md chunks must appear in search results"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21 review repair: canonical embedding endpoint identity (A7/#6)
+    // -----------------------------------------------------------------------
+
+    /// Legacy synthesis and the named-profile facade must produce the same
+    /// canonical embedding path (no `/v1/embeddings` vs `/embeddings` drift).
+    #[test]
+    fn test_legacy_embedding_path_is_canonical() {
+        let cfg = xai_grok_config_types::MemoryEmbeddingConfig {
+            model: Some("embed-model".into()),
+            dimensions: 128,
+            ..Default::default()
+        };
+        let spec = legacy_source_spec(&cfg, "http://proxy.example/v1").unwrap();
+        assert_eq!(
+            spec.embedding_path,
+            canonical_embedding_path(),
+            "legacy synthesis must use the canonical embedding path"
+        );
+        assert_eq!(spec.origin_host, "proxy.example");
+        assert_eq!(spec.dimensions, 128);
+    }
+
+    /// A legacy source and an equivalent named-profile source (same host,
+    /// model, dims, canonical path) fingerprint identically apart from the
+    /// provider-instance label — so a mode switch between equivalent physical
+    /// endpoints does not spuriously rebuild.
+    #[test]
+    fn test_legacy_named_equivalent_source_no_spurious_identity_gap() {
+        use crate::fingerprint::EmbeddingSourceSpec;
+        let legacy_cfg = xai_grok_config_types::MemoryEmbeddingConfig {
+            model: Some("embed-model".into()),
+            dimensions: 128,
+            ..Default::default()
+        };
+        let legacy = legacy_source_spec(&legacy_cfg, "http://api.example.com/v1").unwrap();
+
+        // A named-profile route for the same provider host/model/dims/path.
+        let named = EmbeddingSourceSpec {
+            provider_instance_id: "acct-a".into(),
+            incarnation: Some("inc-1".into()),
+            origin_host: "api.example.com".into(),
+            embedding_path: canonical_embedding_path(),
+            protocol: "openai_compatible".into(),
+            model: "embed-model".into(),
+            dimensions: 128,
+            encoding: "float".into(),
+            normalization: crate::fingerprint::NORMALIZATION_NONE.into(),
+        };
+        assert_eq!(legacy.origin_host, named.origin_host);
+        assert_eq!(legacy.embedding_path, named.embedding_path);
+        assert_eq!(legacy.model, named.model);
+        assert_eq!(legacy.dimensions, named.dimensions);
+        assert_eq!(legacy.protocol, named.protocol);
+        assert_eq!(legacy.encoding, named.encoding);
+
+        // Equalize the provider label: the two fingerprints must be identical.
+        let mut eq_legacy = legacy;
+        eq_legacy.provider_instance_id = "acct-a".into();
+        eq_legacy.incarnation = Some("inc-1".into());
+        let fp_l = crate::fingerprint::VectorFingerprint::build(
+            eq_legacy,
+            crate::fingerprint::DocPreparationSpec::from_index_config(
+                &xai_grok_config_types::MemoryIndexConfig::default(),
+            ),
+            crate::fingerprint::VECTOR_SCHEMA_VERSION,
+        )
+        .unwrap()
+        .0;
+        let fp_n = crate::fingerprint::VectorFingerprint::build(
+            named,
+            crate::fingerprint::DocPreparationSpec::from_index_config(
+                &xai_grok_config_types::MemoryIndexConfig::default(),
+            ),
+            crate::fingerprint::VECTOR_SCHEMA_VERSION,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(
+            fp_l.hash, fp_n.hash,
+            "equivalent physical sources must share a fingerprint (no spurious rebuild)"
         );
     }
 }

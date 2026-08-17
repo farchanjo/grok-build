@@ -871,36 +871,53 @@ fn reorder_map<T: Clone>(
 
 /// Compute whether memory embedding identity/dimensions would change.
 /// Does **not** perform reindex.
+///
+/// The config-level fingerprint mirrors the durable `VectorFingerprint`
+/// fields that are readable here (provider, model, embedding-model id,
+/// dimensions, protocol, encoding, batch size, input tokens). The durable
+/// fingerprint additionally pins normalized origin/path, normalization, and
+/// doc-prep parameters that are **not** readable from the retrieval graph, so
+/// when memory uses a named profile this helper is conservative: it requires
+/// confirmation whenever it cannot prove "no rebuild".
 pub fn compute_memory_reindex_impact(
     prior: &RetrievalGraphConfig,
     next: &RetrievalGraphConfig,
 ) -> MemoryReindexImpact {
     let prev_fp = memory_embedding_fingerprint(prior);
     let next_fp = memory_embedding_fingerprint(next);
-    if prev_fp == next_fp {
+    // Memory is "affected" when a named profile is selected in either graph.
+    let memory_affected =
+        prior.memory_retrieval_profile.is_some() || next.memory_retrieval_profile.is_some();
+    if !memory_affected {
         return MemoryReindexImpact {
             requires_confirmation: false,
-            reason: "No embedding identity/dimension change for memory.".into(),
+            reason: "Embedding models changed but memory has no named profile selection.".into(),
             previous_fingerprint: prev_fp,
             next_fingerprint: next_fp,
         };
     }
-    // Only require confirmation when memory is actually using a named profile
-    // (or switching into/out of one).
-    let memory_affected =
-        prior.memory_retrieval_profile.is_some() || next.memory_retrieval_profile.is_some();
+    if prev_fp == next_fp {
+        // The durable VectorFingerprint also pins normalized origin/path,
+        // normalization, and doc-prep params that are not readable from the
+        // retrieval graph here, so we cannot prove "no rebuild": be
+        // conservative and require confirmation rather than returning false.
+        return MemoryReindexImpact {
+            requires_confirmation: true,
+            reason: "Memory uses a named retrieval profile whose durable vector identity \
+                     cannot be fully verified from config here; treat conservatively \
+                     (memory stays FTS-only until reconciled)."
+                .into(),
+            previous_fingerprint: prev_fp,
+            next_fingerprint: next_fp,
+        };
+    }
     MemoryReindexImpact {
-        requires_confirmation: memory_affected,
-        reason: if memory_affected {
-            // PR21: memory vectors are rebuilt automatically and transactionally
-            // through the pinned profile (FTS-only while a rebuild is pending).
-            "Selected memory retrieval profile embedding identity or dimensions would change. \
-             Memory vectors will be rebuilt automatically through the pinned profile; \
-             memory search stays FTS-only until the transactional rebuild completes."
-                .into()
-        } else {
-            "Embedding models changed but memory has no named profile selection.".into()
-        },
+        requires_confirmation: true,
+        reason: "Selected memory retrieval profile embedding identity or dimensions \
+                 (provider/model/embedding id/dimensions/protocol/encoding) would change. \
+                 Memory vectors will be rebuilt automatically through the pinned profile; \
+                 memory search stays FTS-only until the transactional rebuild completes."
+            .into(),
         previous_fingerprint: prev_fp,
         next_fingerprint: next_fp,
     }
@@ -911,9 +928,20 @@ fn memory_embedding_fingerprint(graph: &RetrievalGraphConfig) -> Option<String> 
     let profile = graph.retrieval_profiles.get(profile_id)?;
     let emb_id = profile.embedding_models.first()?;
     let emb = graph.embedding_models.get(emb_id.as_str())?;
+    let encoding = match emb.encoding {
+        xai_grok_config_types::EmbeddingEncoding::Float => "float",
+        xai_grok_config_types::EmbeddingEncoding::Base64 => "base64",
+    };
     Some(format!(
-        "{}:{}:{}:{:?}",
-        emb.provider, emb.model, emb_id, emb.dimensions
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        emb.provider,
+        emb.model,
+        emb_id,
+        emb.dimensions.map_or("none".to_string(), |d| d.to_string()),
+        emb.protocol.as_str(),
+        encoding,
+        emb.batch_size,
+        emb.max_input_tokens,
     ))
 }
 

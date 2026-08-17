@@ -156,20 +156,16 @@ pub fn validate_rerank_permutation(
 /// `rows` preserves insertion order; a perfect permutation is applied by
 /// reordering `rows` to a new array in the given index order. Every element is
 /// moved exactly once, so no partial loss can occur. Returns the new row order.
-pub fn apply_rerank_permutation<T>(rows: &mut Vec<T>, perm: &[usize]) {
+pub fn apply_rerank_permutation<T: Clone>(rows: &mut Vec<T>, perm: &[usize]) {
     if perm.len() != rows.len() {
         return;
     }
-    // Swap-based in-place permutation (O(n)), preserving every element.
-    let mut pos: Vec<usize> = (0..rows.len()).collect();
-    for (i, &target) in perm.iter().enumerate() {
-        while pos[i] != target {
-            let j = pos[i];
-            let k = pos[j];
-            rows.swap(j, k);
-            pos[j] = k;
-            pos[k] = j;
-        }
+    // `perm[i]` = original index that must land at position `i`. Apply by
+    // cloning the original ordering and writing each position (element-
+    // preserving, O(n)). Correct for every permutation, including reverses.
+    let old: Vec<T> = rows.clone();
+    for (i, &idx) in perm.iter().enumerate() {
+        rows[i] = old[idx].clone();
     }
 }
 

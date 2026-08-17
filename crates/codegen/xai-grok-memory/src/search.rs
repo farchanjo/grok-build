@@ -435,12 +435,18 @@ fn snippet_bounded(s: &str, max_chars: usize) -> String {
     out.into_iter().collect()
 }
 
+/// Max candidate texts sent to a remote reranker in one call.
+const REMOTE_RERANK_PREFIX_CAP: usize = 64;
+
 /// Optionally apply a remote rerank between local ordering and [`finalize_order`].
 ///
-/// Candidate text is bounded before being sent. On any failure — reranker
-/// unavailable, cancelled, malformed, stale, or returning invalid indices —
-/// the **complete exact local pre-rerank order** is restored (a no-op here)
-/// before MMR/truncation continue. No partial reorder/loss ever occurs.
+/// Only the **top-K prefix** (`K = min(results.len(), [`REMOTE_RERANK_PREFIX_CAP`])`)
+/// is sent, bounded by `max_body_chars` per snippet. A valid permutation of
+/// length `K` is applied to the prefix; the suffix (`K..`) is appended
+/// untouched in its exact local order, then MMR/truncation continue. On any
+/// failure — reranker unavailable, cancelled, malformed, stale, or invalid
+/// indices — the **complete exact local pre-rerank order** is kept. No partial
+/// reorder/loss ever occurs.
 pub async fn remote_rerank(
     results: &mut Vec<SearchResult>,
     relevance: &mut Vec<f64>,
@@ -449,36 +455,36 @@ pub async fn remote_rerank(
     max_body_chars: usize,
 ) {
     let Some(r) = retrieval else { return };
-    if results.is_empty() {
+    let n = results.len();
+    if n == 0 {
         return;
     }
-    let docs: Vec<String> = results
+    let k = n.min(REMOTE_RERANK_PREFIX_CAP);
+    let docs: Vec<String> = results[..k]
         .iter()
         .map(|res| snippet_bounded(&res.snippet, max_body_chars))
         .collect();
     let perm = match r.rerank(query, &docs).await {
-        Ok(Some(p)) => super::retrieval::validate_rerank_permutation(Some(&p), results.len()),
+        Ok(Some(p)) => super::retrieval::validate_rerank_permutation(Some(&p), k),
         _ => None,
     };
     let Some(perm) = perm else {
-        // Invalid/unavailable: restore complete exact local pre-rerank order
-        // (already in place).
+        // Invalid/unavailable: complete exact local pre-rerank order stays.
         return;
     };
-    let old_results = std::mem::replace(results, Vec::with_capacity(results.len()));
-    // `relevance` is only aligned when MMR is enabled; otherwise it is empty
-    // and must simply stay empty through the permutation (finalize skips MMR).
-    let relevance_aligned = relevance.len() == old_results.len();
-    let old_relevance = if relevance_aligned {
-        std::mem::replace(relevance, Vec::with_capacity(relevance.len()))
-    } else {
-        Vec::new()
-    };
-    for &i in &perm {
-        results.push(old_results[i].clone());
-        if relevance_aligned {
-            relevance.push(old_relevance[i]);
-        }
+    // Reorder the prefix only; the suffix stays in its exact local order.
+    let mut prefix: Vec<SearchResult> = results[..k].to_vec();
+    let suffix: Vec<SearchResult> = results[k..].to_vec();
+    super::retrieval::apply_rerank_permutation(&mut prefix, &perm);
+    prefix.extend(suffix);
+    *results = prefix;
+    // Keep `relevance` aligned (it is only non-empty when MMR is enabled).
+    if relevance.len() == n {
+        let mut rel_prefix: Vec<f64> = relevance[..k].to_vec();
+        let rel_suffix: Vec<f64> = relevance[k..].to_vec();
+        super::retrieval::apply_rerank_permutation(&mut rel_prefix, &perm);
+        rel_prefix.extend(rel_suffix);
+        *relevance = rel_prefix;
     }
 }
 
@@ -1586,5 +1592,96 @@ mod tests {
         assert_eq!(validate_rerank_permutation(Some(&[2, 0]), 2), None);
         assert_eq!(validate_rerank_permutation(Some(&[]), 0), Some(vec![]));
         assert_eq!(validate_rerank_permutation(None, 2), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21 review repair: bounded top-K prefix rerank (F-04/#9)
+    // -----------------------------------------------------------------------
+
+    /// Build `n` near-identical chunks with strictly increasing access boosts
+    /// so local order is deterministic: chunk with most accesses first.
+    fn n_local_candidates(tmp: &TempDir, n: usize) -> (Vec<SearchResult>, Vec<f64>) {
+        let mut idx = test_index(tmp);
+        for i in 0..n {
+            let f = tmp.path().join(format!("c{i:03}.md"));
+            std::fs::write(&f, "# Rust\n\nRust ownership model explained.").unwrap();
+            idx.reindex_file(&f, "workspace").unwrap();
+            let chunk_id = format!("{}:0", f.to_string_lossy());
+            for _ in 0..i {
+                idx.record_access(&chunk_id).unwrap();
+            }
+        }
+        let config = MemorySearchConfig {
+            max_results: 10_000,
+            min_score: 0.0,
+            ..Default::default()
+        };
+        let fts = idx.search_fts("rust ownership", 10_000).unwrap();
+        let (results, relevance) = build_local_candidates(&idx, fts, None, &config).unwrap();
+        assert_eq!(results.len(), n, "all candidates must be present");
+        (results, relevance)
+    }
+
+    #[tokio::test]
+    async fn test_remote_rerank_bounded_prefix_greater_than_64() {
+        let tmp = TempDir::new().unwrap();
+        let n = 70usize;
+        let (results, relevance) = n_local_candidates(&tmp, n);
+        let local_ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
+        let mut results = results;
+        let mut relevance = relevance;
+
+        // Rerank returns a valid permutation of the 64-prefix only.
+        let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rr");
+        let fake = fake.with_rerank(move |_q, docs| {
+            assert_eq!(docs.len(), 64, "only the bounded prefix is sent");
+            // Reverse the 64 prefix.
+            Ok(Some((0..64).rev().collect()))
+        });
+        super::remote_rerank(&mut results, &mut relevance, Some(&fake), "q", 4000).await;
+
+        assert_eq!(results.len(), n, "no candidate loss");
+        // The suffix (positions 64..) must remain in exact local order.
+        for (k, id) in local_ids[64..].iter().enumerate() {
+            assert_eq!(
+                results[64 + k].chunk_id,
+                *id,
+                "suffix must stay in exact local order"
+            );
+        }
+        // The prefix must be reordered per the permutation (reversed).
+        let mut expected_prefix: Vec<String> = local_ids[..64].to_vec();
+        expected_prefix.reverse();
+        for (k, id) in expected_prefix.iter().enumerate() {
+            assert_eq!(
+                results[k].chunk_id, *id,
+                "prefix must follow the permutation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_rerank_invalid_prefix_indices_keeps_full_local_order() {
+        let tmp = TempDir::new().unwrap();
+        let n = 70usize;
+        let (results, relevance) = n_local_candidates(&tmp, n);
+        let local_ids: Vec<String> = results.iter().map(|r| r.chunk_id.clone()).collect();
+
+        for bad in [
+            vec![0usize; 64],            // duplicates
+            (0..63).collect::<Vec<_>>(), // wrong length (63)
+            vec![63usize, 0, 1],         // wrong length + out of range
+        ] {
+            let fake = crate::retrieval::FakeMemoryRetrieval::new(4, "rr");
+            let fake = fake.with_rerank(move |_q, _d| Ok(Some(bad.clone())));
+            let mut r = results.clone();
+            let mut rel = relevance.clone();
+            super::remote_rerank(&mut r, &mut rel, Some(&fake), "q", 4000).await;
+            let ids: Vec<String> = r.iter().map(|x| x.chunk_id.clone()).collect();
+            assert_eq!(
+                ids, local_ids,
+                "invalid prefix indices must keep the complete exact local order"
+            );
+        }
     }
 }

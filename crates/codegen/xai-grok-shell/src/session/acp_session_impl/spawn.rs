@@ -813,6 +813,14 @@ pub(crate) async fn spawn_session_actor(
             search_source: "tool",
             embedding_credentials: embed_credentials,
             retrieval: memory_retrieval_facade,
+            // The actual `[memory.index]` config every chunk writer uses drives
+            // both fingerprint doc-prep identity and chunking (A8/#5).
+            index_config: memory_config
+                .as_ref()
+                .map_or_else(Default::default, |mc| mc.index.clone()),
+            // Throttle failed vector rebuilds so pending searches stay
+            // FTS-only-cheap instead of rebuilding on every query (A12/#8).
+            rebuild_backoff_secs: 60,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
             storage.clone(),

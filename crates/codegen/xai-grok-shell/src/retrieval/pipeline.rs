@@ -41,6 +41,12 @@ pub struct PipelineOptions {
     pub bypass_semantic: bool,
     /// Optional generation pin; mismatch fails closed.
     pub pin_snapshot_generation: Option<u64>,
+    /// When set, the embed stage iterates **only** this route id (exact-route
+    /// pin): no ordered sibling-route fallback. Used by the memory facade so a
+    /// fallback can never serve vectors from a different embedding space than
+    /// the one the fingerprint describes. Missing/cooldown/config-failed pins
+    /// fail closed (degrade) rather than falling through to another route.
+    pub embed_route_pin: Option<String>,
     /// When true, candidate/result over-limit returns [`OrchestratorError::LimitExceeded`]
     /// instead of soft truncation. Default soft-clamps to profile limits.
     /// Independent of [`Self::hard_error_on_semantic_failure`].
@@ -174,7 +180,16 @@ pub async fn embed_with_profile(
         });
     }
 
-    let route_ids = &ctx.profile.embedding_route_ids;
+    let route_ids = match &options.embed_route_pin {
+        // Exact-route pin: iterate only the pinned route; no sibling fallback.
+        Some(pin) => {
+            if !ctx.profile.embedding_route_ids.iter().any(|id| id == pin) {
+                return semantic_fail(ctx, budget, None);
+            }
+            std::borrow::Cow::Owned(vec![pin.clone()])
+        }
+        None => std::borrow::Cow::Borrowed(&ctx.profile.embedding_route_ids),
+    };
     if route_ids.is_empty() {
         return semantic_fail(ctx, budget, None);
     }

@@ -148,6 +148,58 @@ impl MemoryIndex {
         // Create schema
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
 
+        // Additive migration: DBs that created `vector_staging` before the
+        // chunk-hash column existed (PR21 review repair) get the column now.
+        // Old staged rows get an empty hash, which never matches a live chunk
+        // hash, so they are pruned and re-embedded rather than installed.
+        {
+            let cols: Vec<String> = {
+                let mut stmt = db.prepare("PRAGMA table_info(vector_staging)")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+                let mut out = Vec::new();
+                for c in rows {
+                    out.push(c?);
+                }
+                out
+            };
+            if !cols.iter().any(|c| c == "chunk_hash") {
+                db.execute_batch(
+                    "ALTER TABLE vector_staging ADD COLUMN chunk_hash TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+        }
+
+        // Fail-closed gate for a DB written by a **newer** reader: never run
+        // migrations or destructive writes against it. Open as FTS-only and
+        // skip everything fingerprint/vector related.
+        let stored_schema: Option<u32> = db
+            .query_row(
+                schema::GET_META_SQL,
+                params![schema::META_SCHEMA_VERSION],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        if let Some(stored) = stored_schema
+            && stored > schema::SCHEMA_VERSION
+        {
+            static NEWER_SCHEMA_WARNED: std::sync::Once = std::sync::Once::new();
+            NEWER_SCHEMA_WARNED.call_once(|| {
+                tracing::warn!(
+                    stored,
+                    current = schema::SCHEMA_VERSION,
+                    "memory index written by a newer schema version; refusing writes, FTS-only"
+                );
+            });
+            return Ok(Self {
+                db,
+                storage,
+                chunk_config: config,
+                vec_available: false,
+                embedding_dimensions: dimensions,
+            });
+        }
+
         // Store/verify embedding dimensions in meta table.
         //
         // PR21: this is NOT a destructive migration anymore. A dimension
@@ -568,13 +620,17 @@ impl MemoryIndex {
         Ok(results)
     }
 
-    /// All chunks not yet staged for the given attempt `pending_id`.
+    /// All chunks not yet staged **for their current content hash** under the
+    /// given attempt `pending_id`.
     ///
     /// Unlike [`Self::chunks_without_embeddings`], this ignores the *current*
     /// `chunks_vec` contents: a rebuild replaces the entire embedding space, so
     /// every chunk (including those with old-space vectors) must be re-embedded
-    /// and staged before atomic install. Staged rows survive a crash/reopen, so
-    /// a retry only re-embeds the remaining chunks.
+    /// and staged before atomic install. A staged row only counts if its
+    /// `chunk_hash` matches the chunk's current `hash` — a chunk edited
+    /// mid-rebuild is re-staged with its new text, and a deleted chunk stops
+    /// being eligible. Staged rows survive a crash/reopen, so a retry only
+    /// re-embeds the remaining chunks.
     pub(crate) fn chunks_not_staged(
         &self,
         pending_id: &str,
@@ -586,7 +642,7 @@ impl MemoryIndex {
             "SELECT c.id, c.text FROM chunks c \
              WHERE NOT EXISTS ( \
                SELECT 1 FROM vector_staging s \
-               WHERE s.pending_id = ?1 AND s.chunk_id = c.id \
+               WHERE s.pending_id = ?1 AND s.chunk_id = c.id AND s.chunk_hash = c.hash \
              )",
         )?;
         let results = stmt
@@ -656,6 +712,13 @@ impl MemoryIndex {
     /// (older than `stale_threshold_secs`). Returns `true` if claimed.
     /// Under SQLite's serialized writer model, at most one agent wins.
     pub fn try_claim_reindex(&self, stale_threshold_secs: i64) -> bool {
+        self.try_claim_reindex_owned(stale_threshold_secs).is_some()
+    }
+
+    /// Like [`Self::try_claim_reindex`], but returns the exact claim token on
+    /// success so the caller can later perform an owner-scoped
+    /// [`Self::release_claim`].
+    pub fn try_claim_reindex_owned(&self, stale_threshold_secs: i64) -> Option<String> {
         let pid = std::process::id();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -676,14 +739,21 @@ impl MemoryIndex {
                 0
             });
 
-        rows == 1
+        if rows == 1 { Some(claim_value) } else { None }
     }
 
-    /// Release the reindex claim. Call after reindex completes.
-    pub fn release_claim(&self) {
-        let _ = self
-            .db
-            .execute("UPDATE meta SET value = '' WHERE key = 'reindex_claim'", []);
+    /// Release the reindex claim, but only when this caller still owns it.
+    ///
+    /// Owner-scoped: if a concurrent agent reclaimed the claim via the stale
+    /// window while we were working, our release must NOT clear their claim
+    /// (that would let a third agent claim while the second is still syncing).
+    /// `claim_value` must be the exact token [`Self::try_claim_reindex_owned`]
+    /// returned (or, in tests, the current value of the claim).
+    pub fn release_claim(&self, claim_value: &str) {
+        let _ = self.db.execute(
+            "UPDATE meta SET value = '' WHERE key = 'reindex_claim' AND value = ?1",
+            params![claim_value],
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1318,13 +1388,15 @@ mod tests {
         );
 
         // After the first owner releases, the CLI can claim successfully.
-        idx.release_claim();
+        let claim = idx.get_reindex_claim();
+        idx.release_claim(&claim);
         let third = idx.try_claim_reindex(60);
         assert!(
             third,
             "CLI reindex must succeed after the live session releases"
         );
-        idx.release_claim();
+        let claim = idx.get_reindex_claim();
+        idx.release_claim(&claim);
     }
 
     /// `grok memory reindex` Phase 3 resets the stale reindex claim.
@@ -1346,12 +1418,47 @@ mod tests {
         );
 
         // Simulate `grok memory reindex` Phase 3: release the claim.
-        idx.release_claim();
+        let claim = idx.get_reindex_claim();
+        idx.release_claim(&claim);
 
         assert_eq!(
             idx.get_reindex_claim(),
             "",
             "release_claim must reset the claim so doctor reports no stale lock"
         );
+    }
+
+    /// A5: `release_claim` is owner-scoped — a stolen (stale-window) claim is
+    /// never cleared by the loser.
+    #[test]
+    fn test_reindex_claim_release_is_owner_scoped() {
+        let tmp = TempDir::new().unwrap();
+        let idx = test_index(&tmp);
+
+        // Original owner claims.
+        let original = idx
+            .try_claim_reindex_owned(i64::MAX)
+            .expect("original owner must claim");
+        // A second agent steals the claim via the stale window (writes a new
+        // claim value directly, as a stale predicate would allow).
+        let stolen = "424242:1".to_owned();
+        idx.db()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'reindex_claim'",
+                params![stolen],
+            )
+            .unwrap();
+
+        // The original owner finishing must NOT clear the stolen claim.
+        idx.release_claim(&original);
+        assert_eq!(
+            idx.get_reindex_claim(),
+            stolen,
+            "owner-scoped release must leave the stolen claim intact"
+        );
+
+        // The actual owner can release.
+        idx.release_claim(&stolen);
+        assert_eq!(idx.get_reindex_claim(), "");
     }
 }

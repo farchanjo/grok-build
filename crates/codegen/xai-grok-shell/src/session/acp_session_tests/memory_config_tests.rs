@@ -20,6 +20,8 @@ fn initial_injection_backend_params_use_override_min_score() {
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
         retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     };
     let initial_injection = crate::config::MemoryInitialInjectionConfig {
         enabled: true,
@@ -49,6 +51,8 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
         retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     };
     let (adjusted, effective_min_score) = build_initial_injection_backend_params(
         &params,
@@ -561,6 +565,8 @@ async fn create_injection_ready_actor(
         search_source: "tool",
         embedding_credentials: crate::session::memory::EndpointScopedCredentials::none(),
         retrieval: None,
+        index_config: crate::config::MemoryIndexConfig::default(),
+        rebuild_backoff_secs: 0,
     });
     actor
         .chat_state_handle

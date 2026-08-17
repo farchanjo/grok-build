@@ -64,13 +64,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='');
 -- Transactional vector rebuild staging. Plain (non-virtual) table so a
 -- partially-completed rebuild can be dropped/ignored and only swapped into
 -- the live vector table atomically on success. Rows are keyed by the rebuild
--- attempt id (pending_id) plus the intended fingerprint, so a stale async
--- result for an old intended fingerprint/incarnation can never be installed
--- over a newer pending target.
+-- attempt id (pending_id) plus the chunk id AND content hash, so stale async
+-- results for an old intended fingerprint/incarnation, and vectors computed
+-- over superseded chunk text, can never be installed over a newer pending
+-- target.
 CREATE TABLE IF NOT EXISTS vector_staging (
     pending_id TEXT NOT NULL,
     intended_fingerprint TEXT NOT NULL,
     chunk_id TEXT NOT NULL,
+    chunk_hash TEXT NOT NULL,
     embedding BLOB NOT NULL,
     PRIMARY KEY (pending_id, chunk_id)
 );
