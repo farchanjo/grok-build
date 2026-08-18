@@ -240,7 +240,7 @@ mod tests {
     use crate::config::{AgentDefinition, AgentScope};
     use crate::plugins::discovery::{PluginId, PluginScope};
     use crate::plugins::manifest::PluginManifest;
-    use crate::plugins::{DiscoveredPlugin, PluginOrigin, PluginRegistry};
+    use crate::plugins::{PluginOrigin, PluginRegistry};
     use std::fs;
     use std::path::PathBuf;
 
