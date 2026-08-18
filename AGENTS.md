@@ -316,6 +316,32 @@ deleting the lockfile.
 Distinguish the persistent `Cargo.lock` dependency lockfile from transient
 Cargo file locks under `.cargo` and `target/`.
 
+### Version bumps (fcustom)
+
+The fcustom CLI version lives in exactly four lockstep manifests:
+`xai-grok-pager`, `xai-grok-shell`, `xai-grok-pager-bin`, and
+`xai-grok-version`. Bumping it is a deliberate release action, not an
+ordinary edit:
+
+- Use **plain semver with no pre-release suffix**. A pre-release suffix
+  makes the stable-channel auto-updater force-install the feed's latest
+  stable over the custom build; non-semver strings are rejected by Cargo in
+  manifests and break `minimum_version`/`version_overrides` parsing.
+- Keep the fcustom base ahead of the upstream stable feed
+  (currently `1.0.0 > 0.2.x`) so the auto-updater never replaces a custom
+  build with a feed release.
+- Edit the four lockstep manifests only; regenerate `Cargo.lock` in the
+  canonical isolated environment with a direct cargo command, confirm the
+  diff contains only the four member version lines, and commit manifests and
+  lockfile together.
+- Finish with an explicit `make deploy` + `make verify`; optionally mark the
+  commit with a local annotated tag `v<major.minor.patch>-fcustom` (tag
+  pushes are blocked; tags are local markers).
+
+The canonical procedure, including how the version flows into the binary and
+why deployed builds display ` [alpha]`, is in
+[`GROK.md`](GROK.md#version-identity-and-bumps-fcustom).
+
 ### Tooling policy
 
 Do not add custom build serialization, new linker flags, `mold`, or

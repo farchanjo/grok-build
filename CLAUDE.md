@@ -123,6 +123,21 @@ preserve `Cargo.lock` discipline.
   time; use a separate `CARGO_TARGET_DIR` for isolated experiments or other
   worktrees; do not delete transient `.cargo` file locks.
 
+## Version bumps (fcustom)
+
+- The CLI version is lockstepped across exactly four manifests:
+  `xai-grok-pager`, `xai-grok-shell`, `xai-grok-pager-bin`,
+  `xai-grok-version` (current fcustom base: `1.0.0`).
+- Bumps use **plain semver, no pre-release suffix** (a suffix makes the
+  stable-channel auto-updater overwrite the custom build) and stay ahead of
+  the upstream stable feed so the fork is never auto-replaced.
+- Regenerate `Cargo.lock` in the isolated environment (direct cargo command;
+  the diff must be only the four member lines) and commit it with the
+  manifests. Finish with explicit `make deploy` + `make verify`; optional
+  local tag `v<major.minor.patch>-fcustom`.
+- Full procedure and version-flow details:
+  [`GROK.md`](GROK.md#version-identity-and-bumps-fcustom).
+
 ## Tooling notes
 
 - Root `Cargo.toml` is generated and read-only; edit per-crate manifests.

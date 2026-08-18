@@ -465,6 +465,71 @@ Do not run `make build`, `make deploy`, `make deploy-binary`,
 `make deploy-wrapper`, or `make verify` in ordinary edit loops. Deployment and
 verify targets require an explicit user request.
 
+### Version identity and bumps (fcustom)
+
+The user-visible version of the fork comes from exactly four **lockstep CLI
+crates**, whose `version` fields must always stay identical:
+
+- `crates/codegen/xai-grok-pager/Cargo.toml`
+- `crates/codegen/xai-grok-shell/Cargo.toml`
+- `crates/codegen/xai-grok-pager-bin/Cargo.toml`
+- `crates/codegen/xai-grok-version/Cargo.toml`
+
+The fcustom base is `1.0.0` (bumped from the upstream `0.2.110` base in
+commit `807fc91`; local tag `v1.0.0-fcustom`). Other workspace crates keep
+their own independent versions.
+
+How the version reaches the binary:
+
+1. The manifest version becomes `CARGO_PKG_VERSION` and
+   `xai_grok_version::VERSION`. These feed `grok --version`, the welcome
+   screen, the `x-grok-client-version` telemetry header, MCP client
+   identification, and internal user-agent strings.
+2. `xai-grok-pager/build.rs` bakes `VERSION_WITH_COMMIT` as
+   `<version> (<short commit HEAD>)`, so each build embeds the exact commit.
+3. A `GROK_VERSION` environment variable at build time overrides the manifest
+   in both the pager build script and `xai-grok-version`. Use it only for
+   one-off experimental builds; the manifest is the persistent source of
+   truth.
+4. The channel suffix (` [stable]` / ` [alpha]`) is derived at runtime by
+   comparing the compiled version against the cached stable pointer in
+   `$GROK_HOME/version.json` (written by the auto-updater). Because the
+   fcustom base is ahead of the upstream feed, deployed builds display
+   ` [alpha]`. This is expected and harmless.
+
+Bump procedure (only on explicit release intent):
+
+1. Choose **plain semver with no pre-release suffix** (for example `1.0.1`,
+   `1.1.0`). A pre-release suffix such as `1.0.1-fcustom` makes the
+   stable-channel updater force-install the feed's latest stable over the
+   custom build (`needs_update` in `xai-grok-update` always returns true for
+   pre-release currents on stable). Non-semver strings are rejected by Cargo
+   in manifests and, if forced via `GROK_VERSION`, break
+   `minimum_version` and `version_overrides` parsing.
+2. Edit exactly the four lockstep manifests. No workspace dependency pins
+   these crates by version (all requirements are path-based), so no other
+   manifest changes are needed. Never edit the generated root `Cargo.toml`.
+3. Regenerate `Cargo.lock` with a direct cargo command in the canonical
+   isolated environment (the helpers pass `--locked` and refuse the change,
+   so a direct command is the sanctioned path here). Review the diff: it must
+   contain only the four member version lines. Commit the manifests and the
+   lockfile together.
+4. Rebuild and redeploy with `make deploy`, then `make verify` (explicit user
+   request required, as for all deployment targets). Confirm the deployed
+   binary reports the new version and the new commit hash.
+5. Optionally mark the commit with a local annotated tag
+   `v<major.minor.patch>-fcustom`. Tag pushes are blocked by the repository
+   push policy (`fcustom -> fcustom` only); tags are local markers.
+
+Expected side effects of a bump: the deployed binary shows ` [alpha]` while
+ahead of the cached stable pointer, and any running leader from the previous
+version is evicted on reconnect due to version skew (normal).
+
+Version-selection invariant: keep the fcustom base **ahead of the upstream
+stable feed** (currently `1.0.0 > 0.2.x`). Then `target > current` is false
+for every feed release and the auto-updater never replaces a custom build
+with a feed release.
+
 ### Cargo.lock discipline
 
 `Cargo.lock` is tracked and must remain deterministic.
