@@ -239,7 +239,7 @@ async fn message_batch_appends_reminder_before_real_user_in_order() {
 
 #[tokio::test]
 async fn message_batch_and_ack_waits_for_actor_acceptance() {
-    let mut h = TestHarness::new();
+    let h = TestHarness::new();
     let ack = h
         .handle
         .push_message_batch_and_ack(vec![

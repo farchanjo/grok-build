@@ -504,7 +504,6 @@ pub(crate) fn user_item_with_rx(
             kind: "prompt".to_string(),
             text,
             combined_texts: None,
-            origin: None,
         }),
         send_now: false,
     };

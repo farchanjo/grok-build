@@ -591,21 +591,6 @@ fn user_echo_mode(origin: &super::super::PromptOrigin) -> UserEchoMode {
         | super::super::PromptOrigin::Unknown => UserEchoMode::Broadcast,
     }
 }
-/// Extract the plain text of a user-role `ConversationItem` (PR19 prime
-/// prompt source). Returns empty for non-user items.
-fn user_chat_user_text(item: &xai_grok_inference_types::ConversationItem) -> String {
-    use xai_grok_inference_types::{ContentPart, ConversationItem};
-    let ConversationItem::User(user) = item else {
-        return String::new();
-    };
-    let mut text = String::new();
-    for part in &user.content {
-        if let ContentPart::Text { text: t } = part {
-            text.push_str(t);
-        }
-    }
-    text
-}
 impl SessionActor {
     /// Run the image-normalization pipeline (re-encode caps, min-side and
     /// integrity checks) and surface its outcomes: compression / re-encode
@@ -722,10 +707,10 @@ impl SessionActor {
     /// rendered block is PR18's already-escaped output, used literally (no
     /// entity re-decode / re-encode). Prompt and prime bodies never reach
     /// debug/telemetry.
-    async fn maybe_inject_prime_reminder(
+    pub(crate) async fn maybe_inject_prime_reminder(
         self: &Arc<Self>,
         origin: &crate::session::PromptOrigin,
-        user_chat: &xai_grok_inference_types::ConversationItem,
+        user_query: &str,
         turn_cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Option<xai_grok_inference_types::ConversationItem>, acp::Error> {
         // ── Prime gate: ONLY an explicit real `User` + native backend. ─────
@@ -758,8 +743,8 @@ impl SessionActor {
             async move { b.eligible_native_skills().await }
         };
 
-        // Prompt text from the final, normalized real user item.
-        let prompt = user_chat_user_text(user_chat);
+        // Select skills from the raw user query so assembled context stays local.
+        let prompt = user_query.to_string();
 
         // Workspace + trusted containment roots (canonicalized upstream).
         let cwd: std::path::PathBuf = self.tool_context.cwd.to_path_buf();
@@ -893,14 +878,13 @@ impl SessionActor {
             );
             return Err(err.into_acp_error());
         }
-        let origin = origin;
         if let Some(completion_id) = origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
             if let Some(reservations) = &self.tool_context.task_completion_reservations {
                 reservations.release(completion_id);
             }
         }
-        if !origin.is_synthetic() {
+        if origin.is_client_user_prompt() {
             self.cancel_pending_recap_for_new_prompt();
         }
         *self.turn_start_prompt_mode.lock() = prompt_mode;
@@ -910,7 +894,8 @@ impl SessionActor {
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
-        let turn_start_input = xai_agent_lifecycle::TurnStartInput::new(origin.is_synthetic());
+        let turn_start_input =
+            xai_agent_lifecycle::TurnStartInput::new(!origin.is_client_user_prompt());
         for contributor in self.extension_registry.turn_lifecycle_contributors() {
             contributor.on_turn_start(&turn_start_input).await;
         }
@@ -1183,24 +1168,6 @@ impl SessionActor {
             .begin_prompt(current_prompt_index)
             .await;
         let echo_mode = user_echo_mode(&origin);
-        for block in prompt_blocks.iter() {
-            let update = acp::SessionUpdate::UserMessageChunk(
-                acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
-            );
-            let notification_meta = self.build_notification_meta();
-            let notification = acp::SessionNotification::new(self.session_info.id.clone(), update)
-                .meta(notification_meta.as_object().cloned());
-            if echo_mode == UserEchoMode::PersistOnly {
-                let _ = self
-                    .notifications
-                    .persistence_tx
-                    .send(PersistenceMsg::Update(
-                        crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
-                    ));
-            } else {
-                self.emit_notification_direct(notification).await;
-            }
-        }
         let crate::session::prompt_parser::ParsedPrompt {
             mut context,
             query,
@@ -1270,6 +1237,7 @@ impl SessionActor {
         } else {
             (query, Vec::new())
         };
+        let prime_query = query.clone();
         let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
             &context,
             &query,
@@ -1494,37 +1462,48 @@ impl SessionActor {
                     user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
                 }
             }
-            // PR19: run prime selection at execution time for a real user turn,
-            // after the final normalized user message exists (slash/media/audio/
-            // image normalization complete) and BEFORE the real
-            // `ConversationItem::User` is appended + immediately before
-            // inference. The hidden reminder is inserted straight before it.
             // The prime run shares the turn's cancellation token, so a
             // cancel/abort stops semantic work and discards partial prime
             // without breaking the real user item lifecycle.
             let turn_cancel = self.turn_cancel.borrow().clone();
             let prime_reminder = match self
-                .maybe_inject_prime_reminder(&origin, &user_chat, &turn_cancel)
+                .maybe_inject_prime_reminder(&origin, &prime_query, &turn_cancel)
                 .await
             {
                 Ok(reminder) => reminder,
                 Err(error) => {
-                    // The turn began (index incremented, echo emitted), but
-                    // the user item was never inserted. The prompt index is
-                    // deliberately kept MONOTONIC: this failed turn consumed
-                    // an index, so the next real turn gets a distinct, higher
-                    // index instead of reusing the already-broadcast echo's
-                    // index (no viewer promptIndex collision on the
-                    // replay/updates rail). Observers see TurnStarted(N) ->
-                    // terminal failure -> TurnStarted(N+1). Surface the typed
-                    // error; `handle_completion` emits the terminal failure.
+                    let message = error.to_string();
+                    let input = xai_agent_lifecycle::TurnErrorInput { message: &message };
+                    for contributor in self.extension_registry.turn_lifecycle_contributors() {
+                        contributor.on_turn_error(&input).await;
+                    }
                     return Err(error);
                 }
             };
-            let items: Vec<ConversationItem> = prime_reminder
-                .into_iter()
-                .chain(std::iter::once(user_chat))
-                .collect();
+            let mut items: Vec<ConversationItem> = prime_reminder.into_iter().collect();
+            for item in &mut items {
+                item.set_prompt_index(current_prompt_index);
+            }
+            items.push(user_chat);
+            for block in &prompt_blocks {
+                let update = acp::SessionUpdate::UserMessageChunk(
+                    acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
+                );
+                let notification_meta = self.build_notification_meta();
+                let notification =
+                    acp::SessionNotification::new(self.session_info.id.clone(), update)
+                        .meta(notification_meta.as_object().cloned());
+                if echo_mode == UserEchoMode::PersistOnly {
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::Update(
+                            crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
+                        ));
+                } else {
+                    self.emit_notification_direct(notification).await;
+                }
+            }
             if let Some(ack) = persist_ack {
                 if self
                     .chat_state_handle

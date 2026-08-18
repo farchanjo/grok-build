@@ -19,11 +19,25 @@ use xai_grok_tools::implementations::skills::types::SkillInfo;
 /// not exist in the snapshot, so the semantic refinement fails hard and the
 /// prime run returns a typed error (used to exercise the hard-failure index
 /// gap). Returns the actor and the temp dir guard (kept alive for the test).
+struct RegistryGuard {
+    home: std::path::PathBuf,
+    previous: Option<std::sync::Arc<crate::retrieval::RetrievalRegistry>>,
+}
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        crate::retrieval::uninstall_registry_for_home(&self.home);
+        if let Some(previous) = self.previous.take() {
+            crate::retrieval::install_registry_for_home(&self.home, previous);
+        }
+    }
+}
+
 async fn prime_enabled_actor(
     enabled: bool,
     skill_enabled: bool,
     hard_fail: bool,
-) -> (SessionActor, tempfile::TempDir) {
+) -> (SessionActor, tempfile::TempDir, RegistryGuard) {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().canonicalize().unwrap();
     std::fs::create_dir_all(cwd.join("skills")).unwrap();
@@ -74,7 +88,6 @@ async fn prime_enabled_actor(
             .await;
     }
 
-    // Install a prime-enabled retrieval registry for the test home.
     let home = xai_grok_config::grok_home();
     let reg = crate::retrieval::RetrievalRegistry::disabled(home.clone());
     let mut prime = xai_grok_config_types::PrimeConfig::default();
@@ -101,8 +114,8 @@ async fn prime_enabled_actor(
         source_graph: xai_grok_config_types::RetrievalGraphConfig::default(),
     };
     reg.force_publish(std::sync::Arc::new(snapshot));
-    crate::retrieval::install_registry_for_home(home.clone(), reg);
-    (actor, tmp)
+    let previous = crate::retrieval::install_registry_for_home(home.clone(), reg);
+    (actor, tmp, RegistryGuard { home, previous })
 }
 
 /// Drive `handle_prompt` synchronously through the persist-ack barrier (fired
@@ -169,11 +182,12 @@ fn reminder_items<'a>(
 /// `SystemReminder` immediately before the real `User` item, before inference,
 /// with no echo duplication (exactly [reminder, user] in the conversation).
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn real_user_turn_injects_hidden_skill_prime_reminder_before_user() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -222,11 +236,12 @@ async fn real_user_turn_injects_hidden_skill_prime_reminder_before_user() {
 /// ACP prompt-origin meta tag): they must NOT prime and must shape as
 /// `ConversationItem::scheduler_fired`, not a plain user turn.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn scheduler_fired_cron_never_primes_and_shapes_scheduler_fired() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             // The typed origin the shell reader produces for the pager's
             // `_meta.promptOrigin: "scheduler_fired"` stamp.
@@ -264,11 +279,12 @@ async fn scheduler_fired_cron_never_primes_and_shapes_scheduler_fired() {
 /// it must never prime. A later explicit real `User` turn in the child still
 /// primes (child prime is not disabled globally).
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn subagent_assignment_never_primes_but_later_user_turn_does() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -304,11 +320,12 @@ async fn subagent_assignment_never_primes_but_later_user_turn_does() {
 
 /// Unknown/legacy origins (fail-closed) never prime.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn unknown_origin_never_primes() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -327,13 +344,41 @@ async fn unknown_origin_never_primes() {
         .await;
 }
 
+/// An external backend never primes an otherwise eligible user turn.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
+async fn external_backend_user_turn_omits_prime_reminder() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let actor = std::sync::Arc::new(actor);
+            actor.execution_backend.set(
+                crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
+                    crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+                ),
+            );
+            let reminder = actor
+                .maybe_inject_prime_reminder(
+                    &crate::session::PromptOrigin::User,
+                    "deploy the release now",
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert!(reminder.is_none(), "external execution must never prime");
+        })
+        .await;
+}
+
 /// Disabled prime omits the reminder entirely (user item still flows).
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn disabled_prime_omits_reminder() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, false, false).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, false, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -355,11 +400,12 @@ async fn disabled_prime_omits_reminder() {
 /// Pre-cancelled turn: prime cancels and discards partial work; the real user
 /// item lifecycle is unaffected (no reminder, user item pushed normally).
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn pre_cancelled_turn_omits_prime_but_keeps_user_item() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             // Cancel the turn before the prompt runs: prime sees the shared
             // turn-cancel token and returns cancelled (no reminder); the user
@@ -386,11 +432,12 @@ async fn pre_cancelled_turn_omits_prime_but_keeps_user_item() {
 /// shared-queue row and (being synthetic) never enters normal real-user prompt
 /// history.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn scheduler_fired_queued_without_queue_row_or_history() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
             let (respond_to, _rx) = tokio::sync::oneshot::channel();
             let _ = actor
                 .queue_input(
@@ -433,15 +480,16 @@ async fn scheduler_fired_queued_without_queue_row_or_history() {
 /// a distinct, higher index and a coherent terminal-failure -> next-turn
 /// sequence on the replay/updates rail.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(prime_registry)]
 async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_distinct_index() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _guard) = prime_enabled_actor(true, true, true).await;
+            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, true).await;
             let actor = std::sync::Arc::new(actor);
 
-            // Turn 1: hard prime failure. The persist-ack is never sent (the
-            // user pair is never pushed), so await the task result directly.
+            // Turn 1: hard prime failure. The user pair is never emitted or
+            // persisted, so await the task result directly.
             let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
             let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "deploy the release now",
@@ -470,12 +518,11 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
                 result.is_err(),
                 "hard prime failure must return a typed error before user insertion"
             );
-            // The index is MONOTONIC: the failed turn consumed index 1 (the
-            // echo broadcast used index 0) and no item was inserted.
+            // The index remains monotonic although no user item was inserted.
             assert_eq!(
                 actor.chat_state_handle.get_prompt_index().await,
                 1,
-                "failed hard-prime turn must leave a documented index gap (no reuse)"
+                "failed hard-prime turn must leave an index gap without a replayed echo"
             );
             let conv_after_failure = actor.chat_state_handle.get_conversation().await;
             assert!(
@@ -483,9 +530,8 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
                 "a hard prime failure must not insert any user item"
             );
 
-            // Turn 2 on the SAME session: reinstall a healthy registry (soft
-            // degrade, no missing profile) and drive a real user turn. It must
-            // prime with a DISTINCT index (1), not the reused echo index (0).
+            // Turn 2 on the same session: reinstall a healthy registry and
+            // drive a real user turn with the next distinct index.
             let home = xai_grok_config::grok_home();
             let reg = crate::retrieval::RetrievalRegistry::disabled(home.clone());
             let mut prime = xai_grok_config_types::PrimeConfig::default();
@@ -505,7 +551,7 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
                 source_graph: xai_grok_config_types::RetrievalGraphConfig::default(),
             };
             reg.force_publish(std::sync::Arc::new(snapshot));
-            crate::retrieval::install_registry_for_home(home.clone(), reg);
+            let _previous = crate::retrieval::install_registry_for_home(home.clone(), reg);
 
             let (prompt_task2, conv2) = drive_prompt(
                 actor.clone(),
@@ -530,7 +576,7 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
             assert_eq!(
                 user_item_index,
                 Some(1),
-                "the next real turn must use a distinct index (1), not the reused echo index (0)"
+                "the next real turn must use the next distinct index"
             );
             assert_eq!(
                 actor.chat_state_handle.get_prompt_index().await,

@@ -7186,6 +7186,21 @@ mod tests {
         assert_eq!(conversation_truncate_for_prompt(&conversation, 3), 9);
     }
 
+    #[test]
+    fn test_truncate_for_prompt_drops_marked_system_reminder_with_its_turn() {
+        let mut reminder = ConversationItem::system_reminder("<skill_prime>prime</skill_prime>");
+        reminder.set_prompt_index(1);
+        let mut user = ConversationItem::user("turn one");
+        user.set_prompt_index(1);
+        let conversation = vec![
+            ConversationItem::system("System"),
+            ConversationItem::user("<user_info>preamble</user_info>"),
+            reminder,
+            user,
+        ];
+        assert_eq!(conversation_truncate_for_prompt(&conversation, 1), 2);
+    }
+
     /// The new field round-trips through JSON and is omitted when `None`
     /// (byte-stable with sessions written before the field existed).
     #[test]

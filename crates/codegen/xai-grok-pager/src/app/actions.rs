@@ -1552,7 +1552,9 @@ impl PromptOriginTag {
     /// The additive `_meta.promptOrigin` wire tag (snake_case).
     pub fn as_meta_tag(&self) -> &'static str {
         match self {
-            PromptOriginTag::SchedulerFired => "scheduler_fired",
+            PromptOriginTag::SchedulerFired => {
+                xai_grok_shell::session::PROMPT_ORIGIN_SCHEDULER_FIRED
+            }
         }
     }
 }

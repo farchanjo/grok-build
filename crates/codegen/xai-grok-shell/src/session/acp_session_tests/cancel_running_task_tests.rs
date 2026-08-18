@@ -1652,7 +1652,6 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
                 kind: "prompt".to_string(),
                 text: String::new(),
                 combined_texts: None,
-                origin: None,
             }),
             send_now: false,
         };
@@ -2046,7 +2045,6 @@ async fn cancel_resolves_front_when_running_task_is_none() {
                 kind: "prompt".to_string(),
                 text: String::new(),
                 combined_texts: None,
-                origin: None,
             }),
             send_now: false,
         };
@@ -2632,7 +2630,6 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 kind: "prompt".to_string(),
                 text: String::new(),
                 combined_texts: None,
-                origin: None,
             }),
             send_now: false,
         }

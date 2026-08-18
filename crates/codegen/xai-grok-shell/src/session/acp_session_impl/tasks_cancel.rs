@@ -469,7 +469,7 @@ impl SessionActor {
             let had_queued_user_prompt = state
                 .pending_inputs
                 .iter()
-                .any(|i| !i.origin.is_synthetic());
+                .any(|i| i.origin.is_client_user_prompt());
             // NOTE: `current_prompt_id` is deliberately NOT cleared here —
             // cancel usage attribution must snapshot the ledger against the
             // live pin first; it is cleared below, right after the

@@ -67,10 +67,6 @@ pub struct QueueEntryMeta {
     pub text: String,
     /// Per-prompt display texts when combine merged several follow-ups (len ≥ 2).
     pub combined_texts: Option<Vec<String>>,
-    /// Typed origin of this queue entry (PR19). `None` for legacy entries that
-    /// never recorded one; consumers map `None` to an unknown origin, never a
-    /// real user turn.
-    pub origin: Option<QueueOrigin>,
 }
 
 /// One queue row on the wire.
@@ -93,7 +89,7 @@ pub struct QueueEntryWire {
     /// See [`QueueEntryMeta::combined_texts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combined_texts: Option<Vec<String>>,
-    /// See [`QueueEntryMeta::origin`]. Omitted when `None` (legacy wire).
+    /// Typed display origin. Omitted when `None` for the legacy wire shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<QueueOrigin>,
     /// 0-based position among queued, not-yet-running prompts.

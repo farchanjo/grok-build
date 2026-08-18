@@ -63,12 +63,14 @@ impl SessionActor {
 
         // Bump before any await so a LocalSet recap cannot commit/emit after
         // this Prompt was accepted but before handle_prompt runs.
-        if !origin.is_synthetic() {
+        if origin.is_client_user_prompt() {
             self.cancel_pending_recap_for_new_prompt();
         }
 
         // Don't write synthetic auto-wake prompts to prompt history.
-        if !origin.is_synthetic() && !raw_prompt_text.is_empty() && !self.startup_hints.is_subagent
+        if origin.is_client_user_prompt()
+            && !raw_prompt_text.is_empty()
+            && !self.startup_hints.is_subagent
         {
             let cwd = self.session_info.cwd.clone();
             let session_id = self.session_info.id.to_string();
@@ -135,7 +137,7 @@ impl SessionActor {
         // `State::sweep_pending_inputs`). Gate deliberately keyed on
         // completion-id-bearing synthetics only (pre-existing shape): a queue
         // holding only drain/goal-summary synthetics is never preempted.
-        if !origin.is_synthetic() {
+        if origin.is_client_user_prompt() {
             let preempt_armed = state.pending_inputs.iter().any(|i| {
                 i.origin.completion_id().is_some()
                     && state.running_prompt_id() != Some(i.prompt_id.as_str())
@@ -160,7 +162,7 @@ impl SessionActor {
         // Build the shared-queue metadata for user-originated prompts only.
         // Synthetic inputs (auto-wake, nudges, drains) are not user-visible
         // queue items.
-        let queue_meta = if origin.is_synthetic() {
+        let queue_meta = if !origin.is_client_user_prompt() {
             None
         } else {
             // Derive the wire `kind` from the prompt content so the shared
@@ -182,7 +184,6 @@ impl SessionActor {
                 kind: kind.to_string(),
                 text: Self::queue_text_from_blocks(&prompt_blocks),
                 combined_texts: None,
-                origin: Some((&origin).into()),
             })
         };
         let log_prompt_id = prompt_id.clone();
@@ -221,11 +222,11 @@ impl SessionActor {
             .load(std::sync::atomic::Ordering::Relaxed);
         let blocked_in_wait = self.tool_context.blocking_wait_depth.depth() > 0;
         let held_user_queue = state.pending_inputs.iter().any(|queued| {
-            !queued.origin.is_synthetic()
+            queued.origin.is_client_user_prompt()
                 && Some(queued.prompt_id.as_str()) != running_front_id.as_deref()
         });
         let auto_send_now = turn_running && blocked_in_wait && !held_user_queue;
-        let send_now = !item.origin.is_synthetic() && (send_now || auto_send_now);
+        let send_now = item.origin.is_client_user_prompt() && (send_now || auto_send_now);
         let cancel_running_turn = send_now && turn_running && !goal_active;
         if send_now {
             item.send_now = true;

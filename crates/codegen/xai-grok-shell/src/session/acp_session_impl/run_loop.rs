@@ -761,7 +761,7 @@ pub(super) async fn run_session(
                             // Clear suppression -- user is re-engaging
                             // (skip for synthetic auto-wake prompts; the user hasn't
                             // actually re-engaged, so post-cancel suppression must hold)
-                            if !origin.is_synthetic() {
+                            if origin.is_client_user_prompt() {
                                 if let Some(gate) = &session.tool_context.task_wake_suppressed {
                                     gate.set(false);
                                 }

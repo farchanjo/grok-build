@@ -71,7 +71,7 @@ pub(crate) fn image_blocks(
 /// [`Self::hide_user_echo_from_scrollback`], [`Self::completion_id`], and the
 /// `From<&PromptOrigin> for QueueOrigin` conversion — the compiler forces each
 /// new variant through every lifecycle/security decision.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptOrigin {
     /// A normal user-initiated prompt. The only [`Self::prime_eligible`]
     /// origin.
@@ -123,9 +123,10 @@ pub enum PromptOrigin {
     Unknown,
 }
 /// Meta key on an ACP `PromptRequest` carrying an optional client-declared
-/// prompt-origin tag. Additive: old clients omit it and the prompt is treated
-/// as a real user prompt on the client input path.
+/// prompt-origin tag. Additive: absent tags are user prompts except reserved
+/// legacy synthetic prompt IDs, which fail closed at the ACP boundary.
 pub const PROMPT_ORIGIN_META_KEY: &str = "promptOrigin";
+pub const PROMPT_ORIGIN_SCHEDULER_FIRED: &str = "scheduler_fired";
 impl PromptOrigin {
     /// Exhaustive prime gate. Only an explicit real nominal [`Self::User`]
     /// is prime-eligible; every synthetic, unknown, assignment, and
@@ -205,8 +206,7 @@ impl PromptOrigin {
     /// ([`Self::PROMPT_ORIGIN_META_KEY`]) — the one cross-boundary origin
     /// carrier that IS read back into lifecycle decisions.
     ///
-    /// The ACP prompt path is the client input path, so an absent tag (old
-    /// clients) is a real user prompt (`User`). A recognized scheduler tag
+    /// The ACP boundary classifies absent tags before this reader. A recognized scheduler tag
     /// (`scheduler_fired`, stamped by the pager for `/loop`) maps to
     /// [`Self::SchedulerFired`] and never primes. Any other present tag fails
     /// closed to [`Self::Unknown`]: a client can never claim completion
@@ -215,8 +215,25 @@ impl PromptOrigin {
     pub fn from_prompt_origin_meta(tag: Option<&str>) -> Self {
         match tag {
             None => Self::User,
-            Some("scheduler_fired") => Self::SchedulerFired,
+            Some(PROMPT_ORIGIN_SCHEDULER_FIRED) => Self::SchedulerFired,
             Some(_) => Self::Unknown,
+        }
+    }
+    /// Returns `true` for a direct client user prompt. Exhaustive: each
+    /// variant has a deliberate arm.
+    pub fn is_client_user_prompt(&self) -> bool {
+        match self {
+            Self::User => true,
+            Self::Interjection
+            | Self::SubagentAssignment
+            | Self::TaskCompleted { .. }
+            | Self::SubagentCompleted { .. }
+            | Self::WorkflowCompleted { .. }
+            | Self::NotificationDrain
+            | Self::GoalSummary
+            | Self::SchedulerFired
+            | Self::PlanResume
+            | Self::Unknown => false,
         }
     }
     /// Returns `true` for auto-wake (synthetic) prompts. Exhaustive: each
@@ -296,7 +313,7 @@ impl From<&PromptOrigin> for xai_prompt_queue::QueueOrigin {
 }
 #[cfg(test)]
 mod tests {
-    use super::PromptOrigin;
+    use super::{PROMPT_ORIGIN_SCHEDULER_FIRED, PromptOrigin};
     #[test]
     fn from_prompt_id_unrecognized_is_unknown_never_user() {
         // Legacy fail-closed: an unrecognized id is Unknown, never User.
@@ -338,8 +355,7 @@ mod tests {
     }
     #[test]
     fn from_prompt_origin_meta_absent_is_user_and_scheduler_is_typed() {
-        // The ACP prompt path is the client input path: an absent origin meta
-        // (old clients) is a real user prompt and primes.
+        // A non-reserved untagged ACP prompt is a real user prompt and primes.
         assert_eq!(
             PromptOrigin::from_prompt_origin_meta(None),
             PromptOrigin::User
@@ -350,7 +366,7 @@ mod tests {
         );
         // The pager stamps scheduler_fired for `/loop` cron turns: typed,
         // synthetic, non-priming.
-        let cron = PromptOrigin::from_prompt_origin_meta(Some("scheduler_fired"));
+        let cron = PromptOrigin::from_prompt_origin_meta(Some(PROMPT_ORIGIN_SCHEDULER_FIRED));
         assert_eq!(cron, PromptOrigin::SchedulerFired);
         assert!(cron.is_synthetic());
         assert!(!cron.prime_eligible());
@@ -373,6 +389,12 @@ mod tests {
             assert!(!origin.prime_eligible());
             assert!(origin.is_synthetic());
         }
+    }
+    #[test]
+    fn legacy_synthetic_prompt_ids_fail_closed_at_the_acp_boundary() {
+        let origin = PromptOrigin::from_prompt_id("scheduler-fired-legacy");
+        assert_eq!(origin, PromptOrigin::SchedulerFired);
+        assert!(!origin.prime_eligible());
     }
     #[test]
     fn subagent_assignment_maps_to_unknown_on_wire_not_new_tag() {
@@ -466,7 +488,11 @@ mod tests {
             seen.insert(origin_label(origin));
         }
         // Ensure every variant is covered exactly once.
-        assert_eq!(seen.len(), 11, "producer matrix must cover every variant");
+        assert_eq!(
+            seen.len(),
+            cases.len(),
+            "producer matrix must cover every variant"
+        );
     }
     fn origin_label(o: &PromptOrigin) -> &'static str {
         match o {

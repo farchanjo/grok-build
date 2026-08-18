@@ -1143,12 +1143,7 @@ pub(crate) fn execute(
                     );
                     let send_start = std::time::Instant::now();
                     let mut meta = prompt_request_meta(&prompt_id, screen_mode);
-                    if let (Some(tag), Some(map)) = (prompt_origin, meta.as_object_mut()) {
-                        map.insert(
-                            xai_grok_shell::session::PROMPT_ORIGIN_META_KEY.into(),
-                            serde_json::Value::String(tag.as_meta_tag().into()),
-                        );
-                    }
+                    stamp_prompt_origin_meta(&mut meta, prompt_origin);
                     if send_now && let Some(map) = meta.as_object_mut() {
                         map.insert("sendNow".into(), serde_json::Value::Bool(true));
                     }
@@ -4626,6 +4621,18 @@ fn plain_prompt_content_block(
 /// `screen_mode` is `None` only under `SessionFlags::default()` (tests); the
 /// key is omitted then, keeping the legacy wire shape byte-identical.
 /// Extracted from the spawns for testability.
+fn stamp_prompt_origin_meta(
+    meta: &mut serde_json::Value,
+    origin: Option<crate::app::actions::PromptOriginTag>,
+) {
+    if let (Some(tag), Some(map)) = (origin, meta.as_object_mut()) {
+        map.insert(
+            xai_grok_shell::session::PROMPT_ORIGIN_META_KEY.into(),
+            serde_json::Value::String(tag.as_meta_tag().into()),
+        );
+    }
+}
+
 fn prompt_request_meta(
     prompt_id: &str,
     screen_mode: Option<&'static str>,
