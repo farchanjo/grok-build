@@ -2011,7 +2011,7 @@ fn resolve_agent_definition(
 }
 /// Minimal per-session context for `validate_subagent_type`.
 /// Avoids the heavy `SubagentSpawnContext` clone on the validation hot path.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SubagentValidationContext {
     pub parent_cwd: PathBuf,
     pub plugin_registry: Option<Arc<xai_grok_agent::plugins::PluginRegistry>>,

@@ -27,6 +27,7 @@
 //!
 //! It never splices a conversation and performs no prompt injection (PR19).
 
+pub mod agents;
 pub mod inventory;
 pub mod render;
 pub mod skills;
@@ -47,6 +48,11 @@ use self::render::render_skills;
 
 pub use self::render::{LoadedSkill, RenderBudgets, RenderedSkills};
 pub use self::skills::{PrimeBudgetState, PrimeDropReason, SemanticFillOutcome};
+
+pub use self::agents::{
+    AgentDropReason, AgentGateSnapshot, AgentInput, AgentPrimeBudgetState, AgentRefresh,
+    AgentRenderBudgets, PrimeAgentSelection, RenderedAgents, SelectedAgent,
+};
 
 /// Async supplier of the authoritative eligible native skill snapshot. PR19
 /// wires this to `ToolBridge::eligible_native_skills()`. The shell calls this
