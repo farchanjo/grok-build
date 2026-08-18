@@ -1004,7 +1004,15 @@ impl JsonlStorageAdapter {
             items.push(item);
         }
         let stripped = strip_invalid_images(&mut items);
-        if first_skipped.is_some() || stripped > 0 {
+        // PR19 crash-recovery sanitization: a durable prime <skill_prime>
+        // SystemReminder is only ever valid immediately followed by the real
+        // user item it was batched with. A torn batch (reminder line flushed,
+        // user line lost/partial) would otherwise reload as a lone reminder.
+        // Drop only orphan prime reminders (content carries the `<skill_prime>`
+        // marker); unrelated standalone SystemReminder items (MCP/plan-mode)
+        // without that marker are preserved.
+        let dropped_prime = sanitize_orphan_prime_reminders(&mut items);
+        if first_skipped.is_some() || stripped > 0 || dropped_prime > 0 {
             let quarantine = path.with_extension("jsonl.corrupt");
             if !quarantine.exists()
                 && let Err(e) = std::fs::copy(&path, &quarantine)
@@ -1015,6 +1023,14 @@ impl JsonlStorageAdapter {
                     "failed to write chat history quarantine copy"
                 );
             }
+        }
+        if dropped_prime > 0 {
+            tracing::warn!(
+                count = dropped_prime,
+                path = %path.display(),
+                "dropped orphan prime system-reminders (torn [reminder, user] \
+                 batch); original preserved as *.corrupt"
+            );
         }
         if let Some((first_line, first_error)) = first_skipped {
             tracing::warn!(
@@ -2436,6 +2452,7 @@ const MAX_LOADED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 /// malformed/oversized payloads, truncated or API-rejected formats,
 /// dimensions outside the floors/ceiling) from loaded conversation items,
 /// so a poisoned history recovers instead of 400ing on every turn.
+///
 /// User parts become a text placeholder; `ToolResultItem.images` entries
 /// are removed. HTTP(S) URLs are left untouched.
 ///
@@ -2471,6 +2488,49 @@ pub(crate) fn strip_invalid_images(items: &mut [ConversationItem]) -> usize {
         }
     }
     stripped
+}
+
+/// PR19 crash-recovery sanitization: drop a durable prime `<skill_prime>`
+/// `SystemReminder` that is NOT immediately followed by a real user item.
+///
+/// A healthy prime batch is always `[SystemReminder, real-User]`. If a
+/// `ChatBatch` append tears after the reminder line (or mid-user line), reload
+/// would otherwise surface a lone durable reminder. Only reminders whose
+/// content carries the `<skill_prime>` marker (i.e. the prime reminders, which
+/// are only ever written in a batch) are candidates; unrelated standalone
+/// `SystemReminder` items (MCP / plan-mode reminders) without that marker are
+/// always preserved regardless of position. This is a load-time-only
+/// transform; the original file is preserved as `*.corrupt` by the caller.
+/// Returns the number of orphan prime reminders dropped.
+pub(crate) fn sanitize_orphan_prime_reminders(items: &mut Vec<ConversationItem>) -> usize {
+    use xai_grok_inference_types::SyntheticReason;
+    let original = std::mem::take(items);
+    let mut kept: Vec<ConversationItem> = Vec::with_capacity(original.len());
+    let mut dropped = 0usize;
+    let mut i = 0usize;
+    while i < original.len() {
+        let is_prime_reminder = matches!(
+            &original[i],
+            ConversationItem::User(u)
+                if u.synthetic_reason == Some(SyntheticReason::SystemReminder)
+                    && original[i].text_content().contains("<skill_prime>")
+        );
+        let orphan = is_prime_reminder
+            && !original.get(i + 1).is_some_and(|next| {
+                matches!(
+                    next,
+                    ConversationItem::User(u) if u.synthetic_reason.is_none()
+                )
+            });
+        if orphan {
+            dropped += 1;
+        } else {
+            kept.push(original[i].clone());
+        }
+        i += 1;
+    }
+    *items = kept;
+    dropped
 }
 /// Check that a `data:` URI has a valid `;base64,` header and decodable payload
 /// within the size limit.

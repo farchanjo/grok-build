@@ -24,8 +24,6 @@ pub enum QueueOrigin {
     User,
     /// A stranded user interjection promoted to its own turn (side-channel).
     Interjection,
-    /// A child sub-agent session's first prompt (parent-authored task text).
-    SubagentAssignment,
     /// Auto-wake from a completed background task.
     TaskCompleted,
     /// Auto-wake from a completed subagent.
@@ -41,8 +39,12 @@ pub enum QueueOrigin {
     /// Injected plan-resume follow-up turn.
     PlanResume,
     /// Legacy / wire entry without an explicit origin. Fail-closed: never a
-    /// real user turn.
+    /// real user turn. Tag-only `Unknown` also absorbs any future/unknown tag
+    /// (`#[serde(other)]`), so an old binary that meets an arbitrary new tag
+    /// still deserializes to a safe, never-priming value instead of erroring.
+    /// MUST remain the last variant (serde `other` requires a trailing catch-all).
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -293,6 +295,35 @@ mod tests {
         assert_eq!(QueueOrigin::default(), QueueOrigin::Unknown);
         let v: QueueOrigin = serde_json::from_value(serde_json::json!("unknown")).unwrap();
         assert_eq!(v, QueueOrigin::Unknown);
+    }
+
+    #[test]
+    fn queue_origin_unknown_tag_absorbs_arbitrary_future_tag() {
+        // An old binary meeting an unknown future tag must not error: it
+        // degrades to the safe, never-priming `Unknown` via `#[serde(other)]`.
+        for tag in [
+            "subagent_assignment",
+            "agent_prime_assignment",
+            "future_tag",
+            "bogus",
+        ] {
+            let v: QueueOrigin = serde_json::from_value(serde_json::json!(tag)).unwrap();
+            assert_eq!(
+                v,
+                QueueOrigin::Unknown,
+                "unknown tag {tag} must degrade to Unknown"
+            );
+            assert_ne!(v, QueueOrigin::User);
+        }
+        // Recognized tags still resolve (exact wire names preserved).
+        assert_eq!(
+            serde_json::from_value::<QueueOrigin>(serde_json::json!("scheduler_fired")).unwrap(),
+            QueueOrigin::SchedulerFired
+        );
+        assert_eq!(
+            serde_json::from_value::<QueueOrigin>(serde_json::json!("user")).unwrap(),
+            QueueOrigin::User
+        );
     }
 
     #[test]

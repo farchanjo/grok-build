@@ -182,12 +182,6 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::IncrementPromptIndex);
     }
 
-    /// Roll back a prompt_index incremented for a turn whose user item was
-    /// never inserted (hard prime failure path).
-    pub fn decrement_prompt_index(&self) {
-        let _ = self.cmd_tx.send(ChatStateCommand::DecrementPromptIndex);
-    }
-
     /// Update the sampling config (e.g., model switch).
     pub fn update_inference_settings(&self, config: InferenceSettings) {
         let _ = self

@@ -1510,10 +1510,14 @@ impl SessionActor {
                 Ok(reminder) => reminder,
                 Err(error) => {
                     // The turn began (index incremented, echo emitted), but
-                    // the user item was never inserted. Roll the prompt
-                    // index back and surface the typed error;
-                    // `handle_completion` emits the terminal failure state.
-                    self.chat_state_handle.decrement_prompt_index();
+                    // the user item was never inserted. The prompt index is
+                    // deliberately kept MONOTONIC: this failed turn consumed
+                    // an index, so the next real turn gets a distinct, higher
+                    // index instead of reusing the already-broadcast echo's
+                    // index (no viewer promptIndex collision on the
+                    // replay/updates rail). Observers see TurnStarted(N) ->
+                    // terminal failure -> TurnStarted(N+1). Surface the typed
+                    // error; `handle_completion` emits the terminal failure.
                     return Err(error);
                 }
             };

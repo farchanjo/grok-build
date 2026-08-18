@@ -3468,6 +3468,128 @@ fn read_chat_history_clean_file_writes_no_quarantine() {
             "no corruption detected → no quarantine copy"
         );
 }
+/// PR19 crash-recovery: a durable prime `<skill_prime>` SystemReminder is only
+/// valid immediately followed by the real user item it was batched with. A torn
+/// `ChatBatch` append must never reload as a lone reminder. Adversarial
+/// boundaries: before write, mid-reminder, exactly after the reminder newline,
+/// mid-user, and full pair.
+mod prime_reminder_crash_tests {
+    use super::*;
+
+    fn reminder_item() -> ConversationItem {
+        ConversationItem::system_reminder(
+            "<skill_prime>\n<skill_source name=\"deploy\">BODY</skill_source>\n</skill_prime>",
+        )
+    }
+
+    fn reminder_line() -> Vec<u8> {
+        format!("{}\n", serde_json::to_string(&reminder_item()).unwrap()).into_bytes()
+    }
+
+    fn user_line() -> Vec<u8> {
+        format!(
+            "{}\n",
+            serde_json::to_string(&ConversationItem::user("deploy the release now")).unwrap()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn torn_batch_before_write_yields_nothing() {
+        let temp_dir = TempDir::new().unwrap();
+        let (_, _, items) = load_raw_chat(&temp_dir, b"");
+        assert!(items.is_empty(), "no writes -> no items");
+    }
+
+    #[test]
+    fn torn_batch_mid_reminder_yields_no_reminder() {
+        // Reminder line itself torn mid-write: skipped/quarantined, no items.
+        let temp_dir = TempDir::new().unwrap();
+        let (_, chat_path, items) = load_raw_chat(&temp_dir, b"{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<skill_p");
+        assert!(items.is_empty(), "torn reminder must not survive");
+        assert!(
+            chat_path.with_extension("jsonl.corrupt").exists(),
+            "torn write must be quarantined"
+        );
+    }
+
+    #[test]
+    fn torn_batch_exactly_after_reminder_newline_drops_orphan_reminder() {
+        // Reminder line fully flushed (complete + newline), user line lost:
+        // reload must NOT surface a lone prime reminder.
+        let temp_dir = TempDir::new().unwrap();
+        let raw = reminder_line();
+        let (_, chat_path, items) = load_raw_chat(&temp_dir, &raw);
+        assert!(
+            items.is_empty(),
+            "an orphan prime reminder must be dropped on recovery, got {items:?}"
+        );
+        assert!(
+            chat_path.with_extension("jsonl.corrupt").exists(),
+            "sanitized orphan must be quarantined"
+        );
+    }
+
+    #[test]
+    fn torn_batch_mid_user_drops_orphan_reminder() {
+        // Reminder line complete, user line torn: user line skipped, the now
+        // unpaired reminder is dropped.
+        let temp_dir = TempDir::new().unwrap();
+        let mut raw = reminder_line();
+        raw.extend_from_slice(b"{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"deploy cut");
+        let (_, chat_path, items) = load_raw_chat(&temp_dir, &raw);
+        assert!(
+            items.is_empty(),
+            "a torn [reminder, user] batch must not leave a lone reminder, got {items:?}"
+        );
+        assert!(chat_path.with_extension("jsonl.corrupt").exists());
+    }
+
+    #[test]
+    fn full_batch_reloads_ordered_pair() {
+        // The healthy durable batch reloads as [reminder, user] in order.
+        let temp_dir = TempDir::new().unwrap();
+        let mut raw = reminder_line();
+        raw.extend_from_slice(&user_line());
+        let (_, chat_path, items) = load_raw_chat(&temp_dir, &raw);
+        assert_eq!(items.len(), 2, "full pair must reload in order");
+        assert!(matches!(
+            &items[0],
+            ConversationItem::User(u)
+                if u.synthetic_reason
+                    == Some(xai_grok_inference_types::SyntheticReason::SystemReminder)
+                        && items[0].text_content().contains("<skill_prime>")
+        ));
+        assert!(matches!(
+            &items[1],
+            ConversationItem::User(u) if u.synthetic_reason.is_none()
+        ));
+        assert!(
+            items[1].text_content().contains("deploy the release now"),
+            "real user item must directly follow the reminder"
+        );
+        assert!(
+            !chat_path.with_extension("jsonl.corrupt").exists(),
+            "healthy pair must not be quarantined"
+        );
+    }
+
+    #[test]
+    fn standalone_non_prime_system_reminder_is_preserved() {
+        // Unrelated standalone SystemReminder items (MCP / plan-mode) without
+        // the `<skill_prime>` marker are preserved even as the last item.
+        let temp_dir = TempDir::new().unwrap();
+        let standalone = ConversationItem::system_reminder("## Files Edited This Session");
+        let raw = format!("{}\n", serde_json::to_string(&standalone).unwrap()).into_bytes();
+        let (_, _, items) = load_raw_chat(&temp_dir, &raw);
+        assert_eq!(items.len(), 1, "non-prime reminder must be preserved");
+        assert!(
+            items[0].text_content().contains("Files Edited"),
+            "the standalone reminder content must survive"
+        );
+    }
+}
+
 /// Self-healing append: a torn trailing line (previous append crashed
 /// mid-write, no trailing newline) is terminated before the new record is
 /// written, so the new record lands on its own line and only the torn

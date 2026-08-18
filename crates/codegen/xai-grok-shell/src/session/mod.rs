@@ -278,7 +278,11 @@ impl From<&PromptOrigin> for xai_prompt_queue::QueueOrigin {
         match origin {
             PromptOrigin::User => Q::User,
             PromptOrigin::Interjection => Q::Interjection,
-            PromptOrigin::SubagentAssignment => Q::SubagentAssignment,
+            // A child sub-agent's first prompt is never on a client queue
+            // roster; on the wire it maps to the safe, display-only `Unknown`
+            // tag (never a newly-emitted enum value an old client can't
+            // parse). Prime eligibility stays server-gated by the typed value.
+            PromptOrigin::SubagentAssignment => Q::Unknown,
             PromptOrigin::TaskCompleted { .. } => Q::TaskCompleted,
             PromptOrigin::SubagentCompleted { .. } => Q::SubagentCompleted,
             PromptOrigin::WorkflowCompleted { .. } => Q::WorkflowCompleted,
@@ -369,6 +373,18 @@ mod tests {
             assert!(!origin.prime_eligible());
             assert!(origin.is_synthetic());
         }
+    }
+    #[test]
+    fn subagent_assignment_maps_to_unknown_on_wire_not_new_tag() {
+        // QueueOrigin is display-only and old clients cannot parse a newly
+        // emitted enum value. A child sub-agent's assignment is never on a
+        // client queue roster, so it maps to the safe `Unknown` tag on the
+        // wire (never a new `subagent_assignment` value an old binary errors
+        // on). Prime eligibility stays server-gated by the typed value.
+        let wire = xai_prompt_queue::QueueOrigin::from(&PromptOrigin::SubagentAssignment);
+        assert_eq!(wire, xai_prompt_queue::QueueOrigin::Unknown);
+        let json = serde_json::to_value(&wire).unwrap();
+        assert_eq!(json, serde_json::json!("unknown"));
     }
     #[test]
     fn producer_matrix_classifications_are_exhaustive_and_non_circular() {

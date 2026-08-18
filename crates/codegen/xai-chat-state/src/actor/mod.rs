@@ -210,9 +210,6 @@ impl ChatStateActor {
             ChatStateCommand::IncrementPromptIndex => {
                 self.increment_prompt_index();
             }
-            ChatStateCommand::DecrementPromptIndex => {
-                self.state.prompt_index = self.state.prompt_index.saturating_sub(1);
-            }
             ChatStateCommand::UpdateInferenceSettings { config } => {
                 self.state.inference_settings = config;
             }
