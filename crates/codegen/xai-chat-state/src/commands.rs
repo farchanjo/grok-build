@@ -102,6 +102,18 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<()>,
     },
 
+    /// Push several consecutive user-role items atomically, in order (e.g. a
+    /// hidden prime `<system_reminder>` immediately before the real user
+    /// message). Each item is appended as a user-role item with its own
+    /// `SyntheticReason` tag.
+    PushMessageBatch { items: Vec<ConversationItem> },
+
+    /// Batch push with acknowledgement (see [`Self::PushMessageBatch`]).
+    PushMessageBatchAndAck {
+        items: Vec<ConversationItem>,
+        reply: oneshot::Sender<()>,
+    },
+
     /// Append one working-directory switch without repair or pruning, then
     /// acknowledge only after persistence processes the generation-aware append.
     AppendWorkingDirectorySwitchAndAck {
@@ -451,6 +463,20 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::PushUserMessageAndAck {
             item: ConversationItem::user("hello"),
+            reply: tx,
+        };
+        let _ = ChatStateCommand::PushMessageBatch {
+            items: vec![
+                ConversationItem::system_reminder("prime"),
+                ConversationItem::user("hello"),
+            ],
+        };
+        let (tx, _rx) = oneshot::channel();
+        let _ = ChatStateCommand::PushMessageBatchAndAck {
+            items: vec![
+                ConversationItem::system_reminder("prime"),
+                ConversationItem::user("hello"),
+            ],
             reply: tx,
         };
         let (tx, _rx) = oneshot::channel();

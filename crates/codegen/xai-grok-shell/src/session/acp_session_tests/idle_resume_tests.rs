@@ -257,6 +257,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",

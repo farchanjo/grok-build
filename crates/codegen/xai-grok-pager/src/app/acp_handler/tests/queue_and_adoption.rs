@@ -1487,6 +1487,7 @@
                 text: "ls -la".to_string(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }],
             running_prompt_id: None,
             running_text: None,

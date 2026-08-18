@@ -18,6 +18,7 @@ impl SessionActor {
         &self,
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_id: String,
+        origin: crate::session::PromptOrigin,
         prompt_mode: PromptMode,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
@@ -57,8 +58,8 @@ impl SessionActor {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
-
-        let origin = crate::session::PromptOrigin::from_prompt_id(&prompt_id);
+        // The typed `origin` is carried by the producer (PR19), never inferred
+        // from the prompt-id string.
 
         // Bump before any await so a LocalSet recap cannot commit/emit after
         // this Prompt was accepted but before handle_prompt runs.
@@ -181,6 +182,7 @@ impl SessionActor {
                 kind: kind.to_string(),
                 text: Self::queue_text_from_blocks(&prompt_blocks),
                 combined_texts: None,
+                origin: Some((&origin).into()),
             })
         };
         let log_prompt_id = prompt_id.clone();
@@ -348,6 +350,7 @@ impl SessionActor {
                 kind: meta.kind.clone(),
                 text: meta.text.clone(),
                 combined_texts: meta.combined_texts.clone(),
+                origin: Some((&item.origin).into()),
                 position: out.len(),
             });
         }
@@ -658,6 +661,10 @@ impl SessionActor {
 
     /// Clear queued prompts. When `owner` is `Some`, only that
     /// client's queued items are removed. The running turn is never touched.
+    ///
+    /// `/clear` also invalidates the PR18 [`InventoryCache`] and ephemeral
+    /// prime state: the user reset the queue, so any primed context built
+    /// around the old queue is stale.
     pub(super) async fn handle_clear_queue(&self, owner: Option<&str>) {
         let mut state = self.state.lock().await;
         // Partition rather than `retain`: each cleared user prompt still has a
@@ -667,6 +674,7 @@ impl SessionActor {
         // spurious "Turn failed" on the running turn.
         let running_id = state.running_prompt_id().map(str::to_string);
         let mut kept = VecDeque::with_capacity(state.pending_inputs.len());
+        let mut cleared_any = false;
         for item in std::mem::take(&mut state.pending_inputs) {
             let keep = match &item.queue_meta {
                 // Non-queue (synthetic) items always stay.
@@ -681,10 +689,14 @@ impl SessionActor {
             if keep {
                 kept.push_back(item);
             } else {
+                cleared_any = true;
                 Self::respond_removed_prompt(item.respond_to);
             }
         }
         state.pending_inputs = kept;
+        if cleared_any {
+            self.prime_cache.invalidate();
+        }
         self.broadcast_queue_changed(&state);
     }
 

@@ -124,6 +124,17 @@ impl ChatStateActor {
                 self.push_user_message(item);
                 let _ = reply.send(());
             }
+            ChatStateCommand::PushMessageBatch { items } => {
+                for item in items {
+                    self.push_user_message(item);
+                }
+            }
+            ChatStateCommand::PushMessageBatchAndAck { items, reply } => {
+                for item in items {
+                    self.push_user_message(item);
+                }
+                let _ = reply.send(());
+            }
             ChatStateCommand::AppendWorkingDirectorySwitchAndAck {
                 content,
                 cwd_generation,

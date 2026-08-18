@@ -261,21 +261,25 @@ fn normalize_rel(rel: &Path) -> String {
 /// `invalidate` / `mark_touched` / `clear_dirty_after` are atomic with respect to
 /// one another and never lose a mark across an epoch bump. The dirty list is
 /// capped; when it overflows the epoch is bumped to force a full rebuild.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct InventoryCache {
-    state: std::sync::Mutex<CacheState>,
+    state: std::sync::Arc<std::sync::Mutex<CacheState>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct CacheState {
     epoch: u64,
     dirty: Vec<(PathBuf, u64)>,
+    /// `(epoch-at-build, built-inventory)` for the session workspace. Reused
+    /// when the epoch is unchanged and no path was marked dirty after the
+    /// build; rebuilt on `/clear` (epoch bump), dirty-path marks, or overflow.
+    cached: Option<(u64, WorkspaceInventory)>,
 }
 
 impl Default for InventoryCache {
     fn default() -> Self {
         Self {
-            state: std::sync::Mutex::new(CacheState::default()),
+            state: std::sync::Arc::new(std::sync::Mutex::new(CacheState::default())),
         }
     }
 }
@@ -289,12 +293,43 @@ impl InventoryCache {
         self.state.lock().unwrap().epoch
     }
 
-    /// Invalidate the whole inventory (`/clear`): bumps the epoch and drops
-    /// every dirty mark (all were recorded under an older epoch).
+    /// Return a workspace inventory, rebuilding via
+    /// [`build_inventory`] only when the cache is stale:
+    /// - the epoch changed (`/clear`, dirty-overflow), or
+    /// - a path was marked dirty after the cached build (tool-touched).
+    ///
+    /// The blocked walk is bounded by [`InventoryLimits`]; callers drive it
+    /// off the async executor (e.g. `spawn_blocking`). A failed walk falls
+    /// back to an empty inventory (callers treat it as incomplete).
+    pub fn get_or_build(&self, root: &Path, limits: InventoryLimits) -> WorkspaceInventory {
+        let mut s = self.state.lock().unwrap();
+        let current_epoch = s.epoch;
+        let stale = match &s.cached {
+            Some((built_at, _)) if *built_at == current_epoch => {
+                s.dirty.iter().any(|(_, marked)| *marked >= *built_at)
+            }
+            _ => true,
+        };
+        if !stale {
+            // Reuse the cached inventory for this epoch (unchanged / clean).
+            if let Some((_, inv)) = &s.cached {
+                return inv.clone();
+            }
+        }
+        let inv = build_inventory(root, limits).unwrap_or_default();
+        s.dirty.clear();
+        s.cached = Some((current_epoch, inv.clone()));
+        inv
+    }
+
+    /// Invalidate the whole inventory (`/clear`): bumps the epoch, drops
+    /// every dirty mark (all were recorded under an older epoch), and drops
+    /// any cached inventory (stale for the new epoch).
     pub fn invalidate(&self) -> u64 {
         let mut s = self.state.lock().unwrap();
         s.epoch = s.epoch.saturating_add(1);
         s.dirty.clear();
+        s.cached = None;
         s.epoch
     }
 
@@ -308,6 +343,7 @@ impl InventoryCache {
             // Bound memory: force a full rebuild.
             s.epoch = s.epoch.saturating_add(1);
             s.dirty.clear();
+            s.cached = None;
             let e = s.epoch;
             s.dirty.push((path.to_path_buf(), e));
             return true;
@@ -561,5 +597,63 @@ mod tests {
             cache.dirty().len() <= CACHE_DIRTY_CAP,
             "dirty set must stay bounded"
         );
+    }
+
+    #[test]
+    fn inventory_cache_get_or_build_reuses_then_rebuilds_on_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        write_tree(&root, &["a.rs"]);
+        let cache = InventoryCache::new();
+        let limits = InventoryLimits::default();
+
+        let inv1 = cache.get_or_build(&root, limits);
+        assert!(inv1.paths().iter().any(|p| *p == "a.rs"), "initial build");
+
+        // No changes, no dirty marks: the cache is reused (a stale on-disk
+        // change is NOT picked up — correctness relies on mark_touched.
+        std::fs::write(root.join("b.rs"), "new").unwrap();
+        let inv2 = cache.get_or_build(&root, limits);
+        assert!(
+            !inv2.paths().iter().any(|p| *p == "b.rs"),
+            "must reuse cached inventory when nothing was marked touched"
+        );
+
+        // mark_touched makes the next build rebuild and see the new file.
+        cache.mark_touched(&root.join("b.rs"));
+        let inv3 = cache.get_or_build(&root, limits);
+        assert!(
+            inv3.paths().iter().any(|p| *p == "b.rs"),
+            "mark_touched must force a rebuild that sees the new file"
+        );
+    }
+
+    #[test]
+    fn inventory_cache_invalidate_forces_rebuild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        write_tree(&root, &["a.rs"]);
+        let cache = InventoryCache::new();
+        let limits = InventoryLimits::default();
+        let _first = cache.get_or_build(&root, limits);
+
+        // A second clean build reuses the cached inventory (same root/epoch).
+        std::fs::write(root.join("b.rs"), "new").unwrap();
+        let second = cache.get_or_build(&root, limits);
+        assert!(
+            !second.paths().iter().any(|p| *p == "b.rs"),
+            "reused cached inventory before invalidate"
+        );
+
+        // `/clear`-equivalent invalidate bumps the epoch and forces a rebuild
+        // that picks up on-disk changes.
+        cache.invalidate();
+        let third = cache.get_or_build(&root, limits);
+        assert!(
+            third.paths().iter().any(|p| *p == "b.rs"),
+            "invalidate must force a rebuild that sees the new file"
+        );
+        // The cache epoch advanced past the pre-invalidate value.
+        assert!(cache.epoch() >= 1, "invalidate must bump the cache epoch");
     }
 }

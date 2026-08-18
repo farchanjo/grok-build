@@ -56,10 +56,28 @@ pub(crate) fn image_blocks(
 }
 /// Describes who originated a prompt: the user, or the shell's auto-wake
 /// system reacting to a completed background task / subagent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Every producer constructs an explicit variant (PR19): this enum is carried
+/// as a **typed value** end-to-end from the producer through
+/// `SessionCommand::Prompt` / `queue_input` / `InputItem` / `AgentTask` /
+/// `handle_prompt`. The lifecycle NEVER infers origin from prompt-id strings
+/// after construction; [`Self::from_prompt_id`] survives only as a fail-closed
+/// decoder for legacy wire entries and returns [`Self::Unknown`] for
+/// unrecognized ids (never [`Self::User`]).
+///
+/// [`Self::prime_eligible`] is the exhaustive prime gate: only an explicit
+/// real [`Self::User`] may prime. Every new variant must decide here (the
+/// match is exhaustive, so the compiler forces it).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PromptOrigin {
-    /// A normal user-initiated prompt.
+    /// A normal user-initiated prompt. The only [`Self::prime_eligible`]
+    /// origin.
     User,
+    /// A prompt injected because the user interjected mid-turn (a stranded
+    /// interjection promoted to its own turn). User-typed content, but a
+    /// side-channel interjection — never a queued `User` turn, so it must not
+    /// prime.
+    Interjection,
     /// Auto-wake prompt injected when a background terminal task completed.
     TaskCompleted {
         /// The background task ID (without the `task-completed-` prefix).
@@ -94,9 +112,27 @@ pub enum PromptOrigin {
     /// and the shell injects the follow-up turn. Synthetic so the user never
     /// typed it — kept out of prompt history — but it still runs a real turn.
     PlanResume,
+    /// Legacy / wire entries that carried no explicit origin. Fail-closed:
+    /// rendered and dispatched like a prompt but NEVER primed and never
+    /// treated as a real [`Self::User`] turn.
+    Unknown,
 }
 impl PromptOrigin {
-    /// Parse a prompt_id string into a `PromptOrigin`.
+    /// Exhaustive prime gate. Only an explicit real nominal [`Self::User`]
+    /// is prime-eligible; every synthetic, unknown, and external-runtime
+    /// origin is excluded. New variants must be decided here (exhaustive
+    /// match).
+    pub fn prime_eligible(&self) -> bool {
+        matches!(self, Self::User)
+    }
+    /// Decode a legacy prompt-id string into an origin, FAIL-CLOSED.
+    ///
+    /// Reserved only for deserializing legacy wire entries that predate the
+    /// explicit `origin` field. Recognized synthetic prefixes map to their
+    /// variant; **any unrecognized id returns [`Self::Unknown`], never
+    /// [`Self::User`]** — a legacy id can never claim to be a real user turn.
+    /// The live pipeline passes the typed [`Self`] through instead of calling
+    /// this.
     pub fn from_prompt_id(prompt_id: &str) -> Self {
         if let Some(task_id) = prompt_id.strip_prefix("task-completed-") {
             Self::TaskCompleted {
@@ -110,6 +146,8 @@ impl PromptOrigin {
             Self::WorkflowCompleted {
                 completion_id: completion_id.to_string(),
             }
+        } else if prompt_id.starts_with("interject-fallback-") {
+            Self::Interjection
         } else if prompt_id.starts_with("notifications-") {
             Self::NotificationDrain
         } else if prompt_id.starts_with("goal-summary-") {
@@ -121,7 +159,37 @@ impl PromptOrigin {
         } else if prompt_id.starts_with("plan-resume-") {
             Self::PlanResume
         } else {
-            Self::User
+            // Fail-closed: an unrecognized id is Unknown, never User.
+            Self::Unknown
+        }
+    }
+    /// Map a legacy wire origin to the shell origin, FAIL-CLOSED.
+    ///
+    /// `None` / `Unknown` on the wire become [`Self::Unknown`] — a wire entry
+    /// that did not carry an explicit origin can never claim [`Self::User`].
+    /// The authoritative `User` status is asserted server-side by the producer
+    /// (the ACP client handler / queue), never adopted from a client-sent
+    /// tag.
+    pub fn from_queue_origin(origin: Option<xai_prompt_queue::QueueOrigin>) -> Self {
+        use xai_prompt_queue::QueueOrigin as Q;
+        match origin {
+            None | Some(Q::Unknown) => Self::Unknown,
+            Some(Q::User) => Self::User,
+            Some(Q::Interjection) => Self::Interjection,
+            Some(Q::TaskCompleted) => Self::TaskCompleted {
+                task_id: String::new(),
+            },
+            Some(Q::SubagentCompleted) => Self::SubagentCompleted {
+                subagent_id: String::new(),
+            },
+            Some(Q::WorkflowCompleted) => Self::WorkflowCompleted {
+                completion_id: String::new(),
+            },
+            Some(Q::NotificationDrain) => Self::NotificationDrain,
+            Some(Q::GoalSummary) => Self::GoalSummary,
+            Some(Q::GoalClassifierNudge) => Self::GoalClassifierNudge,
+            Some(Q::SchedulerFired) => Self::SchedulerFired,
+            Some(Q::PlanResume) => Self::PlanResume,
         }
     }
     /// Returns `true` for auto-wake (synthetic) prompts.
@@ -136,13 +204,14 @@ impl PromptOrigin {
     /// real user turns always render.
     pub fn hide_user_echo_from_scrollback(&self) -> bool {
         match self {
-            Self::User | Self::SchedulerFired | Self::PlanResume => false,
+            Self::User | Self::SchedulerFired | Self::PlanResume | Self::Unknown => false,
             Self::TaskCompleted { .. }
             | Self::SubagentCompleted { .. }
             | Self::WorkflowCompleted { .. }
             | Self::NotificationDrain
             | Self::GoalSummary
-            | Self::GoalClassifierNudge => true,
+            | Self::GoalClassifierNudge
+            | Self::Interjection => true,
         }
     }
     pub fn completion_id(&self) -> Option<&str> {
@@ -151,11 +220,31 @@ impl PromptOrigin {
             Self::SubagentCompleted { subagent_id } => Some(subagent_id),
             Self::WorkflowCompleted { completion_id } => Some(completion_id),
             Self::User
+            | Self::Interjection
             | Self::NotificationDrain
             | Self::GoalSummary
             | Self::GoalClassifierNudge
             | Self::SchedulerFired
-            | Self::PlanResume => None,
+            | Self::PlanResume
+            | Self::Unknown => None,
+        }
+    }
+}
+impl From<&PromptOrigin> for xai_prompt_queue::QueueOrigin {
+    fn from(origin: &PromptOrigin) -> Self {
+        use xai_prompt_queue::QueueOrigin as Q;
+        match origin {
+            PromptOrigin::User => Q::User,
+            PromptOrigin::Interjection => Q::Interjection,
+            PromptOrigin::TaskCompleted { .. } => Q::TaskCompleted,
+            PromptOrigin::SubagentCompleted { .. } => Q::SubagentCompleted,
+            PromptOrigin::WorkflowCompleted { .. } => Q::WorkflowCompleted,
+            PromptOrigin::NotificationDrain => Q::NotificationDrain,
+            PromptOrigin::GoalSummary => Q::GoalSummary,
+            PromptOrigin::GoalClassifierNudge => Q::GoalClassifierNudge,
+            PromptOrigin::SchedulerFired => Q::SchedulerFired,
+            PromptOrigin::PlanResume => Q::PlanResume,
+            PromptOrigin::Unknown => Q::Unknown,
         }
     }
 }
@@ -163,12 +252,102 @@ impl PromptOrigin {
 mod tests {
     use super::PromptOrigin;
     #[test]
-    fn from_prompt_id_user() {
+    fn from_prompt_id_unrecognized_is_unknown_never_user() {
+        // Legacy fail-closed: an unrecognized id is Unknown, never User.
         assert_eq!(
             PromptOrigin::from_prompt_id("my-prompt"),
+            PromptOrigin::Unknown
+        );
+        assert!(PromptOrigin::from_prompt_id("my-prompt").is_synthetic());
+        assert!(!PromptOrigin::from_prompt_id("my-prompt").prime_eligible());
+        assert_eq!(
+            PromptOrigin::from_prompt_id("anything-not-matching"),
+            PromptOrigin::Unknown
+        );
+    }
+    #[test]
+    fn prime_eligible_only_for_explicit_user() {
+        assert!(PromptOrigin::User.prime_eligible());
+        assert!(!PromptOrigin::Unknown.prime_eligible());
+        assert!(!PromptOrigin::Interjection.prime_eligible());
+        // Every synthetic origin must be excluded.
+        for o in [
+            PromptOrigin::TaskCompleted {
+                task_id: "t".into(),
+            },
+            PromptOrigin::SubagentCompleted {
+                subagent_id: "s".into(),
+            },
+            PromptOrigin::WorkflowCompleted {
+                completion_id: "w".into(),
+            },
+            PromptOrigin::NotificationDrain,
+            PromptOrigin::GoalSummary,
+            PromptOrigin::GoalClassifierNudge,
+            PromptOrigin::SchedulerFired,
+            PromptOrigin::PlanResume,
+        ] {
+            assert!(!o.prime_eligible(), "synthetic origin must not prime");
+        }
+    }
+    #[test]
+    fn from_queue_origin_fails_closed_to_unknown() {
+        assert_eq!(PromptOrigin::from_queue_origin(None), PromptOrigin::Unknown);
+        assert_eq!(
+            PromptOrigin::from_queue_origin(Some(xai_prompt_queue::QueueOrigin::Unknown)),
+            PromptOrigin::Unknown
+        );
+        assert_eq!(
+            PromptOrigin::from_queue_origin(Some(xai_prompt_queue::QueueOrigin::User)),
             PromptOrigin::User
         );
-        assert!(!PromptOrigin::from_prompt_id("my-prompt").is_synthetic());
+        assert!(!PromptOrigin::from_queue_origin(None).prime_eligible());
+        assert!(
+            PromptOrigin::from_queue_origin(Some(xai_prompt_queue::QueueOrigin::User))
+                .prime_eligible()
+        );
+    }
+    #[test]
+    fn queue_origin_round_trip_matches_synthetic_by_value() {
+        // Tag-only wire origins map back to the same fail-closed class; the
+        // completion/task payloads ride the prompt-id string, so only tag-level
+        // stability is asserted (payloads are never re-parsed from the wire).
+        for origin in [
+            PromptOrigin::User,
+            PromptOrigin::Interjection,
+            PromptOrigin::NotificationDrain,
+            PromptOrigin::GoalSummary,
+            PromptOrigin::GoalClassifierNudge,
+            PromptOrigin::SchedulerFired,
+            PromptOrigin::PlanResume,
+            PromptOrigin::Unknown,
+        ] {
+            let wire = xai_prompt_queue::QueueOrigin::from(&origin);
+            let back = PromptOrigin::from_queue_origin(Some(wire));
+            assert_eq!(back.is_synthetic(), origin.is_synthetic());
+            assert_eq!(back.prime_eligible(), origin.prime_eligible());
+            assert_eq!(
+                back.hide_user_echo_from_scrollback(),
+                origin.hide_user_echo_from_scrollback()
+            );
+        }
+        for origin in [
+            PromptOrigin::TaskCompleted {
+                task_id: "t".into(),
+            },
+            PromptOrigin::SubagentCompleted {
+                subagent_id: "s".into(),
+            },
+            PromptOrigin::WorkflowCompleted {
+                completion_id: "w".into(),
+            },
+        ] {
+            let wire = xai_prompt_queue::QueueOrigin::from(&origin);
+            // Synthetic + never primed.
+            let back = PromptOrigin::from_queue_origin(Some(wire));
+            assert!(back.is_synthetic());
+            assert!(!back.prime_eligible());
+        }
     }
     #[test]
     fn from_prompt_id_task_completed() {
@@ -193,6 +372,13 @@ mod tests {
         );
         assert!(origin.is_synthetic());
         assert_eq!(origin.completion_id(), Some("xyz-789"));
+    }
+    #[test]
+    fn from_prompt_id_interjection() {
+        let origin = PromptOrigin::from_prompt_id("interject-fallback-abc");
+        assert_eq!(origin, PromptOrigin::Interjection);
+        assert!(origin.is_synthetic());
+        assert!(!origin.prime_eligible());
     }
     #[test]
     fn from_prompt_id_notification_drain() {

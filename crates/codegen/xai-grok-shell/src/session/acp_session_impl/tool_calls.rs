@@ -1552,6 +1552,7 @@ impl SessionActor {
         self.queue_input(
             prompt_blocks,
             prompt_id,
+            crate::session::PromptOrigin::PlanResume,
             mode,
             None,
             None,

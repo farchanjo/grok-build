@@ -1731,6 +1731,7 @@ mod tests {
                 text: "ty".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }];
         }
         let effects = dispatch(
@@ -1776,6 +1777,7 @@ mod tests {
                 text: "idle row".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }];
         // Idle (no running turn): expects_send_now_cancel is false — no arm, no paint.
         let _ = dispatch(
@@ -1801,6 +1803,7 @@ mod tests {
                 text: "ls -la".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }];
         }
         let _ = dispatch(
@@ -1969,6 +1972,7 @@ mod tests {
                 text: "original".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }];
         }
         let _ = dispatch(
@@ -2036,6 +2040,7 @@ mod tests {
             text: "held".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }];
         arm_send_now_and_paint(agent, "p-drop", None);
         assert!(agent.visible_queue_is_empty(), "armed row is hidden");
@@ -2512,6 +2517,7 @@ mod tests {
             text: "send now payload".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }];
         assert!(agent.visible_queue_is_empty());
         assert!(agent.has_held_user_queue());
@@ -2713,6 +2719,7 @@ mod tests {
             text: "server bash".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }];
         agent.session.pending_prompts.clear();
         agent.session.enqueue_bash_command("still bash".into());
@@ -2746,6 +2753,7 @@ mod tests {
                 text: "send now payload".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             },
             crate::app::prompt_queue::QueueEntryWire {
                 id: "held-1".into(),
@@ -2756,6 +2764,7 @@ mod tests {
                 text: "genuine held".into(),
                 position: 1,
                 combined_texts: None,
+                origin: None,
             },
         ];
         agent.session.current_prompt_id = Some(running);
@@ -2796,6 +2805,7 @@ mod tests {
                 text: "second held".into(),
                 position: 2,
                 combined_texts: None,
+                origin: None,
             });
         assert_eq!(agent.held_queue_count(), 2);
         agent.sync_queue_pane();
@@ -2833,6 +2843,7 @@ mod tests {
             text: "send now payload".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }];
         assert!(
             agent.has_held_user_queue(),

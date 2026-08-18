@@ -283,6 +283,7 @@ fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
                 text: "first queued".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             },
             QueueEntryWire {
                 id: "q2".into(),
@@ -293,6 +294,7 @@ fn cancel_turn_leaves_shared_queue_for_agent_to_drain() {
                 text: "second queued".into(),
                 position: 1,
                 combined_texts: None,
+                origin: None,
             },
         ];
         assert!(agent.prompt.text().is_empty());

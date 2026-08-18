@@ -147,6 +147,9 @@ pub enum SessionCommand {
     Prompt {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,
+        /// Typed origin of this prompt (PR19). Every producer sets an explicit
+        /// variant; the live pipeline never infers it from `prompt_id`.
+        origin: crate::session::PromptOrigin,
         /// Prompt mode parsed from request `_meta.mode`.
         prompt_mode: PromptMode,
         #[allow(private_interfaces)]

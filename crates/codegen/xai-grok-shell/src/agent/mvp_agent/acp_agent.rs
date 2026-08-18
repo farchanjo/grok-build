@@ -2653,6 +2653,7 @@ impl acp::Agent for MvpAgent {
             .cmd_tx
             .send(SessionCommand::Prompt {
                 prompt_id: prompt_id.clone(),
+                origin: crate::session::PromptOrigin::User,
                 prompt_blocks: arguments.prompt.clone(),
                 prompt_mode,
                 artifact_upload_ctx: trace_context

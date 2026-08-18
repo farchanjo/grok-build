@@ -35,6 +35,7 @@ async fn external_unavailable_preflight_leaves_turn_and_history_unchanged() {
             let result = actor
                 .handle_prompt(
                     "ext-preflight-test",
+                    crate::session::PromptOrigin::User,
                     prompt_blocks,
                     PromptMode::Agent,
                     None,
@@ -131,6 +132,7 @@ async fn external_session_goal_slash_does_not_mutate_goal_state() {
             let _ = actor
                 .handle_prompt(
                     "ext-goal-reject",
+                    crate::session::PromptOrigin::User,
                     prompt_blocks,
                     PromptMode::Agent,
                     None,

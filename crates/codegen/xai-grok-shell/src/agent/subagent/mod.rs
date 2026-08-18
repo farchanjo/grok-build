@@ -2460,6 +2460,9 @@ fn inject_subagent_completed_prompt(
     if cmd_tx
         .send(SessionCommand::Prompt {
             prompt_id: prompt_id.clone(),
+            origin: crate::session::PromptOrigin::SubagentCompleted {
+                subagent_id: subagent_id.to_string(),
+            },
             prompt_blocks,
             prompt_mode: crate::session::plan_mode::PromptMode::Agent,
             artifact_upload_ctx: None,

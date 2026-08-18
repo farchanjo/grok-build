@@ -399,6 +399,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                 .queue_input(
                     vec![],
                     "task-completed-bg-normal".to_string(),
+                    crate::session::PromptOrigin::TaskCompleted { task_id: "bg-normal".into() },
                     PromptMode::Agent,
                     None,
                     None,
@@ -443,6 +444,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                 actor_for_turn
                     .handle_prompt(
                         "task-completed-bg-normal",
+                        crate::session::PromptOrigin::TaskCompleted { task_id: "bg-normal".into() },
                         vec![acp::ContentBlock::Text(acp::TextContent::new("done"))],
                         PromptMode::Agent,
                         None,
@@ -550,6 +552,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                 actor_for_turn
                     .handle_prompt(
                         "user-deferred-completions",
+                        crate::session::PromptOrigin::User,
                         vec![acp::ContentBlock::Text(acp::TextContent::new("continue"))],
                         PromptMode::Agent,
                         None,
@@ -641,6 +644,7 @@ async fn accepted_reservation_survives_user_start() {
                 actor_for_turn
                     .handle_prompt(
                         "user-accepted-race",
+                        crate::session::PromptOrigin::User,
                         vec![acp::ContentBlock::Text(acp::TextContent::new("continue"))],
                         PromptMode::Agent,
                         None,
@@ -850,6 +854,7 @@ async fn user_prompt_preempt_keeps_running_synthetic_slot() {
                 .queue_input(
                     vec![],
                     "user-clarify".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,

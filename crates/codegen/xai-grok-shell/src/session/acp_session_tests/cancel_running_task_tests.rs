@@ -243,6 +243,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -345,6 +346,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 actor_for_prompt
                     .handle_prompt(
                         "persist-ack-test",
+                        crate::session::PromptOrigin::User,
                         prompt_blocks,
                         PromptMode::Agent,
                         None,
@@ -764,6 +766,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -1070,6 +1073,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     std::sync::atomic::AtomicBool::new(false),
                 ),
                 active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(
                     parking_lot::Mutex::new(
                         crate::session::plan_mode::PlanModeTracker::new(
@@ -1523,6 +1527,7 @@ async fn handle_prompt_injects_interrupt_reminder_before_user_message() {
                 actor_for_prompt
                     .handle_prompt(
                         "interrupt-wiring-test",
+                        crate::session::PromptOrigin::User,
                         prompt_blocks,
                         PromptMode::Agent,
                         None,
@@ -1585,6 +1590,7 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                 actor_for_prompt
                     .handle_prompt(
                         "scheduler-fired-test-1",
+                        crate::session::PromptOrigin::SchedulerFired,
                         prompt_blocks,
                         PromptMode::Agent,
                         None,
@@ -1646,6 +1652,7 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
                 kind: "prompt".to_string(),
                 text: String::new(),
                 combined_texts: None,
+                origin: None,
             }),
             send_now: false,
         };
@@ -2039,6 +2046,7 @@ async fn cancel_resolves_front_when_running_task_is_none() {
                 kind: "prompt".to_string(),
                 text: String::new(),
                 combined_texts: None,
+                origin: None,
             }),
             send_now: false,
         };
@@ -2359,6 +2367,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     std::sync::atomic::AtomicBool::new(false),
                 ),
                 active_skill: parking_lot::Mutex::new(None),
+        prime_cache: crate::session::prime::inventory::InventoryCache::new(),
                 plan_mode: Arc::new(
                     parking_lot::Mutex::new(
                         crate::session::plan_mode::PlanModeTracker::new(
@@ -2623,6 +2632,7 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 kind: "prompt".to_string(),
                 text: String::new(),
                 combined_texts: None,
+                origin: None,
             }),
             send_now: false,
         }

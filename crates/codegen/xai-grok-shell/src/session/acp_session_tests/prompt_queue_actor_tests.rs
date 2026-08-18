@@ -1145,6 +1145,7 @@ async fn queue_input_send_now_inserts_behind_running_front_and_requests_cancel()
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("now"))],
                     "d-now".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1207,6 +1208,7 @@ async fn queue_input_stacked_send_now_prompts_insert_fifo_during_goal_turn() {
                     .queue_input(
                         vec![acp::ContentBlock::Text(acp::TextContent::new(id))],
                         id.to_string(),
+                        crate::session::PromptOrigin::User,
                         PromptMode::Agent,
                         None,
                         None,
@@ -1261,6 +1263,7 @@ async fn queue_input_auto_send_now_only_inside_wait_window() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("early"))],
                     "pre-wait".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1284,6 +1287,7 @@ async fn queue_input_auto_send_now_only_inside_wait_window() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("mid-wait"))],
                     "d-mid".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1341,6 +1345,7 @@ async fn queue_input_auto_send_now_when_wait_and_held_queue_empty() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("first"))],
                     "first".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1380,6 +1385,7 @@ async fn queue_input_auto_send_now_when_wait_and_held_queue_empty() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("second"))],
                     "second".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1447,6 +1453,7 @@ async fn queue_input_auto_send_now_during_foreground_subagent_await_window() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("preempt"))],
                     "during-await".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1479,6 +1486,7 @@ async fn queue_input_auto_send_now_during_foreground_subagent_await_window() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("later"))],
                     "after-await".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1537,6 +1545,9 @@ async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("done"))],
                     "task-completed-bg1".to_string(),
+                    crate::session::PromptOrigin::TaskCompleted {
+                        task_id: "bg1".into(),
+                    },
                     PromptMode::Agent,
                     None,
                     None,
@@ -1563,6 +1574,7 @@ async fn queue_input_send_now_exempts_synthetic_and_goal_turns() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("nudge"))],
                     "d-goal".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,
@@ -1692,6 +1704,7 @@ async fn queue_input_send_now_pins_front_on_running_task_identity() {
                 .queue_input(
                     vec![acp::ContentBlock::Text(acp::TextContent::new("now"))],
                     "d-now".to_string(),
+                    crate::session::PromptOrigin::User,
                     PromptMode::Agent,
                     None,
                     None,

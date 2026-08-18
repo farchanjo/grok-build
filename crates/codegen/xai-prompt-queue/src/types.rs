@@ -4,6 +4,42 @@ use serde::{Deserialize, Serialize};
 /// follow-ups were combined (length ≥ 2). Empty / absent = not combined.
 pub const COMBINED_DISPLAY_TEXTS_META: &str = "combinedDisplayTexts";
 
+/// Typed wire tag describing who originated a queue row / running turn.
+///
+/// Additive and default-compatible: a legacy wire entry without an `origin`
+/// deserializes to `None`, which a consumer maps fail-closed to an
+/// "unknown / unclassified" origin — never to a real `User` turn. Tag-only
+/// (no payloads): completion/task ids ride the prompt-id string. New variants
+/// are additive; the JSON form uses snake_case.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueOrigin {
+    /// A real user-initiated prompt.
+    User,
+    /// A stranded user interjection promoted to its own turn (side-channel).
+    Interjection,
+    /// Auto-wake from a completed background task.
+    TaskCompleted,
+    /// Auto-wake from a completed subagent.
+    SubagentCompleted,
+    /// Auto-wake from a completed workflow.
+    WorkflowCompleted,
+    /// Idle-gated notification drain.
+    NotificationDrain,
+    /// Orchestrator summary turn.
+    GoalSummary,
+    /// Verification-stage nudge.
+    GoalClassifierNudge,
+    /// Scheduled task (`/loop`) prompt.
+    SchedulerFired,
+    /// Injected plan-resume follow-up turn.
+    PlanResume,
+    /// Legacy / wire entry without an explicit origin. Fail-closed: never a
+    /// real user turn.
+    #[default]
+    Unknown,
+}
+
 /// Per-item queue metadata the session actor attaches to user-originated inputs; synthetic
 /// inputs (auto-wake, nudges) carry none and never appear in the visible queue. Held in
 /// actor state, never serialized itself.
@@ -23,6 +59,10 @@ pub struct QueueEntryMeta {
     pub text: String,
     /// Per-prompt display texts when combine merged several follow-ups (len ≥ 2).
     pub combined_texts: Option<Vec<String>>,
+    /// Typed origin of this queue entry (PR19). `None` for legacy entries that
+    /// never recorded one; consumers map `None` to an unknown origin, never a
+    /// real user turn.
+    pub origin: Option<QueueOrigin>,
 }
 
 /// One queue row on the wire.
@@ -45,6 +85,9 @@ pub struct QueueEntryWire {
     /// See [`QueueEntryMeta::combined_texts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combined_texts: Option<Vec<String>>,
+    /// See [`QueueEntryMeta::origin`]. Omitted when `None` (legacy wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<QueueOrigin>,
     /// 0-based position among queued, not-yet-running prompts.
     #[serde(default)]
     pub position: usize,
@@ -93,6 +136,7 @@ mod tests {
                     text: "fix the bug".into(),
                     position: 0,
                     combined_texts: None,
+                    origin: None,
                 },
                 QueueEntryWire {
                     id: "p2".into(),
@@ -103,6 +147,7 @@ mod tests {
                     text: "ls -la".into(),
                     position: 1,
                     combined_texts: None,
+                    origin: None,
                 },
             ],
             running_prompt_id: Some("p0".into()),
@@ -135,6 +180,7 @@ mod tests {
                 text: "hi".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             }],
             running_prompt_id: Some("p0".into()),
 
@@ -198,6 +244,49 @@ mod tests {
         assert_eq!(d.session_id, "");
         assert!(d.entries.is_empty());
         assert!(d.running_prompt_id.is_none());
+    }
+
+    #[test]
+    fn queue_entry_origin_round_trips_and_absent_means_none() {
+        // Additive wire: a typed origin round-trips.
+        let entry = QueueEntryWire {
+            id: "p1".into(),
+            version: 0,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "hi".into(),
+            position: 0,
+            combined_texts: None,
+            origin: Some(QueueOrigin::TaskCompleted),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["origin"], "task_completed");
+        let round: QueueEntryWire = serde_json::from_value(json).unwrap();
+        assert_eq!(round.origin, Some(QueueOrigin::TaskCompleted));
+
+        // Legacy wire without `origin` deserializes to `None` (fail-closed
+        // unknown on the consumer side, never a real `User` turn).
+        let legacy = serde_json::json!({
+            "id": "p1", "version": 0, "kind": "prompt", "text": "hi", "position": 0
+        });
+        let parsed: QueueEntryWire = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.origin, None);
+
+        // Omitted when None (keeps the golden wire shape for legacy clients).
+        let entry_none = QueueEntryWire {
+            origin: None,
+            ..entry
+        };
+        let json_none = serde_json::to_value(&entry_none).unwrap();
+        assert!(json_none.get("origin").is_none());
+    }
+
+    #[test]
+    fn queue_origin_json_unknown_default() {
+        assert_eq!(QueueOrigin::default(), QueueOrigin::Unknown);
+        let v: QueueOrigin = serde_json::from_value(serde_json::json!("unknown")).unwrap();
+        assert_eq!(v, QueueOrigin::Unknown);
     }
 
     #[test]

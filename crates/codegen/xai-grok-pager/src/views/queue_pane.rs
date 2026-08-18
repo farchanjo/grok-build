@@ -1025,6 +1025,7 @@ mod tests {
             kind: "prompt".into(),
             text: text.into(),
             combined_texts: None,
+            origin: None,
             position: pos,
         }
     }

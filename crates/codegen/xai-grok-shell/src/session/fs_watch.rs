@@ -276,6 +276,9 @@ pub(crate) struct FsWatchDeps {
     pub client_fs_config: Option<ClientFsConfig>,
     pub persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     pub last_reported_branch: Arc<parking_lot::Mutex<Option<String>>>,
+    /// PR19: session-local prime inventory cache, marked dirty on live
+    /// workspace mutations so the next prime run rebuilds its path evidence.
+    pub prime_cache: crate::session::prime::inventory::InventoryCache,
 }
 
 impl FsWatchDeps {
@@ -296,6 +299,7 @@ impl FsWatchDeps {
             client_fs_config,
             persistence_tx: session.notifications.persistence_tx.clone(),
             last_reported_branch: session.last_reported_branch.clone(),
+            prime_cache: session.prime_cache.clone(),
         }
     }
 }
@@ -544,6 +548,8 @@ pub(crate) struct FsWatchPlan {
     git_head: Option<GitHead>,
     fs_config: xai_fsnotify::FsConfig,
     cwd: PathBuf,
+    /// PR19: marks touched paths on live workspace mutations.
+    prime_cache: crate::session::prime::inventory::InventoryCache,
 }
 
 impl FsWatchPlan {
@@ -594,12 +600,19 @@ impl FsWatchPlan {
             git_head,
             fs_config,
             cwd: deps.cwd,
+            prime_cache: deps.prime_cache,
         }
     }
 
     // Phase subsets differ on purpose — replay excludes hunk (baselines on refresh).
 
     async fn on_files_changed(&self, paths: &[PathBuf], kind: FsEventKind) {
+        // PR19: live workspace mutations feed the bounded prime inventory
+        // cache (`mark_touched`), so the next prime run rebuilds its path
+        // evidence rather than trusting a now-stale inventory.
+        for path in paths {
+            self.prime_cache.mark_touched(path);
+        }
         if let Some(h) = &self.hunk {
             h.on_change(paths, kind);
         }
@@ -1167,6 +1180,7 @@ mod tests {
             client_fs_config: None,
             persistence_tx: tx,
             last_reported_branch: Arc::new(parking_lot::Mutex::new(None)),
+            prime_cache: crate::session::prime::inventory::InventoryCache::new(),
         };
         let plan = FsWatchPlan::build(
             FsWatchCapabilities {

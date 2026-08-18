@@ -62,6 +62,7 @@ impl AgentTask {
     pub(super) fn new_prompt(
         session: Arc<SessionActor>,
         prompt_id: String,
+        origin: super::super::PromptOrigin,
         input: Vec<ContentBlock>,
         prompt_mode: PromptMode,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
@@ -80,6 +81,7 @@ impl AgentTask {
             handle: tokio::task::spawn_local(async move {
                 run_task(
                     session.clone(),
+                    origin,
                     input,
                     prompt_mode,
                     trace_gcs_config,
@@ -144,6 +146,7 @@ impl<T> TaskSlot<T> {
 
 async fn run_task(
     session: Arc<SessionActor>,
+    origin: super::super::PromptOrigin,
     input: Vec<ContentBlock>,
     prompt_mode: PromptMode,
     trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
@@ -160,6 +163,7 @@ async fn run_task(
     let result = session
         .handle_prompt(
             &prompt_id,
+            origin,
             input,
             prompt_mode,
             trace_gcs_config,

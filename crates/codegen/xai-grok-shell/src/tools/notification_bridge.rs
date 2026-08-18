@@ -426,6 +426,9 @@ async fn handle_notification(
                     .session_cmd_tx
                     .send(SessionCommand::Prompt {
                         prompt_id: prompt_id.clone(),
+                        origin: crate::session::PromptOrigin::TaskCompleted {
+                            task_id: task_id.clone(),
+                        },
                         prompt_blocks,
                         prompt_mode: crate::session::plan_mode::PromptMode::Agent,
                         artifact_upload_ctx: None,

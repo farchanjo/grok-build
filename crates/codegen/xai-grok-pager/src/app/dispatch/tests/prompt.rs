@@ -1566,6 +1566,7 @@ fn turn_end_with_shared_queue_does_not_fetch_prompt_suggestion() {
                 text: "queued server-side".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             });
     }
 
@@ -1990,6 +1991,7 @@ fn cancel_hands_queue_to_agent_without_reordering() {
                 text: "two".into(),
                 position: 0,
                 combined_texts: None,
+                origin: None,
             },
             QueueEntryWire {
                 id: "q3".into(),
@@ -2000,6 +2002,7 @@ fn cancel_hands_queue_to_agent_without_reordering() {
                 text: "three".into(),
                 position: 1,
                 combined_texts: None,
+                origin: None,
             },
         ],
         running_prompt_id: Some("q1".into()),
@@ -2052,6 +2055,7 @@ fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
             text: "run the tests".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }],
         running_prompt_id: None,
 
@@ -2085,6 +2089,7 @@ fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
             text: "second message".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }],
         running_prompt_id: None,
 
@@ -2120,6 +2125,7 @@ fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
             text: "third message".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }],
         running_prompt_id: None,
 
@@ -3685,6 +3691,7 @@ fn local_drain_holds_while_server_row_queued() {
             text: "server-owned next".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }];
 
     let agent = app.agents.get_mut(&id).unwrap();

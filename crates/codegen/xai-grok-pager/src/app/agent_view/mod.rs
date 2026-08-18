@@ -2509,6 +2509,7 @@ pub(crate) mod test_fixtures {
             text: "server one".into(),
             position: 0,
             combined_texts: None,
+            origin: None,
         }];
         agent.queue.sync_from_merged(
             &agent.session.pending_prompts,

@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use xai_grok_inference_types::{ConversationItem, InferenceSettings};
+use xai_grok_inference_types::{ConversationItem, InferenceSettings, SyntheticReason};
 
 use crate::actor::ChatStateActor;
 use crate::events::ChatStateEvent;
@@ -174,6 +174,62 @@ async fn push_user_message_and_ack_waits_for_actor_acceptance() {
     let records = h.drain_persistence();
     assert_eq!(records.len(), 1);
     assert!(matches!(&records[0], PersistenceRecord::Message(_)));
+}
+
+#[tokio::test]
+async fn message_batch_appends_reminder_before_real_user_in_order() {
+    let mut h = TestHarness::new();
+    // PR19: a hidden prime `<system_reminder>` must land immediately BEFORE the
+    // real user message, atomically, in a single push.
+    h.handle.push_message_batch(vec![
+        ConversationItem::system_reminder("<skill_prime>…</skill_prime>"),
+        ConversationItem::user("real question"),
+    ]);
+
+    let conv = h.handle.get_conversation().await;
+    assert_eq!(conv.len(), 2);
+    let ConversationItem::User(reminder) = &conv[0] else {
+        panic!("first item must be a user-role reminder");
+    };
+    assert_eq!(
+        reminder.synthetic_reason,
+        Some(SyntheticReason::SystemReminder),
+        "prime reminder must be a hidden synthetic system-reminder item"
+    );
+    let ConversationItem::User(real) = &conv[1] else {
+        panic!("second item must be the real user message");
+    };
+    assert_eq!(
+        real.synthetic_reason, None,
+        "the real user message must not be tagged synthetic"
+    );
+    let text: String = real
+        .content
+        .iter()
+        .filter_map(|p| match p {
+            xai_grok_inference_types::ContentPart::Text { text } => Some(text.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "real question");
+
+    let records = h.drain_persistence();
+    assert_eq!(records.len(), 2, "both items must persist in order");
+}
+
+#[tokio::test]
+async fn message_batch_and_ack_waits_for_actor_acceptance() {
+    let mut h = TestHarness::new();
+    let ack = h
+        .handle
+        .push_message_batch_and_ack(vec![
+            ConversationItem::system_reminder("prime"),
+            ConversationItem::user("hello"),
+        ])
+        .await;
+    assert!(ack.is_some());
+    let conv = h.handle.get_conversation().await;
+    assert_eq!(conv.len(), 2);
 }
 
 #[tokio::test]

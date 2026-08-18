@@ -319,6 +319,7 @@ impl SessionActor {
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
             prompt_id,
+            origin,
             prompt_blocks,
             prompt_mode,
             trace_gcs_config,

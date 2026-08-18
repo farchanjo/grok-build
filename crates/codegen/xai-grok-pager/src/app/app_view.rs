@@ -2067,6 +2067,7 @@ impl AppView {
             kind: kind.to_string(),
             text: text.to_string(),
             combined_texts: None,
+            origin: None,
             position: 0,
         };
         let opt = self

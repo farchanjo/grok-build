@@ -72,7 +72,7 @@ impl SessionActor {
             screen_mode: None,
             verbatim: false,
             json_schema: None,
-            origin: super::super::PromptOrigin::User,
+            origin: super::super::PromptOrigin::Interjection,
             task_wake_fallback: None,
             tool_overrides_update: None,
             respond_to,
