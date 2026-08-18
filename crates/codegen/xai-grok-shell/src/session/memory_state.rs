@@ -127,22 +127,24 @@ impl SessionMemory {
 
     /// Open (or create) the memory index for the current workspace.
     ///
-    /// Shared helper that extracts embed dimensions from `backend_params`
-    /// and opens the index at `<workspace_dir>/index.sqlite`.
+    /// Shared helper that resolves embed dimensions through the same single
+    /// factory decision as the search backend (named-profile facade first,
+    /// legacy `[memory.embedding]` otherwise) so flush/Dream write-time
+    /// vectorization writes into the pinned space, and opens the index at
+    /// `<workspace_dir>/index.sqlite` with the real `[memory.index]` config.
     pub(crate) fn open_index(
         &self,
         storage: &crate::session::memory::MemoryStorage,
     ) -> Option<crate::session::memory::MemoryIndex> {
-        let embed_dims = self
-            .backend_params
-            .as_ref()
-            .and_then(|p| p.embed_config.as_ref())
-            .map_or(1024, |c| c.dimensions);
+        let (embed_dims, index_config) = match &self.backend_params {
+            Some(p) => (p.resolve_embedding_dims(), p.index_config.clone()),
+            None => (1024, crate::config::MemoryIndexConfig::default()),
+        };
         let db_path = storage.workspace_dir().join("index.sqlite");
         crate::session::memory::MemoryIndex::open_or_create(
             &db_path,
             storage.clone(),
-            Default::default(),
+            index_config,
             embed_dims,
         )
         .ok()
@@ -159,7 +161,10 @@ impl SessionMemory {
                 && let Some(provider) = params.make_embedding_provider().await
                 && index.vectors_safe_to_backfill()
             {
-                crate::session::memory::embed_missing_chunks(&index, &provider).await;
+                // Named-profile facade (credential-free) is the single factory
+                // input here too, so flush/Dream write-time vectorization uses
+                // the same route as the search path.
+                crate::session::memory::embed_missing_chunks(&index, &*provider).await;
             }
         }
     }

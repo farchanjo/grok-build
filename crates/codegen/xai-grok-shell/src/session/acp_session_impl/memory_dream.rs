@@ -532,9 +532,7 @@ impl SessionActor {
                                 is_semantically_duplicate(
                                     &content,
                                     &index,
-                                    provider.as_ref().map(|p| {
-                                        p as &dyn crate::session::memory::embedding::EmbeddingProvider
-                                    }),
+                                    provider.as_deref(),
                                     threshold,
                                 )
                                 .await

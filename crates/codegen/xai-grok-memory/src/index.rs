@@ -329,35 +329,43 @@ impl MemoryIndex {
         if !self.vec_available {
             return 0;
         }
-        // Collect orphan chunk ids via the vec0 `_rowids` shadow table (a
-        // plain table), then delete each by the known-good vec0 delete path.
-        let ids: Vec<String> = {
-            let mut stmt = match self.db.prepare(
-                "SELECT v.id FROM chunks_vec_rowids v \
-                 WHERE NOT EXISTS ( \
-                   SELECT 1 FROM chunks c WHERE c.id = v.id \
-                 )",
-            ) {
-                Ok(s) => s,
-                Err(_) => return 0,
-            };
-            match stmt.query_map([], |r| r.get::<_, String>(0)) {
-                Ok(rows) => rows.filter_map(Result::ok).collect(),
-                Err(_) => return 0,
-            }
-        };
-        if ids.is_empty() {
-            return 0;
-        }
         if self.db.execute_batch("BEGIN IMMEDIATE;").is_err() {
             return 0;
         }
         let mut removed = 0usize;
         let result = (|| -> rusqlite::Result<()> {
+            // Detect orphans and prune them under one write lock (BEGIN
+            // IMMEDIATE), so a concurrent writer cannot re-index a chunk
+            // between detection and deletion (F2 race-safe).
+            let mut stmt = self.db.prepare(
+                "SELECT v.id FROM chunks_vec_rowids v \
+                 WHERE NOT EXISTS ( \
+                   SELECT 1 FROM chunks c WHERE c.id = v.id \
+                 )",
+            )?;
+            let ids: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .filter_map(Result::ok)
+                .collect();
+            drop(stmt);
             for id in &ids {
-                self.db
-                    .execute("DELETE FROM chunks_vec WHERE chunk_id = ?1", params![id])?;
-                removed += 1;
+                // Re-check absence at DELETE time (still inside the write
+                // lock, so no writer can commit between the check and the
+                // DELETE), and count only rows actually deleted.
+                let still_absent: bool = self
+                    .db
+                    .query_row(
+                        "SELECT NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = ?1)",
+                        params![id],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false);
+                if still_absent {
+                    let deleted = self
+                        .db
+                        .execute("DELETE FROM chunks_vec WHERE chunk_id = ?1", params![id])?;
+                    removed += deleted;
+                }
             }
             Ok(())
         })();
@@ -367,6 +375,7 @@ impl MemoryIndex {
             }
             Err(_) => {
                 let _ = self.db.execute_batch("ROLLBACK;");
+                removed = 0;
             }
         }
         removed
@@ -690,6 +699,35 @@ impl MemoryIndex {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(results)
+    }
+
+    /// Chunks that lack embeddings **and** belong to exactly the given file
+    /// paths — the *fresh* watcher-dirty work set (F4). The pre-existing
+    /// compatible gap (chunks from other files that missed an earlier embed)
+    /// is deliberately excluded so a genuine-failure backoff can defer only the
+    /// same missing set while newly changed chunks still embed.
+    pub(crate) fn chunks_without_embeddings_for_paths(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        if !self.vec_available {
+            return Ok(vec![]);
+        }
+        let mut result: Vec<(String, String)> = Vec::new();
+        for p in paths {
+            let mut stmt = self.db.prepare(
+                "SELECT c.id, c.text FROM chunks c \
+                 LEFT JOIN chunks_vec_rowids v ON v.id = c.id \
+                 WHERE v.id IS NULL AND c.path = ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![p], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .filter_map(Result::ok);
+            result.extend(rows);
+        }
+        Ok(result)
     }
 
     /// All chunks not yet staged **for their current content hash** under the

@@ -33,6 +33,39 @@ pub trait EmbeddingProvider: Send + Sync {
     fn dimensions(&self) -> usize;
 }
 
+/// Validate an embedding batch **before any SQLite write**: exact result count
+/// (`embeddings.len() == texts_len`), exact per-vector dimension, and finite
+/// values only. A short response must never be zipped onto the first N inputs —
+/// that would permanently mis-associate vectors to wrong chunks — and NaN/Inf
+/// must never reach the vec table (F1 / Phase 7 validation surface).
+pub(crate) fn validate_embedding_batch(
+    texts_len: usize,
+    dimensions: usize,
+    embeddings: &[Vec<f32>],
+) -> Result<(), String> {
+    if embeddings.len() != texts_len {
+        return Err(format!(
+            "embedding provider returned {} vectors for {} inputs; refusing mis-association",
+            embeddings.len(),
+            texts_len,
+        ));
+    }
+    for (i, v) in embeddings.iter().enumerate() {
+        if v.len() != dimensions {
+            return Err(format!(
+                "embedding {i} has dimension {} (expected {dimensions}); refusing mixed spaces",
+                v.len(),
+            ));
+        }
+        if v.iter().any(|f| !f.is_finite()) {
+            return Err(format!(
+                "embedding {i} contains non-finite values (NaN/Inf); refusing to write"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// API-based embedding provider using an OpenAI-compatible embeddings endpoint.
 pub struct ApiEmbeddingProvider {
     api_base: String,
@@ -200,6 +233,11 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
             }
         }
 
+        // Validate before returning: exact count, exact dimensions, finite
+        // values (F1). A malformed provider response must fail closed, never
+        // mis-associate vectors to chunks.
+        validate_embedding_batch(texts.len(), self.dimensions, &all_embeddings)?;
+
         Ok(all_embeddings)
     }
 
@@ -294,6 +332,9 @@ impl EmbeddingProvider for PlatformEmbeddingProvider {
                 all.push(embedding);
             }
         }
+        // Validate before returning: exact count, exact dimensions, finite
+        // values (F1).
+        validate_embedding_batch(texts.len(), self.dimensions, &all)?;
         Ok(all)
     }
 
@@ -345,16 +386,12 @@ impl EmbeddingProvider for RetrievalEmbeddingProvider {
     ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
         let out = self.retrieval.embed_batch(&owned).await?;
-        // Fail closed on dimensional drift: never surface vectors that would
-        // mix a different embedding space into this index.
-        if out.iter().any(|v| v.len() != self.dimensions) {
-            return Err(format!(
-                "embedding provider returned vectors of wrong dimension (expected {}); \
-                 refusing to mix spaces",
-                self.dimensions
-            )
-            .into());
-        }
+        // Validation before any SQLite write (Phase 7 / F1) — including for
+        // the facade-routed provider: exact count, exact dimension, finite
+        // values. Never surface vectors that would mis-associate or mix a
+        // different embedding space into this index.
+        validate_embedding_batch(texts.len(), self.dimensions, &out)
+            .map_err(|e| format!("facade embedding validation: {e}"))?;
         Ok(out)
     }
 
@@ -427,5 +464,47 @@ mod tests {
         let provider = MockEmbeddingProvider { dimensions: 128 };
         let results = provider.embed_batch(&["test"]).await.unwrap();
         assert_eq!(results[0].len(), 128);
+    }
+
+    // F1 / Phase 7: validate embedding batches before any SQLite write.
+
+    #[test]
+    fn validate_embedding_batch_accepts_exact_count_and_dimensions() {
+        let ok = vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]];
+        assert!(validate_embedding_batch(2, 4, &ok).is_ok());
+    }
+
+    #[test]
+    fn validate_embedding_batch_rejects_short_response() {
+        // 2 inputs but only 1 vector returned: a zip would mis-associate the
+        // single vector onto the first input and claim it embedded.
+        let short = vec![vec![1.0, 2.0, 3.0, 4.0]];
+        assert!(validate_embedding_batch(2, 4, &short).is_err());
+    }
+
+    #[test]
+    fn validate_embedding_batch_rejects_extra_response() {
+        let extra = vec![vec![1.0; 4], vec![2.0; 4], vec![3.0; 4]];
+        assert!(validate_embedding_batch(2, 4, &extra).is_err());
+    }
+
+    #[test]
+    fn validate_embedding_batch_rejects_wrong_dimension() {
+        let wrong_dim = vec![vec![1.0; 8]]; // expected 4
+        assert!(validate_embedding_batch(1, 4, &wrong_dim).is_err());
+    }
+
+    #[test]
+    fn validate_embedding_batch_rejects_nan() {
+        let nan = vec![vec![f32::NAN, 1.0, 2.0, 3.0]];
+        assert!(validate_embedding_batch(1, 4, &nan).is_err());
+    }
+
+    #[test]
+    fn validate_embedding_batch_rejects_infinity() {
+        let inf = vec![vec![f32::INFINITY, 1.0, 2.0, 3.0]];
+        let neg_inf = vec![vec![f32::NEG_INFINITY, 1.0, 2.0, 3.0]];
+        assert!(validate_embedding_batch(1, 4, &inf).is_err());
+        assert!(validate_embedding_batch(1, 4, &neg_inf).is_err());
     }
 }

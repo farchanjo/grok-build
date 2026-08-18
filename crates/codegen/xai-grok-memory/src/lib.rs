@@ -40,7 +40,9 @@ pub mod storage;
 pub mod text_utils;
 pub mod watcher;
 
-pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
+pub use backend::{
+    EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams, resolve_embedding_provider,
+};
 pub use fingerprint::{EmbeddingSourceSpec, VectorFingerprint};
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use retrieval::{MemoryRetrieval, RetrievalError, RetrievalErrorKind};
@@ -78,16 +80,32 @@ pub async fn embed_missing_chunks(
         let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
         match provider.embed_batch(&texts).await {
             Ok(embeddings) => {
-                for ((chunk_id, _), embedding) in batch.iter().zip(embeddings.iter()) {
-                    if let Err(e) = index.upsert_embedding(chunk_id, embedding) {
-                        tracing::warn!(
-                            target: xai_grok_telemetry::memory_log::TARGET,
-                            chunk_id,
-                            error = %e,
-                            "failed to upsert embedding"
-                        );
-                    } else {
-                        embedded += 1;
+                // Validate before any SQLite write: exact count, exact
+                // dimension, finite values. A malformed response must fail
+                // closed, never zip/mis-associate vectors (F1 — defense-in-
+                // depth for any provider).
+                if let Err(e) = crate::embedding::validate_embedding_batch(
+                    batch.len(),
+                    provider.dimensions(),
+                    &embeddings,
+                ) {
+                    tracing::warn!(
+                        target: xai_grok_telemetry::memory_log::TARGET,
+                        error = %e,
+                        "embedding batch validation failed; skipping; no vec rows written"
+                    );
+                } else {
+                    for ((chunk_id, _), embedding) in batch.iter().zip(embeddings.iter()) {
+                        if let Err(e) = index.upsert_embedding(chunk_id, embedding) {
+                            tracing::warn!(
+                                target: xai_grok_telemetry::memory_log::TARGET,
+                                chunk_id,
+                                error = %e,
+                                "failed to upsert embedding"
+                            );
+                        } else {
+                            embedded += 1;
+                        }
                     }
                 }
             }

@@ -16,7 +16,6 @@ use rusqlite::params;
 
 use xai_grok_tools::types::memory_backend::{MemoryBackend, MemorySearchResult};
 
-use super::embedding::EmbeddingProvider as _;
 use super::storage::MemoryStorage;
 use super::watcher::MemoryFileWatcher;
 use crate::schema;
@@ -187,17 +186,72 @@ pub struct MemoryBackendParams {
 }
 
 impl MemoryBackendParams {
-    /// Async so `current_api_key_async` can drive the AuthManager
-    /// refresh chain; reindex loops outlive the OIDC TTL.
-    pub async fn make_embedding_provider(&self) -> Option<super::embedding::ApiEmbeddingProvider> {
-        build_embedding_provider(
-            self.embed_config.as_ref(),
+    /// Single embedding-provider factory for **every** memory embedding
+    /// consumer (search, watcher, flush, Dream, memory_state back-fill,
+    /// startup reindex): a named-profile facade (credential-free
+    /// [`RetrievalEmbeddingProvider`]) is authoritative; only when no named
+    /// profile is configured does the legacy `[memory.embedding]` path apply.
+    /// Never falls back to a sibling/active-chat credential path under a named
+    /// profile — including an *unresolved* named profile (facade `None` ⇒ also
+    /// `embed_config None` ⇒ `None` ⇒ FTS-only).
+    pub async fn make_embedding_provider(
+        &self,
+    ) -> Option<std::sync::Arc<dyn super::embedding::EmbeddingProvider>> {
+        resolve_embedding_provider(
+            self.retrieval.clone(),
+            self.embed_config.clone(),
             &self.embedding_credentials,
             self.embed_api_key.as_deref(),
             &self.embed_base_url,
         )
         .await
     }
+
+    /// Single dimension resolution matching the factory: named-profile facade
+    /// spec dimensions, else legacy `[memory.embedding]` dimensions, else 1024.
+    /// Every writer that opens the index (search, watcher, flush/Dream
+    /// write-time back-fill, startup reindex) must use the same space.
+    pub fn resolve_embedding_dims(&self) -> usize {
+        if let Some(retrieval) = &self.retrieval {
+            retrieval.source_spec().dimensions
+        } else if let Some(cfg) = &self.embed_config {
+            cfg.dimensions
+        } else {
+            1024
+        }
+    }
+}
+
+/// Single embedding-provider factory used by **every** memory embedding
+/// consumer (search, watcher, flush, Dream, memory_state back-fill, startup
+/// reindex). A named-profile facade (credential-free
+/// [`RetrievalEmbeddingProvider`]) is authoritative when present; the legacy
+/// `[memory.embedding]` path applies only when no named profile is configured
+/// (callers pass `embed_config = None` under a named profile). Never falls
+/// back to active-chat credentials or a sibling path under a named profile —
+/// including an *unresolved* named profile (facade `None` ⇒ also
+/// `embed_config None` ⇒ `None` ⇒ FTS-only). Async so
+/// `current_api_key_async` can drive the AuthManager refresh chain; reindex
+/// loops outlive the OIDC TTL.
+pub async fn resolve_embedding_provider(
+    retrieval: Option<std::sync::Arc<dyn super::retrieval::MemoryRetrieval>>,
+    embed_config: Option<xai_grok_config_types::MemoryEmbeddingConfig>,
+    credentials: &EndpointScopedCredentials,
+    static_api_key: Option<&str>,
+    base_url: &str,
+) -> Option<std::sync::Arc<dyn super::embedding::EmbeddingProvider>> {
+    if let Some(retrieval) = retrieval {
+        return Some(std::sync::Arc::new(
+            super::embedding::RetrievalEmbeddingProvider::new(retrieval),
+        ));
+    }
+    build_embedding_provider(embed_config.as_ref(), credentials, static_api_key, base_url)
+        .await
+        .map(
+            |p| -> std::sync::Arc<dyn super::embedding::EmbeddingProvider> {
+                std::sync::Arc::new(p)
+            },
+        )
 }
 
 async fn build_embedding_provider(
@@ -276,6 +330,23 @@ pub struct MemoryBackendImpl {
 }
 
 impl MemoryBackendImpl {
+    /// Single embedding-provider factory for every embedding consumer
+    /// (search, watcher, flush, Dream, memory_state, startup reindex):
+    /// named-profile facade authoritative, legacy only when no named profile
+    /// is configured, unresolved named profile ⇒ `None` ⇒ FTS-only.
+    pub(crate) async fn make_embedding_provider(
+        &self,
+    ) -> Option<Arc<dyn super::embedding::EmbeddingProvider>> {
+        resolve_embedding_provider(
+            self.retrieval.clone(),
+            self.embed_config.clone(),
+            &self.embedding_credentials,
+            self.embed_api_key.as_deref(),
+            &self.embed_base_url,
+        )
+        .await
+    }
+
     /// Create a new backend. `db_path` must point to an existing SQLite
     /// database created by `MemoryIndex::open_or_create()`.
     pub fn new(db_path: PathBuf, storage: MemoryStorage) -> Self {
@@ -498,28 +569,12 @@ impl MemoryBackend for MemoryBackendImpl {
         // fingerprint's doc-preparation determinant and the chunker (A8/#5).
         let index_config = self.index_config.clone();
         let (spec, embed_dims) = self.effective_embedding_spec();
-        // Build an embedder for the pinned source (None ⇒ no vectors / FTS-only).
-        let embedder: Option<std::sync::Arc<dyn super::embedding::EmbeddingProvider>> =
-            if let Some(r) = &self.retrieval {
-                Some(std::sync::Arc::new(
-                    super::embedding::RetrievalEmbeddingProvider::new(r.clone()),
-                ))
-            } else if self.embed_config.is_some() {
-                build_embedding_provider(
-                    self.embed_config.as_ref(),
-                    &self.embedding_credentials,
-                    self.embed_api_key.as_deref(),
-                    &self.embed_base_url,
-                )
-                .await
-                .map(
-                    |p| -> std::sync::Arc<dyn super::embedding::EmbeddingProvider> {
-                        std::sync::Arc::new(p)
-                    },
-                )
-            } else {
-                None
-            };
+        // Build an embedder for the pinned source (None ⇒ no vectors /
+        // FTS-only) through the single factory: named-profile facade
+        // (credential-free) authoritative; legacy `[memory.embedding]` only
+        // when no named profile is configured; unresolved named profile ⇒
+        // None ⇒ FTS-only.
+        let embedder = self.make_embedding_provider().await;
         // Cancel token for the vector rebuild loop (search has no external
         // cancellation; the loop only checks this to stay cooperative). The
         // rebuild is throttled by a persisted back-off and a per-search batch
@@ -566,7 +621,10 @@ impl MemoryBackend for MemoryBackendImpl {
         })?;
 
         // ── Sync phase 1: reindex dirty files, collect chunks needing embeddings ──
-        let mut reindex_chunks: Vec<(String, String)> = Vec::new();
+        // Watcher-dirty chunks are *fresh* work — accumulated in their own set
+        // and never deferred by the compatible-gap backfill backoff (F4) nor
+        // embedded synchronously in full (F3/L1, shared per-search cap below).
+        let mut watcher_chunks: Vec<(String, String)> = Vec::new();
         // Owner token for the reindex claim; release is owner-scoped so a
         // stolen (stale-window) claim is never cleared by the loser.
         let mut reindex_claim: Option<String> = None;
@@ -604,46 +662,77 @@ impl MemoryBackend for MemoryBackendImpl {
                 }
             }
             if dirty_count > 0 {
-                reindex_chunks = index.chunks_without_embeddings().unwrap_or_default();
+                // F4: only chunks from the currently-dirty (existing) files
+                // are "fresh work". The pre-existing compatible gap (chunks
+                // from other files that missed an earlier embed) belongs to
+                // the gap set below, which a genuine-failure backoff defers.
+                let dirty_paths: Vec<String> = dirty_files
+                    .iter()
+                    .filter(|f| f.exists())
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .collect();
+                watcher_chunks = index
+                    .chunks_without_embeddings_for_paths(&dirty_paths)
+                    .unwrap_or_default();
             }
             watcher_sync_stats = Some((dirty_count, changed_chunk_count, sync_start));
         }
 
         // `ReadyMissing`: compatible but some current chunks lack vectors
         // (incremental chunk churn or a transient incremental embed failure).
-        // Even when the watcher is quiescent, retry backfilling only the
-        // missing current chunks so the gap heals on this/next search without
-        // a full rebuild (G3/R-01 — the watcher-disabled path still
-        // self-heals).
+        // The gap is a property of the compatible missing set: a genuine embed
+        // failure persists a backoff that defers retrying the *same missing
+        // set* until it passes (L2), but it must not suppress *freshly changed*
+        // watcher-dirty chunks (F4).
         let backfill_backed_off = backfill_backoff_active(&index);
-        if matches!(
+        // Watcher-dirty ids are already covered by the watcher set — exclude
+        // them from the gap set so the combined work set has no duplicates.
+        let watcher_ids: std::collections::HashSet<&str> =
+            watcher_chunks.iter().map(|(id, _)| id.as_str()).collect();
+        let mut gap_chunks: Vec<(String, String)> = if matches!(
             readiness,
             crate::rebuild::VectorReadiness::ReadyMissing { .. }
-        ) && reindex_chunks.is_empty()
-        {
+        ) {
             if backfill_backed_off {
                 // L2: persisted backoff from a genuine incremental embed
                 // failure — don't re-attempt the gap this search (vector
                 // search stays active; the gap retries after the deadline
                 // passes).
+                Vec::new()
             } else {
-                let mut missing = index.chunks_without_embeddings().unwrap_or_default();
-                // L1: bound the synchronous ReadyMissing backfill per search
-                // using the same batch discipline as the rebuild loop; a large
-                // gap is processed across subsequent searches, never all at
-                // once.
-                missing.truncate(READY_MISSING_BACKFILL_BATCH_CAP * BACKFILL_BATCH_SIZE);
-                reindex_chunks = missing;
+                index
+                    .chunks_without_embeddings()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(id, _)| !watcher_ids.contains(id.as_str()))
+                    .collect()
             }
-        }
+        } else {
+            Vec::new()
+        };
+
+        // ── Combine watcher & gap work under a single per-search batch cap ──
+        // F3/L1: the watcher-dirty incremental embed is bounded per search too,
+        // so a large watcher gap progresses over later searches instead of
+        // being embedded synchronously in full — and a cap pause never arms the
+        // backfill backoff. Watcher chunks take priority; the gap gets the
+        // remaining cap.
+        let per_search_cap = READY_MISSING_BACKFILL_BATCH_CAP * BACKFILL_BATCH_SIZE;
+        watcher_chunks.truncate(per_search_cap);
+        let gap_cap_remaining = per_search_cap.saturating_sub(watcher_chunks.len());
+        gap_chunks.truncate(gap_cap_remaining);
+        let mut reindex_chunks = watcher_chunks;
+        reindex_chunks.extend(gap_chunks);
 
         // ── Async phase: embed missing chunks (no &index borrow) ──
         // Incremental embedding into `chunks_vec` only when the pinned vector
         // space is installed (Ready or ReadyMissing); during a pending rebuild
         // we must never mix old/new-space rows into the vec table.
         let mut embedded_count: usize = 0;
+        // The shared cap above bounds the total synchronous incremental embed
+        // per search; the gap set is already skipped while backed off, and
+        // watcher work must proceed even during a gap backoff (F4).
         if vec_active
-            && !backfill_backed_off
             && !reindex_chunks.is_empty()
             && let Some(ref embedder) = embedder
         {
@@ -661,10 +750,11 @@ impl MemoryBackend for MemoryBackendImpl {
                         tracing::warn!(
                             target: xai_grok_telemetry::memory_log::TARGET,
                             error = %e,
-                            "embedding batch failed during sync-on-search, skipping; backfill backs off"
+                            "embedding batch failed during sync-on-search, skipping; incremental embed backs off"
                         );
-                        // L2: stop after a genuine failure — retries are gated
-                        // by the persisted backoff, not repeated per search.
+                        // L2/F4: stop after a genuine failure — retries are
+                        // gated by the persisted backoff, not repeated per
+                        // search, including the watcher-dirty set.
                         failed = true;
                         break;
                     }
@@ -2027,6 +2117,515 @@ mod factory_tests {
             idx.vec_row_count(),
             2,
             "gap self-heals once the embedder recovers"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21 Gate-F: single embedding-provider factory; malformed responses;
+    // orphan-prune accuracy; watcher-dirty cap/backoff decoupling
+    // -----------------------------------------------------------------------
+
+    /// FINDING-1 (High): a named-profile facade is authoritative even in a
+    /// "mixed" config (facade + legacy `[memory.embedding]`). The factory
+    /// never consults the legacy config or its chat credentials; embedding
+    /// routes through the credential-free facade.
+    #[tokio::test]
+    async fn test_resolve_embedding_provider_facade_first() {
+        let dims = 4;
+        let fake = std::sync::Arc::new(crate::retrieval::FakeMemoryRetrieval::new(
+            dims,
+            "pinned-model",
+        ));
+        let params = MemoryBackendParams {
+            retrieval: Some(fake.clone()),
+            embed_config: Some(MemoryEmbeddingConfig {
+                model: Some("legacy-model".into()),
+                dimensions: dims,
+                ..Default::default()
+            }),
+            embed_base_url: "http://chat.example/v1".into(),
+            embed_api_key: Some("chat-secret".into()),
+            ..make_params_fts_only("facade-first")
+        };
+        let provider = params.make_embedding_provider().await;
+        assert!(provider.is_some(), "a present facade must win over legacy");
+        let provider = provider.unwrap();
+        assert_eq!(
+            provider.model_name(),
+            "pinned-model",
+            "provider must route through the facade, not the legacy config"
+        );
+        // No legacy/chat call is issued: embedding goes through the fake.
+        let before = fake.embed_calls();
+        let v = provider.embed_batch(&["hello"]).await.unwrap();
+        assert_eq!(fake.embed_calls() - before, 1);
+        assert_eq!(v[0].len(), dims);
+    }
+
+    /// FINDING-1 (High): an unresolved named profile must be FTS-only — no
+    /// legacy/active-chat fallback is possible through the factory.
+    #[tokio::test]
+    async fn test_resolve_embedding_provider_unresolved_named_is_none() {
+        let params = MemoryBackendParams {
+            retrieval: None,
+            embed_config: None,
+            ..make_params_fts_only("unresolved-named")
+        };
+        assert!(
+            params.make_embedding_provider().await.is_none(),
+            "unresolved named profile must be FTS-only (no legacy fallback)"
+        );
+        // The standalone factory behaves identically even when chat
+        // credentials are offered.
+        assert!(
+            resolve_embedding_provider(
+                None,
+                None,
+                &EndpointScopedCredentials::none(),
+                Some("chat-key"),
+                "http://chat.example/v1",
+            )
+            .await
+            .is_none(),
+            "unresolved named profile must never re-engage chat/legacy credentials"
+        );
+    }
+
+    /// Legacy `[memory.embedding]` applies only when no named profile is set.
+    #[tokio::test]
+    async fn test_resolve_embedding_provider_legacy_only() {
+        let params = MemoryBackendParams {
+            embed_config: Some(MemoryEmbeddingConfig {
+                model: Some("legacy-model".into()),
+                dimensions: 4,
+                ..Default::default()
+            }),
+            embed_base_url: "http://legacy.example/v1".into(),
+            embed_api_key: Some("legacy-key".into()),
+            ..make_params_fts_only("legacy-only")
+        };
+        let provider = params.make_embedding_provider().await;
+        assert!(
+            provider.is_some(),
+            "legacy path applies when no named profile"
+        );
+        assert_eq!(provider.unwrap().model_name(), "legacy-model");
+    }
+
+    /// F1/Phase 7: a malformed provider response (short count, NaN, wrong
+    /// dimension) must fail closed before any SQLite write — never zip/
+    /// mis-associate vectors onto the wrong chunks.
+    #[tokio::test]
+    async fn test_embed_missing_chunks_rejects_malformed_provider() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        for name in ["a.md", "b.md"] {
+            let f = tmp.path().join(name);
+            std::fs::write(&f, format!("# {name}\n\nRust {name} content.")).unwrap();
+            idx.reindex_file(&f, "workspace").unwrap();
+        }
+        assert_eq!(idx.chunk_count(), 2);
+
+        // Short response: 1 vector for 2 inputs must write nothing.
+        struct ShortProvider;
+        #[async_trait::async_trait]
+        impl crate::embedding::EmbeddingProvider for ShortProvider {
+            async fn embed_batch(
+                &self,
+                _texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+                Ok(vec![vec![0.25; 4]])
+            }
+            fn model_name(&self) -> &str {
+                "short"
+            }
+            fn dimensions(&self) -> usize {
+                4
+            }
+        }
+        assert_eq!(crate::embed_missing_chunks(&idx, &ShortProvider).await, 0);
+        assert_eq!(idx.chunks_without_embeddings().unwrap().len(), 2);
+
+        // NaN response must write nothing.
+        struct NaNProvider;
+        #[async_trait::async_trait]
+        impl crate::embedding::EmbeddingProvider for NaNProvider {
+            async fn embed_batch(
+                &self,
+                texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+                Ok(texts
+                    .iter()
+                    .map(|_| vec![f32::NAN, 0.0, 0.0, 0.0])
+                    .collect())
+            }
+            fn model_name(&self) -> &str {
+                "nan"
+            }
+            fn dimensions(&self) -> usize {
+                4
+            }
+        }
+        assert_eq!(crate::embed_missing_chunks(&idx, &NaNProvider).await, 0);
+        assert_eq!(idx.chunks_without_embeddings().unwrap().len(), 2);
+
+        // Wrong-dimension response must write nothing.
+        struct WrongDimProvider;
+        #[async_trait::async_trait]
+        impl crate::embedding::EmbeddingProvider for WrongDimProvider {
+            async fn embed_batch(
+                &self,
+                texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+                Ok(texts.iter().map(|_| vec![0.25; 8]).collect())
+            }
+            fn model_name(&self) -> &str {
+                "wrongdim"
+            }
+            fn dimensions(&self) -> usize {
+                4
+            }
+        }
+        assert_eq!(
+            crate::embed_missing_chunks(&idx, &WrongDimProvider).await,
+            0
+        );
+        assert_eq!(idx.chunks_without_embeddings().unwrap().len(), 2);
+    }
+
+    /// F2: orphan prune reports the actual affected rows and is idempotent;
+    /// valid (live) chunk vectors are never deleted.
+    #[test]
+    fn test_prune_orphan_vector_rows_reports_actual_removed() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            for name in ["a.md", "b.md", "c.md"] {
+                let f = tmp.path().join(name);
+                std::fs::write(&f, format!("# {name}\n\nRust {name} content.")).unwrap();
+                idx.reindex_file(&f, "workspace").unwrap();
+            }
+            let ids: Vec<String> = idx
+                .db()
+                .prepare("SELECT id FROM chunks ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect();
+            assert_eq!(ids.len(), 3);
+            for id in &ids {
+                idx.upsert_embedding(id, &vec![0.25; dims]).unwrap();
+            }
+        }
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        let ids: Vec<String> = idx
+            .db()
+            .prepare("SELECT id FROM chunks ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(ids.len(), 3);
+        idx.db()
+            .execute(
+                "DELETE FROM chunks WHERE id = ?1",
+                rusqlite::params![&ids[0]],
+            )
+            .unwrap();
+        idx.db()
+            .execute(
+                "DELETE FROM chunks WHERE id = ?1",
+                rusqlite::params![&ids[1]],
+            )
+            .unwrap();
+        assert_eq!(idx.vec_row_count(), 3);
+        assert_eq!(idx.chunk_count(), 1);
+        let removed = idx.prune_orphan_vector_rows();
+        assert_eq!(removed, 2, "prune must report the actual rows deleted");
+        assert_eq!(idx.vec_row_count(), 1);
+        assert_eq!(idx.chunk_count(), 1);
+        assert!(idx.chunks_without_embeddings().unwrap().is_empty());
+        assert_eq!(idx.prune_orphan_vector_rows(), 0, "idempotent");
+    }
+
+    /// F3: the watcher-dirty incremental embed is bounded per search with the
+    /// same cap as the compatible-gap backfill; a large watcher gap progresses
+    /// over later searches and a cap pause never arms the backoff.
+    #[tokio::test]
+    async fn test_watcher_dirty_backfill_is_capped_per_search() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let storage = MemoryStorage::with_paths(global.clone(), workspace.clone());
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let watch_dir = dunce::canonicalize(&global).unwrap_or(global.clone());
+
+        // Install a fingerprint + one vector (small file) so readiness is
+        // Ready/ReadyMissing (never a rebuild) during the watcher sync.
+        let small = watch_dir.join("small.md");
+        std::fs::write(&small, "# Small\n\nRust small content.").unwrap();
+        let small_canon = dunce::canonicalize(&small).unwrap_or(small);
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            idx.reindex_file(&small_canon, "global").unwrap();
+        }
+        let fake = std::sync::Arc::new(crate::retrieval::FakeMemoryRetrieval::new(dims, "m"));
+        let install_embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> =
+            Some(std::sync::Arc::new(
+                crate::embedding::RetrievalEmbeddingProvider::new(fake.clone()),
+            ));
+        let out = crate::rebuild::ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &crate::retrieval::stub_spec(dims, "m"),
+            install_embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, crate::rebuild::VectorReadiness::Ready),
+            "{out:?}"
+        );
+        assert_eq!(
+            MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap()
+            .vec_row_count(),
+            1
+        );
+
+        // Watcher on the canonical global dir, then a big file (140 chunks).
+        let watcher = match crate::watcher::MemoryFileWatcher::start(&watch_dir) {
+            Some(w) => w,
+            None => return, // file watching unsupported here
+        };
+        let mut big = String::new();
+        for i in 0..140 {
+            big.push_str(&format!("## B{i}\n\nRust gap content {i}.\n\n"));
+        }
+        std::fs::write(watch_dir.join("big.md"), &big).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
+        let params = MemoryBackendParams {
+            retrieval: Some(fake),
+            watcher: Some(std::sync::Arc::new(watcher)),
+            ..make_params_fts_only("watcher-cap")
+        };
+        let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
+
+        // Search #1: watcher-dirty sync embeds at most the per-search cap
+        // (128 chunks); a cap pause never arms the backoff.
+        let _ = backend.search("rust", 5, 0.0).await.unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            1 + 128,
+            "watcher-dirty incremental embed must be capped per search"
+        );
+        let backoff: String = idx
+            .db()
+            .query_row(
+                crate::schema::GET_META_SQL,
+                rusqlite::params![crate::schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "0".into());
+        assert_eq!(backoff, "0", "cap pause must not arm the backfill backoff");
+        drop(idx);
+
+        // Search #2: the remaining gap heals through the ReadyMissing path.
+        let _ = backend.search("rust", 5, 0.0).await.unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            141,
+            "watcher gap heals over later searches"
+        );
+        assert_eq!(idx.vec_row_count(), idx.chunk_count());
+    }
+
+    /// F4: a compatible-gap backoff defers only the same missing set — a
+    /// freshly changed watcher-dirty chunk still embeds during the window.
+    #[tokio::test]
+    async fn test_watcher_dirty_backfill_proceeds_during_gap_backoff() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let global = tmp.path().join("memory");
+        let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let storage = MemoryStorage::with_paths(global.clone(), workspace.clone());
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let watch_dir = dunce::canonicalize(&global).unwrap_or(global.clone());
+
+        // Install fingerprint + 1 vector (small file).
+        let small = watch_dir.join("small.md");
+        std::fs::write(&small, "# Small\n\nRust small content.").unwrap();
+        let small_canon = dunce::canonicalize(&small).unwrap_or(small);
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            idx.reindex_file(&small_canon, "global").unwrap();
+        }
+        let fake = std::sync::Arc::new(crate::retrieval::FakeMemoryRetrieval::new(dims, "m"));
+        let install_embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> =
+            Some(std::sync::Arc::new(
+                crate::embedding::RetrievalEmbeddingProvider::new(fake.clone()),
+            ));
+        let out = crate::rebuild::ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &crate::retrieval::stub_spec(dims, "m"),
+            install_embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, crate::rebuild::VectorReadiness::Ready),
+            "{out:?}"
+        );
+
+        // A pre-existing compatible gap: chunk gap.md without a vector.
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let f = watch_dir.join("gap.md");
+            std::fs::write(&f, "# Gap\n\nRust gap chunk.").unwrap();
+            let f = dunce::canonicalize(&f).unwrap_or(f);
+            idx.reindex_file(&f, "global").unwrap();
+        }
+        // Prime the compatible-gap backoff (now + 3600).
+        {
+            let idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let until = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                + 3600;
+            idx.db()
+                .execute(
+                    crate::schema::UPSERT_META_SQL,
+                    rusqlite::params![
+                        crate::schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL,
+                        until.to_string()
+                    ],
+                )
+                .unwrap();
+            drop(idx);
+        }
+
+        // Watcher adds a NEW file (fresh work) during the backoff window.
+        let watcher = match crate::watcher::MemoryFileWatcher::start(&watch_dir) {
+            Some(w) => w,
+            None => return,
+        };
+        std::fs::write(watch_dir.join("fresh.md"), "# Fresh\n\nRust fresh content.").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
+        let params = MemoryBackendParams {
+            retrieval: Some(fake),
+            watcher: Some(std::sync::Arc::new(watcher)),
+            ..make_params_fts_only("watcher-during-backoff")
+        };
+        let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
+        let _ = backend.search("rust", 5, 0.0).await.unwrap();
+
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            2,
+            "fresh watcher work must embed even during a gap backoff"
+        );
+        // The same missing set (gap.md chunk) stays deferred.
+        assert_eq!(
+            idx.chunks_without_embeddings().unwrap().len(),
+            1,
+            "the deferred gap chunk must remain unembedded"
         );
     }
 }
