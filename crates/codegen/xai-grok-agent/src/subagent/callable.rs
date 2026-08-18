@@ -151,6 +151,12 @@ fn classify(entry: &SubagentEntry) -> CallableAgentSource {
 /// on top. So the full built-in set (not just `subagent_variants()`) is
 /// spawnable; include the non-subagent builtins unless a higher-priority
 /// user/repo/plugin definition shadows their name.
+///
+/// `grok-build-plan-no-subagents` is deliberately EXCLUDED: its definition
+/// strips the Task tool from its own toolset (`grok_build_plan_no_subagents_toolset`
+/// omits TaskTool), so it is defined to spawn no sub-agents; recommending it as
+/// a callable Task target would contradict that policy. It is still resolvable
+/// by name at spawn (existing behavior), just not surfaced as a recommendation.
 fn non_subagent_builtins() -> Vec<AgentDefinition> {
     let variants: HashSet<&'static str> = BuiltinAgentName::subagent_variants()
         .iter()
@@ -158,6 +164,7 @@ fn non_subagent_builtins() -> Vec<AgentDefinition> {
         .collect();
     BuiltinAgentName::iter()
         .filter(|b| !variants.contains(b.as_ref()))
+        .filter(|b| !matches!(b, BuiltinAgentName::GrokBuildPlanNoSubagents))
         .map(BuiltinAgentName::definition)
         .collect()
 }
@@ -365,6 +372,15 @@ mod tests {
         );
         assert!(snapshot.iter().any(|d| d.name == "codex"));
         assert!(snapshot.iter().any(|d| d.name == "explore"));
+        // R3: `grok-build-plan-no-subagents` is deliberately excluded — its
+        // definition strips the Task tool from its own toolset (it is defined
+        // to spawn no sub-agents), so it must not be recommended.
+        assert!(
+            !snapshot
+                .iter()
+                .any(|d| d.name == "grok-build-plan-no-subagents"),
+            "no-subagents builtin must not be surfaced as a callable recommendation"
+        );
     }
 
     #[test]

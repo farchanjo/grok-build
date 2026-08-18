@@ -696,8 +696,11 @@ where
 /// agents for centralized name management and `by_name()` dispatch.
 ///
 /// `subagent_variants()` returns only the 3 that are exposed to the LLM
-/// via the `TaskTool` description. The remaining 6 are top-level agent
-/// profiles resolvable by name but not advertised as subagent types.
+/// via the `TaskTool` description. The remaining 9 are top-level agent
+/// profiles resolvable by name but not advertised as subagent types in the
+/// Task tool description; they remain valid Task targets by name, and the
+/// PR20 callable snapshot includes the non-subagent variants unless shadowed
+/// (see `xai-grok-agent::subagent::callable::non_subagent_builtins`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
 )]

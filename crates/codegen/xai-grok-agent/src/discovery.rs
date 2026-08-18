@@ -126,18 +126,24 @@ fn merge_subagents(
     // A user-level ~/.grok/agents/explore.md does NOT shadow built-in explore
     // at spawn time, so it must not shadow it in the visible list either.
     // Otherwise: visible != callable (the guarantee would be broken).
+    //
+    // This applies to ANY builtin name, not just the three subagent variants
+    // (general-purpose / explore / plan): at spawn, by_name_in_cwd resolves
+    // project > builtin > user > bundled, so a user- or bundled-scope file
+    // named `codex`, `grok-build`, `opencode`, etc. is shadowed by the builtin
+    // and the snapshot must present the BUILTIN source/description — not the
+    // non-spawnable user def. Project-scope files still shadow the builtin
+    // (both in the visible list and at spawn), so project precedence is kept.
     for def in discovered {
         if def.scope == AgentScope::BuiltIn {
             continue;
         }
 
-        let is_builtin_name = BuiltinAgentName::from_str(&def.name)
-            .ok()
-            .filter(|b| BuiltinAgentName::subagent_variants().contains(b));
+        let is_builtin_name = BuiltinAgentName::from_str(&def.name).ok();
 
         if is_builtin_name.is_some() && def.scope != AgentScope::Project {
-            // User-level agent has same name as built-in subagent — skip it.
-            // It cannot shadow the built-in at runtime, so don't let
+            // Non-project agent has the same name as a built-in (any variant) —
+            // skip it. It cannot shadow the built-in at runtime, so don't let
             // it shadow in the visible list.
             continue;
         }
@@ -1387,6 +1393,134 @@ mod tests {
             }
         );
         assert!(entries.iter().any(|e| e.name == "plugin-one:reviewer"));
+    }
+
+    /// O1: a user- or bundled-scope file named after ANY builtin (not just the
+    /// three subagent variants) is shadowed by the builtin at spawn
+    /// (project > builtin > user > bundled), so it must NOT be listed as a
+    /// `UserDefined`/visible def; the builtin identity wins in both the visible
+    /// list and `by_name_in_cwd_with_plugins`. Project scope still shadows the
+    /// builtin in both.
+    #[test]
+    fn user_and_bundled_agents_named_after_builtins_are_shadowed_by_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        let user_dir = home.join(".grok").join("agents");
+        let bundled_dir = home.join(".grok").join("bundled").join("agents");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(&bundled_dir).unwrap();
+
+        // User-scope files named after non-subagent builtins (codex, grok-build).
+        write_agent_file(&user_dir, "codex.md", "codex", "USER-CODEX-DESC");
+        write_agent_file(&user_dir, "grok-build.md", "grok-build", "USER-GB-DESC");
+        // Bundled-scope files named after non-subagent builtins.
+        write_agent_file(
+            &bundled_dir,
+            "opencode.md",
+            "opencode",
+            "BUNDLED-OPENCODE-DESC",
+        );
+        write_agent_file(
+            &bundled_dir,
+            "grok-build-plan.md",
+            "grok-build-plan",
+            "BUNDLED-GBP-DESC",
+        );
+
+        let entries = all_subagents_with_plugins_and_home(
+            &cwd,
+            &HashMap::new(),
+            None,
+            Some(&home),
+            Some(&home.join(".grok")),
+        );
+        // Shadowed non-project builtin names must NOT appear as user defs.
+        for name in ["codex", "grok-build", "opencode", "grok-build-plan"] {
+            assert!(
+                !entries.iter().any(|e| e.name == name),
+                "{name} must not be listed as a user/bundled def (builtin shadows it)"
+            );
+        }
+
+        // Spawn resolution returns the BUILTIN definition for each name.
+        let codex = by_name_in_cwd_with_plugins_and_home(
+            "codex",
+            &cwd,
+            None,
+            Some(&home),
+            Some(&home.join(".grok")),
+        )
+        .unwrap();
+        assert_eq!(
+            codex.description,
+            BuiltinAgentName::Codex.definition().description,
+            "user codex.md must resolve to the builtin codex"
+        );
+        assert!(!codex.description.contains("USER-CODEX-DESC"));
+
+        let gb = by_name_in_cwd_with_plugins_and_home(
+            "grok-build",
+            &cwd,
+            None,
+            Some(&home),
+            Some(&home.join(".grok")),
+        )
+        .unwrap();
+        assert!(!gb.description.contains("USER-GB-DESC"));
+        assert_eq!(
+            gb.description,
+            BuiltinAgentName::GrokBuild.definition().description
+        );
+
+        let opencode = by_name_in_cwd_with_plugins_and_home(
+            "opencode",
+            &cwd,
+            None,
+            Some(&home),
+            Some(&home.join(".grok")),
+        )
+        .unwrap();
+        assert!(
+            !opencode.description.contains("BUNDLED-OPENCODE-DESC"),
+            "bundled opencode.md must resolve to the builtin opencode"
+        );
+        assert_eq!(
+            opencode.description,
+            BuiltinAgentName::Opencode.definition().description
+        );
+
+        // Project scope still shadows the builtin in BOTH lists.
+        let project_dir = cwd.join(".grok").join("agents");
+        fs::create_dir_all(&project_dir).unwrap();
+        write_agent_file(&project_dir, "codex.md", "codex", "PROJECT-CODEX-DESC");
+        let entries = all_subagents_with_plugins_and_home(
+            &cwd,
+            &HashMap::new(),
+            None,
+            Some(&home),
+            Some(&home.join(".grok")),
+        );
+        let codex_entry = entries.iter().find(|e| e.name == "codex").unwrap();
+        assert_eq!(
+            codex_entry.source,
+            SubagentSource::UserDefined {
+                scope: AgentScope::Project
+            },
+            "project codex.md must shadow the builtin in the visible list"
+        );
+        assert_eq!(codex_entry.description, "PROJECT-CODEX-DESC");
+
+        let codex_def = by_name_in_cwd_with_plugins_and_home(
+            "codex",
+            &cwd,
+            None,
+            Some(&home),
+            Some(&home.join(".grok")),
+        )
+        .unwrap();
+        assert_eq!(codex_def.description, "PROJECT-CODEX-DESC");
     }
 
     #[test]

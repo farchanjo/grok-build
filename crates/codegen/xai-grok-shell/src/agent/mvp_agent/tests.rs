@@ -4857,6 +4857,262 @@ mod soft_default_settings_emit {
             "unconfirmed name must be blocked"
         );
     }
+    // O3: exercise the FULL production assembly chain against real minimal
+    // discovery — real filesystem repo agent + real plugin registry + real CLI
+    // agent → `MvpAgent::build_callable_agent_authority` (which internally calls
+    // `callable_agent_snapshot` + `build_subagent_validation_context`) → real
+    // `gate` → `run_prime_agent_selection`. No hand-authored AuthorityCapture /
+    // validation context.
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_chain_snapshot_to_authority_to_gate_to_selection() {
+        use xai_grok_agent::config::AgentDefinition;
+        use xai_grok_agent::plugins::discovery::{PluginId, PluginScope};
+        use xai_grok_agent::plugins::manifest::PluginManifest;
+        use xai_grok_agent::plugins::{DiscoveredPlugin, PluginOrigin, PluginRegistry};
+        use xai_grok_agent::plugins::SharedPluginRegistryHandle;
+        use xai_grok_config_types::AgentPrimeConfig;
+        use crate::session::prime::agents::{
+            AgentGateVerdict, AgentInput, run_prime_agent_selection,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Real repo agent.
+        let repo_dir = cwd.join(".grok").join("agents");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            repo_dir.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: Repo reviewer\n---\n",
+        )
+        .unwrap();
+        // Real plugin agent.
+        let plugin_root = root.join("plugins").join("pl");
+        let plugin_agents = plugin_root.join("agents");
+        std::fs::create_dir_all(&plugin_agents).unwrap();
+        std::fs::write(
+            plugin_agents.join("arch.md"),
+            "---\nname: arch\ndescription: Plugin arch\n---\n",
+        )
+        .unwrap();
+        let registry = PluginRegistry::from_discovered(
+            vec![DiscoveredPlugin {
+                manifest: PluginManifest {
+                    name: "pl".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    description: Some("Program plugin pl".to_string()),
+                    author: None,
+                    homepage: None,
+                    repository: None,
+                    license: None,
+                    keywords: vec![],
+                    skills: None,
+                    commands: None,
+                    agents: None,
+                    hooks: None,
+                    mcp_servers: None,
+                    lsp_servers: None,
+                },
+                id: PluginId::new(PluginScope::User, &plugin_root, "pl"),
+                root: plugin_root.clone(),
+                canonical_root: plugin_root.clone(),
+                scope: PluginScope::User,
+                origin: PluginOrigin::CliOverride,
+                trusted: true,
+                skill_dirs: vec![],
+                command_dirs: vec![],
+                agent_dirs: vec![plugin_agents],
+                hooks_path: None,
+                mcp_config_path: None,
+                lsp_config_path: None,
+                conflict: None,
+            }],
+            &[],
+            &["pl".to_string()],
+        );
+        // Real CLI agent.
+        let mut cli = AgentDefinition::general_purpose();
+        cli.name = "cli-inline".into();
+        cli.description = "CLI inline".into();
+
+        let mut agent = build_minimal_agent_for_tests();
+        // Inject the real plugin registry and CLI agents into the live MvpAgent.
+        agent.plugin_registry_handle = SharedPluginRegistryHandle::new(Some(registry), Vec::new());
+        {
+            let mut cfg = agent.cfg.borrow_mut();
+            cfg.cli_agents = vec![cli];
+            assert!(cfg.subagents_enabled, "fixture keeps subagents enabled");
+        }
+
+        // Parent session rooted at the real workspace.
+        let sid = acp::SessionId::new("o3-chain-sess");
+        let mut handle = make_test_handle("test-model", false, None);
+        handle.agent_name = "reviewer".to_string();
+        handle.info.id = sid.clone();
+        handle.info.cwd = cwd.to_string_lossy().to_string();
+        handle.tool_context.subagent_depth = 0;
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+
+        // PRODUCTION authority (snapshot + validation context inside).
+        let authority = agent.build_callable_agent_authority("o3-chain-sess");
+        let fresh = authority.agents.clone();
+        let names: Vec<&str> = fresh.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"reviewer"), "repo agent: {names:?}");
+        assert!(names.contains(&"pl:arch"), "plugin agent: {names:?}");
+        assert!(names.contains(&"cli-inline"), "cli agent: {names:?}");
+        assert!(
+            names.contains(&"grok-build"),
+            "non-subagent builtin: {names:?}"
+        );
+
+        // Current agent is "reviewer" → excluded by the production gate.
+        assert_eq!(
+            authority.gate("reviewer"),
+            AgentGateVerdict::Blocked,
+            "current agent must be blocked"
+        );
+
+        // Drive the real selection with the freshly built authority as the
+        // revalidation source, over the authority's own fresh descriptors.
+        let plugin_arc = agent.plugin_registry_handle.snapshot();
+        let cli_names: Vec<String> = agent
+            .cfg
+            .borrow()
+            .cli_agents
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        let auth2 = authority.clone();
+        let sel = run_prime_agent_selection(
+            &AgentInput {
+                agents: &fresh,
+                refresh: &(move || {
+                    let a = auth2.clone();
+                    async move { a }
+                }),
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    max_results: 50,
+                    ..AgentPrimeConfig::default()
+                },
+                ..AgentInput::default()
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!sel.selected.is_empty(), "expected some recommendations");
+        // Selected ⊆ actual spawnable names (real spawn/validation machinery).
+        for s in &sel.selected {
+            let resolved = xai_grok_agent::discovery::by_name_in_cwd_with_plugins(
+                &s.name,
+                &cwd,
+                plugin_arc.as_deref(),
+            )
+            .is_some();
+            let cli = cli_names.iter().any(|n| n == &s.name);
+            assert!(
+                resolved || cli,
+                "selected {} not actually spawnable (neither discovery nor CLI)",
+                s.name
+            );
+            // Every selected name also passes `validate_subagent_type` (the
+            // authority's own per-name gate is exactly resolve+toggle+allow).
+            assert_eq!(
+                authority.gate(&s.name),
+                AgentGateVerdict::Callable,
+                "authority must confirm every selected agent"
+            );
+            assert_ne!(s.name, "reviewer", "current agent must never be selected");
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_chain_negative_gates() {
+        use xai_grok_agent::plugins::SharedPluginRegistryHandle;
+        use xai_grok_config_types::AgentPrimeConfig;
+        use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+        use crate::session::prime::agents::{AgentInput, run_prime_agent_selection};
+
+        // (a) global `subagents_enabled = false` → task_available false → empty.
+        {
+            let mut agent = build_minimal_agent_for_tests();
+            agent.plugin_registry_handle =
+                SharedPluginRegistryHandle::new(None, Vec::new());
+            {
+                let mut cfg = agent.cfg.borrow_mut();
+                cfg.subagents_enabled = false;
+            }
+            let sid = acp::SessionId::new("neg-global");
+            let mut handle = make_test_handle("test-model", false, None);
+            handle.info.id = sid.clone();
+            handle.tool_context.subagent_depth = 0;
+            agent.sessions.borrow_mut().insert(sid, handle);
+            let authority = agent.build_callable_agent_authority("neg-global");
+            assert!(
+                !authority.global_subagents_enabled,
+                "global disable must be derived"
+            );
+            assert!(!authority.task_available, "global disable ⇒ no Task");
+            let sel = run_prime_agent_selection(
+                &AgentInput {
+                    agents: &authority.agents.clone(),
+                    refresh: &|| {
+                        let a = authority.clone();
+                        async move { a }
+                    },
+                    config: AgentPrimeConfig {
+                        enabled: true,
+                        max_results: 10,
+                        ..AgentPrimeConfig::default()
+                    },
+                    ..AgentInput::default()
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(sel.selected.is_empty(), "global disabled ⇒ empty");
+        }
+
+        // (b) parent at max depth (Task stripped) → task_available false → empty.
+        {
+            let mut agent = build_minimal_agent_for_tests();
+            agent.plugin_registry_handle =
+                SharedPluginRegistryHandle::new(None, Vec::new());
+            let sid = acp::SessionId::new("neg-depth");
+            let mut handle = make_test_handle("test-model", false, None);
+            handle.info.id = sid.clone();
+            handle.tool_context.subagent_depth = MAX_SUBAGENT_DEPTH; // at limit
+            agent.sessions.borrow_mut().insert(sid, handle);
+            let authority = agent.build_callable_agent_authority("neg-depth");
+            assert_eq!(
+                authority.task_available,
+                MAX_SUBAGENT_DEPTH < MAX_SUBAGENT_DEPTH,
+                "depth >= MAX_SUBAGENT_DEPTH strips the Task tool"
+            );
+            let sel = run_prime_agent_selection(
+                &AgentInput {
+                    agents: &authority.agents.clone(),
+                    refresh: &|| {
+                        let a = authority.clone();
+                        async move { a }
+                    },
+                    config: AgentPrimeConfig {
+                        enabled: true,
+                        max_results: 10,
+                        ..AgentPrimeConfig::default()
+                    },
+                    ..AgentInput::default()
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(sel.selected.is_empty(), "max depth ⇒ empty selections");
+        }
+    }
 }
 #[cfg(feature = "dhat-heap")]
 mod dhat_soak;

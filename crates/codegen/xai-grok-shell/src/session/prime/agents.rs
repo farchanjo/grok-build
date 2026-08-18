@@ -135,9 +135,13 @@ pub struct CallableAgentAuthority {
     /// session agent is known).
     pub(crate) current_agent: Option<String>,
     /// False when the Task tool is unavailable (max depth / stripped / global
-    /// disabled) — the recommendation set is then empty. The per-name
-    /// native/trust/model gates a future wiring may add plug in via the
-    /// `eligible` predicate at capture time.
+    /// disabled) — the recommendation set is then empty. Derived by the
+    /// production capture lane from real live state: global `subagents_enabled`
+    /// AND `parent_depth < MAX_SUBAGENT_DEPTH`. The current spawn path has NO
+    /// additional external-runtime or per-name native/trust/model gate for Task
+    /// availability (verified against `resolve_agent_definition` +
+    /// `gate_subagent_type`); if one is added it must be expressed in
+    /// `MvpAgent::build_callable_agent_authority`, never approximated here.
     pub(crate) task_available: bool,
     /// False when `[subagents] enabled = false` (`GROK_SUBAGENTS=0`) globally.
     pub(crate) global_subagents_enabled: bool,
@@ -188,10 +192,14 @@ pub(crate) struct AuthorityCapture<'a> {
     pub(crate) task_available: bool,
     /// True only when `[subagents] enabled` (global) — `cfg.subagents_enabled`.
     pub(crate) global_subagents_enabled: bool,
-    /// Per-name eligibility predicate rooted in real spawn-side data
-    /// (native/trust/model/external-runtime gates a future wiring adds).
-    /// Applied to every descriptor name; a name the predicate does not confirm
-    /// is `Blocked`.
+    /// Per-name eligibility predicate. There are NO additional per-name spawn
+    /// gates in the current spawn path beyond resolve + toggle + allow-list
+    /// (verified against the real spawn path), so the production
+    /// `MvpAgent::build_callable_agent_authority` confirms every resolved
+    /// descriptor — an identity over the snapshot that must not be read as an
+    /// invented authorization gate. If a future spawn path adds a per-name
+    /// native/trust/model gate, it must be expressed here (and only here);
+    /// names the predicate does not confirm are `Blocked`.
     pub(crate) eligible: Box<dyn Fn(&str) -> bool + Send + Sync>,
     /// Source generation for telemetry/accounting.
     pub(crate) generation: Option<u64>,
@@ -1350,6 +1358,33 @@ mod tests {
             "no Task tool ⇒ empty"
         );
         assert!(sel.rendered.is_none());
+    }
+
+    // O2: the authority adds NO invented per-name gate beyond the real spawn
+    // gates. A name that is in the fresh snapshot, passes
+    // `validate_subagent_type` (resolve+toggle+allow-list), is not the current
+    // agent, and is positively confirmed is `Callable` — there is no extra
+    // native/trust/model/external-runtime rejection in the current spawn path
+    // (documented on `AuthorityCapture::eligible`), so none is asserted here.
+    #[test]
+    fn authority_adds_no_invented_per_name_gates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        let (agents, ctx) = callable_set(cwd.clone(), &["explore", "plan"]);
+        let snap = live(
+            agents.clone(),
+            ctx,
+            true,
+            None,
+            eligible_map(&["explore", "plan"]),
+        );
+        for a in &agents {
+            assert_eq!(
+                snap.gate(&a.name),
+                AgentGateVerdict::Callable,
+                "validated + confirmed + not-current must be Callable (no invented per-name gate)"
+            );
+        }
     }
 
     #[tokio::test]
