@@ -30,6 +30,14 @@
 //! identity strings only, and no credential/vector/text field is ever
 //! persisted or rendered. Fingerprint field bytes are length-framed and
 //! reject NUL/control characters, so crafted fields cannot collide.
+//!
+//! **The persisted payload is exactly the identity determinant set and
+//! nothing more** (source spec + doc-prep + schema version). It never
+//! contains query text, chunk text, vector values, provider API keys/tokens,
+//! or debug/telemetry data; the identity labels it does carry are necessary
+//! determinants — two accounts on the same host/model are different embedding
+//! spaces — and are not secrets. See the schema docs and the
+//! `payload_and_debug_expose_no_query_or_vectors` test.
 
 use blake3;
 
@@ -537,5 +545,64 @@ mod tests {
         );
         // Deterministic for identical inputs.
         assert_eq!(a.hash, build(&a.source).hash);
+    }
+
+    /// Carried privacy note: the persisted payload and every Debug/Display
+    /// rendering expose the necessary identity labels (provider/host) but
+    /// never query text, chunk text, vector values, or credential material.
+    #[test]
+    fn payload_and_debug_expose_no_query_or_vectors() {
+        let s = EmbeddingSourceSpec {
+            provider_instance_id: "acct-b".into(),
+            incarnation: Some("inc-2".into()),
+            origin_host: "embed.provider.example".into(),
+            embedding_path: "/v1/embeddings".into(),
+            protocol: "openai_compatible".into(),
+            model: "text-embed-3-small".into(),
+            dimensions: 1536,
+            encoding: "float".into(),
+            normalization: NORMALIZATION_NONE.into(),
+        };
+        let (fp, payload) = VectorFingerprint::build(
+            s,
+            DocPreparationSpec::from_index_config(&MemoryIndexConfig::default()),
+            VECTOR_SCHEMA_VERSION,
+        )
+        .unwrap();
+
+        // Necessary identity labels ARE persisted (identity determinants).
+        assert!(
+            payload.contains("acct-b"),
+            "provider instance id is identity"
+        );
+        assert!(
+            payload.contains("embed.provider.example"),
+            "origin host is identity"
+        );
+
+        // Nothing non-identity is ever persisted or rendered: query/chunk
+        // text, vector floats, and credential markers.
+        let haystacks = [payload.as_str(), &format!("{fp:?}"), &format!("{fp}")];
+        for forbidden in [
+            "secret-query-text-x9",
+            "Rust borrow checker",
+            "0.39215687",
+            "sk-",
+            "api_key",
+            "authorization",
+            "Bearer",
+            "secret-token",
+        ] {
+            for hay in &haystacks {
+                assert!(
+                    !hay.to_lowercase().contains(&forbidden.to_lowercase()),
+                    "identity output must never expose {forbidden:?} (got {hay})"
+                );
+            }
+        }
+        // The source spec Display renders identity only.
+        let disp = format!("{}", fp.source);
+        assert!(disp.contains("acct-b"));
+        assert!(!disp.contains("secret-token"));
     }
 }

@@ -318,6 +318,60 @@ impl MemoryIndex {
             .unwrap_or(0)
     }
 
+    /// Remove orphan vector rows — rows whose `chunk_id` no longer exists in
+    /// the `chunks` table (crash/legacy residue). Orphans are inert (search
+    /// joins through live chunk ids) but pollute the vec table and make
+    /// `vec_row_count` inaccurate. Pruning is transactional and touches
+    /// **only** orphan rows: valid rows and the installed fingerprint are
+    /// preserved, and no rebuild is triggered (L3). Returns the number of
+    /// removed rows.
+    pub(crate) fn prune_orphan_vector_rows(&self) -> usize {
+        if !self.vec_available {
+            return 0;
+        }
+        // Collect orphan chunk ids via the vec0 `_rowids` shadow table (a
+        // plain table), then delete each by the known-good vec0 delete path.
+        let ids: Vec<String> = {
+            let mut stmt = match self.db.prepare(
+                "SELECT v.id FROM chunks_vec_rowids v \
+                 WHERE NOT EXISTS ( \
+                   SELECT 1 FROM chunks c WHERE c.id = v.id \
+                 )",
+            ) {
+                Ok(s) => s,
+                Err(_) => return 0,
+            };
+            match stmt.query_map([], |r| r.get::<_, String>(0)) {
+                Ok(rows) => rows.filter_map(Result::ok).collect(),
+                Err(_) => return 0,
+            }
+        };
+        if ids.is_empty() {
+            return 0;
+        }
+        if self.db.execute_batch("BEGIN IMMEDIATE;").is_err() {
+            return 0;
+        }
+        let mut removed = 0usize;
+        let result = (|| -> rusqlite::Result<()> {
+            for id in &ids {
+                self.db
+                    .execute("DELETE FROM chunks_vec WHERE chunk_id = ?1", params![id])?;
+                removed += 1;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                let _ = self.db.execute_batch("COMMIT;");
+            }
+            Err(_) => {
+                let _ = self.db.execute_batch("ROLLBACK;");
+            }
+        }
+        removed
+    }
+
     // -----------------------------------------------------------------------
     // Indexing
     // -----------------------------------------------------------------------

@@ -27,7 +27,14 @@
 //!   mismatch) makes the source *incompatible* and still fails closed into a
 //!   rebuild. A fresh index with no fingerprint and a non-empty chunk set is
 //!   not yet "compatible" — it must atomically rebuild (and install the
-//!   fingerprint) before vectors are ready.
+//!   fingerprint) before vectors are ready. That initial migration happens on
+//!   the **first search** (deliberate: init-time backfill is gated on an
+//!   installed fingerprint) and is **bounded** by the per-search batch cap —
+//!   a large fresh store stays FTS-only across capped rebuild searches, and
+//!   no user-visible vector `Ready` precedes the atomic install.
+//! - Orphan vector rows (for chunks deleted outside normal paths) are pruned
+//!   transactionally when a compatible index reports `rows > chunks`, so
+//!   `Ready`/`ReadyMissing` counts are always accurate — never a rebuild (L3).
 //! - A rebuild is **claimed** with a true compare-and-swap (the claim write
 //!   and the staging-binding write are one transaction); only one process
 //!   wins. Stale/same-target takeovers observe the completed state as Ready.
@@ -845,11 +852,35 @@ fn compatible_readiness(idx: &MemoryIndex) -> VectorReadiness {
     let rows = idx.vec_row_count();
     let chunks = idx.chunk_count();
     if rows == chunks {
-        VectorReadiness::Ready
-    } else {
-        VectorReadiness::ReadyMissing {
-            missing: chunks.saturating_sub(rows) as usize,
+        return VectorReadiness::Ready;
+    }
+    if rows > chunks {
+        // L3: orphan vector rows for deleted chunks make the count inaccurate.
+        // Prune them transactionally — never a full rebuild, never touching
+        // valid rows or the installed fingerprint.
+        let removed = idx.prune_orphan_vector_rows();
+        if removed > 0 {
+            tracing::debug!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                removed,
+                "pruned orphan vector rows for a compatible index"
+            );
         }
+        let rows = idx.vec_row_count();
+        let chunks = idx.chunk_count();
+        return if rows == chunks {
+            VectorReadiness::Ready
+        } else if rows < chunks {
+            VectorReadiness::ReadyMissing {
+                missing: (chunks - rows) as usize,
+            }
+        } else {
+            // Residual extras under concurrent churn remain inert but usable.
+            VectorReadiness::Ready
+        };
+    }
+    VectorReadiness::ReadyMissing {
+        missing: (chunks - rows) as usize,
     }
 }
 
@@ -3292,6 +3323,155 @@ mod tests {
             staged_count(&idx, &pending.id),
             0,
             "retry must drain staging"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21 final L1–L3 / carried notes
+    // -----------------------------------------------------------------------
+
+    /// L3: orphan vector rows (for chunks deleted outside normal paths) are
+    /// pruned transactionally on a compatible index — `rows > chunks` becomes
+    /// an accurate `Ready` without a full rebuild, and the valid rows +
+    /// fingerprint are preserved.
+    #[tokio::test]
+    async fn test_compatible_readiness_prunes_orphan_rows() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        for name in ["a.md", "b.md"] {
+            let f = write_note(&tmp, name, &format!("# {name}\n\nRust {name} content."));
+            let mut idx = open_index(&db_path, storage.clone(), dims);
+            idx.reindex_file(&f, "workspace").unwrap();
+        }
+        let spec = stub_spec(dims, "m");
+        install_vectors_for(&db_path, &storage, dims, &spec, "m").await;
+
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(idx.vec_row_count(), 2);
+        assert_eq!(idx.chunk_count(), 2);
+        // Simulate crash/legacy residue: delete a `chunks` row, leaving its
+        // `chunks_vec` row behind as an orphan.
+        let orphan_id: String = idx
+            .db()
+            .query_row("SELECT id FROM chunks LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        idx.db()
+            .execute("DELETE FROM chunks WHERE id = ?1", params![orphan_id])
+            .unwrap();
+        assert_eq!(idx.vec_row_count(), 2, "orphan vec row still present");
+        assert_eq!(idx.chunk_count(), 1);
+        drop(idx);
+
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "m"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        let out = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, VectorReadiness::Ready),
+            "orphan prune must yield an accurate Ready, not ReadyMissing{{0}}: {out:?}"
+        );
+        assert_eq!(fake.embed_calls(), 0, "orphan prune must not rebuild");
+
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(idx.vec_row_count(), 1, "orphan removed, valid row kept");
+        assert_eq!(idx.chunk_count(), 1);
+        assert_eq!(
+            idx.installed_vector_fingerprint_hash().as_deref(),
+            Some(fp_for(&spec).hash.as_str()),
+            "fingerprint preserved across orphan prune"
+        );
+    }
+
+    /// Carried note: a fresh non-empty no-fingerprint index migrates on the
+    /// FIRST search — deliberately — and that initial rebuild is **bounded**
+    /// by the per-search batch cap: `Pending` (never `ReadyMissing`/`Ready`)
+    /// until the atomic install, with no user-visible vector Ready before it.
+    #[tokio::test]
+    async fn test_fresh_non_empty_initial_rebuild_is_bounded() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        let mut content = String::new();
+        for i in 0..40 {
+            content.push_str(&format!(
+                "## A{i}\n\nRust content {i}.\n\nPadding filler sentence so the document \
+                 exceeds max_chunk_chars and the chunker splits by sections.\n\n"
+            ));
+        }
+        let f = write_note(&tmp, "many.md", &content);
+        idx.reindex_file(&f, "workspace").unwrap();
+        assert_eq!(idx.chunk_count(), 40, "one chunk per H2 section");
+        assert_eq!(idx.vec_row_count(), 0);
+        assert!(idx.installed_vector_fingerprint_hash().is_none());
+        drop(idx);
+
+        let spec = stub_spec(dims, "m");
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "m"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        // First search, cap 1 batch (32): bounded initial migration — Pending,
+        // never ReadyMissing/Ready, no fingerprint installed yet.
+        let out1 = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder.clone(),
+            60,
+            0,
+            Some(1),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out1, VectorReadiness::Pending { owned: true }),
+            "{out1:?}"
+        );
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert!(
+            idx.installed_vector_fingerprint_hash().is_none(),
+            "no vector Ready before the atomic install"
+        );
+        drop(idx);
+
+        // Second search completes the atomic migration.
+        let out2 = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder,
+            60,
+            0,
+            Some(2),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(out2, VectorReadiness::Ready), "{out2:?}");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(idx.vec_row_count(), idx.chunk_count());
+        assert_eq!(idx.vec_row_count(), 40);
+        assert_eq!(
+            idx.installed_vector_fingerprint_hash().as_deref(),
+            Some(fp_for(&spec).hash.as_str()),
+            "fingerprint installed only by the atomic install"
         );
     }
 }

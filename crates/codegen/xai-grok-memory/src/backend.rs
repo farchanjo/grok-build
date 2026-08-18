@@ -12,11 +12,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rusqlite::params;
+
 use xai_grok_tools::types::memory_backend::{MemoryBackend, MemorySearchResult};
 
 use super::embedding::EmbeddingProvider as _;
 use super::storage::MemoryStorage;
 use super::watcher::MemoryFileWatcher;
+use crate::schema;
 
 /// Embedding-client credentials scoped to a trusted endpoint. Only
 /// [`Self::for_endpoint`] retains a live credential; the empty default fails closed.
@@ -413,6 +416,63 @@ impl MemoryBackendImpl {
     }
 }
 
+/// Per-search batch cap for the `ReadyMissing` compatible-gap backfill — the
+/// same bounded discipline as the rebuild loop (batches of 32, capped at 4),
+/// so a large one-shot gap is processed across subsequent searches instead of
+/// one synchronous embed of everything (L1).
+const READY_MISSING_BACKFILL_BATCH_CAP: usize = 4;
+/// Batch size for the incremental backfill path (matches the rebuild batch).
+const BACKFILL_BATCH_SIZE: usize = 32;
+
+/// Whether the persisted incremental-backfill backoff is currently active
+/// (`now < deadline`). Written only by a genuine incremental embed failure
+/// (never by a cap pause); suppresses the `ReadyMissing` gap backfill until it
+/// passes, so a failing embedder is not hammered every search while the gap
+/// still self-heals eventually (L2).
+fn backfill_backoff_active(index: &super::index::MemoryIndex) -> bool {
+    let until: i64 = index
+        .db()
+        .query_row(
+            schema::GET_META_SQL,
+            params![schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|s| s.trim().parse::<i64>().unwrap_or(0))
+        .unwrap_or(0);
+    until > 0 && now_secs() < until
+}
+
+/// Persist an incremental-backfill backoff deadline (`now + backoff_secs`).
+fn record_backfill_backoff(index: &super::index::MemoryIndex, backoff_secs: i64) {
+    if backoff_secs <= 0 {
+        return;
+    }
+    let until = now_secs() + backoff_secs;
+    let _ = index.db().execute(
+        schema::UPSERT_META_SQL,
+        params![
+            schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL,
+            until.to_string()
+        ],
+    );
+}
+
+/// Clear any persisted incremental-backfill backoff (a successful pass means
+/// the embedder recovered; the gap self-heals immediately).
+fn clear_backfill_backoff(index: &super::index::MemoryIndex) {
+    let _ = index.db().execute(
+        schema::UPSERT_META_SQL,
+        params![schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL, "0"],
+    );
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 #[async_trait::async_trait]
 impl MemoryBackend for MemoryBackendImpl {
     #[tracing::instrument(name = "memory.search", skip_all, fields(
@@ -555,12 +615,26 @@ impl MemoryBackend for MemoryBackendImpl {
         // missing current chunks so the gap heals on this/next search without
         // a full rebuild (G3/R-01 — the watcher-disabled path still
         // self-heals).
+        let backfill_backed_off = backfill_backoff_active(&index);
         if matches!(
             readiness,
             crate::rebuild::VectorReadiness::ReadyMissing { .. }
         ) && reindex_chunks.is_empty()
         {
-            reindex_chunks = index.chunks_without_embeddings().unwrap_or_default();
+            if backfill_backed_off {
+                // L2: persisted backoff from a genuine incremental embed
+                // failure — don't re-attempt the gap this search (vector
+                // search stays active; the gap retries after the deadline
+                // passes).
+            } else {
+                let mut missing = index.chunks_without_embeddings().unwrap_or_default();
+                // L1: bound the synchronous ReadyMissing backfill per search
+                // using the same batch discipline as the rebuild loop; a large
+                // gap is processed across subsequent searches, never all at
+                // once.
+                missing.truncate(READY_MISSING_BACKFILL_BATCH_CAP * BACKFILL_BATCH_SIZE);
+                reindex_chunks = missing;
+            }
         }
 
         // ── Async phase: embed missing chunks (no &index borrow) ──
@@ -569,11 +643,13 @@ impl MemoryBackend for MemoryBackendImpl {
         // we must never mix old/new-space rows into the vec table.
         let mut embedded_count: usize = 0;
         if vec_active
+            && !backfill_backed_off
             && !reindex_chunks.is_empty()
             && let Some(ref embedder) = embedder
         {
             let mut upserts: Vec<(String, Vec<f32>)> = Vec::new();
-            for batch in reindex_chunks.chunks(32) {
+            let mut failed = false;
+            for batch in reindex_chunks.chunks(BACKFILL_BATCH_SIZE) {
                 let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
                 match embedder.embed_batch(&texts).await {
                     Ok(embeddings) => {
@@ -585,10 +661,23 @@ impl MemoryBackend for MemoryBackendImpl {
                         tracing::warn!(
                             target: xai_grok_telemetry::memory_log::TARGET,
                             error = %e,
-                            "embedding batch failed during sync-on-search, skipping"
+                            "embedding batch failed during sync-on-search, skipping; backfill backs off"
                         );
+                        // L2: stop after a genuine failure — retries are gated
+                        // by the persisted backoff, not repeated per search.
+                        failed = true;
+                        break;
                     }
                 }
+            }
+            if failed {
+                // L2: persist an incremental-backfill backoff. A cap pause (no
+                // failure) never arms it.
+                record_backfill_backoff(&index, self.rebuild_backoff_secs);
+            } else {
+                // A successful pass means the embedder recovered; clear any
+                // stale backoff so the gap self-heals immediately.
+                clear_backfill_backoff(&index);
             }
             // Sync: upsert embeddings back (borrows &index, no await)
             for (chunk_id, emb) in &upserts {
@@ -1643,6 +1732,301 @@ mod factory_tests {
             idx.vec_row_count(),
             idx.chunk_count(),
             "vector set is complete after the self-heal"
+        );
+    }
+
+    /// L1: the `ReadyMissing` incremental backfill is bounded per search with
+    /// the same batch discipline as the rebuild loop (4 × 32 = 128). A large
+    /// gap is processed across subsequent searches, never all at once, and a
+    /// cap pause never arms the backfill backoff.
+    #[tokio::test]
+    async fn test_search_ready_missing_backfill_is_capped_per_search() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+
+        // Install a fingerprint + one vector (chunk A).
+        let spec = crate::retrieval::stub_spec(dims, "m");
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let fa = tmp.path().join("a.md");
+            std::fs::write(&fa, "# A\n\nRust a content.").unwrap();
+            idx.reindex_file(&fa, "workspace").unwrap();
+        }
+        let install_embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> =
+            Some(std::sync::Arc::new(
+                crate::embedding::RetrievalEmbeddingProvider::new(std::sync::Arc::new(
+                    crate::retrieval::FakeMemoryRetrieval::new(dims, "m"),
+                )),
+            ));
+        let out = crate::rebuild::ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            install_embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, crate::rebuild::VectorReadiness::Ready),
+            "{out:?}"
+        );
+
+        // A large gap: 140 chunks in ONE file, none embedded → 141 chunks / 1 row.
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let mut content = String::new();
+            for i in 0..140 {
+                content.push_str(&format!(
+                    "## B{i}\n\nRust gap content {i}.\n\nPadding filler sentence so the \
+                     document exceeds max_chunk_chars and the chunker splits by sections.\n\n"
+                ));
+            }
+            let f = tmp.path().join("gap.md");
+            std::fs::write(&f, &content).unwrap();
+            idx.reindex_file(&f, "workspace").unwrap();
+            assert_eq!(idx.chunk_count(), 141);
+            assert_eq!(idx.vec_row_count(), 1);
+            drop(idx);
+        }
+
+        let params = MemoryBackendParams {
+            retrieval: Some(std::sync::Arc::new(
+                crate::retrieval::FakeMemoryRetrieval::new(dims, "m"),
+            )),
+            watcher: None,
+            ..make_params_fts_only("cap-test")
+        };
+        let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
+
+        // First search: the ReadyMissing backfill is capped at 4×32 = 128.
+        let _ = backend.search("rust", 5, 0.0).await.unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            1 + 128,
+            "cap must bound the synchronous ReadyMissing backfill per search"
+        );
+        assert_eq!(idx.vec_row_count(), idx.chunk_count() - 12);
+        // Cap pause is not a failure: no backfill backoff is persisted.
+        let backoff: String = idx
+            .db()
+            .query_row(
+                crate::schema::GET_META_SQL,
+                rusqlite::params![crate::schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "0".into());
+        assert_eq!(backoff, "0", "cap pause must not arm the backfill backoff");
+        drop(idx);
+
+        // Second search resumes and completes the gap.
+        let _ = backend.search("rust", 5, 0.0).await.unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(idx.vec_row_count(), idx.chunk_count(), "gap healed");
+        assert_eq!(idx.vec_row_count(), 141);
+    }
+
+    /// L2: a genuine incremental-embed failure persists a backfill backoff
+    /// (production-like 60s); a backed-off search does not re-attempt the gap
+    /// (only the query embed runs), and once the deadline passes a healthy
+    /// embedder self-heals. A cap pause never arms this backoff.
+    #[tokio::test]
+    async fn test_search_ready_missing_backfill_backs_off_after_failure() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+
+        // Install fingerprint + vector for chunk A.
+        let spec = crate::retrieval::stub_spec(dims, "m");
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let fa = tmp.path().join("a.md");
+            std::fs::write(&fa, "# A\n\nRust a content.").unwrap();
+            idx.reindex_file(&fa, "workspace").unwrap();
+        }
+        let install_embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> =
+            Some(std::sync::Arc::new(
+                crate::embedding::RetrievalEmbeddingProvider::new(std::sync::Arc::new(
+                    crate::retrieval::FakeMemoryRetrieval::new(dims, "m"),
+                )),
+            ));
+        let out = crate::rebuild::ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            install_embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, crate::rebuild::VectorReadiness::Ready),
+            "{out:?}"
+        );
+
+        // One missing chunk (B) → ReadyMissing { missing: 1 }.
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let fb = tmp.path().join("b.md");
+            std::fs::write(&fb, "# B\n\nRust b content.").unwrap();
+            idx.reindex_file(&fb, "workspace").unwrap();
+            drop(idx);
+        }
+
+        // A genuinely failing embedder (production-like backoff 60s).
+        let failing = std::sync::Arc::new(
+            crate::retrieval::FakeMemoryRetrieval::new(dims, "m").with_embedment(|_| {
+                Err(crate::retrieval::RetrievalError::new(
+                    crate::retrieval::RetrievalErrorKind::Transient,
+                ))
+            }),
+        );
+        let params = MemoryBackendParams {
+            retrieval: Some(failing.clone()),
+            watcher: None,
+            rebuild_backoff_secs: 60,
+            ..make_params_fts_only("backoff-test")
+        };
+        let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
+
+        // Search #1: incremental backfill fails → persisted backoff, gap stays.
+        let _ = backend.search("rust", 5, 0.0).await.unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(idx.vec_row_count(), 1, "failed backfill leaves the gap");
+        let until: i64 = idx
+            .db()
+            .query_row(
+                crate::schema::GET_META_SQL,
+                rusqlite::params![crate::schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL],
+                |r| r.get::<_, String>(0),
+            )
+            .map(|s| s.trim().parse::<i64>().unwrap_or(0))
+            .unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        assert!(
+            until > now,
+            "genuine failure must persist a backfill backoff"
+        );
+        drop(idx);
+
+        // Search #2 (immediately): backoff active → gap is NOT re-attempted.
+        let embed_calls_before = failing.embed_calls();
+        let _ = backend.search("rust", 5, 0.0).await.unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            1,
+            "backoff must suppress the gap retry"
+        );
+        drop(idx);
+        assert_eq!(
+            failing.embed_calls() - embed_calls_before,
+            1,
+            "a backed-off search must only run the query embed, never the gap backfill"
+        );
+
+        // Deadline passes (simulate by clearing the persisted value): a
+        // healthy embedder self-heals the gap on the next search.
+        {
+            let idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            idx.db()
+                .execute(
+                    crate::schema::UPSERT_META_SQL,
+                    rusqlite::params![crate::schema::META_VECTOR_BACKFILL_BACKOFF_UNTIL, "0"],
+                )
+                .unwrap();
+            drop(idx);
+        }
+        let healthy_params = MemoryBackendParams {
+            retrieval: Some(std::sync::Arc::new(
+                crate::retrieval::FakeMemoryRetrieval::new(dims, "m"),
+            )),
+            watcher: None,
+            ..make_params_fts_only("backoff-heal")
+        };
+        let healthy_backend =
+            MemoryBackendImpl::from_session_params(storage.clone(), &healthy_params);
+        let _ = healthy_backend.search("rust", 5, 0.0).await.unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            2,
+            "gap self-heals once the embedder recovers"
         );
     }
 }

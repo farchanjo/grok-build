@@ -7,6 +7,15 @@
 //!
 //! When sqlite-vec is available, a fourth table is created:
 //! - `chunks_vec` — vec0 virtual table for KNN vector search
+//!
+//! **Persisted identity privacy:** `meta[META_VECTOR_FINGERPRINT]` stores the
+//! canonical fingerprint payload, which is exactly the vector-identity
+//! determinant set (provider/host/endpoint labels, model, dims, protocol,
+//! encoding, doc-prep, schema version). It is credential-free by design: no
+//! API keys, tokens, query text, chunk text, vectors, or provider secrets are
+//! ever persisted. The identity labels (`provider_instance_id`, `origin_host`)
+//! are necessary identity determinants — two accounts on the same host/model
+//! are different embedding spaces — and are not secrets.
 
 /// Schema version. Bump when making breaking schema changes that require
 /// dropping and recreating tables.
@@ -22,6 +31,12 @@ pub const META_VECTOR_SCHEMA_VERSION: &str = "vector_schema_version";
 pub const META_VECTOR_REBUILD_PENDING: &str = "vector_rebuild_pending";
 /// meta key for the intended fingerprint currently staged ('' when none).
 pub const META_VECTOR_STAGING_FP: &str = "vector_rebuild_staging_fp";
+/// meta key for the persisted incremental-backfill backoff deadline (unix
+/// seconds; '0' when none). Written **only** by a genuine incremental embed
+/// failure (never by a batch-cap pause); suppresses the `ReadyMissing`
+/// compatible-gap backfill until it passes, so a failing embedder is not
+/// hammered every search while the gap still self-heals eventually (L2).
+pub const META_VECTOR_BACKFILL_BACKOFF_UNTIL: &str = "vector_backfill_backoff_until";
 /// meta key for the index-level (non-vector) schema version.
 pub const META_SCHEMA_VERSION: &str = "schema_version";
 
@@ -84,6 +99,7 @@ INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_FINGERPRINT}', '');
 INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_SCHEMA_VERSION}', '0');
 INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_REBUILD_PENDING}', '');
 INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_STAGING_FP}', '');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('{META_VECTOR_BACKFILL_BACKOFF_UNTIL}', '0');
 "#
     );
 
