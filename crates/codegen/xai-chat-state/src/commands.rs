@@ -167,6 +167,11 @@ pub enum ChatStateCommand {
     /// Increment prompt_index (called at start of each user turn).
     IncrementPromptIndex,
 
+    /// Roll back a prompt_index that was incremented for a turn whose user
+    /// item was never actually inserted (e.g. a hard prime failure that
+    /// aborts before the user message is pushed).
+    DecrementPromptIndex,
+
     /// Update the sampling config (e.g., model switch).
     UpdateInferenceSettings { config: InferenceSettings },
 
@@ -493,6 +498,7 @@ mod tests {
         };
         let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
         let _ = ChatStateCommand::IncrementPromptIndex;
+        let _ = ChatStateCommand::DecrementPromptIndex;
         let _ = ChatStateCommand::UpdateInferenceSettings {
             config: InferenceSettings {
                 base_url: String::new(),

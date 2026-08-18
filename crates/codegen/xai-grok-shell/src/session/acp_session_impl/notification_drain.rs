@@ -269,7 +269,7 @@ impl SessionActor {
             )
         };
         self.apply_tool_overrides_update(tool_overrides_update);
-        if matches!(origin, super::PromptOrigin::User) {
+        if origin.prime_eligible() {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
             }

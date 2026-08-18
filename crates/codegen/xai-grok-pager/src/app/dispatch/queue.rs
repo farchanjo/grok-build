@@ -412,6 +412,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     session_id,
                     blocks,
                     prompt_id,
+                    prompt_origin: None,
                 }]
             } else if !queued.images.is_empty() {
                 // Image-bearing prompt: build text + image content blocks.
@@ -434,6 +435,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     session_id,
                     blocks,
                     prompt_id,
+                    prompt_origin: None,
                 }]
             } else if multi {
                 // Stamp combinedDisplayTexts so reload paints multi-bubble. No
@@ -447,6 +449,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     session_id,
                     blocks: vec![acp::ContentBlock::Text(tb)],
                     prompt_id,
+                    prompt_origin: None,
                 }]
             } else {
                 // Normal prompt: send text as-is.
@@ -534,6 +537,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     session_id,
                     blocks,
                     prompt_id,
+                    // Typed carrier so the shell never primes a `/loop` cron
+                    // turn (stamped into `_meta.promptOrigin`).
+                    prompt_origin: Some(crate::app::actions::PromptOriginTag::SchedulerFired),
                 }],
                 page_flip_entry: flip.then_some(prompt_entry_id),
             }

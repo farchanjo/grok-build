@@ -125,14 +125,10 @@ impl ChatStateActor {
                 let _ = reply.send(());
             }
             ChatStateCommand::PushMessageBatch { items } => {
-                for item in items {
-                    self.push_user_message(item);
-                }
+                self.push_message_batch(items);
             }
             ChatStateCommand::PushMessageBatchAndAck { items, reply } => {
-                for item in items {
-                    self.push_user_message(item);
-                }
+                self.push_message_batch(items);
                 let _ = reply.send(());
             }
             ChatStateCommand::AppendWorkingDirectorySwitchAndAck {
@@ -213,6 +209,9 @@ impl ChatStateActor {
             }
             ChatStateCommand::IncrementPromptIndex => {
                 self.increment_prompt_index();
+            }
+            ChatStateCommand::DecrementPromptIndex => {
+                self.state.prompt_index = self.state.prompt_index.saturating_sub(1);
             }
             ChatStateCommand::UpdateInferenceSettings { config } => {
                 self.state.inference_settings = config;

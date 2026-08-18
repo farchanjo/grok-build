@@ -663,8 +663,9 @@ impl SessionActor {
     /// client's queued items are removed. The running turn is never touched.
     ///
     /// `/clear` also invalidates the PR18 [`InventoryCache`] and ephemeral
-    /// prime state: the user reset the queue, so any primed context built
-    /// around the old queue is stale.
+    /// prime state on EVERY successful clear command — even when nothing was
+    /// actually removed — because the user reset the queue, so any primed
+    /// context built around it is stale.
     pub(super) async fn handle_clear_queue(&self, owner: Option<&str>) {
         let mut state = self.state.lock().await;
         // Partition rather than `retain`: each cleared user prompt still has a
@@ -674,7 +675,6 @@ impl SessionActor {
         // spurious "Turn failed" on the running turn.
         let running_id = state.running_prompt_id().map(str::to_string);
         let mut kept = VecDeque::with_capacity(state.pending_inputs.len());
-        let mut cleared_any = false;
         for item in std::mem::take(&mut state.pending_inputs) {
             let keep = match &item.queue_meta {
                 // Non-queue (synthetic) items always stay.
@@ -689,14 +689,14 @@ impl SessionActor {
             if keep {
                 kept.push_back(item);
             } else {
-                cleared_any = true;
                 Self::respond_removed_prompt(item.respond_to);
             }
         }
         state.pending_inputs = kept;
-        if cleared_any {
-            self.prime_cache.invalidate();
-        }
+        // Invalidate on every successful clear, not only when rows were
+        // removed: the prime inventory/state is tied to the queue context the
+        // user just reset.
+        self.prime_cache.invalidate();
         self.broadcast_queue_changed(&state);
     }
 

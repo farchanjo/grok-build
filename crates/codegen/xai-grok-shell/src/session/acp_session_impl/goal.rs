@@ -1438,13 +1438,11 @@ impl SessionActor {
         };
         {
             let state = self.state.lock().await;
-            if state.pending_inputs.iter().any(|i| {
-                matches!(
-                    i.origin,
-                    super::super::PromptOrigin::GoalSummary
-                        | super::super::PromptOrigin::GoalClassifierNudge,
-                )
-            }) {
+            if state
+                .pending_inputs
+                .iter()
+                .any(|i| i.origin == super::super::PromptOrigin::GoalSummary)
+            {
                 return;
             }
         }
@@ -1454,13 +1452,11 @@ impl SessionActor {
         let (respond_to, _) = tokio::sync::oneshot::channel();
         {
             let mut state = self.state.lock().await;
-            if state.pending_inputs.iter().any(|i| {
-                matches!(
-                    i.origin,
-                    super::super::PromptOrigin::GoalSummary
-                        | super::super::PromptOrigin::GoalClassifierNudge,
-                )
-            }) {
+            if state
+                .pending_inputs
+                .iter()
+                .any(|i| i.origin == super::super::PromptOrigin::GoalSummary)
+            {
                 tracing::debug!("continuation reminder already pending; skipping duplicate");
                 return;
             }

@@ -289,6 +289,9 @@ pub enum PersistenceMsg {
     },
     ContentChunk(PersistenceContentChunk),
     Chat(ConversationItem),
+    /// A consecutive chat batch (e.g. a hidden prime `<system_reminder>`
+    /// immediately before its user message) persisted as ONE durable append.
+    ChatBatch(Vec<ConversationItem>),
     AppendCwdSwitchAndAck {
         item: ConversationItem,
         respond_to: tokio::sync::oneshot::Sender<
@@ -1982,6 +1985,15 @@ impl SessionPersistence {
                         .await
                     {
                         tracing::warn!(?e, "failed to write chat message");
+                    }
+                }
+                PersistenceMsg::ChatBatch(chat_msgs) => {
+                    if let Err(e) = self
+                        .storage
+                        .append_chat_messages(&self.info, &chat_msgs)
+                        .await
+                    {
+                        tracing::warn!(?e, "failed to write chat message batch");
                     }
                 }
                 PersistenceMsg::AppendCwdSwitchAndAck { item, respond_to } => {

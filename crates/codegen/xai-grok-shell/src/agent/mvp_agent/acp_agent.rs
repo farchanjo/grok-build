@@ -2614,12 +2614,24 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("clientIdentifier"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let prompt_screen_mode = arguments
+                let prompt_screen_mode = arguments
             .meta
             .as_ref()
             .and_then(|m| m.get("screenMode"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Typed cross-boundary origin carrier (PR19): the ACP prompt path is
+        // the client input path. An absent meta tag (old clients) is a real
+        // user prompt; the pager stamps `scheduler_fired` for `/loop` cron
+        // turns; any other tag fails closed to Unknown (never primes). The
+        // origin is never derived from the prompt-id string.
+        let origin = crate::session::PromptOrigin::from_prompt_origin_meta(
+            arguments
+                .meta
+                .as_ref()
+                .and_then(|m| m.get(crate::session::PROMPT_ORIGIN_META_KEY))
+                .and_then(|v| v.as_str()),
+        );
         let json_schema = arguments
             .meta
             .as_ref()
@@ -2653,7 +2665,7 @@ impl acp::Agent for MvpAgent {
             .cmd_tx
             .send(SessionCommand::Prompt {
                 prompt_id: prompt_id.clone(),
-                origin: crate::session::PromptOrigin::User,
+                origin,
                 prompt_blocks: arguments.prompt.clone(),
                 prompt_mode,
                 artifact_upload_ctx: trace_context

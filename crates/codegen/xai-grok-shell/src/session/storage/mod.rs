@@ -1219,6 +1219,22 @@ pub trait StorageAdapter: Send + Sync {
     /// Append a chat message and increment counter.
     async fn append_chat_message(&self, info: &Info, message: &ConversationItem) -> io::Result<()>;
 
+    /// Append a consecutive batch of chat messages (e.g. a hidden prime
+    /// `<system_reminder>` directly before the real user message) as ONE
+    /// durable append, then increment the counter by the batch length. The
+    /// default implementation appends each message separately; storage
+    /// backends that can append multiple records in one sync override this.
+    async fn append_chat_messages(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> io::Result<()> {
+        for message in messages {
+            self.append_chat_message(info, message).await?;
+        }
+        Ok(())
+    }
+
     /// Append one working-directory switch generation exactly once.
     async fn append_cwd_switch_commit_aware(
         &self,

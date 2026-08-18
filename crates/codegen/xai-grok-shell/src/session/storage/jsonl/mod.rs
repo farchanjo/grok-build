@@ -1683,6 +1683,39 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
+    async fn append_chat_messages(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> io::Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        // Serialize the whole batch into ONE buffer and append it in a single
+        // sync: a crash either persists the entire `[reminder, user]` pair or
+        // a torn tail (healed as one corrupt line), so a prime reminder can
+        // never be durably orphaned without its user message.
+        let mut buf: Vec<u8> = Vec::new();
+        for message in messages {
+            buf.extend(
+                serde_json::to_vec(message)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            );
+            buf.push(b'\n');
+        }
+        Self::append_jsonl_line_blocking(self.chat_file(info), buf, AppendDurability::Buffered)
+            .await?;
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                record_activity: true,
+                chat_messages: Some(super::summary_write::CounterOp::Increment(messages.len())),
+                chat_format_version: Some(CHAT_FORMAT_VERSION),
+                ..Default::default()
+            },
+        )
+        .await
+    }
     async fn append_cwd_switch_commit_aware(
         &self,
         info: &Info,

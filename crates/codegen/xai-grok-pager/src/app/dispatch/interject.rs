@@ -162,6 +162,9 @@ pub(super) fn dispatch_send_prompt_now(
         session_id,
         blocks,
         prompt_id,
+        // A send-now interjection is user-typed: no origin tag (User on the
+        // ACP path).
+        prompt_origin: None,
     }]
 }
 

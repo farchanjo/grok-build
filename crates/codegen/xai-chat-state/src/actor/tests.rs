@@ -214,7 +214,27 @@ async fn message_batch_appends_reminder_before_real_user_in_order() {
     assert_eq!(text, "real question");
 
     let records = h.drain_persistence();
-    assert_eq!(records.len(), 2, "both items must persist in order");
+    // The batch is persisted as ONE durable append (MessageBatch), so a crash
+    // can never durably orphan the prime reminder without its user message.
+    assert_eq!(
+        records.len(),
+        1,
+        "batch must persist as a single durable record"
+    );
+    match &records[0] {
+        PersistenceRecord::MessageBatch(items) => {
+            assert_eq!(items.len(), 2, "batch carries both items in order");
+            let ConversationItem::User(first) = &items[0] else {
+                panic!("first batched item must be the reminder");
+            };
+            assert_eq!(
+                first.synthetic_reason,
+                Some(SyntheticReason::SystemReminder),
+                "batched reminder must stay a hidden SystemReminder"
+            );
+        }
+        other => panic!("expected MessageBatch record, got {other:?}"),
+    }
 }
 
 #[tokio::test]

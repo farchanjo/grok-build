@@ -1537,6 +1537,26 @@ pub enum RetrievalManagementResult {
     Error(String),
 }
 
+/// Typed origin tag a client may attach to a structured prompt it sends over
+/// ACP (additive `_meta.promptOrigin`). Tag-only and small: today it exists so
+/// the pager's `/loop` scheduler can stamp `scheduler_fired` so the shell
+/// never primes a cron turn. Absent tag on the ACP prompt path means a real
+/// user prompt; unknown tags fail closed server-side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptOriginTag {
+    /// A scheduled `/loop` cron turn fired by the pager scheduler.
+    SchedulerFired,
+}
+
+impl PromptOriginTag {
+    /// The additive `_meta.promptOrigin` wire tag (snake_case).
+    pub fn as_meta_tag(&self) -> &'static str {
+        match self {
+            PromptOriginTag::SchedulerFired => "scheduler_fired",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Effect {
     /// Create a new ACP session.
@@ -1802,6 +1822,10 @@ pub enum Effect {
         blocks: Vec<acp::ContentBlock>,
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
+        /// Optional typed origin tag stamped into `_meta.promptOrigin` (e.g.
+        /// `scheduler_fired` for `/loop` cron turns). `None` = a real user
+        /// prompt on the ACP input path.
+        prompt_origin: Option<PromptOriginTag>,
     },
     /// Cancel-and-send: `session/prompt` stamped with `_meta.sendNow`, so the
     /// shell cancels the running turn and runs this prompt next (background
@@ -1813,6 +1837,8 @@ pub enum Effect {
         blocks: Vec<acp::ContentBlock>,
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
+        /// See [`Effect::SendPromptBlocks::prompt_origin`].
+        prompt_origin: Option<PromptOriginTag>,
     },
     /// Toggle plan mode — fire-and-forget signal to the shell.
     TogglePlanMode { session_id: acp::SessionId },

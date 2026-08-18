@@ -1121,8 +1121,8 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id }
-        | Effect::SendPromptNow { agent_id, session_id, blocks, prompt_id } => {
+        Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id, prompt_origin }
+        | Effect::SendPromptNow { agent_id, session_id, blocks, prompt_id, prompt_origin } => {
             let send_now = effect_is_send_now;
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
@@ -1137,11 +1137,18 @@ pub(crate) fn execute(
                         "kind": if send_now { "send_now" } else { "blocks" },
                         "block_count": blocks.len(),
                         "prompt_id": prompt_id,
+                        "origin_tag": prompt_origin.map(|t| t.as_meta_tag()),
                     }),
                         ),
                     );
                     let send_start = std::time::Instant::now();
                     let mut meta = prompt_request_meta(&prompt_id, screen_mode);
+                    if let (Some(tag), Some(map)) = (prompt_origin, meta.as_object_mut()) {
+                        map.insert(
+                            xai_grok_shell::session::PROMPT_ORIGIN_META_KEY.into(),
+                            serde_json::Value::String(tag.as_meta_tag().into()),
+                        );
+                    }
                     if send_now && let Some(map) = meta.as_object_mut() {
                         map.insert("sendNow".into(), serde_json::Value::Bool(true));
                     }

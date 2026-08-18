@@ -34,6 +34,12 @@ impl ChatPersistence for ChannelChatPersistence {
         let _ = self.tx.send(PersistenceMsg::Chat(item.clone()));
     }
 
+    fn persist_message_batch(&mut self, items: &[ConversationItem]) {
+        if !items.is_empty() {
+            let _ = self.tx.send(PersistenceMsg::ChatBatch(items.to_vec()));
+        }
+    }
+
     fn persist_working_directory_switch_and_ack(
         &mut self,
         item: &ConversationItem,

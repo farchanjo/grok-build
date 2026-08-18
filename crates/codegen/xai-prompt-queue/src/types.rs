@@ -7,10 +7,16 @@ pub const COMBINED_DISPLAY_TEXTS_META: &str = "combinedDisplayTexts";
 /// Typed wire tag describing who originated a queue row / running turn.
 ///
 /// Additive and default-compatible: a legacy wire entry without an `origin`
-/// deserializes to `None`, which a consumer maps fail-closed to an
+/// deserializes to `None`, which consumers map fail-closed to an
 /// "unknown / unclassified" origin — never to a real `User` turn. Tag-only
 /// (no payloads): completion/task ids ride the prompt-id string. New variants
 /// are additive; the JSON form uses snake_case.
+///
+/// **Display metadata only.** The shell writes this tag for clients to render
+/// (e.g. distinguish a cron row); it is NEVER read back into lifecycle or
+/// prime decisions. Cross-boundary origins that gate security/lifecycle are
+/// carried by the typed in-memory value or the ACP prompt-request origin meta
+/// tag instead.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueOrigin {
@@ -18,6 +24,8 @@ pub enum QueueOrigin {
     User,
     /// A stranded user interjection promoted to its own turn (side-channel).
     Interjection,
+    /// A child sub-agent session's first prompt (parent-authored task text).
+    SubagentAssignment,
     /// Auto-wake from a completed background task.
     TaskCompleted,
     /// Auto-wake from a completed subagent.
@@ -28,8 +36,6 @@ pub enum QueueOrigin {
     NotificationDrain,
     /// Orchestrator summary turn.
     GoalSummary,
-    /// Verification-stage nudge.
-    GoalClassifierNudge,
     /// Scheduled task (`/loop`) prompt.
     SchedulerFired,
     /// Injected plan-resume follow-up turn.

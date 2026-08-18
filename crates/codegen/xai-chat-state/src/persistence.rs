@@ -68,6 +68,17 @@ pub trait ChatPersistence: Send + 'static {
     /// Persist a single conversation item (append to chat_history.jsonl).
     fn persist_message(&mut self, item: &ConversationItem);
 
+    /// Persist a batch of consecutive conversation items as ONE durable
+    /// append (e.g. a hidden prime `<system_reminder>` immediately followed
+    /// by the real user message). Implementations that support a single
+    /// journal append for the whole batch override this; the default falls
+    /// back to per-item [`Self::persist_message`].
+    fn persist_message_batch(&mut self, items: &[ConversationItem]) {
+        for item in items {
+            self.persist_message(item);
+        }
+    }
+
     /// Persist one working-directory switch generation and report commit status.
     fn persist_working_directory_switch_and_ack(
         &mut self,
@@ -97,6 +108,8 @@ pub trait ChatPersistence: Send + 'static {
 pub enum PersistenceRecord {
     /// A single message was persisted.
     Message(ConversationItem),
+    /// A consecutive batch was persisted as one durable append.
+    MessageBatch(Vec<ConversationItem>),
     /// A persistence-acknowledged switch append was requested.
     AcknowledgedMessage(ConversationItem),
     /// The full history was replaced.
@@ -215,6 +228,12 @@ impl MockPersistenceReceiver {
 impl ChatPersistence for MockChatPersistence {
     fn persist_message(&mut self, item: &ConversationItem) {
         let _ = self.tx.send(PersistenceRecord::Message(item.clone()));
+    }
+
+    fn persist_message_batch(&mut self, items: &[ConversationItem]) {
+        let _ = self
+            .tx
+            .send(PersistenceRecord::MessageBatch(items.to_vec()));
     }
 
     fn persist_working_directory_switch_and_ack(

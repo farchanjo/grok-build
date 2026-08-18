@@ -270,10 +270,12 @@ pub struct InventoryCache {
 struct CacheState {
     epoch: u64,
     dirty: Vec<(PathBuf, u64)>,
-    /// `(epoch-at-build, built-inventory)` for the session workspace. Reused
-    /// when the epoch is unchanged and no path was marked dirty after the
-    /// build; rebuilt on `/clear` (epoch bump), dirty-path marks, or overflow.
-    cached: Option<(u64, WorkspaceInventory)>,
+    /// `(epoch-at-build, canonical-built-root, built-inventory)` for the
+    /// session workspace. Reused when the epoch is unchanged, the requested
+    /// root resolves to the same canonical root as the cached build, and no
+    /// path was marked dirty after the build; rebuilt on `/clear` (epoch
+    /// bump), dirty-path marks, root change, or overflow.
+    cached: Option<(u64, PathBuf, WorkspaceInventory)>,
 }
 
 impl Default for InventoryCache {
@@ -295,7 +297,9 @@ impl InventoryCache {
 
     /// Return a workspace inventory, rebuilding via
     /// [`build_inventory`] only when the cache is stale:
-    /// - the epoch changed (`/clear`, dirty-overflow), or
+    /// - the epoch changed (`/clear`, dirty-overflow),
+    /// - the requested root resolves to a different canonical root than the
+    ///   cached build (cwd/worktree/root change), or
     /// - a path was marked dirty after the cached build (tool-touched).
     ///
     /// The blocked walk is bounded by [`InventoryLimits`]; callers drive it
@@ -304,21 +308,24 @@ impl InventoryCache {
     pub fn get_or_build(&self, root: &Path, limits: InventoryLimits) -> WorkspaceInventory {
         let mut s = self.state.lock().unwrap();
         let current_epoch = s.epoch;
+        let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let stale = match &s.cached {
-            Some((built_at, _)) if *built_at == current_epoch => {
+            Some((built_at, built_root, _))
+                if *built_at == current_epoch && *built_root == canonical_root =>
+            {
                 s.dirty.iter().any(|(_, marked)| *marked >= *built_at)
             }
             _ => true,
         };
         if !stale {
-            // Reuse the cached inventory for this epoch (unchanged / clean).
-            if let Some((_, inv)) = &s.cached {
+            // Reuse the cached inventory for this epoch + root (clean).
+            if let Some((_, _, inv)) = &s.cached {
                 return inv.clone();
             }
         }
         let inv = build_inventory(root, limits).unwrap_or_default();
         s.dirty.clear();
-        s.cached = Some((current_epoch, inv.clone()));
+        s.cached = Some((current_epoch, canonical_root, inv.clone()));
         inv
     }
 
@@ -655,5 +662,58 @@ mod tests {
         );
         // The cache epoch advanced past the pre-invalidate value.
         assert!(cache.epoch() >= 1, "invalidate must bump the cache epoch");
+    }
+
+    #[test]
+    fn inventory_cache_is_keyed_by_canonical_root() {
+        let tmp_a = tempfile::tempdir().unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+        let root_a = dunce::canonicalize(tmp_a.path()).unwrap();
+        let root_b = dunce::canonicalize(tmp_b.path()).unwrap();
+        write_tree(&root_a, &["a.rs"]);
+        write_tree(&root_b, &["b.rs"]);
+        let cache = InventoryCache::new();
+        let limits = InventoryLimits::default();
+
+        let inv_a = cache.get_or_build(&root_a, limits);
+        assert!(inv_a.paths().iter().any(|p| *p == "a.rs"));
+
+        // A different root must NOT reuse root_a's cached inventory: the cwd
+        // change forces a rebuild rooted at root_b.
+        let inv_b = cache.get_or_build(&root_b, limits);
+        assert!(
+            inv_b.paths().iter().any(|p| *p == "b.rs"),
+            "root change must rebuild with the new root's files"
+        );
+        assert!(
+            !inv_b.paths().iter().any(|p| *p == "a.rs"),
+            "root change must never reuse another root's inventory"
+        );
+
+        // Root_a's inventory is still cached and reused unchanged.
+        let inv_a2 = cache.get_or_build(&root_a, limits);
+        assert!(inv_a2.paths().iter().any(|p| *p == "a.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_cache_treats_symlinked_roots_as_same_canonical_root() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = dunce::canonicalize(tmp.path()).unwrap();
+        let link = tmp.path().join("linked");
+        symlink(&real, &link).unwrap();
+        write_tree(&real, &["a.rs"]);
+        let cache = InventoryCache::new();
+        let limits = InventoryLimits::default();
+
+        let via_real = cache.get_or_build(&real, limits);
+        assert!(via_real.paths().iter().any(|p| *p == "a.rs"));
+        // The symlinked path canonicalizes to the same root, so it reuses the
+        // cached inventory (no spurious rebuild, no duplicate walk).
+        let via_link = cache.get_or_build(&link, limits);
+        assert!(via_link.paths().iter().any(|p| *p == "a.rs"));
+        // Same canonical root => cache hit (identical entry list, no dup).
+        assert_eq!(via_link.paths(), via_real.paths());
     }
 }

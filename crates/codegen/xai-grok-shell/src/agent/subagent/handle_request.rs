@@ -1648,7 +1648,10 @@ pub(crate) async fn handle_assigned_subagent_request(
         .cmd_tx
         .send(SessionCommand::Prompt {
             prompt_id: child_prompt_id.clone(),
-            origin: crate::session::PromptOrigin::User,
+            // Parent-authored task assignment, not a real typed user turn:
+            // never prime-eligible. A later explicit user turn in the child may
+            // prime using the child's own workspace/inventory.
+            origin: crate::session::PromptOrigin::SubagentAssignment,
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
             prompt_mode: crate::session::plan_mode::PromptMode::Agent,
             artifact_upload_ctx: ctx

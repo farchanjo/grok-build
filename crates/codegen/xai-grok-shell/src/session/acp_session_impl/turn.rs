@@ -580,7 +580,15 @@ fn user_echo_mode(origin: &super::super::PromptOrigin) -> UserEchoMode {
         // rendered side-channel content — never broadcast as a user prompt.
         super::super::PromptOrigin::Interjection
         | super::super::PromptOrigin::NotificationDrain => UserEchoMode::PersistOnly,
-        _ => UserEchoMode::Broadcast,
+        super::super::PromptOrigin::User
+        | super::super::PromptOrigin::SubagentAssignment
+        | super::super::PromptOrigin::TaskCompleted { .. }
+        | super::super::PromptOrigin::SubagentCompleted { .. }
+        | super::super::PromptOrigin::WorkflowCompleted { .. }
+        | super::super::PromptOrigin::GoalSummary
+        | super::super::PromptOrigin::SchedulerFired
+        | super::super::PromptOrigin::PlanResume
+        | super::super::PromptOrigin::Unknown => UserEchoMode::Broadcast,
     }
 }
 /// Extract the plain text of a user-role `ConversationItem` (PR19 prime
@@ -718,6 +726,7 @@ impl SessionActor {
         self: &Arc<Self>,
         origin: &crate::session::PromptOrigin,
         user_chat: &xai_grok_inference_types::ConversationItem,
+        turn_cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Option<xai_grok_inference_types::ConversationItem>, acp::Error> {
         // ── Prime gate: ONLY an explicit real `User` + native backend. ─────
         if !origin.prime_eligible() {
@@ -789,11 +798,7 @@ impl SessionActor {
             inventory: Some(&owned_inventory),
         };
 
-        let result = crate::session::prime::run_prime_selection(
-            &input,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
+        let result = crate::session::prime::run_prime_selection(&input, turn_cancel.clone()).await;
 
         match result {
             Ok(sel) if sel.cancelled => Ok(None),
@@ -1325,7 +1330,7 @@ impl SessionActor {
         self.maybe_inject_date_rollover_reminder().await;
         self.inject_plan_mode_reminders().await;
         self.inject_resumed_tasks_reminder();
-        if matches!(&origin, super::super::PromptOrigin::User) {
+        if origin.prime_eligible() {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);
             }
@@ -1440,10 +1445,9 @@ impl SessionActor {
             }
             // The interrupt reminder applies to a real user turn (User) or a
             // promoted interjection (the user typed it mid-turn). Legacy
-            // Unknown is ambiguous, so it is omitted here.
-            if origin.prime_eligible()
-                || matches!(&origin, super::super::PromptOrigin::Interjection)
-            {
+            // Unknown and parent-authored assignments are ambiguous, so they
+            // are omitted here (is_user_typed is exhaustive).
+            if origin.is_user_typed() {
                 self.maybe_inject_interrupt_reminder().await;
             }
             let mut user_chat = match &origin {
@@ -1462,14 +1466,12 @@ impl SessionActor {
                 super::super::PromptOrigin::GoalSummary => {
                     ConversationItem::goal_summary(user_message)
                 }
-                super::super::PromptOrigin::GoalClassifierNudge => {
-                    ConversationItem::goal_classifier_nudge(user_message)
-                }
                 super::super::PromptOrigin::SchedulerFired => {
                     ConversationItem::scheduler_fired(user_message)
                 }
                 super::super::PromptOrigin::PlanResume
                 | super::super::PromptOrigin::Interjection
+                | super::super::PromptOrigin::SubagentAssignment
                 | super::super::PromptOrigin::Unknown => ConversationItem::user(user_message),
                 super::super::PromptOrigin::User => {
                     let mut item = ConversationItem::user(user_message);
@@ -1497,9 +1499,24 @@ impl SessionActor {
             // image normalization complete) and BEFORE the real
             // `ConversationItem::User` is appended + immediately before
             // inference. The hidden reminder is inserted straight before it.
-            let prime_reminder = self
-                .maybe_inject_prime_reminder(&origin, &user_chat)
-                .await?;
+            // The prime run shares the turn's cancellation token, so a
+            // cancel/abort stops semantic work and discards partial prime
+            // without breaking the real user item lifecycle.
+            let turn_cancel = self.turn_cancel.borrow().clone();
+            let prime_reminder = match self
+                .maybe_inject_prime_reminder(&origin, &user_chat, &turn_cancel)
+                .await
+            {
+                Ok(reminder) => reminder,
+                Err(error) => {
+                    // The turn began (index incremented, echo emitted), but
+                    // the user item was never inserted. Roll the prompt
+                    // index back and surface the typed error;
+                    // `handle_completion` emits the terminal failure state.
+                    self.chat_state_handle.decrement_prompt_index();
+                    return Err(error);
+                }
+            };
             let items: Vec<ConversationItem> = prime_reminder
                 .into_iter()
                 .chain(std::iter::once(user_chat))
@@ -1523,18 +1540,16 @@ impl SessionActor {
                     {
                         let _ = ack.send(());
                     } else {
-                        tracing::error!(
-                            session_id = %self.session_info.id.0,
-                            prompt_id = %prompt_id,
-                            "persist_ack flush barrier failed"
-                        );
+                        // Surface the failure: the user pair was not durably
+                        // accepted, so do not proceed to inference.
+                        return Err(acp::Error::internal_error().data(
+                            "persist flush barrier failed after prompt insertion; \
+                             user message pair was not durably accepted",
+                        ));
                     }
                 } else {
-                    tracing::error!(
-                        session_id = %self.session_info.id.0,
-                        prompt_id = %prompt_id,
-                        "persist_ack skipped: chat-state actor unavailable"
-                    );
+                    return Err(acp::Error::internal_error()
+                        .data("chat-state actor unavailable; user message pair was not accepted"));
                 }
             } else {
                 self.chat_state_handle.push_message_batch(items);
