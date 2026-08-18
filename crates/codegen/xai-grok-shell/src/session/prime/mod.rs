@@ -50,8 +50,9 @@ pub use self::render::{LoadedSkill, RenderBudgets, RenderedSkills};
 pub use self::skills::{PrimeBudgetState, PrimeDropReason, SemanticFillOutcome};
 
 pub use self::agents::{
-    AgentDropReason, AgentGateSnapshot, AgentInput, AgentPrimeBudgetState, AgentRefresh,
-    AgentRenderBudgets, PrimeAgentSelection, RenderedAgents, SelectedAgent,
+    AgentDropReason, AgentEligibility, AgentGateVerdict, AgentInput, AgentPrimeBudgetState,
+    AgentRefresh, AgentRenderBudgets, CallableAgentAuthority, PrimeAgentSelection, RenderedAgents,
+    SelectedAgent,
 };
 
 /// Async supplier of the authoritative eligible native skill snapshot. PR19

@@ -6,17 +6,21 @@
 //! the PR17 semantic retrieval service (metadata only — name, safe
 //! frontmatter description, qualified/source label, and selected-skill names;
 //! never an agent prompt/system body), then **revalidates each surviving
-//! candidate against a fresh live snapshot** before rendering an advisory-only
-//! block.
+//! candidate against a fresh live [`CallableAgentAuthority`]** before
+//! rendering an advisory-only block.
 //!
 //! Safety/precedence invariants:
-//! - The recommendation set is a **subset** of what
-//!   [`validate_subagent_type`] + the spawn path would permit at that instant:
-//!   every candidate is re-run through the live [`SubagentValidationContext`]
-//!   (resolve + toggle + allow-list) plus the current-agent exclusion, Task-tool
-//!   availability (max-depth), native-backend/trust/plugin-qualification and
-//!   model/task eligibility deltas supplied by the caller's live gate. It never
-//!   copies or approximates precedence.
+//! - The recommendation set is a **subset** of what [`validate_subagent_type`]
+//!   + the spawn path would permit at that instant: every candidate is
+//!   re-run through a [`CallableAgentAuthority`] built ([`CallableAgentAuthority::capture`],
+//!   the only sanctioned constructor) from the same live session/spawn data the
+//!   Task tool uses — resolve + toggle + allow-list, global `subagents_enabled`,
+//!   Task-tool availability (max-depth; derived by the
+//!   `MvpAgent::build_callable_agent_authority` capture lane), the current-agent
+//!   exclusion, and a positively-confirmed per-name eligibility map. It never
+//!   copies or approximates precedence, and **omitted eligibility can never mean
+//!   allowed**: a name that is not positively recorded `Callable` in the
+//!   authority's verdict map is always `Blocked`.
 //! - **Advisory only**: the rendered output never calls spawn, enqueues a task,
 //!   alters allowlists/toggles/toolsets/depth, or modifies the prompt. It states
 //!   recommendations are optional and do not authorize execution.
@@ -41,35 +45,87 @@ use crate::retrieval::{
 use super::PrimeError;
 use super::PrimeGate;
 
-/// Async supplier of the live callable-agent gate snapshot.
+/// Async supplier of the live callable-agent authority.
 ///
 /// The shell wires this to its authoritative discovery + session state. The
 /// prime run awaits a genuinely async refresh every time — it never clones a
-/// stale pre-fetched snapshot — so a config/plugin/agent refresh re-evaluates
+/// stale pre-fetched authority — so a config/plugin/agent refresh re-evaluates
 /// on the next call and no stale cache can grant access.
 #[async_trait::async_trait]
 pub trait AgentRefresh: Send + Sync {
-    async fn refresh(&self) -> AgentGateSnapshot;
+    async fn refresh(&self) -> CallableAgentAuthority;
 }
 
 #[async_trait::async_trait]
 impl<F, Fut> AgentRefresh for F
 where
     F: Fn() -> Fut + Send + Sync,
-    Fut: std::future::Future<Output = AgentGateSnapshot> + Send,
+    Fut: std::future::Future<Output = CallableAgentAuthority> + Send,
 {
-    async fn refresh(&self) -> AgentGateSnapshot {
+    async fn refresh(&self) -> CallableAgentAuthority {
         (self)().await
     }
 }
 
-/// Live validation gate snapshot returned by [`AgentRefresh::refresh`].
+/// Fail-closed per-name gate verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentGateVerdict {
+    /// Every live gate passes: Task available, global enable, resolve/toggle/
+    /// allow-list via [`validate_subagent_type`], and a positively-confirmed
+    /// per-name eligibility verdict.
+    Callable,
+    /// Blocked by at least one live gate (or the session cannot spawn at all).
+    Blocked,
+}
+
+/// Fail-closed per-name eligibility captured by [`CallableAgentAuthority::capture`].
 ///
-/// Together these encode the exact gates the spawn path applies, so the
-/// recommendation set cannot exceed what `validate_subagent_type` +
-/// `gate_subagent_type` would permit at this instant.
+/// This is **not** a caller-supplied map: it is derived inside `capture` from
+/// the authority's fresh descriptors and the caller's eligibility predicate.
+/// A name that is not positively recorded here is always `Blocked` — omitted
+/// eligibility data can never mean allowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentEligibility {
+    /// Names positively confirmed eligible by the captured eligibility data.
+    confirmed: HashSet<String>,
+    /// True only when the per-name eligibility predicate said yes AND the
+    /// session-level gates (global enable + Task availability) held.
+    granted: bool,
+}
+
+impl AgentEligibility {
+    fn confirmed(names: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            confirmed: names.into_iter().collect(),
+            granted: false,
+        }
+    }
+    fn grant(mut self) -> Self {
+        self.granted = true;
+        self
+    }
+
+    /// A name is eligible only when it was positively confirmed **and** the
+    /// session-level grant applied. Everything else is `Blocked`.
+    pub fn is_eligible(&self, name: &str) -> bool {
+        self.granted && self.confirmed.contains(name)
+    }
+}
+
+/// Typed fail-closed authority over the current session's spawn gates.
+///
+/// The **only** sanctioned constructor is [`CallableAgentAuthority::capture`],
+/// which derives every gate from the live session/spawn data the Task tool and
+/// spawn path use — resolve + toggle + allow-list ([`validate_subagent_type`]),
+/// global `subagents_enabled`, Task-tool availability (max-depth; derived by
+/// the `MvpAgent::build_callable_agent_authority` capture lane), the
+/// current-agent exclusion, and a positively-confirmed per-name eligibility
+/// set. The `eligibility`/`task_available` fields are private so a
+/// future caller cannot hand-construct a permissive authority; they must build
+/// it through the shell's [`CallableAgentAuthority::capture`] lane (see
+/// `MvpAgent::build_callable_agent_authority`).
 #[derive(Clone)]
-pub struct AgentGateSnapshot {
+pub struct CallableAgentAuthority {
     /// Fresh authoritative callable agents (post-revalidation identity).
     pub agents: Vec<CallableAgentDescriptor>,
     /// Live validation context (toggle / allow-list / CLI names / plugin
@@ -77,25 +133,26 @@ pub struct AgentGateSnapshot {
     pub(crate) ctx: SubagentValidationContext,
     /// The currently-running agent to exclude (`Some(name)` when a current
     /// session agent is known).
-    pub current_agent: Option<String>,
-    /// False when there is no Task tool (at max depth / stripped) — the
-    /// recommendation set is then empty.
-    pub task_available: bool,
-    /// Per-name eligibility deltas the caller computes from spawn gates not
-    /// derivable from the context alone: native backend, source
-    /// trust/plugin-qualification, and any model/task eligibility applied by
-    /// spawn. `.get(name) == Some(false)` excludes; absent names default to
-    /// eligible (mirrors the toggle default).
-    pub eligibility: HashMap<String, bool>,
+    pub(crate) current_agent: Option<String>,
+    /// False when the Task tool is unavailable (max depth / stripped / global
+    /// disabled) — the recommendation set is then empty. The per-name
+    /// native/trust/model gates a future wiring may add plug in via the
+    /// `eligible` predicate at capture time.
+    pub(crate) task_available: bool,
+    /// False when `[subagents] enabled = false` (`GROK_SUBAGENTS=0`) globally.
+    pub(crate) global_subagents_enabled: bool,
+    /// Fail-closed per-name eligibility derived by `capture`.
+    eligibility: AgentEligibility,
     /// Source generation for telemetry/accounting (`None` when unknown).
-    pub generation: Option<u64>,
+    pub(crate) generation: Option<u64>,
 }
 
-impl std::fmt::Debug for AgentGateSnapshot {
+impl std::fmt::Debug for CallableAgentAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `ctx` is a pub(crate) runtime handle without a stable Debug; surface
-        // only its safe shape (never toggle/allow-list contents in Debug).
-        f.debug_struct("AgentGateSnapshot")
+        // only its safe shape (never toggle/allow-list/eligibility contents in
+        // Debug).
+        f.debug_struct("CallableAgentAuthority")
             .field(
                 "agent_names",
                 &self
@@ -106,22 +163,101 @@ impl std::fmt::Debug for AgentGateSnapshot {
             )
             .field("current_agent", &self.current_agent)
             .field("task_available", &self.task_available)
-            .field("eligibility", &self.eligibility)
+            .field("global_subagents_enabled", &self.global_subagents_enabled)
+            .field("confirmed_eligible", &self.eligibility.confirmed)
             .field("generation", &self.generation)
             .finish()
     }
 }
 
-impl AgentGateSnapshot {
+/// Real inputs [`CallableAgentAuthority::capture`] requires. Every value is
+/// derived from the live session/spawn data; none has a permissive default.
+///
+/// `pub(crate)` because it is the in-crate wiring seam: only shell code (e.g.
+/// `MvpAgent::build_callable_agent_authority`) can construct an authority, so
+/// a future PR cannot hand-supply a permissive one.
+pub(crate) struct AuthorityCapture<'a> {
+    /// Fresh authoritative callable descriptors.
+    pub(crate) agents: &'a [CallableAgentDescriptor],
+    /// Live validation context (resolve/toggle/allow-list/CLI/plugin/cwd).
+    pub(crate) ctx: SubagentValidationContext,
+    /// The currently-running agent to exclude.
+    pub(crate) current_agent: Option<String>,
+    /// True only when the Task tool is actually available (global enable AND
+    /// `parent_depth < MAX_SUBAGENT_DEPTH`).
+    pub(crate) task_available: bool,
+    /// True only when `[subagents] enabled` (global) — `cfg.subagents_enabled`.
+    pub(crate) global_subagents_enabled: bool,
+    /// Per-name eligibility predicate rooted in real spawn-side data
+    /// (native/trust/model/external-runtime gates a future wiring adds).
+    /// Applied to every descriptor name; a name the predicate does not confirm
+    /// is `Blocked`.
+    pub(crate) eligible: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    /// Source generation for telemetry/accounting.
+    pub(crate) generation: Option<u64>,
+}
+
+impl CallableAgentAuthority {
+    /// The only sanctioned constructor. Derives the per-name verdict map from
+    /// the real inputs; a name omitted from confirmation is `Blocked`.
+    pub(crate) fn capture(input: AuthorityCapture<'_>) -> Self {
+        let granted = input.global_subagents_enabled && input.task_available;
+        let mut eligibility = AgentEligibility::confirmed(
+            input
+                .agents
+                .iter()
+                .map(|a| a.name.clone())
+                .filter(|name| (input.eligible)(name)),
+        );
+        if granted {
+            eligibility = eligibility.grant();
+        }
+        Self {
+            agents: input.agents.to_vec(),
+            ctx: input.ctx,
+            current_agent: input.current_agent,
+            task_available: input.task_available,
+            global_subagents_enabled: input.global_subagents_enabled,
+            eligibility,
+            generation: input.generation,
+        }
+    }
+
+    /// Full fail-closed gate for a candidate name. Returns [`AgentGateVerdict::Callable`]
+    /// only when every live gate passes at this instant.
+    pub fn gate(&self, name: &str) -> AgentGateVerdict {
+        if !self.global_subagents_enabled || !self.task_available {
+            return AgentGateVerdict::Blocked;
+        }
+        if self.current_agent.as_deref() == Some(name) {
+            return AgentGateVerdict::Blocked;
+        }
+        if !self.eligibility.is_eligible(name) {
+            return AgentGateVerdict::Blocked;
+        }
+        if !matches!(
+            validate_subagent_type(name, &self.ctx),
+            SubagentValidateTypeOutcome::Ok
+        ) {
+            return AgentGateVerdict::Blocked;
+        }
+        AgentGateVerdict::Callable
+    }
+
     pub(crate) fn empty(generation: Option<u64>) -> Self {
         Self {
             agents: Vec::new(),
             ctx: SubagentValidationContext::default(),
             current_agent: None,
             task_available: false,
-            eligibility: HashMap::new(),
+            global_subagents_enabled: false,
+            eligibility: AgentEligibility::default(),
             generation,
         }
+    }
+
+    pub(crate) fn generation(&self) -> Option<u64> {
+        self.generation
     }
 }
 
@@ -133,7 +269,11 @@ pub struct AgentInput<'a> {
     pub refresh: &'a dyn AgentRefresh,
     /// PR18 selected skill names used (metadata only) for ranking + semantic.
     pub selected_skills: &'a [String],
-    /// Prompt metadata used for ranking (never the full instruction body).
+    /// Bounded real prompt text used for ranking and (capped) as the semantic
+    /// retrieval query. This IS the user-visible interaction — it is neither an
+    /// agent prompt nor a body. Only the agent-side payload shipped by this
+    /// module is metadata/frontmatter (see [`metadata_text`]); the query itself
+    /// is the (bounded) real prompt, per L3/privacy documentation.
     pub prompt: &'a str,
     /// Explicit agent name to pin first (never duplicated; matches bare or
     /// qualified name).
@@ -165,8 +305,8 @@ impl Default for AgentInput<'_> {
 struct NoopRefresh;
 #[async_trait::async_trait]
 impl AgentRefresh for NoopRefresh {
-    async fn refresh(&self) -> AgentGateSnapshot {
-        AgentGateSnapshot::empty(None)
+    async fn refresh(&self) -> CallableAgentAuthority {
+        CallableAgentAuthority::empty(None)
     }
 }
 const NOOP_REFRESH: NoopRefresh = NoopRefresh;
@@ -190,7 +330,11 @@ pub struct AgentPrimeBudgetState {
     pub selected_names: Vec<String>,
     pub dropped: usize,
     pub drop_reasons: Vec<AgentDropReason>,
-    pub over_result_limit: bool,
+    /// True when the **ranked pool** (pre-revalidation `order`) exceeded the
+    /// configured result cap. Not a statement about the final selected set —
+    /// revalidation may drop candidates below the cap. Named `pool_` to keep
+    /// this accurate.
+    pub pool_over_limit: bool,
 }
 
 /// A selected (revalidated) callable agent recommendation.
@@ -266,7 +410,6 @@ impl std::fmt::Debug for PrimeAgentSelection {
 struct Ranked {
     idx: usize,
     primary: i64,
-    secondary: i64,
 }
 
 /// Normalize a token stream into significant lowercase words.
@@ -320,11 +463,7 @@ fn rank_agents(
                     primary = primary.saturating_add(3);
                 }
             }
-            Ranked {
-                idx: i,
-                primary,
-                secondary: 0,
-            }
+            Ranked { idx: i, primary }
         })
         .collect();
 
@@ -332,13 +471,10 @@ fn rank_agents(
     order.sort_by(|&a, &b| {
         let ra = &ranked[a];
         let rb = &ranked[b];
-        rb.primary
-            .cmp(&ra.primary)
-            .then_with(|| rb.secondary.cmp(&ra.secondary))
-            .then_with(|| {
-                (agents[a].name.as_str(), agents[a].source.label().as_str())
-                    .cmp(&(agents[b].name.as_str(), agents[b].source.label().as_str()))
-            })
+        rb.primary.cmp(&ra.primary).then_with(|| {
+            (agents[a].name.as_str(), agents[a].source.label().as_str())
+                .cmp(&(agents[b].name.as_str(), agents[b].source.label().as_str()))
+        })
     });
 
     if let Some(name) = explicit
@@ -381,6 +517,23 @@ fn metadata_text(a: &CallableAgentDescriptor, selected_skills: &[String]) -> Str
         parts.push(format!("selected-skills:{joined}"));
     }
     cap_chars(&parts.join(" "), MAX_METADATA_TOTAL_CHARS)
+}
+
+/// Build the bounded semantic retrieval query.
+///
+/// The query IS the bounded user/prompt text (the real interaction the model
+/// sees) — not an agent prompt or body. Only the candidate rows
+/// ([`metadata_text`]) are agent-side frontmatter metadata. Selected-skill
+/// names get a reserved slot so a long prompt cannot truncate them away.
+fn build_semantic_query(prompt: &str, selected_skills: &[String]) -> String {
+    if selected_skills.is_empty() {
+        return cap_chars(prompt, MAX_METADATA_TOTAL_CHARS);
+    }
+    let tail = format!(" {}", selected_skills.join(" "));
+    let prompt_budget = MAX_METADATA_TOTAL_CHARS.saturating_sub(tail.chars().count());
+    let mut q = cap_chars(prompt, prompt_budget);
+    q.push_str(&tail);
+    cap_chars(&q, MAX_METADATA_TOTAL_CHARS)
 }
 
 /// Unique, path-free candidate identifier (`sourceLabel|name|#sha256`) — the
@@ -554,14 +707,16 @@ struct SelectedBatch {
     generation: Option<u64>,
 }
 
-/// Revalidate `order` against a **fresh** live gate snapshot and select up to
-/// `target`, backfilling the next-ranked candidate whenever one is dropped.
+/// Revalidate `order` against a **fresh** live [`CallableAgentAuthority`] and
+/// select up to `target`, backfilling the next-ranked candidate whenever one is
+/// dropped.
 ///
-/// The subset guarantee: a candidate is selected only when it is present in the
-/// fresh snapshot AND re-passes the live `validate_subagent_type` (resolve +
-/// toggle + allow-list) AND is not the current agent AND the Task tool is
-/// available AND no caller eligibility delta excludes it. Later spawn still
-/// runs normal validation independently.
+/// The subset guarantee: a candidate is selected only when the fresh authority's
+/// [`CallableAgentAuthority::gate`] returns `Callable` at this instant — present
+/// in the fresh snapshot, `validate_subagent_type` Ok (resolve + toggle +
+/// allow-list), not the current agent, Task available, global enable, and a
+/// positively-confirmed eligibility verdict. Later spawn still runs normal
+/// validation independently.
 async fn select_and_revalidate(
     agents: &[CallableAgentDescriptor],
     order: &[usize],
@@ -579,8 +734,8 @@ async fn select_and_revalidate(
     let mut selected = Vec::new();
     let mut drop_reasons = Vec::new();
 
-    // No Task tool (max depth / stripped / external runtime): no recommendations.
-    if !snap.task_available {
+    // No Task tool / globally disabled: no recommendations at all.
+    if !snap.task_available || !snap.global_subagents_enabled {
         return SelectedBatch {
             selected,
             drop_reasons,
@@ -599,21 +754,21 @@ async fn select_and_revalidate(
             drop_reasons.push(AgentDropReason::ChangedOrGone);
             continue;
         };
-        if snap.current_agent.as_deref() == Some(cand.name.as_str()) {
-            drop_reasons.push(AgentDropReason::CurrentAgent);
-            continue;
-        }
-        if snap.eligibility.get(&cand.name).copied() == Some(false) {
-            drop_reasons.push(AgentDropReason::NotCallable);
-            continue;
-        }
-        // The exact live validation gates: resolve + toggle + allow-list.
-        if !matches!(
-            validate_subagent_type(&cand.name, &snap.ctx),
-            SubagentValidateTypeOutcome::Ok
-        ) {
-            drop_reasons.push(AgentDropReason::NotCallable);
-            continue;
+        // The single authoritative gate: resolve + toggle + allow-list,
+        // current-agent exclusion, Task availability, global enable, and the
+        // positively-confirmed eligibility verdict, all in one fail-closed
+        // check against the fresh authority.
+        match snap.gate(&cand.name) {
+            AgentGateVerdict::Callable => {}
+            AgentGateVerdict::Blocked => {
+                let reason = if snap.current_agent.as_deref() == Some(cand.name.as_str()) {
+                    AgentDropReason::CurrentAgent
+                } else {
+                    AgentDropReason::NotCallable
+                };
+                drop_reasons.push(reason);
+                continue;
+            }
         }
 
         selected.push(SelectedAgent {
@@ -642,7 +797,11 @@ pub struct AgentRenderBudgets {
     pub per_agent_chars: usize,
     /// Max aggregated **characters** across all overhead + rows.
     pub max_total_chars: usize,
-    /// Body-row token budget (proxy, rows only). `Some(0)` = no rows.
+    /// Token budget (proxy) over rendered **row** bytes, wrapper-inclusive
+    /// (each row's name + source + marker bytes, not just the description
+    /// body). Conservative by design: it never under-budgets. Header/footer
+    /// overhead is bounded separately via `max_total_chars`. `Some(0)` = no
+    /// rows.
     pub max_tokens: Option<usize>,
 }
 
@@ -861,14 +1020,7 @@ pub async fn run_prime_agent_selection(
         && let Some(profile) = input.semantic_profile
         && let Some(service) = input.semantic_service
     {
-        let query = {
-            let mut q = input.prompt.to_string();
-            if !input.selected_skills.is_empty() {
-                q.push(' ');
-                q.push_str(&input.selected_skills.join(" "));
-            }
-            cap_chars(&q, MAX_METADATA_TOTAL_CHARS)
-        };
+        let query = build_semantic_query(input.prompt, input.selected_skills);
         let hard = !input.config.degrade_on_error;
         let outcome = semantic_fill_agents(
             service,
@@ -915,7 +1067,9 @@ pub async fn run_prime_agent_selection(
         selected_names: batch.selected.iter().map(|a| a.name.clone()).collect(),
         dropped: batch.drop_reasons.len(),
         drop_reasons: batch.drop_reasons,
-        over_result_limit: order.len() > target,
+        // N2: this is the RANKED-POOL signal (pre-revalidation `order`), not
+        // the final selected set. Kept accurate by the name `pool_over_limit`.
+        pool_over_limit: order.len() > target,
     };
 
     Ok(PrimeAgentSelection {
@@ -935,7 +1089,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use xai_grok_agent::config::AgentScope;
-    use xai_grok_agent::subagent::callable::CallableAgentSource;
+    use xai_grok_agent::plugins::discovery::{PluginId, PluginScope};
+    use xai_grok_agent::plugins::manifest::PluginManifest;
+    use xai_grok_agent::plugins::{DiscoveredPlugin, PluginOrigin, PluginRegistry};
+    use xai_grok_agent::subagent::callable::{
+        CallableAgentDescriptor, CallableAgentOptions, CallableAgentSource, callable_agent_snapshot,
+    };
     use xai_grok_tools::implementations::grok_build::task::types::SubagentValidateTypeOutcome;
 
     use crate::retrieval::bounds::ProfileBudgetLimits;
@@ -989,26 +1148,32 @@ mod tests {
         }
     }
 
+    /// Build a fresh [`CallableAgentAuthority`] via its only sanctioned
+    /// constructor, confirming exactly `eligible` names. `global_subagents_enabled`
+    /// defaults true; noir change via the `global` param is not needed here.
     fn live(
         agents: Vec<CallableAgentDescriptor>,
         ctx: SubagentValidationContext,
         task_available: bool,
         current: Option<&str>,
-        eligibility: HashMap<String, bool>,
-    ) -> AgentGateSnapshot {
-        AgentGateSnapshot {
-            agents,
+        eligible: HashSet<String>,
+    ) -> CallableAgentAuthority {
+        CallableAgentAuthority::capture(AuthorityCapture {
+            agents: &agents,
             ctx,
             current_agent: current.map(|s| s.to_string()),
             task_available,
-            eligibility,
+            global_subagents_enabled: true,
+            eligible: Box::new(move |n| eligible.contains(n)),
             generation: Some(7),
-        }
+        })
     }
 
-    /// A refresh closure that returns `snap` each call.
-    fn refresher(snap: AgentGateSnapshot) -> impl Fn() -> std::future::Ready<AgentGateSnapshot> {
-        move || std::future::ready(snap.clone())
+    /// A refresh closure that returns `authority` each call.
+    fn refresher(
+        authority: CallableAgentAuthority,
+    ) -> impl Fn() -> std::future::Ready<CallableAgentAuthority> {
+        move || std::future::ready(authority.clone())
     }
 
     /// A deterministic callable set whose members all resolve via `cli_agent_names`
@@ -1031,8 +1196,8 @@ mod tests {
         (agents, validation_ctx(cwd, HashMap::new(), None, cli))
     }
 
-    fn eligible_map(names: &[&str]) -> HashMap<String, bool> {
-        names.iter().map(|n| (n.to_string(), true)).collect()
+    fn eligible_map(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
     }
 
     // ── Subset-of-validation invariant ─────────────────────────────
@@ -1130,9 +1295,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         let (agents, ctx) = callable_set(cwd.clone(), &["explore", "plan"]);
-        // "plan" fails a native-backend / trust / model eligibility delta.
-        let mut elig = eligible_map(&["explore", "plan"]);
-        elig.insert("plan".to_string(), false);
+        // "plan" fails a native-backend / trust / model eligibility delta: it
+        // is simply NOT in the captured confirmed set, so the authority's
+        // fail-closed gate blocks it (omission never means allowed).
+        let elig = eligible_map(&["explore"]);
         let snap = live(agents.clone(), ctx, true, None, elig);
         let sel = run_prime_agent_selection(
             &AgentInput {
@@ -1157,7 +1323,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         let (agents, ctx) = callable_set(cwd.clone(), &["explore", "plan"]);
-        let snap = live(agents.clone(), ctx, false, None, HashMap::new());
+        let snap = live(
+            agents.clone(),
+            ctx,
+            false,
+            Some("explore"),
+            eligible_map(&["explore", "plan"]),
+        );
         let sel = run_prime_agent_selection(
             &AgentInput {
                 agents: &agents,
@@ -1187,7 +1359,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         let (agents, ctx) = callable_set(cwd.clone(), &["explore"]);
-        let snap = live(agents.clone(), ctx, false, None, HashMap::new());
+        let snap = live(agents.clone(), ctx, false, None, eligible_map(&["explore"]));
         let sel = run_prime_agent_selection(
             &AgentInput {
                 agents: &agents,
@@ -1925,7 +2097,7 @@ mod tests {
                 selected_names: vec!["explore".into()],
                 dropped: 0,
                 drop_reasons: vec![],
-                over_result_limit: false,
+                pool_over_limit: false,
             },
             snapshot_generation: Some(1),
             cancelled: false,
@@ -1951,5 +2123,328 @@ mod tests {
         assert!(!id.starts_with('/'));
         assert!(!id.contains('/'), "path separator leaked into id: {id}");
         assert!(id.contains('#'), "digest marker missing: {id}");
+    }
+
+    // ── End-to-end: real discovery → real authority → selection is a subset ──
+
+    /// Write a real agent `.md` file (frontmatter-only body).
+    fn write_agent(dir: &Path, filename: &str, name: &str, desc: &str) {
+        let content = format!("---\nname: {name}\ndescription: {desc}\n---\n");
+        let _ = std::fs::create_dir_all(dir);
+        std::fs::write(dir.join(filename), content).unwrap();
+    }
+
+    /// Build a real (`User`-scoped, trusted) [`PluginRegistry`] with one agent dir.
+    fn real_plugin_registry(plugin_name: &str, agent_dirs: Vec<PathBuf>) -> PluginRegistry {
+        let root = PathBuf::from(format!("/tmp/primed-e2e-{plugin_name}"));
+        let discovered = DiscoveredPlugin {
+            manifest: PluginManifest {
+                name: plugin_name.to_string(),
+                version: Some("1.0.0".to_string()),
+                description: Some(format!("Plugin {plugin_name}")),
+                author: None,
+                homepage: None,
+                repository: None,
+                license: None,
+                keywords: vec![],
+                skills: None,
+                commands: None,
+                agents: None,
+                hooks: None,
+                mcp_servers: None,
+                lsp_servers: None,
+            },
+            id: PluginId::new(PluginScope::User, &root, plugin_name),
+            root: root.clone(),
+            canonical_root: root,
+            scope: PluginScope::User,
+            origin: PluginOrigin::CliOverride,
+            trusted: true,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs,
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: None,
+            conflict: None,
+        };
+        PluginRegistry::from_discovered(vec![discovered], &[], &[plugin_name.to_string()])
+    }
+
+    /// Mirror `MvpAgent::build_callable_agent_authority` against real inputs:
+    /// snapshot from real discovery + a real validation context built from the
+    /// same cwd/plugin/toggle/cli, then `CallableAgentAuthority::capture`.
+    fn authority_from_real_plugin(
+        cwd: PathBuf,
+        registry: &PluginRegistry,
+        cli_defs: Vec<xai_grok_agent::config::AgentDefinition>,
+        global: bool,
+        task: bool,
+        current: Option<String>,
+    ) -> (
+        Vec<CallableAgentDescriptor>,
+        SubagentValidationContext,
+        CallableAgentAuthority,
+    ) {
+        let toggle = HashMap::new();
+        let agents = callable_agent_snapshot(&CallableAgentOptions {
+            cwd: &cwd,
+            toggle: &toggle,
+            plugins: Some(registry),
+            cli_agents: &cli_defs,
+        });
+        let ctx = validation_ctx(
+            cwd,
+            HashMap::new(),
+            None,
+            cli_defs.iter().map(|d| d.name.clone()).collect(),
+        );
+        let eligible: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+        let authority = CallableAgentAuthority::capture(AuthorityCapture {
+            agents: &agents,
+            ctx: ctx.clone(),
+            current_agent: current,
+            task_available: task,
+            global_subagents_enabled: global,
+            eligible: Box::new(move |n| eligible.iter().any(|e| e == n)),
+            generation: Some(9),
+        });
+        (agents, ctx, authority)
+    }
+
+    async fn run_with_inputs(
+        agents: &[CallableAgentDescriptor],
+        authority: CallableAgentAuthority,
+    ) -> PrimeAgentSelection {
+        run_prime_agent_selection(
+            &AgentInput {
+                agents,
+                refresh: &refresher(authority),
+                config: AgentPrimeConfig {
+                    enabled: true,
+                    max_results: 20,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The full spawnable set at an instant, computed by re-running the real
+    /// validation machinery over the real descriptors: a name is spawnable when
+    /// it is in the snapshot AND `validate_subagent_type` returns `Ok` (resolve
+    /// + toggle + allow-list — exactly the spawn `resolve_agent_definition` +
+    /// `gate_subagent_type` predicate).
+    fn spawnable_set(
+        ctx: &SubagentValidationContext,
+        agents: &[CallableAgentDescriptor],
+    ) -> std::collections::HashSet<String> {
+        agents
+            .iter()
+            .map(|a| a.name.clone())
+            .filter(|n| {
+                matches!(
+                    validate_subagent_type(n, ctx),
+                    SubagentValidateTypeOutcome::Ok
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn end_to_end_real_discovery_builds_authority_and_selected_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Real repo agent.
+        write_agent(
+            &cwd.join(".grok").join("agents"),
+            "reviewer.md",
+            "reviewer",
+            "Repo reviewer",
+        );
+        // Real plugin agent.
+        let plugin_agents = root.join("plugins").join("pl").join("agents");
+        write_agent(&plugin_agents, "arch.md", "arch", "Plugin architect");
+        let registry = real_plugin_registry("pl", vec![plugin_agents]);
+        // Real CLI-inline agent.
+        let mut cli = xai_grok_agent::config::AgentDefinition::general_purpose();
+        cli.name = "cli-inline".into();
+        cli.description = "CLI inline".into();
+
+        let (agents, ctx, authority) =
+            authority_from_real_plugin(cwd.clone(), &registry, vec![cli], true, true, None);
+
+        // Real discovery must include repo/plugin/CLI entries.
+        let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"reviewer"),
+            "repo agent discovered: {names:?}"
+        );
+        assert!(
+            names.contains(&"pl:arch"),
+            "plugin agent discovered: {names:?}"
+        );
+        assert!(
+            names.contains(&"cli-inline"),
+            "cli-inline discovered: {names:?}"
+        );
+        // CLI-inline is never labeled builtin.
+        let cli_d = agents.iter().find(|a| a.name == "cli-inline").unwrap();
+        assert_eq!(cli_d.source, CallableAgentSource::CliInline);
+
+        let sel = run_with_inputs(&agents, authority.clone()).await;
+        assert!(!sel.selected.is_empty(), "expected selections");
+
+        // Subset proof: every selected name is in the real full spawnable set.
+        let spawnable = spawnable_set(&ctx, &agents);
+        for s in &sel.selected {
+            assert!(
+                spawnable.contains(&s.name),
+                "selected {} not in the real spawnable set {:?}",
+                s.name,
+                spawnable
+            );
+        }
+        // And the authority gate (the live revalidation) agrees.
+        for s in &sel.selected {
+            assert_eq!(
+                authority.gate(&s.name),
+                AgentGateVerdict::Callable,
+                "authority must confirm every selected agent"
+            );
+        }
+    }
+
+    #[test]
+    fn end_to_end_plugin_toggle_excluded_from_real_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugin_agents = root.join("plugins").join("pl").join("agents");
+        write_agent(&plugin_agents, "arch.md", "arch", "Plugin architect");
+        let registry = real_plugin_registry("pl", vec![plugin_agents]);
+
+        // Toggle the plugin agent off by qualified name; the descriptor
+        // snapshot (real discovery) must omit it.
+        let mut toggle = HashMap::new();
+        toggle.insert("pl:arch".to_string(), false);
+        let agents = callable_agent_snapshot(&CallableAgentOptions {
+            cwd: &cwd,
+            toggle: &toggle,
+            plugins: Some(&registry),
+            cli_agents: &[],
+        });
+        assert!(
+            !agents.iter().any(|a| a.name == "pl:arch"),
+            "toggled-off plugin must be omitted from real discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn end_to_end_global_disabled_or_no_task_yields_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_agent(
+            &cwd.join(".grok").join("agents"),
+            "reviewer.md",
+            "reviewer",
+            "Rev",
+        );
+        // Global disable.
+        let (agents, _ctx, global_off) = authority_from_real_plugin(
+            cwd.clone(),
+            &PluginRegistry::empty(),
+            vec![],
+            false,
+            true,
+            None,
+        );
+        let sel = run_with_inputs(&agents, global_off).await;
+        assert!(sel.selected.is_empty(), "global disabled ⇒ empty");
+        assert!(sel.rendered.is_none());
+
+        // No Task tool (max depth / stripped).
+        let (agents, _ctx, no_task) = authority_from_real_plugin(
+            cwd.clone(),
+            &PluginRegistry::empty(),
+            vec![],
+            true,
+            false,
+            None,
+        );
+        let sel = run_with_inputs(&agents, no_task).await;
+        assert!(sel.selected.is_empty(), "no Task tool ⇒ empty");
+        assert!(sel.rendered.is_none());
+    }
+
+    #[tokio::test]
+    async fn end_to_end_current_agent_excluded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_agent(
+            &cwd.join(".grok").join("agents"),
+            "reviewer.md",
+            "reviewer",
+            "Rev",
+        );
+        let (agents, _ctx, authority) = authority_from_real_plugin(
+            cwd.clone(),
+            &PluginRegistry::empty(),
+            vec![],
+            true,
+            true,
+            Some("reviewer".to_string()),
+        );
+        let sel = run_with_inputs(&agents, authority).await;
+        assert!(
+            !sel.selected.iter().any(|s| s.name == "reviewer"),
+            "current agent must be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn end_to_end_stale_refresh_with_fresh_authority_drops_gone_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Rank over a snapshot that no longer reflects the live filesystem.
+        write_agent(&cwd.join(".grok").join("agents"), "gone.md", "gone", "Gone");
+        let registry = PluginRegistry::empty();
+        let stale_toggle = HashMap::new();
+        let stale = callable_agent_snapshot(&CallableAgentOptions {
+            cwd: &cwd,
+            toggle: &stale_toggle,
+            plugins: None,
+            cli_agents: &[],
+        });
+        // Rank against the stale list, but refresh with a fresh authority built
+        // from a revisited discovery that drops "gone".
+        std::fs::remove_dir_all(cwd.join(".grok").join("agents")).unwrap();
+        write_agent(
+            &cwd.join(".grok").join("agents"),
+            "reviewer.md",
+            "reviewer",
+            "Rev",
+        );
+        let (fresh_agents, _ctx, fresh_authority) =
+            authority_from_real_plugin(cwd, &registry, vec![], true, true, None);
+        assert!(!fresh_agents.iter().any(|a| a.name == "gone"));
+
+        let sel = run_with_inputs(&stale, fresh_authority).await;
+        assert!(
+            !sel.selected.iter().any(|s| s.name == "gone"),
+            "stale ranked name must be dropped by the fresh authority"
+        );
     }
 }

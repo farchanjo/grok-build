@@ -408,9 +408,30 @@ fn all_subagents_with_plugins_and_home(
                     let Some(mut def) = def else { continue };
                     def.plugin_name = Some(plugin.name.clone());
 
-                    let qualified_name = format!("{}:{}", plugin.name, def.name);
+                    // The callable name is the FILE STEM, not the frontmatter
+                    // `name`. `by_name_in_cwd_with_plugins` resolves a qualified
+                    // `plugin:agent` by looking up `{agent}.md`, so a file
+                    // `alpha.md` with frontmatter `name: beta` spawns as
+                    // `plugin:alpha`, never `plugin:beta`. Using the stem keeps
+                    // discovery names identical to spawn lookup names.
+                    let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    let qualified_name = format!("{}:{}", plugin.name, file_stem);
+
+                    // Apply the same `[subagents.toggle]` gate native entries
+                    // get (qualified-name keyed; omitted = enabled) so a
+                    // toggled-off plugin agent is not enumerated as callable.
+                    // Mirrors `gate_subagent_type`/`validate_subagent_type`,
+                    // which toggle plugin agents by qualified name.
+                    if !toggle.get(&qualified_name).copied().unwrap_or(true) {
+                        continue;
+                    }
 
                     // Skip if a native entry already has this qualified name
+                    // (can only collide with another plugin of the same name;
+                    // the registry keys plugins by name, so a second
+                    // same-named plugin already overwrote the first).
                     if entries.iter().any(|e| e.name == qualified_name) {
                         continue;
                     }

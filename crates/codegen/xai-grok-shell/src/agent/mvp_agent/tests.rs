@@ -4813,6 +4813,50 @@ mod soft_default_settings_emit {
             })
             .await;
     }
+    /// H1: the callable-agent authority's session-level gates are DERIVED from
+    /// real live state (config subagents_enabled + parent depth + current
+    /// agent), never a caller-supplied permissive map.
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_callable_agent_authority_derives_gates_from_real_state() {
+        use crate::session::prime::agents::AgentGateVerdict;
+        use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("callable-auth-sess");
+        let mut handle = make_test_handle("test-model", false, None);
+        // A top-level session (depth 0) whose agent is "explore".
+        handle.agent_name = "explore".to_string();
+        handle.tool_context.subagent_depth = 0;
+        handle.info.id = sid.clone();
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+
+        let authority = agent.build_callable_agent_authority("callable-auth-sess");
+
+        // Global enable is the config default (true); Task availability is
+        // derived from depth < MAX_SUBAGENT_DEPTH.
+        assert!(
+            authority.global_subagents_enabled,
+            "default config subagents_enabled must hold"
+        );
+        assert_eq!(
+            authority.task_available,
+            0u32 < MAX_SUBAGENT_DEPTH,
+            "task_available must follow parent_depth < MAX_SUBAGENT_DEPTH"
+        );
+
+        // The current agent is excluded by the authority's gate.
+        assert_eq!(
+            authority.gate("explore"),
+            AgentGateVerdict::Blocked,
+            "current agent must be blocked"
+        );
+        // An unknown name is fail-closed blocked (never implicitly allowed).
+        assert_eq!(
+            authority.gate("not-a-real-agent"),
+            AgentGateVerdict::Blocked,
+            "unconfirmed name must be blocked"
+        );
+    }
 }
 #[cfg(feature = "dhat-heap")]
 mod dhat_soak;

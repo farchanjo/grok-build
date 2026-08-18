@@ -388,6 +388,82 @@ impl MvpAgent {
             cli_agent_names,
         }
     }
+    /// Build the authoritative [`CallableAgentAuthority`] for a parent session —
+    /// the shipped computation that makes the H1/"subset of the full spawn
+    /// path" guarantee concrete. Every gate the recommendation set depends on is
+    /// derived here from the live session/config/plugin state the Task tool and
+    /// spawn path use; it is never a caller-supplied permissive map.
+    ///
+    /// - `global_subagents_enabled` = `cfg.subagents_enabled`.
+    /// - `task_available` = global enable AND `parent_depth < MAX_SUBAGENT_DEPTH`
+    ///   (the exact `TaskTool`/`strip_task_tools_at_max_depth` gate).
+    /// - Per-name eligibility = every descriptor the resolver+gate admits (the
+    ///   spawn path exposes no additional per-agent native/trust/model gate
+    ///   beyond resolve + toggle + allow-list, which
+    ///   `CallableAgentAuthority::gate` re-runs via `validate_subagent_type` on
+    ///   the live ctx). A future wiring that adds such a per-name gate must
+    ///   express it here as the eligibility predicate — it cannot supply a
+    ///   hand-built permissive authority.
+    ///
+    /// Descriptors come from the same `callable_agent_snapshot` discovery lane
+    /// the descriptor layer exposes; the validation context is the same
+    /// `build_subagent_validation_context` used by the real `ValidateType` arm.
+    pub(super) fn build_callable_agent_authority(
+        &self,
+        parent_session_id: &str,
+    ) -> crate::session::prime::agents::CallableAgentAuthority {
+        use xai_grok_agent::subagent::callable::{CallableAgentOptions, callable_agent_snapshot};
+        use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+
+        use crate::session::prime::agents::{AuthorityCapture, CallableAgentAuthority};
+
+        let parent_sid = acp::SessionId::new(parent_session_id);
+        let (parent_cwd, parent_depth, current_agent) = {
+            let sessions = self.sessions.borrow();
+            let ps = sessions.get(&parent_sid);
+            (
+                ps.map(|h| std::path::PathBuf::from(&h.info.cwd))
+                    .unwrap_or_default(),
+                ps.map(|h| h.tool_context.subagent_depth).unwrap_or(0),
+                ps.map(|h| h.agent_name.clone()),
+            )
+        };
+        let (subagent_toggle, cli_agents, subagents_enabled) = {
+            let cfg = self.cfg.borrow();
+            (
+                cfg.subagent_toggle.clone(),
+                cfg.cli_agents.clone(),
+                cfg.subagents_enabled,
+            )
+        };
+        let plugins = self.plugin_registry_handle.snapshot();
+        let opts = CallableAgentOptions {
+            cwd: &parent_cwd,
+            toggle: &subagent_toggle,
+            plugins: plugins.as_deref(),
+            cli_agents: &cli_agents,
+        };
+        let agents = callable_agent_snapshot(&opts);
+        let ctx = self.build_subagent_validation_context(parent_session_id);
+
+        let task_available = subagents_enabled && parent_depth < MAX_SUBAGENT_DEPTH;
+        // The spawn path exposes no per-agent native/trust/model gate beyond
+        // resolve + toggle + allow-list (re-run by `CallableAgentAuthority::gate`
+        // on the live ctx). Confirm every descriptor here; a future per-name
+        // gate must be expressed as this predicate (fail-closed), never a
+        // hand-built authority.
+        let eligible: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+
+        CallableAgentAuthority::capture(AuthorityCapture {
+            agents: &agents,
+            ctx,
+            current_agent,
+            task_available,
+            global_subagents_enabled: subagents_enabled,
+            eligible: Box::new(move |n| eligible.iter().any(|e| e == n)),
+            generation: None,
+        })
+    }
     /// Test-only infallible wrapper around
     /// [`Self::try_build_subagent_spawn_context`]. Production spawn paths use
     /// the fallible variant and fail the request when the parent session is
