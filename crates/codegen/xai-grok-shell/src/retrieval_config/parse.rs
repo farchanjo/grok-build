@@ -1151,6 +1151,35 @@ retrieval_profile = "default"
         assert!(p.warnings.is_empty());
     }
 
+    /// Both config readers parse the same `[memory] retrieval_profile` key.
+    #[test]
+    fn memory_retrieval_profile_key_parity_with_memory_config() {
+        let toml_src = r#"
+[memory]
+retrieval_profile = "team-default"
+"#;
+
+        // Retrieval-graph parser used by validation and management.
+        let p = parse(toml_src);
+        assert_eq!(
+            p.graph.memory_retrieval_profile.as_deref(),
+            Some("team-default")
+        );
+
+        // Runtime `MemoryConfig` used by session spawn.
+        let v: toml::Value = toml::from_str(toml_src).unwrap();
+        let mem_value = v.get("memory").cloned().unwrap();
+        let memory_config: crate::config::MemoryConfig = toml::Value::try_into(mem_value).unwrap();
+
+        assert_eq!(
+            memory_config.retrieval_profile.as_deref(),
+            p.graph.memory_retrieval_profile.as_deref(),
+            "both readers must parse the same [memory] retrieval_profile key \
+             to the same value; a management write only ever touches this \
+             single key"
+        );
+    }
+
     #[test]
     fn non_table_section_disables_only_that_section() {
         let p = parse(

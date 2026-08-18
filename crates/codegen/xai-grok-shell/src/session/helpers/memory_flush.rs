@@ -254,7 +254,8 @@ const SEMANTIC_DEDUP_KNN_LIMIT: usize = 3;
 /// a value from config for remote/local overrides.
 ///
 /// Falls back gracefully: returns `false` (allow write) if embeddings are
-/// unavailable, the index has no vector support, or any step fails.
+/// unavailable, the index has no vector support, or the vector state is not
+/// safe for backfill (for example, during a pending rebuild).
 ///
 /// Structured as sync/async/sync phases so `&MemoryIndex` (which contains
 /// `!Send` `rusqlite::Connection`) is never held across `.await` boundaries,
@@ -278,6 +279,14 @@ pub async fn is_semantically_duplicate(
     if !index.vec_available() {
         tracing::debug!(target: LOG,
             "MEMORY_FLUSH_SEMANTIC_DEDUP: sqlite-vec not available, skipping");
+        return false;
+    }
+
+    // Skip reads while a rebuild or incompatible vector state is pending.
+    if !index.vectors_safe_to_backfill() {
+        tracing::debug!(target: LOG,
+            "MEMORY_FLUSH_SEMANTIC_DEDUP: vector state not safe to backfill \
+             (pending rebuild, incompatible fingerprint, or none installed), skipping");
         return false;
     }
 
@@ -608,6 +617,42 @@ mod tests {
     // is_semantically_duplicate tests
     // -----------------------------------------------------------------------
 
+    /// Install a compatible fingerprint and backfill existing chunks.
+    async fn install_compatible_fingerprint(
+        db_path: &std::path::Path,
+        storage: crate::session::memory::MemoryStorage,
+        dims: usize,
+    ) -> std::sync::Arc<dyn xai_grok_memory::embedding::EmbeddingProvider> {
+        use crate::session::memory::embedding::RetrievalEmbeddingProvider;
+        use crate::session::memory::retrieval::FakeMemoryRetrieval;
+
+        let embedder: std::sync::Arc<dyn xai_grok_memory::embedding::EmbeddingProvider> =
+            std::sync::Arc::new(RetrievalEmbeddingProvider::new(std::sync::Arc::new(
+                FakeMemoryRetrieval::new(dims, "test-model"),
+            )));
+        let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
+            db_path,
+            storage,
+            Default::default(),
+            &xai_grok_memory::retrieval::stub_spec(dims, "test-model"),
+            Some(embedder.clone()),
+            60,
+            0,
+            Some(usize::MAX),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(
+                readiness,
+                xai_grok_memory::rebuild::VectorReadiness::Ready
+                    | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
+            ),
+            "test fixture: fingerprint must install, got {readiness:?}"
+        );
+        embedder
+    }
+
     #[tokio::test]
     async fn test_semantic_dedup_no_provider_allows_write() {
         use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
@@ -659,7 +704,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_detects_identical_content() {
-        use crate::session::memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
         use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
@@ -668,29 +712,33 @@ mod tests {
         let db_path = tmp.path().join("test.sqlite");
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
-        let mut index =
-            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
-
-        let provider = MockEmbeddingProvider { dimensions: 4 };
+        let dims = 4;
         let content = "## Decisions\n\nWe chose Rust for memory safety.";
 
         // Index a file containing the same content.
         let file_path = tmp.path().join("existing.md");
         std::fs::write(&file_path, content).unwrap();
-        index.reindex_file(&file_path, "session").unwrap();
+        {
+            let mut idx =
+                MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), dims)
+                    .unwrap();
+            idx.reindex_file(&file_path, "session").unwrap();
+        }
 
-        // Embed the existing chunk.
-        let existing_embedding = provider.embed_batch(&[content]).await.unwrap();
-        let chunk_id = format!("{}:0", file_path.to_string_lossy());
-        index
-            .upsert_embedding(&chunk_id, &existing_embedding[0])
-            .unwrap();
+        // Install the fingerprint and backfill the existing chunk.
+        let embedder = install_compatible_fingerprint(&db_path, storage.clone(), dims).await;
+        let index =
+            MemoryIndex::open_or_create(&db_path, storage, Default::default(), dims).unwrap();
+        assert!(
+            index.vectors_safe_to_backfill(),
+            "precondition: fingerprint installed"
+        );
 
         // Same content → identical embedding → distance 0 → similarity 1.0 → duplicate.
         let result = is_semantically_duplicate(
             content,
             &index,
-            Some(&provider),
+            Some(embedder.as_ref()),
             SEMANTIC_DEDUP_SIMILARITY_THRESHOLD,
         )
         .await;
@@ -699,7 +747,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_allows_different_content() {
-        use crate::session::memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
         use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
@@ -708,32 +755,95 @@ mod tests {
         let db_path = tmp.path().join("test.sqlite");
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
-        let mut index =
-            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
-
-        let provider = MockEmbeddingProvider { dimensions: 4 };
+        let dims = 4;
         let existing = "## Decisions\n\nWe chose Rust for memory safety.";
 
-        // Index and embed existing content.
+        // Index existing content.
         let file_path = tmp.path().join("existing.md");
         std::fs::write(&file_path, existing).unwrap();
-        index.reindex_file(&file_path, "session").unwrap();
-        let emb = provider.embed_batch(&[existing]).await.unwrap();
-        let chunk_id = format!("{}:0", file_path.to_string_lossy());
-        index.upsert_embedding(&chunk_id, &emb[0]).unwrap();
+        {
+            let mut idx =
+                MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), dims)
+                    .unwrap();
+            idx.reindex_file(&file_path, "session").unwrap();
+        }
+
+        // Install the fingerprint and backfill the existing chunk.
+        let embedder = install_compatible_fingerprint(&db_path, storage.clone(), dims).await;
+        let index =
+            MemoryIndex::open_or_create(&db_path, storage, Default::default(), dims).unwrap();
+        assert!(
+            index.vectors_safe_to_backfill(),
+            "precondition: fingerprint installed"
+        );
 
         // Different content should not be flagged as duplicate.
         let novel = "## Architecture\n\nThe API uses Python FastAPI with async handlers.";
         let result = is_semantically_duplicate(
             novel,
             &index,
-            Some(&provider),
+            Some(embedder.as_ref()),
             SEMANTIC_DEDUP_SIMILARITY_THRESHOLD,
         )
         .await;
         assert!(
             !result,
             "different content should not be flagged as duplicate"
+        );
+    }
+
+    /// A pending dimension rebuild skips dedup without invoking the provider.
+    #[tokio::test]
+    async fn test_semantic_dedup_skips_when_vectors_not_safe_to_backfill() {
+        use crate::session::memory::embedding::RetrievalEmbeddingProvider;
+        use crate::session::memory::retrieval::FakeMemoryRetrieval;
+        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use tempfile::TempDir;
+
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.sqlite");
+        let storage =
+            MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
+        let content = "## Decisions\n\nWe chose Rust for memory safety.";
+        let file_path = tmp.path().join("existing.md");
+        std::fs::write(&file_path, content).unwrap();
+
+        // Index a chunk with the original dimensions.
+        {
+            let mut idx =
+                MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), 4)
+                    .unwrap();
+            idx.reindex_file(&file_path, "session").unwrap();
+        }
+
+        // A different dimension count marks the rebuild as pending.
+        let index = MemoryIndex::open_or_create(&db_path, storage, Default::default(), 8).unwrap();
+        assert!(
+            !index.vectors_safe_to_backfill(),
+            "precondition: dimension-mismatch rebuild-pending state"
+        );
+
+        // A provider is available, but must not be invoked.
+        let fake = std::sync::Arc::new(FakeMemoryRetrieval::new(8, "test-model"));
+        let provider = RetrievalEmbeddingProvider::new(fake.clone());
+
+        let result = is_semantically_duplicate(
+            content,
+            &index,
+            Some(&provider),
+            SEMANTIC_DEDUP_SIMILARITY_THRESHOLD,
+        )
+        .await;
+
+        assert!(
+            !result,
+            "pending/incompatible vector state must allow the write, not query stale vectors"
+        );
+        assert_eq!(
+            fake.embed_calls(),
+            0,
+            "no provider embed call may be issued while vectors are not safe to backfill"
         );
     }
 }

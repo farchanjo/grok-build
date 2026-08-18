@@ -2125,8 +2125,8 @@ mod factory_tests {
     // orphan-prune accuracy; watcher-dirty cap/backoff decoupling
     // -----------------------------------------------------------------------
 
-    /// FINDING-1 (High): a named-profile facade is authoritative even in a
-    /// "mixed" config (facade + legacy `[memory.embedding]`). The factory
+    /// A named-profile facade is authoritative even in a mixed config.
+    /// The factory
     /// never consults the legacy config or its chat credentials; embedding
     /// routes through the credential-free facade.
     #[tokio::test]
@@ -2162,8 +2162,7 @@ mod factory_tests {
         assert_eq!(v[0].len(), dims);
     }
 
-    /// FINDING-1 (High): an unresolved named profile must be FTS-only — no
-    /// legacy/active-chat fallback is possible through the factory.
+    /// An unresolved named profile must be FTS-only.
     #[tokio::test]
     async fn test_resolve_embedding_provider_unresolved_named_is_none() {
         let params = MemoryBackendParams {

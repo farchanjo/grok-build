@@ -78,12 +78,7 @@ mod cli_catchall_drop_tests {
     }
 }
 
-/// Per-choice startup-reindex embedding inputs, resolved exactly like the
-/// search backend (FINDING-1, High): a configured named retrieval profile is
-/// authoritative — the credential-free facade's spec dimensions are used and
-/// the legacy `[memory.embedding]` config is switched off; an unresolved
-/// named profile is FTS-only (no legacy config, no active-chat credential
-/// path). The legacy config applies only when no named profile is configured.
+/// Resolve startup-reindex inputs using the session's pinned memory profile.
 /// Returns `(embed_config, index_open_dimensions)`.
 pub(crate) fn startup_reindex_embedding_inputs(
     memory_named_profile_set: bool,
@@ -101,13 +96,8 @@ pub(crate) fn startup_reindex_embedding_inputs(
     (embed_config, dims)
 }
 
-/// Detached startup-reindex vector backfill (FINDING-1, High): gated on a
-/// stable vector state (`vectors_safe_to_backfill`), then the provider is
-/// resolved through the single embedding-provider factory — a named profile's
-/// credential-free facade is authoritative, the legacy `[memory.embedding]`
-/// path applies only when no named profile is configured, and an unresolved
-/// named profile resolves to `None` ⇒ FTS-only with no legacy/chat call and
-/// no vector writes. Returns the number of chunks embedded.
+/// Backfill startup-reindex chunks only when the vector state is stable.
+/// Returns the number of chunks embedded.
 pub(crate) async fn startup_reindex_backfill(
     index: &crate::session::memory::MemoryIndex,
     facade: Option<std::sync::Arc<dyn xai_grok_memory::MemoryRetrieval>>,
@@ -783,15 +773,7 @@ pub(crate) async fn spawn_session_actor(
     let memory_initial_injection_config = memory_config
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
-    // PR21: when `[memory] retrieval_profile` is set, memory embeddings/rerank
-    // route through the exact named PR15 profile + PR17 provider routes (never
-    // the active chat model base URL/API key/OAuth). The facade is
-    // credential-free. When the profile is configured but cannot be resolved,
-    // memory degrades to FTS-only — it never falls back to a sibling
-    // `[memory.embedding]` credential path. This decision is resolved ONCE at
-    // session scope and shared by the search backend and the detached startup
-    // reindex task (single factory input across every memory embedding
-    // consumer).
+    // Resolve the named profile once so all session memory consumers agree.
     let memory_named_profile_set: bool = memory_config
         .as_ref()
         .and_then(|mc| mc.retrieval_profile.as_ref())
@@ -865,17 +847,25 @@ pub(crate) async fn spawn_session_actor(
         // above): facade when resolvable, FTS-only when not; legacy
         // `[memory.embedding]` only when no named profile is set.
         let memory_retrieval_facade = memory_facade_for_session.clone();
-        let embed_credentials = memory_embedding_credentials.clone();
         let embed_config = if memory_named_profile_set {
             None
         } else {
             memory_config.as_ref().map(|mc| mc.embedding.clone())
         };
+        // Keep active-chat credentials out of named-profile memory params.
+        let (embed_credentials, embed_api_key_for_memory) = if memory_named_profile_set {
+            (
+                crate::session::memory::EndpointScopedCredentials::none(),
+                None,
+            )
+        } else {
+            (memory_embedding_credentials.clone(), embed_api_key.clone())
+        };
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
             embed_config,
             embed_base_url: embed_base_url.clone(),
-            embed_api_key: embed_api_key.clone(),
+            embed_api_key: embed_api_key_for_memory,
             search_config: memory_config
                 .as_ref()
                 .map_or_else(Default::default, |mc| mc.search.clone()),
@@ -1939,13 +1929,7 @@ pub(crate) async fn spawn_session_actor(
         let index_config = memory_config
             .as_ref()
             .map_or_else(Default::default, |mc| mc.index.clone());
-        // The detached startup reindex uses the SAME single embedding-provider
-        // factory decision as the search backend (High finding): a named
-        // profile's credential-free facade is authoritative; the legacy
-        // `[memory.embedding]` path applies only when no named profile is set
-        // (with scoped/approved credentials, never the raw active-chat key).
-        // An unresolved named profile ⇒ provider None ⇒ FTS-only, no legacy/
-        // chat call, no vector writes.
+        // Startup reindex shares the session-scoped provider decision with search.
         let (startup_embed_config, startup_embed_dims) = startup_reindex_embedding_inputs(
             memory_named_profile_set,
             memory_config.as_ref(),
@@ -1982,12 +1966,7 @@ pub(crate) async fn spawn_session_actor(
                     files = files.len(),
                     "MEMORY_REINDEX: background reindex complete"
                 );
-                // Gate back-fill on a stable vector state: never write into
-                // `chunks_vec` while a rebuild is pending or before a
-                // fingerprint is installed (F7). Resolve the provider through
-                // the single factory (`startup_reindex_backfill`) so a named
-                // profile (resolved or not) never re-engages the legacy/
-                // active-chat credential path.
+                // Backfill only after the index has reached a stable vector state.
                 let embedded_count = startup_reindex_backfill(
                     &index,
                     memory_facade_for_session.clone(),

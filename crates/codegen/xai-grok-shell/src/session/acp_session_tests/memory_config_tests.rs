@@ -699,9 +699,7 @@ async fn test_idle_flush_timeout_from_config() {
         .await;
 }
 
-/// FINDING-2 (Low): flush/Dream semantic dedup and write-time vectorization
-/// use the named facade through the single factory — they are no longer
-/// silently disabled/deferred under a named profile.
+/// Flush and Dream embedding use the named facade through the shared factory.
 #[tokio::test]
 async fn facade_powers_flush_and_dream_embedding_emitters() {
     let dims = 4;
@@ -733,7 +731,7 @@ async fn facade_powers_flush_and_dream_embedding_emitters() {
     assert_eq!(
         provider.unwrap().model_name(),
         "pinned-model",
-        "flush/Dream must embed through the credential-free facade, not a legacy/chat path"
+        "flush/Dream must use the named facade"
     );
 
     // Unresolved named profile ⇒ FTS-only for these emitters too.
@@ -748,11 +746,7 @@ async fn facade_powers_flush_and_dream_embedding_emitters() {
     );
 }
 
-/// FINDING-1 (High): the detached startup `MEMORY_REINDEX` back-fill resolves
-/// its embedding provider through the credential-free named-profile facade —
-/// even when a legacy `[memory.embedding]` config and active-chat credentials
-/// are also present — so vectors are written in the facade's pinned space, no
-/// legacy/chat call is issued, and no foreign vectors enter the vec table.
+/// Startup reindex backfill uses the resolved named-profile facade.
 #[tokio::test]
 #[allow(clippy::field_reassign_with_default)]
 async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
@@ -765,10 +759,7 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
     crate::session::memory::index::init_sqlite_vec();
     let db_path = workspace_dir.join("index.sqlite");
 
-    // Named profile configured and resolved: the facade pins dims = 6. A
-    // legacy `[memory.embedding]` config (dims 1024 — a different space) is
-    // present too, exactly the documented "mixed" case, plus an active-chat
-    // API key.
+    // Keep a conflicting legacy config and active-chat key in the fixture.
     let facade_dims = 6usize;
     let fake = std::sync::Arc::new(crate::session::memory::retrieval::FakeMemoryRetrieval::new(
         facade_dims,
@@ -798,8 +789,7 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
         "startup index must open in the facade space"
     );
 
-    // A persistent session already installed a fingerprint in the facade
-    // space (first file embedded through the facade).
+    // Install a fingerprint in the facade space.
     let small = tmp.path().join("small.md");
     std::fs::write(&small, "# Small\n\nRust small content.").unwrap();
     {
@@ -838,8 +828,7 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
         "facade-space fingerprint must install, got {readiness:?}"
     );
 
-    // The startup reindex indexes more files → chunks without vectors (the
-    // gap the startup back-fill must close in the facade's pinned space).
+    // Add chunks without vectors for startup backfill.
     let mut idx = crate::session::memory::index::MemoryIndex::open_or_create(
         &db_path,
         storage.clone(),
@@ -855,9 +844,7 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
     let missing_before = idx.chunks_without_embeddings().unwrap().len();
     assert!(missing_before > 0, "the new chunks must lack vectors");
 
-    // Run the startup back-fill exactly as the detached task does: the
-    // facade clone, embed_config None (named profile), scoped credentials,
-    // and the raw active-chat key offered but never used.
+    // Run backfill with the named facade and conflicting chat credentials.
     let credentials = crate::session::memory::EndpointScopedCredentials::none();
     let embed_calls_before = fake.embed_calls();
     let embedded = super::spawn::startup_reindex_backfill(
@@ -883,11 +870,7 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
     );
 }
 
-/// FINDING-1 (High): an unresolved named retrieval profile leaves the startup
-/// back-fill FTS-only — even with a fingerprint installed (the dangerous
-/// steady state where `vectors_safe_to_backfill()` is true) and an
-/// active-chat API key offered, the factory resolves `None` and zero vector
-/// rows are written.
+/// An unresolved named profile leaves startup backfill FTS-only.
 #[tokio::test]
 #[allow(clippy::field_reassign_with_default)]
 async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
@@ -901,9 +884,7 @@ async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
     let db_path = workspace_dir.join("index.sqlite");
     let dims = 1024usize;
 
-    // Named profile configured but NOT resolvable (facade None). Spawn sets
-    // embed_config=None under a named profile, so even the legacy config that
-    // happens to be present must not be consulted.
+    // The unresolved named profile disables the legacy config.
     let mut memory_config = crate::config::MemoryConfig::default();
     memory_config.enabled = true;
     memory_config.retrieval_profile = Some("never-resolves".to_string());
@@ -917,8 +898,7 @@ async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
     assert!(embed_config.is_none(), "unresolved named ⇒ legacy disabled");
     assert_eq!(dims_from_inputs, 1024);
 
-    // Steady state from a prior session: a fingerprint IS installed so
-    // `vectors_safe_to_backfill()` is true (the case the old code mishandled).
+    // Install a prior fingerprint so backfill is otherwise available.
     let small = tmp.path().join("small.md");
     std::fs::write(&small, "# Small\n\nRust small content.").unwrap();
     {
@@ -977,10 +957,7 @@ async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
     let missing = idx.chunks_without_embeddings().unwrap().len();
     assert!(missing > 0);
 
-    // Unresolved named profile endpoint: facade None + embed_config None (as
-    // spawn sets them), scoped credentials, and the raw active-chat key
-    // offered. No legacy/chat call may happen and no vector row may be
-    // written.
+    // No provider is available for the unresolved profile.
     let credentials = crate::session::memory::EndpointScopedCredentials::none();
     let embedded = super::spawn::startup_reindex_backfill(
         &idx,
@@ -1002,8 +979,7 @@ async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
     );
 }
 
-/// FINDING-1: with no named profile configured, the startup inputs keep the
-/// legacy `[memory.embedding]` config and open the index in the legacy space.
+/// Without a named profile, startup inputs keep the legacy embedding config.
 #[test]
 #[allow(clippy::field_reassign_with_default)]
 fn startup_reindex_embedding_inputs_legacy_only_when_no_named_profile() {
