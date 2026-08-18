@@ -485,7 +485,15 @@ impl MemoryBackend for MemoryBackendImpl {
             }
             None => crate::rebuild::VectorReadiness::Disabled,
         };
-        let vec_active = matches!(readiness, crate::rebuild::VectorReadiness::Ready);
+        // Vector search is active for `Ready` (compatible + complete) and for
+        // `ReadyMissing` (compatible, a few current chunks lack vectors — the
+        // existing vectors are usable and only the missing rows are backfilled).
+        // Only a pending/disabled state must go FTS-only.
+        let vec_active = matches!(
+            readiness,
+            crate::rebuild::VectorReadiness::Ready
+                | crate::rebuild::VectorReadiness::ReadyMissing { .. }
+        );
 
         let mut index = super::index::MemoryIndex::open_or_create(
             &self.db_path,
@@ -541,10 +549,24 @@ impl MemoryBackend for MemoryBackendImpl {
             watcher_sync_stats = Some((dirty_count, changed_chunk_count, sync_start));
         }
 
+        // `ReadyMissing`: compatible but some current chunks lack vectors
+        // (incremental chunk churn or a transient incremental embed failure).
+        // Even when the watcher is quiescent, retry backfilling only the
+        // missing current chunks so the gap heals on this/next search without
+        // a full rebuild (G3/R-01 — the watcher-disabled path still
+        // self-heals).
+        if matches!(
+            readiness,
+            crate::rebuild::VectorReadiness::ReadyMissing { .. }
+        ) && reindex_chunks.is_empty()
+        {
+            reindex_chunks = index.chunks_without_embeddings().unwrap_or_default();
+        }
+
         // ── Async phase: embed missing chunks (no &index borrow) ──
         // Incremental embedding into `chunks_vec` only when the pinned vector
-        // space is installed (Ready); during a pending rebuild we must never
-        // mix old/new-space rows into the vec table.
+        // space is installed (Ready or ReadyMissing); during a pending rebuild
+        // we must never mix old/new-space rows into the vec table.
         let mut embedded_count: usize = 0;
         if vec_active
             && !reindex_chunks.is_empty()
@@ -1521,6 +1543,107 @@ mod factory_tests {
             "no vectors may be installed on failure"
         );
         assert!(idx.chunk_count() > 0, "chunks must survive");
+    }
+
+    /// R-01/G3: a compatible-partial vector set (matching fingerprint, one
+    /// missing current chunk) self-heals **on search** even with no watcher and
+    /// no dirty files — `ReadyMissing` keeps existing vectors usable and
+    /// backfills only the missing chunk instead of triggering a full rebuild.
+    #[tokio::test]
+    async fn test_search_self_heals_compatible_partial_no_watcher() {
+        let tmp = TempDir::new().unwrap();
+        init_sqlite_vec();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+
+        // Chunk A, then atomically install a matching fingerprint + vector.
+        let spec = crate::retrieval::stub_spec(dims, "m");
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let fa = tmp.path().join("a.md");
+            std::fs::write(&fa, "# A\n\nRust a content.").unwrap();
+            idx.reindex_file(&fa, "workspace").unwrap();
+        }
+        let install_embedder: Option<std::sync::Arc<dyn crate::embedding::EmbeddingProvider>> =
+            Some(std::sync::Arc::new(
+                crate::embedding::RetrievalEmbeddingProvider::new(std::sync::Arc::new(
+                    crate::retrieval::FakeMemoryRetrieval::new(dims, "m"),
+                )),
+            ));
+        let out = crate::rebuild::ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            install_embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, crate::rebuild::VectorReadiness::Ready),
+            "{out:?}"
+        );
+
+        // Add chunk B but do NOT embed it (a transient incremental embed
+        // failure): matching fp, 2 chunks, 1 vector row.
+        {
+            let mut idx = MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                xai_grok_config_types::MemoryIndexConfig::default(),
+                dims,
+            )
+            .unwrap();
+            let fb = tmp.path().join("b.md");
+            std::fs::write(&fb, "# B\n\nRust b content.").unwrap();
+            idx.reindex_file(&fb, "workspace").unwrap();
+            assert_eq!(idx.vec_row_count(), 1, "B must not be auto-embedded");
+            assert_eq!(idx.chunk_count(), 2);
+        }
+
+        // A backend with no watcher (and no dirty files) must still self-heal:
+        // search returns results and leaves the vector set complete.
+        let params = MemoryBackendParams {
+            retrieval: Some(std::sync::Arc::new(
+                crate::retrieval::FakeMemoryRetrieval::new(dims, "m"),
+            )),
+            watcher: None,
+            ..make_params_fts_only("self-heal-test")
+        };
+        let backend = MemoryBackendImpl::from_session_params(storage.clone(), &params);
+        let results = backend.search("rust", 5, 0.0).await.unwrap();
+        assert!(
+            !results.is_empty(),
+            "search must still return results during a compatible-partial state"
+        );
+
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            dims,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            2,
+            "ReadyMissing must backfill the missing chunk on search"
+        );
+        assert_eq!(
+            idx.vec_row_count(),
+            idx.chunk_count(),
+            "vector set is complete after the self-heal"
+        );
     }
 }
 

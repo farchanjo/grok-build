@@ -13,9 +13,21 @@
 //!   index (zero chunks, zero vectors) or a provably complete same-dims
 //!   legacy set. Adopt re-checks the marker inside its transaction (CAS) so a
 //!   concurrently created marker aborts the adopt.
-//! - Installed fingerprint differs, dimensions differ, vectors are missing,
-//!   or a prior incomplete marker exists ⇒ mark **rebuild pending** and
-//!   operate **FTS-only** (old vectors are never queried / mixed).
+//! - Installed fingerprint differs, dimensions differ, or a prior incomplete
+//!   marker exists ⇒ mark **rebuild pending** and operate **FTS-only** (old
+//!   vectors are never queried / mixed).
+//! - **Initial atomic migration vs compatible incremental backfill:** a
+//!   matching installed fingerprint proves the atomic initial migration
+//!   completed. Later `vec_row_count < chunk_count` is normal incremental
+//!   chunk churn or a transient incremental embed failure — the existing
+//!   compatible vectors stay **usable** and the caller backfills only the
+//!   missing current chunks via `chunks_without_embeddings` on this/next
+//!   search (`ReadyMissing`); this never triggers a full-index rebuild. A
+//!   torn/corrupt install (fingerprint present but dimensions/schema
+//!   mismatch) makes the source *incompatible* and still fails closed into a
+//!   rebuild. A fresh index with no fingerprint and a non-empty chunk set is
+//!   not yet "compatible" — it must atomically rebuild (and install the
+//!   fingerprint) before vectors are ready.
 //! - A rebuild is **claimed** with a true compare-and-swap (the claim write
 //!   and the staging-binding write are one transaction); only one process
 //!   wins. Stale/same-target takeovers observe the completed state as Ready.
@@ -313,6 +325,18 @@ pub fn try_claim_rebuild(
                 params![schema::META_VECTOR_STAGING_FP, &claimed.id],
             )?;
         }
+        #[cfg(test)]
+        if updated == 1
+            && crate::rebuild::CLAIM_PRE_COMMIT_FAIL.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // Injected crash after the CAS update and the binding write: the
+            // whole transaction rolls back, so neither the claim nor the
+            // staging binding persists (G2).
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                Some("injected claim pre-commit failure".into()),
+            ));
+        }
         Ok(updated)
     });
     match updated {
@@ -321,12 +345,19 @@ pub fn try_claim_rebuild(
             true
         }
         _ => {
-            // Lost the CAS to a concurrent writer — someone else owns the
-            // marker.
+            // Lost the CAS (or an injected pre-commit rollback) — the marker
+            // and binding are untouched; another owner may have the claim.
             false
         }
     }
 }
+
+/// Test-only hook: when set, `try_claim_rebuild` rolls back the claim + binding
+/// transaction right before COMMIT (after the CAS update and the staging-binding
+/// write), proving a crash can tear neither the claim nor the binding (G2).
+#[cfg(test)]
+pub(crate) static CLAIM_PRE_COMMIT_FAIL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Atomically clear a stale pending marker + staging when this builder
 /// observes a **completed** target (installed fingerprint == intended).
@@ -338,9 +369,12 @@ pub fn try_claim_rebuild(
 /// - `expected_id: None`: clears any parseable marker whose `intended` equals
 ///   `intended_fp` (a marker for the already-completed target is stale), and
 ///   drops that attempt's staging. Markers for other targets are preserved.
-/// Runs in one transaction so the clear is crash-atomic (F6).
+/// Runs in one transaction so the clear is crash-atomic (F6). A failure is
+/// logged (safe: only the error; no marker/body/secret) and retried on the
+/// next observe-completed pass — a stale marker is never silently dropped
+/// (G5).
 fn clear_completed_target(index: &MemoryIndex, expected_id: Option<&str>, intended_fp: &str) {
-    let _ = in_transaction(index.db(), |db| -> rusqlite::Result<()> {
+    let result = in_transaction(index.db(), |db| -> rusqlite::Result<()> {
         let raw: Option<String> = db
             .query_row(
                 schema::GET_META_SQL,
@@ -392,11 +426,32 @@ fn clear_completed_target(index: &MemoryIndex, expected_id: Option<&str>, intend
                     "DELETE FROM vector_staging WHERE pending_id = ?1",
                     params![&p.id],
                 )?;
+                #[cfg(test)]
+                if crate::rebuild::CLEAR_PRE_COMMIT_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(1),
+                        Some("injected clear pre-commit failure".into()),
+                    ));
+                }
                 Ok(())
             }
         }
     });
+    if let Err(e) = result {
+        tracing::debug!(
+            target: xai_grok_telemetry::memory_log::TARGET,
+            error = %e,
+            "failed to clear completed-target pending marker; retained and retried on next pass"
+        );
+    }
 }
+
+/// Test-only hook: when set, `clear_completed_target` rolls back the clearing
+/// transaction right before COMMIT (after the writes), proving a failed clear
+/// leaves the stale marker/staging intact and is retried (G5).
+#[cfg(test)]
+pub(crate) static CLEAR_PRE_COMMIT_FAIL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Persist `last_attempt_at` on the pending marker, owner-scoped: only applies
 /// when the stored marker still carries our attempt id (a superseded attempt
@@ -760,13 +815,42 @@ use super::fingerprint::{DocPreparationSpec, EmbeddingSourceSpec, VECTOR_SCHEMA_
 /// Outcome of the vector reconcile/build for this query round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorReadiness {
-    /// Installed vectors are compatible with the pinned source — query them.
+    /// Installed vectors are compatible with the pinned source **and** cover
+    /// every chunk — query them (`vec_row_count == chunk_count`).
     Ready,
+    /// Installed vectors are compatible (a matching fingerprint proves the
+    /// atomic initial migration completed) and the existing vectors remain
+    /// **usable**, but some current chunks are missing vectors (`vec_row_count
+    /// < chunk_count`). That is normal incremental chunk churn or a transient
+    /// incremental embed failure, **not** a reason to rebuild the whole index:
+    /// query the existing vectors and backfill only the `missing` current
+    /// chunks via `chunks_without_embeddings` on this/next search. A torn/
+    /// corrupt install (fingerprint present but dimensions/schema mismatch)
+    /// is *not* reported here — it makes the source `incompatible` and falls
+    /// through to a fail-closed rebuild.
+    ReadyMissing { missing: usize },
     /// Rebuild pending — operate FTS-only. `owned` indicates this caller
     /// (tried to) run the rebuild this round.
     Pending { owned: bool },
     /// sqlite-vec unavailable (or no embedding source) — FTS-only.
     Disabled,
+}
+
+/// Readiness for an already-`compatible` index (installed fingerprint and
+/// dimensions both match the pinned source): `Ready` when the installed vector
+/// set covers every chunk, else `ReadyMissing` with the missing-row count.
+/// Shared by the Phase-0 branch and every observe-completed path so a
+/// compatible-partial index always stays vector-usable (never a rebuild).
+fn compatible_readiness(idx: &MemoryIndex) -> VectorReadiness {
+    let rows = idx.vec_row_count();
+    let chunks = idx.chunk_count();
+    if rows == chunks {
+        VectorReadiness::Ready
+    } else {
+        VectorReadiness::ReadyMissing {
+            missing: chunks.saturating_sub(rows) as usize,
+        }
+    }
 }
 
 fn open_index(
@@ -828,14 +912,22 @@ pub async fn ensure_vectors_ready(
     let compatible =
         installed.as_deref() == Some(fp.hash.as_str()) && installed_dims == spec.dimensions;
     match installed {
-        Some(_) if compatible && idx.vec_row_count() == idx.chunk_count() => {
-            // Compatible AND the installed vector set covers every chunk
-            // (F9): reuse vectors. Clear any stale marker for this already
-            // completed target (F6), then return Ready.
+        Some(_) if compatible => {
+            // A matching fingerprint proves the atomic initial migration
+            // completed. Later `vec_row_count < chunk_count` is normal
+            // incremental chunk churn or a transient incremental embed
+            // failure — keep the existing compatible vectors **usable** and
+            // backfill only the missing rows (ReadyMissing); never a full-index
+            // rebuild solely for compatible missing rows (G3/R-01). A torn/
+            // corrupt install (fingerprint present but dimensions/schema
+            // mismatch) makes `compatible` false and falls through below to a
+            // fail-closed rebuild. Clear any stale marker for this already
+            // completed target (F6).
             clear_completed_target(&idx, None, fp.hash.as_str());
-            return VectorReadiness::Ready;
+            return compatible_readiness(&idx);
         }
-        Some(_) => { /* mismatch -> rebuild below */ }
+        Some(_) => { /* fingerprint/dimensions/schema mismatch (incl. torn install) -> rebuild below */
+        }
         None => {
             // No fingerprint: adopt WITHOUT a rebuild ONLY when there is no
             // pending marker at all (parseable or corrupt), and the vec set is
@@ -870,6 +962,10 @@ pub async fn ensure_vectors_ready(
         Ok(v) => v,
         Err(_) => return VectorReadiness::Pending { owned: false },
     };
+    // Reaching here with `installed == fp.hash` means the fingerprint matches
+    // but `embedding_dimensions` does not — a torn/corrupt install invariant —
+    // so it is reported as a schema mismatch and rebuilt fail-closed. A fresh
+    // index that failed to adopt (no fingerprint) is "adopt_incompatible".
     let reason = if installed.is_none() {
         "adopt_incompatible"
     } else if installed.as_deref() == Some(fp.hash.as_str()) {
@@ -896,7 +992,7 @@ pub async fn ensure_vectors_ready(
             && idx.embedding_dimensions() == spec.dimensions
         {
             clear_completed_target(&idx, Some(&p.id), fp.hash.as_str());
-            return VectorReadiness::Ready;
+            return compatible_readiness(&idx);
         }
         return VectorReadiness::Pending { owned: false };
     }
@@ -928,7 +1024,7 @@ pub async fn ensure_vectors_ready(
                 && idx.embedding_dimensions() == spec.dimensions
             {
                 clear_completed_target(&idx, Some(&pending.id), fp.hash.as_str());
-                return VectorReadiness::Ready;
+                return compatible_readiness(&idx);
             }
         }
         return VectorReadiness::Pending { owned: false };
@@ -958,7 +1054,7 @@ pub async fn ensure_vectors_ready(
             && idx.embedding_dimensions() == spec.dimensions
         {
             clear_completed_target(&idx, Some(&pending.id), fp.hash.as_str());
-            return VectorReadiness::Ready;
+            return compatible_readiness(&idx);
         }
         // Pending must still reference our attempt id; a superseding rebuild
         // (newer fingerprint/incarnation) must discard our stale staging.
@@ -2815,5 +2911,387 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(c, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // PR21 final re-review (G1/G3/G4/G5 + R-01): compatible-partial state
+    // -----------------------------------------------------------------------
+
+    /// G1/G3/R-01: a matching fingerprint with one missing current chunk
+    /// returns `ReadyMissing` (existing vectors stay usable) — *not* a full
+    /// rebuild — and backend backfills only that missing row, preserving the
+    /// compatible fingerprint.
+    #[tokio::test]
+    async fn test_compatible_partial_backfills_missing_only() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        let fa = write_note(&tmp, "a.md", "# A\n\nRust a content.");
+        idx.reindex_file(&fa, "workspace").unwrap();
+        drop(idx);
+        let spec = stub_spec(dims, "m");
+        install_vectors_for(&db_path, &storage, dims, &spec, "m").await;
+
+        // Add chunk B without embedding it (normal incremental churn / a
+        // transient incremental embed failure): matching fp, 2 chunks, 1 row.
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        let fb = write_note(&tmp, "b.md", "# B\n\nRust b content.");
+        idx.reindex_file(&fb, "workspace").unwrap();
+        assert_eq!(
+            idx.vec_row_count(),
+            1,
+            "new chunk must not be auto-embedded"
+        );
+        assert_eq!(idx.chunk_count(), 2);
+        assert_eq!(
+            idx.chunks_without_embeddings().unwrap().len(),
+            1,
+            "exactly chunk B is missing vectors"
+        );
+        drop(idx);
+
+        // Next search: NO rebuild — existing compatible vectors usable, only
+        // the missing chunk reported for backfill.
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "m"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        let out = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder.clone(),
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, VectorReadiness::ReadyMissing { missing: 1 }),
+            "{out:?}"
+        );
+        assert_eq!(
+            fake.embed_calls(),
+            0,
+            "ReadyMissing must not re-embed (no full rebuild)"
+        );
+        assert!(
+            !pending_marker_present(&open_index(&db_path, storage.clone(), dims)),
+            "ReadyMissing must not arm a pending marker"
+        );
+
+        // Backend backfills ONLY the missing current chunk.
+        let idx = open_index(&db_path, storage.clone(), dims);
+        let missing = idx.chunks_without_embeddings().unwrap();
+        assert_eq!(missing.len(), 1, "backfill is bounded to the missing row");
+        let (cid, text) = missing.into_iter().next().unwrap();
+        let mock = Arc::new(MockEmbeddingProvider { dimensions: dims });
+        let v = mock.embed_batch(&[text.as_str()]).await.unwrap();
+        idx.upsert_embedding(&cid, &v[0]).unwrap();
+        assert_eq!(idx.vec_row_count(), 2);
+        drop(idx);
+
+        // Next search: compatible + complete => Ready, fingerprint preserved.
+        let out2 = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(out2, VectorReadiness::Ready), "{out2:?}");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(idx.vec_row_count(), 2);
+        assert_eq!(
+            idx.installed_vector_fingerprint_hash().as_deref(),
+            Some(fp_for(&spec).hash.as_str()),
+            "compatible fingerprint preserved, not reinstalled"
+        );
+    }
+
+    /// R-01: after a transient incremental embed failure (a caller-side
+    /// failing backfill leaves the gap), the next search reports `ReadyMissing`
+    /// (vector search stays active — never FTS-only, never a full rebuild) and
+    /// heals the gap once the embedder recovers.
+    #[tokio::test]
+    async fn test_transient_incremental_failure_heals_next_search() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        let fa = write_note(&tmp, "a.md", "# A\n\nRust a content.");
+        idx.reindex_file(&fa, "workspace").unwrap();
+        drop(idx);
+        let spec = stub_spec(dims, "m");
+        install_vectors_for(&db_path, &storage, dims, &spec, "m").await;
+
+        // Add chunk B; its incremental embed fails transiently, leaving the
+        // index with a matching fingerprint, 2 chunks, 1 vector row.
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        let fb = write_note(&tmp, "b.md", "# B\n\nRust b content.");
+        idx.reindex_file(&fb, "workspace").unwrap();
+        let missing = idx.chunks_without_embeddings().unwrap();
+        assert_eq!(missing.len(), 1);
+        let failing = Arc::new(FailingEmbeddingProvider { dims });
+        let res = failing.embed_batch(&[missing[0].1.as_str()]).await;
+        assert!(res.is_err(), "incremental embed fails transiently");
+        drop(idx);
+
+        // Next search with a HEALTHY embedder: ReadyMissing — the index stays
+        // vector-active (not FTS-only, not a rebuild).
+        let healthy = Arc::new(FakeMemoryRetrieval::new(dims, "m"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(healthy.clone())));
+        let out = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder.clone(),
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(out, VectorReadiness::ReadyMissing { missing: 1 }),
+            "must stay compatible-partial, not rebuild: {out:?}"
+        );
+        assert!(
+            !matches!(out, VectorReadiness::Pending { .. })
+                && !matches!(out, VectorReadiness::Disabled),
+            "vector search must stay active"
+        );
+        assert_eq!(healthy.embed_calls(), 0, "no full-index rebuild embed");
+
+        // Incremental backfill succeeds now → next search is Ready.
+        let idx = open_index(&db_path, storage.clone(), dims);
+        let missing = idx.chunks_without_embeddings().unwrap();
+        assert_eq!(missing.len(), 1);
+        let (cid, text) = missing.into_iter().next().unwrap();
+        let mock = Arc::new(MockEmbeddingProvider { dimensions: dims });
+        let v = mock.embed_batch(&[text.as_str()]).await.unwrap();
+        idx.upsert_embedding(&cid, &v[0]).unwrap();
+        drop(idx);
+
+        let out2 = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(out2, VectorReadiness::Ready), "{out2:?}");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(idx.vec_row_count(), 2);
+        assert_eq!(idx.vec_row_count(), idx.chunk_count());
+    }
+
+    /// G4/R-01: a non-empty index with NO installed fingerprint is not yet
+    /// compatible — it must atomically rebuild (install the fingerprint) before
+    /// vectors are ready, and can never be reported `ReadyMissing` (which
+    /// requires a matching installed fingerprint).
+    #[tokio::test]
+    async fn test_no_partial_initial_fingerprint_is_ready() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        let fa = write_note(&tmp, "a.md", "# A\n\nRust a content.");
+        idx.reindex_file(&fa, "workspace").unwrap();
+        assert_eq!(idx.chunk_count(), 1);
+        assert_eq!(idx.vec_row_count(), 0);
+        assert!(idx.installed_vector_fingerprint_hash().is_none());
+        drop(idx);
+
+        let spec = stub_spec(dims, "m");
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "m"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        let out = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        // Atomic initial migration: only Ready after the install completes,
+        // and never ReadyMissing (no fingerprint was installed to match).
+        assert!(matches!(out, VectorReadiness::Ready), "{out:?}");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(
+            idx.vec_row_count(),
+            idx.chunk_count(),
+            "complete after rebuild"
+        );
+        assert_eq!(idx.vec_row_count(), 1);
+        assert_eq!(
+            idx.installed_vector_fingerprint_hash().as_deref(),
+            Some(fp_for(&spec).hash.as_str()),
+            "fingerprint installed atomically before Ready"
+        );
+    }
+
+    /// G4: a brand-new index (zero chunks, zero vectors, no fingerprint)
+    /// adopts the canonical fingerprint with zero embedding work and reports
+    /// Ready — the deliberate initial-migration path.
+    #[tokio::test]
+    async fn test_fresh_empty_index_adopts_zero_chunks() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let spec = stub_spec(dims, "m");
+        let fake = Arc::new(FakeMemoryRetrieval::new(dims, "m"));
+        let embedder: Option<Arc<dyn EmbeddingProvider>> =
+            Some(Arc::new(RetrievalEmbeddingProvider::new(fake.clone())));
+        let out = ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            xai_grok_config_types::MemoryIndexConfig::default(),
+            &spec,
+            embedder,
+            60,
+            0,
+            Some(usize::MAX),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(out, VectorReadiness::Ready), "{out:?}");
+        assert_eq!(fake.embed_calls(), 0, "empty adopt must not embed");
+        let idx = open_index(&db_path, storage.clone(), dims);
+        assert_eq!(idx.vec_row_count(), 0);
+        assert_eq!(idx.chunk_count(), 0);
+        assert_eq!(
+            idx.installed_vector_fingerprint_hash().as_deref(),
+            Some(fp_for(&spec).hash.as_str()),
+            "empty adopt persists the canonical fingerprint"
+        );
+    }
+
+    /// G2: a crash between the claim CAS / staging-binding write and COMMIT
+    /// tears neither — the marker stays unclaimed and the binding stays the
+    /// pending id; a retry without the crash wins.
+    #[test]
+    fn test_claim_binding_rolls_back_on_crash() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let idx = open_index(&db_path, storage.clone(), dims);
+        let spec = stub_spec(dims, "m");
+        let fp_x = fp_for(&spec);
+        let mut pending = ensure_pending(&idx, &fp_x.hash, "test").unwrap();
+        let pre = pending.clone();
+        assert!(pending.claim.is_empty(), "precondition: unclaimed");
+
+        crate::rebuild::CLAIM_PRE_COMMIT_FAIL.store(true, std::sync::atomic::Ordering::SeqCst);
+        let won = try_claim_rebuild(&idx, &mut pending, 60);
+        crate::rebuild::CLAIM_PRE_COMMIT_FAIL.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!won, "injected crash must tear the claim attempt");
+
+        // Neither the claim fields nor the staging binding tore.
+        let st = pending_state(&idx).unwrap();
+        assert_eq!(st.claim, pre.claim, "claim must not persist on rollback");
+        assert_eq!(st.claimed_at, pre.claimed_at, "claimed_at must not persist");
+        assert_eq!(st.status, pre.status, "status must not flip to running");
+        assert!(st.claim.is_empty(), "marker stays unclaimed after rollback");
+        let binding = idx
+            .meta_get(schema::META_VECTOR_STAGING_FP)
+            .unwrap_or_default();
+        assert_eq!(
+            binding, pre.id,
+            "staging binding must remain the pending id"
+        );
+
+        // Retry without the hook: the CAS still matches (rolled-back) state.
+        assert!(try_claim_rebuild(&idx, &mut pending, 60), "retry must win");
+        let st = pending_state(&idx).unwrap();
+        assert!(!st.claim.is_empty(), "claim persisted on success");
+        assert_eq!(st.status, "running");
+        let binding = idx
+            .meta_get(schema::META_VECTOR_STAGING_FP)
+            .unwrap_or_default();
+        assert_eq!(binding, st.id, "binding matches the claimed attempt id");
+    }
+
+    /// G5: a failed `clear_completed_target` is logged, retains the stale
+    /// marker + staging (safe), and the next pass clears both.
+    #[tokio::test]
+    async fn test_clear_completed_target_failure_retains_and_retries() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let dims = 4;
+        let mut idx = open_index(&db_path, storage.clone(), dims);
+        let spec = stub_spec(dims, "m");
+        let fp_hash = fp_for(&spec).hash;
+        let f = write_note(&tmp, "a.md", "# A\n\nRust a lock.");
+        idx.reindex_file(&f, "workspace").unwrap();
+        let pending = ensure_pending(&idx, &fp_hash, "test").unwrap();
+        let chunk = idx
+            .get_chunk(&format!("{}:0", f.to_string_lossy()))
+            .unwrap()
+            .unwrap();
+        let mock = MockEmbeddingProvider { dimensions: dims };
+        let v = mock.embed_batch(&[chunk.text.as_str()]).await.unwrap();
+        stage_vector(
+            &idx,
+            &pending.id,
+            &fp_hash,
+            chunk.id.as_str(),
+            chunk.hash.as_str(),
+            &v[0],
+        )
+        .unwrap();
+
+        // Inject a crash on the clear; marker + staging survive (retryable).
+        crate::rebuild::CLEAR_PRE_COMMIT_FAIL.store(true, std::sync::atomic::Ordering::SeqCst);
+        clear_completed_target(&idx, Some(&pending.id), &fp_hash);
+        crate::rebuild::CLEAR_PRE_COMMIT_FAIL.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            pending_marker_present(&idx),
+            "failed clear must retain the marker"
+        );
+        assert!(
+            staged_count(&idx, &pending.id) > 0,
+            "failed clear must retain staging"
+        );
+
+        // Next pass succeeds.
+        clear_completed_target(&idx, Some(&pending.id), &fp_hash);
+        assert!(!pending_marker_present(&idx), "retry must clear the marker");
+        assert_eq!(
+            staged_count(&idx, &pending.id),
+            0,
+            "retry must drain staging"
+        );
     }
 }
