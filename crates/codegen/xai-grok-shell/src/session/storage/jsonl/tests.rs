@@ -1110,6 +1110,92 @@ async fn fork_summary_wrap_preserves_raw_external_runtime_envelope() {
 }
 
 #[tokio::test]
+async fn fork_copy_clears_source_only_schema_fields_and_keeps_unknown_fields() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("wrap-clear-src"),
+        cwd: "/source/workspace".to_string(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let summary_path = adapter.summary_file(&source_info);
+    let mut summary = std::fs::read_to_string(&summary_path).unwrap();
+    summary.pop();
+    summary.push_str(
+        r#",
+  "request_id": "leak-request",
+  "collection_id": "leak-collection",
+  "hidden": true,
+  "git_remotes": ["origin"],
+  "parent_session_id": "leak-parent",
+  "pending_cwd_switch_reminder": {"cwd_generation": 3, "previous_cwd": "/src", "destination_cwd": "/destination", "content": "switch"},
+  "futureSummaryField": "kept"
+}"#,
+    );
+    std::fs::write(&summary_path, summary).unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("wrap-clear-dst"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let copied = adapter.read_summary_sync(&target_info).unwrap();
+    assert!(copied.request_id.is_none());
+    assert!(copied.collection_id.is_none());
+    assert!(copied.hidden.is_none());
+    assert!(copied.git_remotes.is_empty());
+    assert!(copied.parent_session_id.is_none());
+    assert!(copied.pending_cwd_switch_reminder.is_none());
+    let raw = std::fs::read_to_string(adapter.summary_file(&target_info)).unwrap();
+    assert!(raw.contains(r#""futureSummaryField":"kept""#));
+}
+
+#[test]
+fn summary_schema_probe_covers_conditional_fields() {
+    let keys = super::summary_schema_keys();
+    for expected in [
+        "info",
+        "cwd_generation",
+        "previous_cwd",
+        "pending_cwd_switch_reminder",
+        "cwd_switch_bookkeeping_generation",
+        "parent_session_id",
+        "forked_at",
+        "collection_id",
+        "prompt_display_cwd",
+        "session_kind",
+        "fork_context_source",
+        "fork_parent_prompt_id",
+        "inherited_prefix_len",
+        "hidden",
+        "source_workspace_dir",
+        "git_root_dir",
+        "git_remotes",
+        "head_commit",
+        "head_branch",
+        "request_id",
+        "grok_home",
+        "last_active_at",
+        "generated_title",
+        "title_is_manual",
+        "worktree_label",
+        "agent_name",
+        "sandbox_profile",
+        "reasoning_effort",
+        "execution_backend",
+        "external_runtime",
+    ] {
+        assert!(keys.contains(expected), "schema probe misses {expected:?}");
+    }
+}
+
+#[tokio::test]
 async fn copy_session_data_rejects_unsafe_session_id_components() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -1360,8 +1446,14 @@ async fn duplicate_checkpoint_records_copy_the_file_once() {
 fn assert_no_copy_staging(adapter: &JsonlStorageAdapter, target_info: &Info) {
     let target_dir = adapter.session_dir(target_info);
     let prefix = format!(".{}.copy-", target_info.id);
-    let leftovers: Vec<_> = std::fs::read_dir(target_dir.parent().unwrap())
-        .unwrap()
+    // A missing parent directory means nothing could have been staged there.
+    let Some(parent) = target_dir.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let leftovers: Vec<_> = entries
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
         .map(|entry| entry.path())

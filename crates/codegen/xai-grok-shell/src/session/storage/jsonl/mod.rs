@@ -1968,6 +1968,78 @@ fn read_regular_file_nofollow(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+/// Every key the `Summary` schema can serialize.
+///
+/// Serializing a fully populated `Summary` exercises every
+/// `skip_serializing_if` predicate, so the key set tracks schema growth
+/// automatically: a fork stays authoritative for newly added fields without
+/// anyone updating a hand-maintained list.
+fn summary_schema_keys() -> std::collections::HashSet<String> {
+    let now = chrono::Utc::now();
+    let probe = Summary {
+        info: Info {
+            id: acp::SessionId::new("schema-probe"),
+            cwd: "/schema-probe".to_string(),
+        },
+        cwd_generation: 1,
+        previous_cwd: Some("/previous".to_string()),
+        pending_cwd_switch_reminder: Some(crate::session::persistence::PendingCwdSwitchReminder {
+            cwd_generation: 1,
+            previous_cwd: "/previous".to_string(),
+            destination_cwd: "/destination".to_string(),
+            content: "probe".to_string(),
+            destination_project_instructions: Some("instructions".to_string()),
+        }),
+        cwd_switch_bookkeeping_generation: 1,
+        session_summary: "schema probe".to_string(),
+        created_at: now,
+        updated_at: now,
+        num_messages: 1,
+        num_chat_messages: 1,
+        current_model_id: acp::ModelId::new("schema-probe-model"),
+        parent_session_id: Some("schema-probe-parent".to_string()),
+        forked_at: Some(now),
+        collection_id: Some("schema-probe-collection".to_string()),
+        next_trace_turn: 1,
+        chat_format_version: CHAT_FORMAT_VERSION,
+        prompt_display_cwd: Some("/schema-probe-display".to_string()),
+        session_kind: Some("fork".to_string()),
+        fork_context_source: Some("new".to_string()),
+        fork_parent_prompt_id: Some("schema-probe-prompt".to_string()),
+        inherited_prefix_len: Some(1),
+        hidden: Some(true),
+        source_workspace_dir: Some("/schema-probe-source-workspace".to_string()),
+        git_root_dir: Some("/schema-probe-git".to_string()),
+        git_remotes: vec!["origin".to_string()],
+        head_commit: Some("schema-probe-commit".to_string()),
+        head_branch: Some("schema-probe-branch".to_string()),
+        request_id: Some("schema-probe-request".to_string()),
+        grok_home: Some("/schema-probe-grok-home".to_string()),
+        last_active_at: Some(now),
+        generated_title: Some("schema probe title".to_string()),
+        title_is_manual: true,
+        worktree_label: Some("schema-probe-worktree".to_string()),
+        agent_name: Some("schema-probe-agent".to_string()),
+        sandbox_profile: Some("workspace".to_string()),
+        reasoning_effort: Some(xai_grok_inference_types::ReasoningEffort::Medium),
+        execution_backend: crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
+            crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+        ),
+        external_runtime: Some(
+            crate::agent::external_runtime::ExternalRuntimeEnvelope::for_kind(
+                crate::agent::execution_backend::ExternalAgentKind::ClaudeCli,
+            ),
+        ),
+    };
+    serde_json::to_value(probe)
+        .expect("fully populated Summary must serialize")
+        .as_object()
+        .expect("Summary must serialize as a JSON object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
 fn wrap_fork_summary_json(source: &[u8], target: &Summary) -> io::Result<Vec<u8>> {
     #[derive(serde::Deserialize)]
     struct RawSummaryPeek<'a> {
@@ -1978,9 +2050,9 @@ fn wrap_fork_summary_json(source: &[u8], target: &Summary) -> io::Result<Vec<u8>
     let raw_external_runtime = serde_json::from_slice::<RawSummaryPeek<'_>>(source)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
         .external_runtime;
-    let mut source_value: serde_json::Value = serde_json::from_slice(source)
+    let source_value: serde_json::Value = serde_json::from_slice(source)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let source_object = source_value.as_object_mut().ok_or_else(|| {
+    let source_object = source_value.as_object().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "source summary must be a JSON object",
@@ -1994,13 +2066,25 @@ fn wrap_fork_summary_json(source: &[u8], target: &Summary) -> io::Result<Vec<u8>
             "target summary must be a JSON object",
         )
     })?;
+    // The fork target is authoritative for every key in the `Summary` schema:
+    // a key the target omitted through a `skip_serializing_if` predicate
+    // (for example a cleared `pending_cwd_switch_reminder`) must not leak
+    // back from the source. Keys outside the schema carry over from the
+    // source so newer summary fields round-trip through older binaries.
+    let schema_keys = summary_schema_keys();
+    let mut merged = serde_json::Map::new();
     for (key, value) in target_object {
-        source_object.insert(key.clone(), value.clone());
+        merged.insert(key.clone(), value.clone());
+    }
+    for (key, value) in source_object {
+        if !merged.contains_key(key) && !schema_keys.contains(key.as_str()) {
+            merged.insert(key.clone(), value.clone());
+        }
     }
 
     let mut bytes = Vec::new();
     bytes.push(b'{');
-    for (index, (key, value)) in source_object.iter().enumerate() {
+    for (index, (key, value)) in merged.iter().enumerate() {
         if index > 0 {
             bytes.push(b',');
         }
