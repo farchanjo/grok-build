@@ -37,7 +37,7 @@ pub trait EmbeddingProvider: Send + Sync {
 /// (`embeddings.len() == texts_len`), exact per-vector dimension, and finite
 /// values only. A short response must never be zipped onto the first N inputs —
 /// that would permanently mis-associate vectors to wrong chunks — and NaN/Inf
-/// must never reach the vec table (F1 / Phase 7 validation surface).
+/// must never reach the vec table (the validation surface).
 pub(crate) fn validate_embedding_batch(
     texts_len: usize,
     dimensions: usize,
@@ -234,7 +234,7 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
         }
 
         // Validate before returning: exact count, exact dimensions, finite
-        // values (F1). A malformed provider response must fail closed, never
+        // values. A malformed provider response must fail closed, never
         // mis-associate vectors to chunks.
         validate_embedding_batch(texts.len(), self.dimensions, &all_embeddings)?;
 
@@ -333,7 +333,7 @@ impl EmbeddingProvider for PlatformEmbeddingProvider {
             }
         }
         // Validate before returning: exact count, exact dimensions, finite
-        // values (F1).
+        // values.
         validate_embedding_batch(texts.len(), self.dimensions, &all)?;
         Ok(all)
     }

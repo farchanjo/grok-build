@@ -82,7 +82,7 @@ pub async fn embed_missing_chunks(
             Ok(embeddings) => {
                 // Validate before any SQLite write: exact count, exact
                 // dimension, finite values. A malformed response must fail
-                // closed, never zip/mis-associate vectors (F1 — defense-in-
+                // closed, never zip/mis-associate vectors (defense-in-
                 // depth for any provider).
                 if let Err(e) = crate::embedding::validate_embedding_batch(
                     batch.len(),

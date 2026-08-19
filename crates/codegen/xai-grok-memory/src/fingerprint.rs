@@ -484,7 +484,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PR21 re-review (F10): length-framed encoding + NUL/control rejection
+    // Length-framed encoding rejects ambiguous and control-containing inputs.
     // -----------------------------------------------------------------------
 
     #[test]

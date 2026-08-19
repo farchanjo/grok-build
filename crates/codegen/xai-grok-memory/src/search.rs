@@ -1595,7 +1595,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PR21 review repair: bounded top-K prefix rerank (F-04/#9)
+    // Keep remote reranking bounded to the top-K local candidates.
     // -----------------------------------------------------------------------
 
     /// Build `n` near-identical chunks with strictly increasing access boosts

@@ -78,6 +78,26 @@ mod cli_catchall_drop_tests {
     }
 }
 
+#[cfg(test)]
+mod memory_embedding_input_tests {
+    use super::memory_embedding_inputs;
+    use crate::session::memory::EndpointScopedCredentials;
+
+    #[test]
+    fn named_profile_strips_legacy_embedding_inputs() {
+        let credentials = EndpointScopedCredentials::none();
+        let (embedding_credentials, embed_api_key, embed_base_url) = memory_embedding_inputs(
+            true,
+            &credentials,
+            Some(&"chat-key".to_owned()),
+            "http://chat.example/v1",
+        );
+        assert!(embedding_credentials.is_empty());
+        assert!(embed_api_key.is_none());
+        assert!(embed_base_url.is_empty());
+    }
+}
+
 /// Resolve startup-reindex inputs using the memory profile pinned at spawn.
 /// Profile changes take effect for memory on the next session.
 /// Returns `(embed_config, index_open_dimensions)`.
@@ -97,6 +117,31 @@ pub(crate) fn startup_reindex_embedding_inputs(
     (embed_config, dims)
 }
 
+const MEMORY_REBUILD_BACKOFF_SECS: i64 = 60;
+
+/// Return memory embedding inputs without leaking active-chat credentials into
+/// named-profile parameters.
+fn memory_embedding_inputs(
+    named_profile: bool,
+    credentials: &crate::session::memory::EndpointScopedCredentials,
+    api_key: Option<&String>,
+    base_url: &str,
+) -> (
+    crate::session::memory::EndpointScopedCredentials,
+    Option<String>,
+    String,
+) {
+    if named_profile {
+        (
+            crate::session::memory::EndpointScopedCredentials::none(),
+            None,
+            String::new(),
+        )
+    } else {
+        (credentials.clone(), api_key.cloned(), base_url.to_owned())
+    }
+}
+
 /// Backfill startup-reindex chunks only when the vector state is stable.
 /// Returns the number of chunks embedded.
 pub(crate) async fn startup_reindex_backfill(
@@ -108,6 +153,7 @@ pub(crate) async fn startup_reindex_backfill(
     credentials: &crate::session::memory::EndpointScopedCredentials,
     static_api_key: Option<&str>,
     base_url: &str,
+    rebuild_backoff_secs: i64,
 ) -> usize {
     let Some(provider) = xai_grok_memory::resolve_embedding_provider(
         facade.clone(),
@@ -135,7 +181,7 @@ pub(crate) async fn startup_reindex_backfill(
         &spec,
         Some(provider.clone()),
         60,
-        0,
+        rebuild_backoff_secs,
         Some(4),
         tokio_util::sync::CancellationToken::new(),
     )
@@ -892,22 +938,17 @@ pub(crate) async fn spawn_session_actor(
             memory_config.as_ref().map(|mc| mc.embedding.clone())
         };
         // Keep active-chat credentials out of named-profile memory params.
-        let (embed_credentials, embed_api_key_for_memory) = if memory_named_profile_set {
-            (
-                crate::session::memory::EndpointScopedCredentials::none(),
-                None,
-            )
-        } else {
-            (memory_embedding_credentials.clone(), embed_api_key.clone())
-        };
+        let (embed_credentials, embed_api_key_for_memory, embed_base_url_for_memory) =
+            memory_embedding_inputs(
+                memory_named_profile_set,
+                &memory_embedding_credentials,
+                embed_api_key.as_ref(),
+                &embed_base_url,
+            );
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
             embed_config,
-            embed_base_url: if memory_named_profile_set {
-                String::new()
-            } else {
-                embed_base_url.clone()
-            },
+            embed_base_url: embed_base_url_for_memory,
             embed_api_key: embed_api_key_for_memory,
             search_config: memory_config
                 .as_ref()
@@ -924,7 +965,7 @@ pub(crate) async fn spawn_session_actor(
                 .map_or_else(Default::default, |mc| mc.index.clone()),
             // Throttle failed vector rebuilds so pending searches stay
             // FTS-only instead of rebuilding on every query.
-            rebuild_backoff_secs: 60,
+            rebuild_backoff_secs: MEMORY_REBUILD_BACKOFF_SECS,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
             storage.clone(),
@@ -1980,21 +2021,12 @@ pub(crate) async fn spawn_session_actor(
                 .as_ref()
                 .map(|f| f.source_spec().dimensions),
         );
-        let startup_credentials = if memory_named_profile_set {
-            crate::session::memory::EndpointScopedCredentials::none()
-        } else {
-            memory_embedding_credentials.clone()
-        };
-        let startup_base_url = if memory_named_profile_set {
-            String::new()
-        } else {
-            embed_base_url.clone()
-        };
-        let startup_api_key = if memory_named_profile_set {
-            None
-        } else {
-            embed_api_key.clone()
-        };
+        let (startup_credentials, startup_api_key, startup_base_url) = memory_embedding_inputs(
+            memory_named_profile_set,
+            &memory_embedding_credentials,
+            embed_api_key.as_ref(),
+            &embed_base_url,
+        );
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
         tokio::task::spawn_local(async move {
@@ -2031,6 +2063,7 @@ pub(crate) async fn spawn_session_actor(
                     &startup_credentials,
                     startup_api_key.as_deref(),
                     &startup_base_url,
+                    MEMORY_REBUILD_BACKOFF_SECS,
                 )
                 .await;
                 xai_grok_telemetry::session_ctx::log_event(

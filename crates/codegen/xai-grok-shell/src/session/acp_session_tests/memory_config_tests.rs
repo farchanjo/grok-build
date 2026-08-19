@@ -856,6 +856,7 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
         &credentials,
         Some("chat-secret"),
         "http://chat.example/v1",
+        60,
     )
     .await;
     assert_eq!(
@@ -970,6 +971,7 @@ async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
         &credentials,
         Some("chat-secret"),
         "http://chat.example/v1",
+        60,
     )
     .await;
     assert_eq!(

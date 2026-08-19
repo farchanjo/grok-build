@@ -376,7 +376,7 @@ pub(crate) static CLAIM_PRE_COMMIT_FAIL: std::sync::atomic::AtomicBool =
 /// - `expected_id: None`: clears any parseable marker whose `intended` equals
 ///   `intended_fp` (a marker for the already-completed target is stale), and
 ///   drops that attempt's staging. Markers for other targets are preserved.
-/// Runs in one transaction so the clear is crash-atomic (F6). A failure is
+/// Runs in one transaction so the clear is crash-atomic. A failure is
 /// logged (safe: only the error; no marker/body/secret) and retried on the
 /// next observe-completed pass — a stale marker is never silently dropped
 /// (G5).
@@ -616,7 +616,7 @@ pub fn discard_foreign_staging(
 /// same dimensions. The entire adopt (all metadata + staging clear) is one
 /// transaction, so a crash mid-adopt can never leave torn metadata.
 ///
-/// **Marker CAS (F1):** inside the `BEGIN IMMEDIATE` transaction the stored
+/// **Marker compare-and-swap:** inside the `BEGIN IMMEDIATE` transaction the stored
 /// pending marker is re-checked *before any mutation*; if a concurrent writer
 /// created a marker since the Phase-0 read, the adopt aborts (Err) and the
 /// caller must route to the rebuild path. Because `BEGIN IMMEDIATE` holds the
@@ -753,7 +753,7 @@ pub fn install_vectors(
         meta_set_conn(db, schema::META_VECTOR_FINGERPRINT_HASH, &fp.hash)?;
         meta_set_conn(db, schema::META_VECTOR_FINGERPRINT, payload)?;
         // Never downgrade the persisted vector schema compatibility version
-        // (F8): use the same max semantics as adopt.
+        // Use the same maximum-dimension semantics as vector adoption.
         let v_schema = u32::max(
             index.installed_vector_schema_version(),
             fp.vector_schema_version,
@@ -953,7 +953,7 @@ pub async fn ensure_vectors_ready(
             // corrupt install (fingerprint present but dimensions/schema
             // mismatch) makes `compatible` false and falls through below to a
             // fail-closed rebuild. Clear any stale marker for this already
-            // completed target (F6).
+            // completed target.
             clear_completed_target(&idx, None, fp.hash.as_str());
             return compatible_readiness(&idx);
         }
@@ -1007,9 +1007,9 @@ pub async fn ensure_vectors_ready(
 
     // Failure back-off: read the existing marker FIRST and, when back-off is
     // active for our target, return FTS-only without rewriting the marker or
-    // discarding foreign staging (N-06 — no write amplification during
-    // back-off). If the target is already installed, observe completion and
-    // clear our stale marker (F6).
+    // discarding foreign staging (no write amplification during back-off).
+    // If the target is already installed, observe completion and clear our
+    // stale marker.
     let existing_marker = idx
         .meta_get(schema::META_VECTOR_REBUILD_PENDING)
         .unwrap_or_default();
@@ -1080,7 +1080,7 @@ pub async fn ensure_vectors_ready(
         };
         // If a concurrent owner completed the same target while we were
         // preparing, observe the completed state (loser sees Ready) and clear
-        // our stale marker (F6).
+        // our stale marker.
         if idx.installed_vector_fingerprint_hash().as_deref() == Some(fp.hash.as_str())
             && idx.embedding_dimensions() == spec.dimensions
         {
@@ -1140,7 +1140,7 @@ pub async fn ensure_vectors_ready(
             {
                 // Cap is a normal pause (progress), NOT a failure: do not
                 // record an attempt so the failure back-off stays idle and
-                // the next search resumes immediately (F2).
+                // the next search resumes immediately.
                 return VectorReadiness::Pending { owned: true };
             }
             if cancel.is_cancelled() {
@@ -2321,7 +2321,7 @@ mod tests {
         assert_eq!(idx.installed_vector_fingerprint_hash().unwrap(), fp.hash);
     }
 
-    /// A12/#8: repeated failed rebuilds back off and stay FTS-only.
+    /// Repeated failed rebuilds honor persisted backoff and stay FTS-only.
     #[tokio::test]
     async fn test_rebuild_backoff_stays_fts_only() {
         init_sqlite_vec();
@@ -2580,7 +2580,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PR21 re-review repair tests (F1-F10, N-01/N-06)
+    // Regression tests for vector rebuild state, atomicity, and bounded recovery.
     // -----------------------------------------------------------------------
 
     /// F1: adopt re-checks the pending marker inside its transaction — a
