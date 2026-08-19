@@ -848,9 +848,11 @@ async fn startup_reindex_backfill_mixed_config_uses_facade_only() {
     let credentials = crate::session::memory::EndpointScopedCredentials::none();
     let embed_calls_before = fake.embed_calls();
     let embedded = super::spawn::startup_reindex_backfill(
-        &idx,
+        &db_path,
+        storage.clone(),
         Some(fake.clone()),
         embed_config,
+        crate::config::MemoryIndexConfig::default(),
         &credentials,
         Some("chat-secret"),
         "http://chat.example/v1",
@@ -960,9 +962,11 @@ async fn startup_reindex_backfill_unresolved_named_is_fts_only() {
     // No provider is available for the unresolved profile.
     let credentials = crate::session::memory::EndpointScopedCredentials::none();
     let embedded = super::spawn::startup_reindex_backfill(
-        &idx,
+        &db_path,
+        storage.clone(),
         None,
         None,
+        crate::config::MemoryIndexConfig::default(),
         &credentials,
         Some("chat-secret"),
         "http://chat.example/v1",

@@ -181,7 +181,7 @@ impl MemoryIndex {
         db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
 
         // Additive migration: DBs that created `vector_staging` before the
-        // chunk-hash column existed (PR21 review repair) get the column now.
+        // chunk-hash column existed get the column now.
         // Old staged rows get an empty hash, which never matches a live chunk
         // hash, so they are pruned and re-embedded rather than installed.
         {
@@ -203,7 +203,7 @@ impl MemoryIndex {
 
         // Store/verify embedding dimensions in meta table.
         //
-        // PR21: this is NOT a destructive migration anymore. A dimension
+        // This is not a destructive migration. A dimension
         // mismatch no longer drops `chunks_vec` (which destroyed all vectors).
         // Instead it records a fail-closed pending marker so the transactional
         // rebuild state machine (`super::rebuild`) can rebuild vectors through
@@ -291,13 +291,17 @@ impl MemoryIndex {
             .unwrap_or(0)
     }
 
+    /// Whether vectors can be used after a caller has reconciled the source.
+    /// This local predicate also rejects pending or uninitialized state.
+    /// Callers with a provider must first use `ensure_vectors_ready`.
+    ///
     /// Whether legacy back-fill (`embed_missing_chunks` on the `chunks_vec`
     /// table) is safe right now.
     ///
     /// Returns `false` while a vector rebuild is pending (writes would be
     /// redundant work against a table the atomic install is about to replace,
     /// or could mix an incompatible space) or when no installed fingerprint
-    /// exists yet. Back-fill callers must gate on this (F7).
+    /// exists yet. Back-fill callers must gate on this.
     pub fn vectors_safe_to_backfill(&self) -> bool {
         if !self.vec_available {
             return false;
@@ -323,7 +327,7 @@ impl MemoryIndex {
     /// joins through live chunk ids) but pollute the vec table and make
     /// `vec_row_count` inaccurate. Pruning is transactional and touches
     /// **only** orphan rows: valid rows and the installed fingerprint are
-    /// preserved, and no rebuild is triggered (L3). Returns the number of
+    /// preserved, and no rebuild is triggered. Returns the number of
     /// removed rows.
     pub(crate) fn prune_orphan_vector_rows(&self) -> usize {
         if !self.vec_available {
@@ -336,7 +340,7 @@ impl MemoryIndex {
         let result = (|| -> rusqlite::Result<()> {
             // Detect orphans and prune them under one write lock (BEGIN
             // IMMEDIATE), so a concurrent writer cannot re-index a chunk
-            // between detection and deletion (F2 race-safe).
+            // between detection and deletion.
             let mut stmt = self.db.prepare(
                 "SELECT v.id FROM chunks_vec_rowids v \
                  WHERE NOT EXISTS ( \
@@ -702,7 +706,7 @@ impl MemoryIndex {
     }
 
     /// Chunks that lack embeddings **and** belong to exactly the given file
-    /// paths — the *fresh* watcher-dirty work set (F4). The pre-existing
+    /// paths — the *fresh* watcher-dirty work set. The pre-existing
     /// compatible gap (chunks from other files that missed an earlier embed)
     /// is deliberately excluded so a genuine-failure backoff can defer only the
     /// same missing set while newly changed chunks still embed.

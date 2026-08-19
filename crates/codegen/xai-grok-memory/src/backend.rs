@@ -112,7 +112,7 @@ fn origin_host(base_url: &str) -> String {
 /// from `[memory.embedding]` + legacy endpoint. Existing users with populated
 /// vectors and no persisted fingerprint adopt this spec so they never have to
 /// reconnect/rebuild.
-fn legacy_source_spec(
+pub fn legacy_embedding_source_spec(
     cfg: &xai_grok_config_types::MemoryEmbeddingConfig,
     base_url: &str,
 ) -> Option<super::fingerprint::EmbeddingSourceSpec> {
@@ -123,7 +123,7 @@ fn legacy_source_spec(
         origin_host: origin_host(base_url),
         // Canonical embedding endpoint path shared with the named-profile
         // facade so the same logical endpoint never fingerprints differently
-        // purely from the hardcoded literal (A7/#6).
+        // purely from the hardcoded literal.
         embedding_path: canonical_embedding_path(),
         protocol: "openai_compatible".to_owned(),
         model: model.to_owned(),
@@ -171,14 +171,14 @@ pub struct MemoryBackendParams {
     /// - `"compaction_recovery"` — post-compaction context re-injection
     pub search_source: &'static str,
     pub embedding_credentials: EndpointScopedCredentials,
-    /// Credential-free retrieval facade (PR21). When present, embeddings and
+    /// Credential-free retrieval facade. When present, embeddings and
     /// optional remote reranking route through it (named profile or a
     /// shell-synthesized legacy source) instead of the legacy
     /// `[memory.embedding]` provider. `None` keeps the legacy path.
     pub retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
     /// The exact `MemoryIndexConfig` every chunk writer uses. Both the vector
     /// fingerprint's doc-preparation determinant and the search index must use
-    /// this one value (A8/#5); a non-default prep change therefore rebuilds.
+    /// this one value; a non-default prep change therefore rebuilds.
     pub index_config: xai_grok_config_types::MemoryIndexConfig,
     /// Seconds to back off between failed vector-rebuild attempts (FTS-only
     /// while backing off), so repeated failures do not rebuild on every search.
@@ -205,6 +205,16 @@ impl MemoryBackendParams {
             &self.embed_base_url,
         )
         .await
+    }
+
+    /// Resolve the exact non-secret source identity used by the embedding factory.
+    pub fn embedding_source_spec(&self) -> Option<super::fingerprint::EmbeddingSourceSpec> {
+        if let Some(retrieval) = &self.retrieval {
+            return Some(retrieval.source_spec());
+        }
+        self.embed_config
+            .as_ref()
+            .and_then(|cfg| legacy_embedding_source_spec(cfg, &self.embed_base_url))
     }
 
     /// Single dimension resolution matching the factory: named-profile facade
@@ -441,7 +451,7 @@ impl MemoryBackendImpl {
         backend
     }
 
-    /// Attach a credential-free retrieval facade (PR21).
+    /// Attach a credential-free retrieval facade.
     pub fn with_retrieval(
         mut self,
         retrieval: Option<Arc<dyn super::retrieval::MemoryRetrieval>>,
@@ -460,7 +470,7 @@ impl MemoryBackendImpl {
         }
         let cfg = self.embed_config.as_ref();
         match cfg {
-            Some(c) => match legacy_source_spec(c, &self.embed_base_url) {
+            Some(c) => match legacy_embedding_source_spec(c, &self.embed_base_url) {
                 Some(spec) => (Some(spec.clone()), spec.dimensions),
                 None => (None, 1024),
             },
@@ -490,7 +500,7 @@ impl MemoryBackendImpl {
 /// Per-search batch cap for the `ReadyMissing` compatible-gap backfill — the
 /// same bounded discipline as the rebuild loop (batches of 32, capped at 4),
 /// so a large one-shot gap is processed across subsequent searches instead of
-/// one synchronous embed of everything (L1).
+/// one synchronous embed of everything.
 const READY_MISSING_BACKFILL_BATCH_CAP: usize = 4;
 /// Batch size for the incremental backfill path (matches the rebuild batch).
 const BACKFILL_BATCH_SIZE: usize = 32;
@@ -499,7 +509,7 @@ const BACKFILL_BATCH_SIZE: usize = 32;
 /// (`now < deadline`). Written only by a genuine incremental embed failure
 /// (never by a cap pause); suppresses the `ReadyMissing` gap backfill until it
 /// passes, so a failing embedder is not hammered every search while the gap
-/// still self-heals eventually (L2).
+/// still self-heals eventually.
 fn backfill_backoff_active(index: &super::index::MemoryIndex) -> bool {
     let until: i64 = index
         .db()
@@ -566,7 +576,7 @@ impl MemoryBackend for MemoryBackendImpl {
         // credential-free facade, or a synthesized legacy `[memory.embedding]`
         // source) and the pinned vector space.
         // The real index config used by every chunk writer drives both the
-        // fingerprint's doc-preparation determinant and the chunker (A8/#5).
+        // fingerprint's doc-preparation determinant and the chunker.
         let index_config = self.index_config.clone();
         let (spec, embed_dims) = self.effective_embedding_spec();
         // Build an embedder for the pinned source (None ⇒ no vectors /
@@ -578,7 +588,7 @@ impl MemoryBackend for MemoryBackendImpl {
         // Cancel token for the vector rebuild loop (search has no external
         // cancellation; the loop only checks this to stay cooperative). The
         // rebuild is throttled by a persisted back-off and a per-search batch
-        // cap so pending searches stay FTS-only-cheap (A12/#8).
+        // cap so pending searches stay FTS-only.
         let rebuild_cancel = tokio_util::sync::CancellationToken::new();
         let rebuild_backoff_secs = self.rebuild_backoff_secs;
         let rebuild_batches_per_call = 4usize;
@@ -622,8 +632,7 @@ impl MemoryBackend for MemoryBackendImpl {
 
         // ── Sync phase 1: reindex dirty files, collect chunks needing embeddings ──
         // Watcher-dirty chunks are *fresh* work — accumulated in their own set
-        // and never deferred by the compatible-gap backfill backoff (F4) nor
-        // embedded synchronously in full (F3/L1, shared per-search cap below).
+        // and are not deferred by the compatible-gap backoff or embedded in full.
         let mut watcher_chunks: Vec<(String, String)> = Vec::new();
         // Owner token for the reindex claim; release is owner-scoped so a
         // stolen (stale-window) claim is never cleared by the loser.
@@ -662,7 +671,7 @@ impl MemoryBackend for MemoryBackendImpl {
                 }
             }
             if dirty_count > 0 {
-                // F4: only chunks from the currently-dirty (existing) files
+                // Only chunks from currently dirty files are fresh work.
                 // are "fresh work". The pre-existing compatible gap (chunks
                 // from other files that missed an earlier embed) belongs to
                 // the gap set below, which a genuine-failure backoff defers.
@@ -682,8 +691,8 @@ impl MemoryBackend for MemoryBackendImpl {
         // (incremental chunk churn or a transient incremental embed failure).
         // The gap is a property of the compatible missing set: a genuine embed
         // failure persists a backoff that defers retrying the *same missing
-        // set* until it passes (L2), but it must not suppress *freshly changed*
-        // watcher-dirty chunks (F4).
+        // set until it passes, but it must not suppress freshly changed
+        // watcher-dirty chunks.
         let backfill_backed_off = backfill_backoff_active(&index);
         // Watcher-dirty ids are already covered by the watcher set — exclude
         // them from the gap set so the combined work set has no duplicates.
@@ -694,7 +703,7 @@ impl MemoryBackend for MemoryBackendImpl {
             crate::rebuild::VectorReadiness::ReadyMissing { .. }
         ) {
             if backfill_backed_off {
-                // L2: persisted backoff from a genuine incremental embed
+                // Persisted backoff from a genuine incremental embed
                 // failure — don't re-attempt the gap this search (vector
                 // search stays active; the gap retries after the deadline
                 // passes).
@@ -712,7 +721,7 @@ impl MemoryBackend for MemoryBackendImpl {
         };
 
         // ── Combine watcher & gap work under a single per-search batch cap ──
-        // F3/L1: the watcher-dirty incremental embed is bounded per search too,
+        // The watcher-dirty incremental embed is bounded per search too,
         // so a large watcher gap progresses over later searches instead of
         // being embedded synchronously in full — and a cap pause never arms the
         // backfill backoff. Watcher chunks take priority; the gap gets the
@@ -731,7 +740,7 @@ impl MemoryBackend for MemoryBackendImpl {
         let mut embedded_count: usize = 0;
         // The shared cap above bounds the total synchronous incremental embed
         // per search; the gap set is already skipped while backed off, and
-        // watcher work must proceed even during a gap backoff (F4).
+        // watcher work must proceed even during a gap backoff.
         if vec_active
             && !reindex_chunks.is_empty()
             && let Some(ref embedder) = embedder
@@ -752,7 +761,7 @@ impl MemoryBackend for MemoryBackendImpl {
                             error = %e,
                             "embedding batch failed during sync-on-search, skipping; incremental embed backs off"
                         );
-                        // L2/F4: stop after a genuine failure — retries are
+                        // Stop after a genuine failure; retries are
                         // gated by the persisted backoff, not repeated per
                         // search, including the watcher-dirty set.
                         failed = true;
@@ -761,8 +770,8 @@ impl MemoryBackend for MemoryBackendImpl {
                 }
             }
             if failed {
-                // L2: persist an incremental-backfill backoff. A cap pause (no
-                // failure) never arms it.
+                // Persist an incremental-backfill backoff after failure. A cap
+                // pause never arms it.
                 record_backfill_backoff(&index, self.rebuild_backoff_secs);
             } else {
                 // A successful pass means the embedder recovered; clear any
@@ -1947,7 +1956,7 @@ mod factory_tests {
         assert_eq!(idx.vec_row_count(), 141);
     }
 
-    /// L2: a genuine incremental-embed failure persists a backfill backoff
+    /// A genuine incremental-embed failure persists a backfill backoff
     /// (production-like 60s); a backed-off search does not re-attempt the gap
     /// (only the query embed runs), and once the deadline passes a healthy
     /// embedder self-heals. A cap pause never arms this backoff.
@@ -2121,7 +2130,7 @@ mod factory_tests {
     }
 
     // -----------------------------------------------------------------------
-    // PR21 Gate-F: single embedding-provider factory; malformed responses;
+    // Embedding-provider factory, malformed responses, and backfill behavior.
     // orphan-prune accuracy; watcher-dirty cap/backoff decoupling
     // -----------------------------------------------------------------------
 
@@ -2211,7 +2220,7 @@ mod factory_tests {
         assert_eq!(provider.unwrap().model_name(), "legacy-model");
     }
 
-    /// F1/Phase 7: a malformed provider response (short count, NaN, wrong
+    /// A malformed provider response (short count, NaN, wrong
     /// dimension) must fail closed before any SQLite write — never zip/
     /// mis-associate vectors onto the wrong chunks.
     #[tokio::test]
@@ -2501,7 +2510,7 @@ mod factory_tests {
         assert_eq!(idx.vec_row_count(), idx.chunk_count());
     }
 
-    /// F4: a compatible-gap backoff defers only the same missing set — a
+    /// A compatible-gap backoff defers only the same missing set — a
     /// freshly changed watcher-dirty chunk still embeds during the window.
     #[tokio::test]
     async fn test_watcher_dirty_backfill_proceeds_during_gap_backoff() {
@@ -2948,7 +2957,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PR21 review repair: canonical embedding endpoint identity (A7/#6)
+    // Canonical embedding endpoint identity.
     // -----------------------------------------------------------------------
 
     /// Legacy synthesis and the named-profile facade must produce the same
@@ -2960,7 +2969,7 @@ mod tests {
             dimensions: 128,
             ..Default::default()
         };
-        let spec = legacy_source_spec(&cfg, "http://proxy.example/v1").unwrap();
+        let spec = legacy_embedding_source_spec(&cfg, "http://proxy.example/v1").unwrap();
         assert_eq!(
             spec.embedding_path,
             canonical_embedding_path(),
@@ -2982,7 +2991,8 @@ mod tests {
             dimensions: 128,
             ..Default::default()
         };
-        let legacy = legacy_source_spec(&legacy_cfg, "http://api.example.com/v1").unwrap();
+        let legacy =
+            legacy_embedding_source_spec(&legacy_cfg, "http://api.example.com/v1").unwrap();
 
         // A named-profile route for the same provider host/model/dims/path.
         let named = EmbeddingSourceSpec {

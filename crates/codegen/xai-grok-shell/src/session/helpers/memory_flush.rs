@@ -244,6 +244,7 @@ const MAX_L2_DISTANCE: f64 = 2.0;
 const SEMANTIC_DEDUP_KNN_LIMIT: usize = 3;
 
 /// Check if flush content is semantically similar to existing memory chunks.
+/// The caller must reconcile the provider source before calling this helper.
 ///
 /// Uses the embedding provider to embed the flush content, then runs a KNN
 /// search against the memory index. If any result exceeds `threshold`,
@@ -622,14 +623,16 @@ mod tests {
         db_path: &std::path::Path,
         storage: crate::session::memory::MemoryStorage,
         dims: usize,
-    ) -> std::sync::Arc<dyn xai_grok_memory::embedding::EmbeddingProvider> {
+    ) -> (
+        std::sync::Arc<dyn xai_grok_memory::embedding::EmbeddingProvider>,
+        std::sync::Arc<crate::session::memory::retrieval::FakeMemoryRetrieval>,
+    ) {
         use crate::session::memory::embedding::RetrievalEmbeddingProvider;
         use crate::session::memory::retrieval::FakeMemoryRetrieval;
 
+        let fake = std::sync::Arc::new(FakeMemoryRetrieval::new(dims, "test-model"));
         let embedder: std::sync::Arc<dyn xai_grok_memory::embedding::EmbeddingProvider> =
-            std::sync::Arc::new(RetrievalEmbeddingProvider::new(std::sync::Arc::new(
-                FakeMemoryRetrieval::new(dims, "test-model"),
-            )));
+            std::sync::Arc::new(RetrievalEmbeddingProvider::new(fake.clone()));
         let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
             db_path,
             storage,
@@ -650,7 +653,7 @@ mod tests {
             ),
             "test fixture: fingerprint must install, got {readiness:?}"
         );
-        embedder
+        (embedder, fake)
     }
 
     #[tokio::test]
@@ -678,7 +681,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_no_similar_content() {
-        use crate::session::memory::embedding::MockEmbeddingProvider;
         use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
@@ -687,19 +689,22 @@ mod tests {
         let db_path = tmp.path().join("test.sqlite");
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
+        let (embedder, fake) = install_compatible_fingerprint(&db_path, storage.clone(), 4).await;
         let index = MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
+        assert!(index.vectors_safe_to_backfill());
+        let provider = embedder;
 
-        let provider = MockEmbeddingProvider { dimensions: 4 };
-
-        // Empty index → no neighbors → not a duplicate.
+        // Compatible empty index → no neighbors → not a duplicate.
+        let before = fake.embed_calls();
         let result = is_semantically_duplicate(
             "## New Content\n\nFresh ideas here.",
             &index,
-            Some(&provider),
+            Some(provider.as_ref()),
             SEMANTIC_DEDUP_SIMILARITY_THRESHOLD,
         )
         .await;
         assert!(!result, "should not be duplicate against empty index");
+        assert!(fake.embed_calls() > before);
     }
 
     #[tokio::test]
@@ -726,7 +731,7 @@ mod tests {
         }
 
         // Install the fingerprint and backfill the existing chunk.
-        let embedder = install_compatible_fingerprint(&db_path, storage.clone(), dims).await;
+        let (embedder, _) = install_compatible_fingerprint(&db_path, storage.clone(), dims).await;
         let index =
             MemoryIndex::open_or_create(&db_path, storage, Default::default(), dims).unwrap();
         assert!(
@@ -769,7 +774,7 @@ mod tests {
         }
 
         // Install the fingerprint and backfill the existing chunk.
-        let embedder = install_compatible_fingerprint(&db_path, storage.clone(), dims).await;
+        let (embedder, _) = install_compatible_fingerprint(&db_path, storage.clone(), dims).await;
         let index =
             MemoryIndex::open_or_create(&db_path, storage, Default::default(), dims).unwrap();
         assert!(
@@ -790,6 +795,60 @@ mod tests {
             !result,
             "different content should not be flagged as duplicate"
         );
+    }
+
+    /// A same-dimension source change must reconcile before dedup reads vectors.
+    #[tokio::test]
+    async fn test_semantic_dedup_skips_during_same_dimension_source_change() {
+        use crate::session::memory::embedding::RetrievalEmbeddingProvider;
+        use crate::session::memory::retrieval::FakeMemoryRetrieval;
+        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use tempfile::TempDir;
+
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.sqlite");
+        let storage =
+            MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
+        let (old_embedder, _) = install_compatible_fingerprint(&db_path, storage.clone(), 4).await;
+        let old_index =
+            MemoryIndex::open_or_create(&db_path, storage.clone(), Default::default(), 4).unwrap();
+        assert!(old_index.vectors_safe_to_backfill());
+        drop(old_embedder);
+
+        let new_fake = std::sync::Arc::new(FakeMemoryRetrieval::new(4, "new-model"));
+        let new_provider = RetrievalEmbeddingProvider::new(new_fake.clone());
+        let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
+            &db_path,
+            storage.clone(),
+            Default::default(),
+            &xai_grok_memory::MemoryRetrieval::source_spec(&*new_fake),
+            Some(std::sync::Arc::new(RetrievalEmbeddingProvider::new(
+                new_fake.clone(),
+            ))),
+            60,
+            0,
+            Some(0),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(
+            readiness,
+            xai_grok_memory::rebuild::VectorReadiness::Pending { .. }
+        ));
+
+        let index = MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
+        assert!(!index.vectors_safe_to_backfill());
+        assert!(
+            !is_semantically_duplicate(
+                "new content",
+                &index,
+                Some(&new_provider),
+                SEMANTIC_DEDUP_SIMILARITY_THRESHOLD,
+            )
+            .await
+        );
+        assert_eq!(new_fake.embed_calls(), 0);
     }
 
     /// A pending dimension rebuild skips dedup without invoking the provider.

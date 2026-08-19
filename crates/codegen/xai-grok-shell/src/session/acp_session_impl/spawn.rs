@@ -78,7 +78,8 @@ mod cli_catchall_drop_tests {
     }
 }
 
-/// Resolve startup-reindex inputs using the session's pinned memory profile.
+/// Resolve startup-reindex inputs using the memory profile pinned at spawn.
+/// Profile changes take effect for memory on the next session.
 /// Returns `(embed_config, index_open_dimensions)`.
 pub(crate) fn startup_reindex_embedding_inputs(
     memory_named_profile_set: bool,
@@ -99,19 +100,18 @@ pub(crate) fn startup_reindex_embedding_inputs(
 /// Backfill startup-reindex chunks only when the vector state is stable.
 /// Returns the number of chunks embedded.
 pub(crate) async fn startup_reindex_backfill(
-    index: &crate::session::memory::MemoryIndex,
+    db_path: &std::path::Path,
+    storage: crate::session::memory::MemoryStorage,
     facade: Option<std::sync::Arc<dyn xai_grok_memory::MemoryRetrieval>>,
     embed_config: Option<crate::config::MemoryEmbeddingConfig>,
+    index_config: crate::config::MemoryIndexConfig,
     credentials: &crate::session::memory::EndpointScopedCredentials,
     static_api_key: Option<&str>,
     base_url: &str,
 ) -> usize {
-    if !index.vectors_safe_to_backfill() {
-        return 0;
-    }
     let Some(provider) = xai_grok_memory::resolve_embedding_provider(
-        facade,
-        embed_config,
+        facade.clone(),
+        embed_config.clone(),
         credentials,
         static_api_key,
         base_url,
@@ -120,7 +120,43 @@ pub(crate) async fn startup_reindex_backfill(
     else {
         return 0;
     };
-    crate::session::memory::embed_missing_chunks(index, &*provider).await
+    let spec = facade.as_ref().map(|f| f.source_spec()).or_else(|| {
+        embed_config
+            .as_ref()
+            .and_then(|c| xai_grok_memory::backend::legacy_embedding_source_spec(c, base_url))
+    });
+    let Some(spec) = spec else {
+        return 0;
+    };
+    let readiness = xai_grok_memory::rebuild::ensure_vectors_ready(
+        db_path,
+        storage.clone(),
+        index_config.clone(),
+        &spec,
+        Some(provider.clone()),
+        60,
+        0,
+        Some(4),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    if !matches!(
+        readiness,
+        xai_grok_memory::rebuild::VectorReadiness::Ready
+            | xai_grok_memory::rebuild::VectorReadiness::ReadyMissing { .. }
+    ) {
+        return 0;
+    }
+    let Some(index) = crate::session::memory::MemoryIndex::open_or_create(
+        db_path,
+        storage,
+        index_config,
+        spec.dimensions,
+    )
+    .ok() else {
+        return 0;
+    };
+    crate::session::memory::embed_missing_chunks(&index, &*provider).await
 }
 
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
@@ -792,12 +828,15 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
-    let memory_embedding_credentials =
+    let memory_embedding_credentials = if memory_named_profile_set {
+        crate::session::memory::EndpointScopedCredentials::none()
+    } else {
         crate::auth::credential_provider::embedding_session_credentials(
             &embed_base_url,
             auth_manager.as_ref(),
             api_key_provider.clone(),
-        );
+        )
+    };
     let mut memory_backend_params_for_session: Option<crate::session::memory::MemoryBackendParams> =
         None;
     let mut memory_search_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>> = None;
@@ -864,7 +903,11 @@ pub(crate) async fn spawn_session_actor(
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
             embed_config,
-            embed_base_url: embed_base_url.clone(),
+            embed_base_url: if memory_named_profile_set {
+                String::new()
+            } else {
+                embed_base_url.clone()
+            },
             embed_api_key: embed_api_key_for_memory,
             search_config: memory_config
                 .as_ref()
@@ -875,12 +918,12 @@ pub(crate) async fn spawn_session_actor(
             embedding_credentials: embed_credentials,
             retrieval: memory_retrieval_facade,
             // The actual `[memory.index]` config every chunk writer uses drives
-            // both fingerprint doc-prep identity and chunking (A8/#5).
+            // both fingerprint doc-prep identity and chunking.
             index_config: memory_config
                 .as_ref()
                 .map_or_else(Default::default, |mc| mc.index.clone()),
             // Throttle failed vector rebuilds so pending searches stay
-            // FTS-only-cheap instead of rebuilding on every query (A12/#8).
+            // FTS-only instead of rebuilding on every query.
             rebuild_backoff_secs: 60,
         };
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
@@ -1937,9 +1980,21 @@ pub(crate) async fn spawn_session_actor(
                 .as_ref()
                 .map(|f| f.source_spec().dimensions),
         );
-        let startup_credentials = memory_embedding_credentials.clone();
-        let startup_base_url = embed_base_url.clone();
-        let startup_api_key = embed_api_key.clone();
+        let startup_credentials = if memory_named_profile_set {
+            crate::session::memory::EndpointScopedCredentials::none()
+        } else {
+            memory_embedding_credentials.clone()
+        };
+        let startup_base_url = if memory_named_profile_set {
+            String::new()
+        } else {
+            embed_base_url.clone()
+        };
+        let startup_api_key = if memory_named_profile_set {
+            None
+        } else {
+            embed_api_key.clone()
+        };
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
         tokio::task::spawn_local(async move {
@@ -1947,7 +2002,7 @@ pub(crate) async fn spawn_session_actor(
             if let Ok(mut index) = crate::session::memory::MemoryIndex::open_or_create(
                 &db_path,
                 storage.clone(),
-                index_config,
+                index_config.clone(),
                 startup_embed_dims,
             ) && let Ok(files) = storage.list_memory_files()
             {
@@ -1968,9 +2023,11 @@ pub(crate) async fn spawn_session_actor(
                 );
                 // Backfill only after the index has reached a stable vector state.
                 let embedded_count = startup_reindex_backfill(
-                    &index,
+                    &db_path,
+                    storage.clone(),
                     memory_facade_for_session.clone(),
                     startup_embed_config,
+                    index_config.clone(),
                     &startup_credentials,
                     startup_api_key.as_deref(),
                     &startup_base_url,
