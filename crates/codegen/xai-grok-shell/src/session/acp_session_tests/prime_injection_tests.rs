@@ -11,6 +11,7 @@
 use super::support::*;
 use super::*;
 
+use crate::session::storage::updates_truncate_for_prompt;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
 
 /// Prime-enabled actor with a real temp workspace containing a `SKILL.md` and
@@ -18,26 +19,17 @@ use xai_grok_tools::implementations::skills::types::SkillInfo;
 /// config uses `degrade_on_error = false` with a retrieval profile that does
 /// not exist in the snapshot, so the semantic refinement fails hard and the
 /// prime run returns a typed error (used to exercise the hard-failure index
-/// gap). Returns the actor and the temp dir guard (kept alive for the test).
-struct RegistryGuard {
-    home: std::path::PathBuf,
-    previous: Option<std::sync::Arc<crate::retrieval::RetrievalRegistry>>,
-}
-
-impl Drop for RegistryGuard {
-    fn drop(&mut self) {
-        crate::retrieval::uninstall_registry_for_home(&self.home);
-        if let Some(previous) = self.previous.take() {
-            crate::retrieval::install_registry_for_home(&self.home, previous);
-        }
-    }
-}
-
+/// gap). Returns the actor and test-local retrieval override guard.
 async fn prime_enabled_actor(
     enabled: bool,
     skill_enabled: bool,
     hard_fail: bool,
-) -> (SessionActor, tempfile::TempDir, RegistryGuard) {
+) -> (
+    SessionActor,
+    tempfile::TempDir,
+    crate::retrieval::TestRegistryOverride,
+    std::sync::Arc<std::sync::Mutex<Vec<crate::session::storage::SessionUpdate>>>,
+) {
     let tmp = tempfile::TempDir::new().unwrap();
     let cwd = tmp.path().canonicalize().unwrap();
     std::fs::create_dir_all(cwd.join("skills")).unwrap();
@@ -50,12 +42,20 @@ async fn prime_enabled_actor(
 
     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    let persisted_updates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let persisted_updates_for_pump = persisted_updates.clone();
     // Resolve flush barriers so the persist-ack path completes deterministically
     // (mirrors the production persistence actor).
     tokio::task::spawn_local(async move {
         while let Some(msg) = persistence_rx.recv().await {
-            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                let _ = respond_to.send(());
+            match msg {
+                PersistenceMsg::FlushAndAck { respond_to } => {
+                    let _ = respond_to.send(());
+                }
+                PersistenceMsg::Update(update) => {
+                    persisted_updates_for_pump.lock().unwrap().push(update);
+                }
+                _ => {}
             }
         }
     });
@@ -88,8 +88,7 @@ async fn prime_enabled_actor(
             .await;
     }
 
-    let home = xai_grok_config::grok_home();
-    let reg = crate::retrieval::RetrievalRegistry::disabled(home.clone());
+    let reg = crate::retrieval::RetrievalRegistry::disabled(xai_grok_config::grok_home());
     let mut prime = xai_grok_config_types::PrimeConfig::default();
     prime.skills.enabled = skill_enabled;
     if hard_fail {
@@ -114,8 +113,8 @@ async fn prime_enabled_actor(
         source_graph: xai_grok_config_types::RetrievalGraphConfig::default(),
     };
     reg.force_publish(std::sync::Arc::new(snapshot));
-    let previous = crate::retrieval::install_registry_for_home(home.clone(), reg);
-    (actor, tmp, RegistryGuard { home, previous })
+    let registry_override = crate::retrieval::install_test_registry_override(reg);
+    (actor, tmp, registry_override, persisted_updates)
 }
 
 /// Drive `handle_prompt` synchronously through the persist-ack barrier (fired
@@ -187,7 +186,8 @@ async fn real_user_turn_injects_hidden_skill_prime_reminder_before_user() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -227,6 +227,16 @@ async fn real_user_turn_injects_hidden_skill_prime_reminder_before_user() {
                 ),
                 "the real user item must directly follow the reminder"
             );
+            let reminder_index = match reminders[0] {
+                xai_grok_inference_types::ConversationItem::User(user) => user.prompt_index,
+                _ => None,
+            };
+            let user_index = match second {
+                xai_grok_inference_types::ConversationItem::User(user) => user.prompt_index,
+                _ => None,
+            };
+            assert_eq!(reminder_index, Some(0));
+            assert_eq!(reminder_index, user_index);
             prompt_task.abort();
         })
         .await;
@@ -241,12 +251,14 @@ async fn scheduler_fired_cron_never_primes_and_shapes_scheduler_fired() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             // The typed origin the shell reader produces for the pager's
             // `_meta.promptOrigin: "scheduler_fired"` stamp.
-            let cron_origin =
-                crate::session::PromptOrigin::from_prompt_origin_meta(Some("scheduler_fired"));
+            let cron_origin = crate::session::PromptOrigin::from_prompt_origin_meta(Some(
+                crate::session::PROMPT_ORIGIN_SCHEDULER_FIRED,
+            ));
             assert_eq!(cron_origin, crate::session::PromptOrigin::SchedulerFired);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -284,7 +296,8 @@ async fn subagent_assignment_never_primes_but_later_user_turn_does() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -325,7 +338,8 @@ async fn unknown_origin_never_primes() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -351,7 +365,8 @@ async fn external_backend_user_turn_omits_prime_reminder() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             actor.execution_backend.set(
                 crate::agent::execution_backend::ExecutionBackend::ExternalAgent(
@@ -378,7 +393,8 @@ async fn disabled_prime_omits_reminder() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, false, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, false, false).await;
             let actor = std::sync::Arc::new(actor);
             let (prompt_task, conv) = drive_prompt(
                 actor.clone(),
@@ -405,7 +421,8 @@ async fn pre_cancelled_turn_omits_prime_but_keeps_user_item() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
             let actor = std::sync::Arc::new(actor);
             // Cancel the turn before the prompt runs: prime sees the shared
             // turn-cancel token and returns cancelled (no reminder); the user
@@ -437,7 +454,8 @@ async fn scheduler_fired_queued_without_queue_row_or_history() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, false).await;
+            let (actor, _workspace, _registry, _persisted_updates) =
+                prime_enabled_actor(true, true, false).await;
             let (respond_to, _rx) = tokio::sync::oneshot::channel();
             let _ = actor
                 .queue_input(
@@ -485,7 +503,8 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (actor, _workspace, _registry) = prime_enabled_actor(true, true, true).await;
+            let (actor, _workspace, _registry, persisted_updates) =
+                prime_enabled_actor(true, true, true).await;
             let actor = std::sync::Arc::new(actor);
 
             // Turn 1: hard prime failure. The user pair is never emitted or
@@ -529,11 +548,39 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
                 conv_after_failure.is_empty(),
                 "a hard prime failure must not insert any user item"
             );
+            tokio::task::yield_now().await;
+            let updates = persisted_updates.lock().unwrap().clone();
+            assert!(
+                updates.iter().all(|update| !matches!(
+                    update,
+                    crate::session::storage::SessionUpdate::Acp(notification)
+                        if matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_))
+                )),
+                "a hard prime failure must not enqueue a durable UserMessageChunk"
+            );
+            assert_eq!(updates_truncate_for_prompt(&updates, 0), updates.len());
+            let replay_dir = tempfile::TempDir::new().unwrap();
+            let updates_path = replay_dir.path().join("updates.jsonl");
+            let mut jsonl = Vec::new();
+            for update in &updates {
+                let envelope =
+                    crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap();
+                let mut line = serde_json::to_vec(&envelope).unwrap();
+                line.push(b'\n');
+                jsonl.extend(line);
+            }
+            std::fs::write(&updates_path, jsonl).unwrap();
+            let replay = crate::session::helpers::replay::replay_to_prompt(
+                &updates_path,
+                replay_dir.path(),
+                0,
+            )
+            .unwrap();
+            assert!(replay.conversation.is_empty());
 
             // Turn 2 on the same session: reinstall a healthy registry and
             // drive a real user turn with the next distinct index.
-            let home = xai_grok_config::grok_home();
-            let reg = crate::retrieval::RetrievalRegistry::disabled(home.clone());
+            let reg = crate::retrieval::RetrievalRegistry::disabled(xai_grok_config::grok_home());
             let mut prime = xai_grok_config_types::PrimeConfig::default();
             prime.skills.enabled = true;
             let snapshot = crate::retrieval::graph::RetrievalSnapshot {
@@ -551,7 +598,7 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
                 source_graph: xai_grok_config_types::RetrievalGraphConfig::default(),
             };
             reg.force_publish(std::sync::Arc::new(snapshot));
-            let _previous = crate::retrieval::install_registry_for_home(home.clone(), reg);
+            let _healthy_registry = crate::retrieval::install_test_registry_override(reg);
 
             let (prompt_task2, conv2) = drive_prompt(
                 actor.clone(),

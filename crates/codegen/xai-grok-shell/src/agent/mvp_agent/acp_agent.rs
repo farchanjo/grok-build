@@ -22,6 +22,61 @@ fn tool_overrides_capability() -> serde_json::Value {
     serde_json::to_value(TOOL_OVERRIDES_CAPABILITY)
         .expect("ToolOverridesCapability is always serializable")
 }
+
+fn classify_acp_prompt_origin(
+    meta: Option<&agent_client_protocol::Meta>,
+    prompt_id: &str,
+) -> crate::session::PromptOrigin {
+    match meta.and_then(|meta| meta.get(crate::session::PROMPT_ORIGIN_META_KEY)) {
+        None => match crate::session::PromptOrigin::from_prompt_id(prompt_id) {
+            crate::session::PromptOrigin::Unknown => crate::session::PromptOrigin::User,
+            origin => origin,
+        },
+        Some(serde_json::Value::String(tag)) => {
+            crate::session::PromptOrigin::from_prompt_origin_meta(Some(tag))
+        }
+        Some(_) => crate::session::PromptOrigin::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod prompt_origin_tests {
+    use super::classify_acp_prompt_origin;
+    use crate::session::{PROMPT_ORIGIN_META_KEY, PROMPT_ORIGIN_SCHEDULER_FIRED, PromptOrigin};
+
+    #[test]
+    fn prompt_origin_metadata_boundary_fails_closed_for_non_strings() {
+        for value in [
+            serde_json::json!(123),
+            serde_json::Value::Null,
+            serde_json::json!({ "tag": "scheduler_fired" }),
+            serde_json::json!(["scheduler_fired"]),
+        ] {
+            let mut meta = agent_client_protocol::Meta::new();
+            meta.insert(PROMPT_ORIGIN_META_KEY.into(), value);
+            let origin = classify_acp_prompt_origin(Some(&meta), "plain-user-id");
+            assert_eq!(origin, PromptOrigin::Unknown);
+            assert!(!origin.prime_eligible());
+        }
+    }
+
+    #[test]
+    fn prompt_origin_metadata_boundary_handles_absent_and_scheduler_tags() {
+        assert_eq!(
+            classify_acp_prompt_origin(None, "scheduler-fired-legacy"),
+            PromptOrigin::SchedulerFired
+        );
+        let mut meta = agent_client_protocol::Meta::new();
+        meta.insert(
+            PROMPT_ORIGIN_META_KEY.into(),
+            serde_json::Value::String(PROMPT_ORIGIN_SCHEDULER_FIRED.into()),
+        );
+        assert_eq!(
+            classify_acp_prompt_origin(Some(&meta), "plain-user-id"),
+            PromptOrigin::SchedulerFired
+        );
+    }
+}
 async fn read_applied_tool_overrides(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
 ) -> Option<xai_grok_inference_types::ToolOverrides> {
@@ -2620,22 +2675,7 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("screenMode"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        // Older ACP clients omit the typed tag, so recognize only reserved
-        // synthetic IDs at this boundary; all malformed claims fail closed.
-        let origin = match arguments
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get(crate::session::PROMPT_ORIGIN_META_KEY))
-        {
-            None => match crate::session::PromptOrigin::from_prompt_id(&prompt_id) {
-                crate::session::PromptOrigin::Unknown => crate::session::PromptOrigin::User,
-                origin => origin,
-            },
-            Some(serde_json::Value::String(tag)) => {
-                crate::session::PromptOrigin::from_prompt_origin_meta(Some(tag))
-            }
-            Some(_) => crate::session::PromptOrigin::Unknown,
-        };
+        let origin = classify_acp_prompt_origin(arguments.meta.as_ref(), &prompt_id);
         let json_schema = arguments
             .meta
             .as_ref()

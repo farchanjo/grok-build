@@ -167,13 +167,12 @@ impl PromptOrigin {
     }
     /// Decode a legacy prompt-id string into an origin, FAIL-CLOSED.
     ///
-    /// Reserved only for deserializing legacy wire entries that predate the
-    /// explicit `origin` field. Recognized synthetic prefixes map to their
-    /// variant; **any unrecognized id returns [`Self::Unknown`], never
+    /// Used for legacy wire entries and at the ACP boundary when an older
+    /// client omits the typed origin tag. Recognized synthetic prefixes map to
+    /// their variant; **any unrecognized id returns [`Self::Unknown`], never
     /// [`Self::User`]** — a legacy id can never claim to be a real user turn.
-    /// The live pipeline passes the typed [`Self`] through instead of calling
-    /// this, and the scheduler is carried by the typed ACP meta tag, never by
-    /// this prefix decoder.
+    /// After that boundary, the live pipeline carries the typed [`Self`]
+    /// without further prompt-id inference.
     pub fn from_prompt_id(prompt_id: &str) -> Self {
         if let Some(task_id) = prompt_id.strip_prefix("task-completed-") {
             Self::TaskCompleted {

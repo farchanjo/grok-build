@@ -791,8 +791,8 @@ pub(crate) struct SessionActor {
     /// recorded as `skill.name` on the turn span. Reset at the start of each
     /// prompt (`handle_prompt`), so it never leaks across turns.
     pub(crate) active_skill: parking_lot::Mutex<Option<String>>,
-    /// Per-session PR18 inventory cache. `/clear` invalidates it; tool-touched
-    /// workspace paths mark it dirty. Child sessions own their own cache and
+    /// Per-session PR18 inventory cache. `/clear` and fs-watch recovery
+    /// invalidate it; tool and fs-watch paths mark it dirty. Child sessions own their own cache and
     /// build their own workspace inventory, so prime bodies never leak across
     /// sessions/workspaces.
     pub(crate) prime_cache: crate::session::prime::inventory::InventoryCache,

@@ -276,8 +276,8 @@ pub(crate) struct FsWatchDeps {
     pub client_fs_config: Option<ClientFsConfig>,
     pub persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     pub last_reported_branch: Arc<parking_lot::Mutex<Option<String>>>,
-    /// PR19: session-local prime inventory cache, marked dirty on live
-    /// workspace mutations so the next prime run rebuilds its path evidence.
+    /// Session-local prime inventory cache: live and replayed paths mark it
+    /// dirty; head-change and recovery paths invalidate its epoch.
     pub prime_cache: crate::session::prime::inventory::InventoryCache,
 }
 
@@ -548,7 +548,7 @@ pub(crate) struct FsWatchPlan {
     git_head: Option<GitHead>,
     fs_config: xai_fsnotify::FsConfig,
     cwd: PathBuf,
-    /// PR19: marks touched paths on live workspace mutations.
+    /// Tracks live/replayed paths and recovery invalidations for prime inventory.
     prime_cache: crate::session::prime::inventory::InventoryCache,
 }
 
@@ -620,7 +620,6 @@ impl FsWatchPlan {
     }
 
     async fn on_replayed_change(&self, paths: &[PathBuf], kind: FsEventKind) {
-        mark_prime_paths(&self.prime_cache, paths);
         if let Some(i) = &self.index {
             i.on_change(paths, kind);
         }
@@ -855,6 +854,27 @@ fn on_settle_due(
     }
 }
 
+fn apply_outcome_to_prime_cache(
+    outcome: &Outcome,
+    cache: &crate::session::prime::inventory::InventoryCache,
+) {
+    match outcome {
+        Outcome::Completed { replay, .. } => {
+            for (paths, _) in replay {
+                mark_prime_paths(cache, paths);
+            }
+        }
+        Outcome::CompletedInvalidated { .. }
+        | Outcome::Refresh {
+            invalidate_prime: true,
+            ..
+        } => {
+            cache.invalidate();
+        }
+        Outcome::Buffered | Outcome::Forward(_) | Outcome::Refresh { .. } => {}
+    }
+}
+
 /// Bookkeeping shared by the `Completed`/`Refresh` outcome arms: record the
 /// rebuild request and (re)start the debounce quiet window.
 fn note_refresh_request(rebuild: bool, debounce: &mut Debounce, rebuild_flag: &mut bool) {
@@ -984,6 +1004,7 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
+                    apply_outcome_to_prime_cache(&outcome, &plan.prime_cache);
                     match outcome {
                         Outcome::Buffered => {}
                         Outcome::Forward((paths, kind)) => {
@@ -996,16 +1017,9 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
                             note_refresh_request(rebuild, &mut debounce, &mut rebuild_codebase_graph);
                         }
                         Outcome::CompletedInvalidated { rebuild } => {
-                            plan.prime_cache.invalidate();
                             note_refresh_request(rebuild, &mut debounce, &mut rebuild_codebase_graph);
                         }
-                        Outcome::Refresh {
-                            rebuild,
-                            invalidate_prime,
-                        } => {
-                            if invalidate_prime {
-                                plan.prime_cache.invalidate();
-                            }
+                        Outcome::Refresh { rebuild, .. } => {
                             note_refresh_request(rebuild, &mut debounce, &mut rebuild_codebase_graph);
                         }
                     }
@@ -1238,19 +1252,75 @@ mod tests {
     }
 
     #[test]
-    fn replayed_paths_mark_prime_inventory_dirty() {
+    fn outcome_handling_marks_replayed_paths_and_invalidates_recovery_cache() {
         let cache = crate::session::prime::inventory::InventoryCache::new();
-        let path = PathBuf::from("/repo/src/lib.rs");
-        mark_prime_paths(&cache, std::slice::from_ref(&path));
-        assert_eq!(cache.dirty(), vec![path]);
-    }
+        let replayed = PathBuf::from("/repo/src/replayed.rs");
+        let replay = Outcome::Completed {
+            replay: vec![(vec![replayed.clone()], FsEventKind::Modified)],
+            rebuild: true,
+        };
+        apply_outcome_to_prime_cache(&replay, &cache);
+        assert_eq!(cache.dirty(), vec![replayed]);
 
-    #[test]
-    fn recovery_paths_invalidate_prime_inventory() {
-        let cache = crate::session::prime::inventory::InventoryCache::new();
-        assert_eq!(cache.epoch(), 0);
-        cache.invalidate();
+        let mut in_op = true;
+        let mut op_buffer = vec![batch()];
+        let head_change = on_event(
+            FsEvent::GitOperationCompleted { head_changed: true },
+            &mut in_op,
+            &mut op_buffer,
+        );
+        assert!(matches!(
+            head_change,
+            Outcome::CompletedInvalidated { rebuild: true }
+        ));
+        apply_outcome_to_prime_cache(&head_change, &cache);
         assert_eq!(cache.epoch(), 1);
+        assert!(cache.dirty().is_empty());
+
+        let mut in_op = true;
+        let mut op_buffer: Vec<FsBatch> = (0..MAX_OP_BUFFER).map(|_| batch()).collect();
+        let overflow = on_event(files_changed("/repo/overflow"), &mut in_op, &mut op_buffer);
+        assert!(matches!(
+            overflow,
+            Outcome::Refresh {
+                rebuild: true,
+                invalidate_prime: true
+            }
+        ));
+        apply_outcome_to_prime_cache(&overflow, &cache);
+        assert_eq!(cache.epoch(), 2);
+
+        let mut in_op = true;
+        let mut op_buffer = vec![batch()];
+        let resync = on_resync(&mut in_op, &mut op_buffer);
+        assert!(matches!(
+            resync,
+            Outcome::Refresh {
+                rebuild: true,
+                invalidate_prime: true
+            }
+        ));
+        apply_outcome_to_prime_cache(&resync, &cache);
+        assert_eq!(cache.epoch(), 3);
+
+        let mut in_op = false;
+        let mut op_buffer = Vec::new();
+        let git_meta = on_event(
+            FsEvent::GitMetaChanged {
+                kind: xai_fsnotify::GitMetaKind::RefsChanged,
+            },
+            &mut in_op,
+            &mut op_buffer,
+        );
+        assert!(matches!(
+            git_meta,
+            Outcome::Refresh {
+                rebuild: true,
+                invalidate_prime: true
+            }
+        ));
+        apply_outcome_to_prime_cache(&git_meta, &cache);
+        assert_eq!(cache.epoch(), 4);
     }
 
     #[test]
@@ -1485,7 +1555,8 @@ mod tests {
                     &mut in_op,
                     &mut op_buffer,
                 ) {
-                    Outcome::Completed { rebuild, .. } => {
+                    Outcome::Completed { rebuild, .. }
+                    | Outcome::CompletedInvalidated { rebuild } => {
                         note_refresh_request(rebuild, &mut debounce, &mut rebuild_flag);
                     }
                     other => panic!(

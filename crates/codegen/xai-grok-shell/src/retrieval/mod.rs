@@ -53,6 +53,8 @@ pub use telemetry::{
     TracingTelemetrySink,
 };
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -107,6 +109,37 @@ pub fn install_registry_for_home(
 pub fn registry_for_home(home: impl AsRef<Path>) -> Option<Arc<RetrievalRegistry>> {
     let key = stable_home_key(home.as_ref());
     home_map().read().get(&key).cloned()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_REGISTRY_OVERRIDE: RefCell<Option<Arc<RetrievalRegistry>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestRegistryOverride(Option<Arc<RetrievalRegistry>>);
+
+#[cfg(test)]
+impl Drop for TestRegistryOverride {
+    fn drop(&mut self) {
+        TEST_REGISTRY_OVERRIDE.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_registry_override(
+    registry: Arc<RetrievalRegistry>,
+) -> TestRegistryOverride {
+    let previous = TEST_REGISTRY_OVERRIDE.with(|slot| slot.replace(Some(registry)));
+    TestRegistryOverride(previous)
+}
+
+pub(crate) fn registry_for_prime_home(home: impl AsRef<Path>) -> Option<Arc<RetrievalRegistry>> {
+    #[cfg(test)]
+    if let Some(registry) = TEST_REGISTRY_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Some(registry);
+    }
+    registry_for_home(home)
 }
 
 /// Remove the registry for `home` (tests / shutdown).

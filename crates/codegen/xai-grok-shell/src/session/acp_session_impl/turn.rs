@@ -723,7 +723,8 @@ impl SessionActor {
         // Per-home retrieval registry supplies the prime config and the
         // semantic service (child sessions share the registry but build their
         // own inventory from their own workspace below).
-        let Some(registry) = crate::retrieval::registry_for_home(xai_grok_config::grok_home())
+        let Some(registry) =
+            crate::retrieval::registry_for_prime_home(xai_grok_config::grok_home())
         else {
             return Ok(None);
         };
