@@ -1110,6 +1110,14 @@ pub(crate) struct SessionActor {
     /// A `tracing::warn!` tripwire in the handler logs every occurrence so
     /// we can quantify the loss in production before investing in a stash.
     pub(crate) streaming_turn_capture: parking_lot::Mutex<StreamingTurnCapture>,
+    /// In-flight Chat Completions / Messages `ToolCallDelta` cards. The
+    /// sampler drainer announces ACP `ToolCall` (Pending) as soon as the
+    /// model streams a name+id; `prepare_tool_call` reuses that id so the
+    /// pager does not get a duplicate card, then `forget`s it. Execution
+    /// still waits for the completed sampler response. Leftover announced
+    /// ids are marked Failed on the next `StreamStarted` (cancelled stream).
+    pub(crate) streaming_tool_calls:
+        parking_lot::Mutex<crate::session::streaming_tool_calls::StreamingToolCallAcc>,
     /// Per-turn barrier that orders the streamed message against the turn's
     /// tool calls.
     ///

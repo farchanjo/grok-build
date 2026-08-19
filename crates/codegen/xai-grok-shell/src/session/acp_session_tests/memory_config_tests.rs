@@ -308,6 +308,7 @@ async fn create_test_actor_with_memory(
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
+        streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_inference::InferenceHandle::noop(),

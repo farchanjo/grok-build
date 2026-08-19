@@ -325,6 +325,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 recap_epoch: std::cell::Cell::new(0),
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
+                streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),

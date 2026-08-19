@@ -767,35 +767,55 @@ impl SessionActor {
             let _span = tracing::info_span!("tool.register").entered();
             let early_raw_input =
                 serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok();
-            let subagent_background = matches!(
-                call.function.name.as_str(),
-                "task" | "Task" | "spawn_subagent"
-            )
-            .then(|| {
-                early_raw_input
-                    .as_ref()
-                    .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true)
-            });
-            let mut meta = self.stamp_tool_meta(None, &call.function.name, None);
-            if let Some(bg) = subagent_background {
-                meta.get_or_insert_with(serde_json::Map::new).insert(
-                    "subagentBackground".to_string(),
-                    serde_json::Value::Bool(bg),
-                );
+            let already_announced = {
+                let mut acc = self.streaming_tool_calls.lock();
+                let announced = acc.is_announced(&call.id);
+                acc.forget(&call.id);
+                announced
+            };
+            if already_announced {
+                self.send_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        tool_call_id.clone(),
+                        acp::ToolCallUpdateFields::new()
+                            .kind(Some(acp::ToolKind::Other))
+                            .status(Some(acp::ToolCallStatus::Pending))
+                            .raw_input(early_raw_input),
+                    )),
+                    None,
+                )
+                .await;
+            } else {
+                let subagent_background = matches!(
+                    call.function.name.as_str(),
+                    "task" | "Task" | "spawn_subagent"
+                )
+                .then(|| {
+                    early_raw_input
+                        .as_ref()
+                        .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true)
+                });
+                let mut meta = self.stamp_tool_meta(None, &call.function.name, None);
+                if let Some(bg) = subagent_background {
+                    meta.get_or_insert_with(serde_json::Map::new).insert(
+                        "subagentBackground".to_string(),
+                        serde_json::Value::Bool(bg),
+                    );
+                }
+                self.send_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(tool_call_id.clone(), call.function.name.clone())
+                            .kind(acp::ToolKind::Other)
+                            .status(acp::ToolCallStatus::Pending)
+                            .raw_input(early_raw_input)
+                            .meta(meta),
+                    ),
+                    None,
+                )
+                .await;
             }
-            self.send_update(
-                acp::SessionUpdate::ToolCall(
-                    acp::ToolCall::new(tool_call_id.clone(), call.function.name.clone())
-                        .kind(acp::ToolKind::Other)
-                        .status(acp::ToolCallStatus::Pending)
-                        .raw_input(early_raw_input)
-                        .meta(meta),
-                ),
-                None,
-            )
-            .await;
         }
         let mcp_parts = parse_mcp_tool_name(&call.function.name);
         let is_mcp_tool = mcp_parts.is_some();
@@ -2746,6 +2766,23 @@ impl SessionActor {
                     }
                     cap.start_stream(timestamp_ms);
                 }
+                let stale_ids = {
+                    let mut acc = self.streaming_tool_calls.lock();
+                    let ids = acc.announced_ids();
+                    acc.clear();
+                    ids
+                };
+                for id in stale_ids {
+                    self.send_update(
+                        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                            acp::ToolCallId::new(Arc::from(id)),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(acp::ToolCallStatus::Failed)),
+                        )),
+                        None,
+                    )
+                    .await;
+                }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
             }
             InferenceEvent::FirstToken { .. } => {
@@ -2813,6 +2850,49 @@ impl SessionActor {
                     let mut cap = self.streaming_turn_capture.lock();
                     if cap.prompt_id.is_some() {
                         cap.phase = CapturePhase::ToolCall;
+                    }
+                }
+                let emit = self.streaming_tool_calls.lock().apply_delta(
+                    tool_index,
+                    id.clone(),
+                    name.clone(),
+                    arguments_delta.clone(),
+                );
+                match emit {
+                    crate::session::streaming_tool_calls::StreamingToolCallEmit::None => {}
+                    crate::session::streaming_tool_calls::StreamingToolCallEmit::Announce {
+                        id: call_id,
+                        name: tool_name,
+                        raw_input,
+                    } => {
+                        let meta = self.stamp_tool_meta(None, &tool_name, None);
+                        self.send_update(
+                            acp::SessionUpdate::ToolCall(
+                                acp::ToolCall::new(
+                                    acp::ToolCallId::new(Arc::from(call_id)),
+                                    tool_name,
+                                )
+                                .kind(acp::ToolKind::Other)
+                                .status(acp::ToolCallStatus::Pending)
+                                .raw_input(raw_input)
+                                .meta(meta),
+                            ),
+                            None,
+                        )
+                        .await;
+                    }
+                    crate::session::streaming_tool_calls::StreamingToolCallEmit::Update {
+                        id: call_id,
+                        raw_input,
+                    } => {
+                        self.send_update(
+                            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                                acp::ToolCallId::new(Arc::from(call_id)),
+                                acp::ToolCallUpdateFields::new().raw_input(raw_input),
+                            )),
+                            None,
+                        )
+                        .await;
                     }
                 }
                 self.send_buffered_xai_update(XaiSessionUpdate::ToolCallDeltaChunk {

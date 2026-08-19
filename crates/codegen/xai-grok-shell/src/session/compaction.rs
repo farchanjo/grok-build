@@ -2783,6 +2783,7 @@ mod inline_auto_compact_flow_tests {
             streaming_turn_capture: parking_lot::Mutex::new(
                 crate::session::acp_session::StreamingTurnCapture::default(),
             ),
+            streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
             turn_stream_drained: parking_lot::Mutex::new(None),
             pending_image_strip: parking_lot::Mutex::new(None),
             sampler_handle: xai_grok_inference::InferenceHandle::noop(),

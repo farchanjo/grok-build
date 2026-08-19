@@ -1,5 +1,6 @@
 use super::support::*;
 use super::*;
+use crate::session::replay_events::SessionEvent;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
 use tokio::sync::mpsc;
@@ -27,6 +28,21 @@ fn extract_text(n: &acp::SessionNotification) -> Option<String> {
         },
         _ => None,
     }
+}
+
+/// Drain mixed ACP + xAI extension notifications until the next ACP update.
+fn recv_acp_notification(
+    rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+) -> Option<acp::SessionNotification> {
+    while let Ok(ev) = rx.try_recv() {
+        let SessionEvent::Notification(notif) = ev else {
+            continue;
+        };
+        if let crate::session::replay_events::SessionNotification::Acp(n) = notif {
+            return Some(*n);
+        }
+    }
+    None
 }
 pub(super) struct ReplaySendUpdateFixture {
     pub(super) actor: SessionActor,
@@ -251,6 +267,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
+        streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
         pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_inference::InferenceHandle::noop(),
@@ -1134,6 +1151,128 @@ async fn tool_call_delta_on_idle_slot_leaves_phase_pending() {
             let cap = actor.streaming_turn_capture.lock().clone();
             assert_eq!(cap.phase, CapturePhase::Pending);
             assert!(cap.is_empty());
+        })
+        .await;
+}
+/// Chat Completions `ToolCallDelta` with id+name must mint an ACP Pending
+/// card immediately so the pager can show the tool while arguments stream.
+#[tokio::test(flavor = "current_thread")]
+async fn tool_call_delta_announces_acp_pending_card() {
+    use xai_grok_inference::{InferenceEvent, RequestId};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut fixture = make_replay_send_update_fixture().await;
+            let actor = Arc::new(fixture.actor);
+            actor
+                .handle_sampling_event(InferenceEvent::ToolCallDelta {
+                    request_id: RequestId::random(),
+                    tool_index: 0,
+                    id: Some("call-weather".to_string()),
+                    name: Some("get_weather".to_string()),
+                    arguments_delta: Some("{".to_string()),
+                })
+                .await;
+            let acp_n = recv_acp_notification(&mut fixture.event_rx)
+                .expect("ToolCallDelta must enqueue an ACP ToolCall");
+            match &acp_n.update {
+                acp::SessionUpdate::ToolCall(tc) => {
+                    assert_eq!(tc.tool_call_id.0.as_ref(), "call-weather");
+                    assert_eq!(tc.title, "get_weather");
+                    assert!(matches!(tc.status, acp::ToolCallStatus::Pending));
+                    assert_eq!(tc.raw_input, Some(serde_json::json!({ "raw": "{" })),);
+                }
+                other => panic!("expected ToolCall, got {other:?}"),
+            }
+            assert!(
+                actor
+                    .streaming_tool_calls
+                    .lock()
+                    .is_announced("call-weather")
+            );
+            actor
+                .handle_sampling_event(InferenceEvent::ToolCallDelta {
+                    request_id: RequestId::random(),
+                    tool_index: 0,
+                    id: None,
+                    name: None,
+                    arguments_delta: Some(r#""city":"Recife"}"#.to_string()),
+                })
+                .await;
+            let acp_n = recv_acp_notification(&mut fixture.event_rx)
+                .expect("follow-up delta must enqueue ToolCallUpdate");
+            match &acp_n.update {
+                acp::SessionUpdate::ToolCallUpdate(u) => {
+                    assert_eq!(u.tool_call_id.0.as_ref(), "call-weather");
+                    assert_eq!(
+                        u.fields.raw_input,
+                        Some(serde_json::json!({ "city": "Recife" })),
+                    );
+                }
+                other => panic!("expected ToolCallUpdate, got {other:?}"),
+            }
+        })
+        .await;
+}
+/// A new `StreamStarted` after an announced-but-never-prepared card
+/// must fail that card (cancelled / retried stream). Cards already
+/// handed to `prepare_tool_call` (`forget`) must not be failed.
+#[tokio::test(flavor = "current_thread")]
+async fn stream_started_fails_unprepared_streaming_tool_cards() {
+    use xai_grok_inference::{InferenceEvent, RequestId};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut fixture = make_replay_send_update_fixture().await;
+            let actor = Arc::new(fixture.actor);
+            actor
+                .handle_sampling_event(InferenceEvent::ToolCallDelta {
+                    request_id: RequestId::random(),
+                    tool_index: 0,
+                    id: Some("call-stale".to_string()),
+                    name: Some("read_file".to_string()),
+                    arguments_delta: None,
+                })
+                .await;
+            let _ = recv_acp_notification(&mut fixture.event_rx);
+            actor
+                .handle_sampling_event(InferenceEvent::StreamStarted {
+                    request_id: RequestId::random(),
+                    timestamp_ms: 1,
+                })
+                .await;
+            let acp_n = recv_acp_notification(&mut fixture.event_rx)
+                .expect("stale announced card must be Failed");
+            match &acp_n.update {
+                acp::SessionUpdate::ToolCallUpdate(u) => {
+                    assert_eq!(u.tool_call_id.0.as_ref(), "call-stale");
+                    assert!(matches!(u.fields.status, Some(acp::ToolCallStatus::Failed)));
+                }
+                other => panic!("expected Failed ToolCallUpdate, got {other:?}"),
+            }
+            assert!(actor.streaming_tool_calls.lock().announced_ids().is_empty());
+
+            actor
+                .handle_sampling_event(InferenceEvent::ToolCallDelta {
+                    request_id: RequestId::random(),
+                    tool_index: 0,
+                    id: Some("call-kept".to_string()),
+                    name: Some("read_file".to_string()),
+                    arguments_delta: None,
+                })
+                .await;
+            let _ = recv_acp_notification(&mut fixture.event_rx);
+            actor.streaming_tool_calls.lock().forget("call-kept");
+            actor
+                .handle_sampling_event(InferenceEvent::StreamStarted {
+                    request_id: RequestId::random(),
+                    timestamp_ms: 2,
+                })
+                .await;
+            assert!(
+                recv_acp_notification(&mut fixture.event_rx).is_none(),
+                "forgotten (prepared) cards must not be Failed on StreamStarted",
+            );
         })
         .await;
 }

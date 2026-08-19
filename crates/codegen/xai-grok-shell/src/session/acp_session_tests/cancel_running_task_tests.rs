@@ -311,6 +311,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 recap_epoch: std::cell::Cell::new(0),
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
+                streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
@@ -832,6 +833,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 recap_epoch: std::cell::Cell::new(0),
                 session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
+                streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
@@ -1155,6 +1157,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 streaming_turn_capture: parking_lot::Mutex::new(
                     StreamingTurnCapture::default(),
                 ),
+                streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: xai_grok_inference::InferenceHandle::noop(),
@@ -2479,6 +2482,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 streaming_turn_capture: parking_lot::Mutex::new(
                     StreamingTurnCapture::default(),
                 ),
+                streaming_tool_calls: parking_lot::Mutex::new(Default::default()),
                 turn_stream_drained: parking_lot::Mutex::new(None),
                 pending_image_strip: parking_lot::Mutex::new(None),
                 sampler_handle: sampler_handle.clone(),

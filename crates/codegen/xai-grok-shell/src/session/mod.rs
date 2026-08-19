@@ -357,6 +357,7 @@ pub mod signals;
 pub(crate) mod slash_commands;
 pub mod storage;
 pub(crate) mod streaming_capture;
+pub(crate) mod streaming_tool_calls;
 pub(crate) mod summary;
 pub(crate) mod telemetry;
 pub mod tool_index;
