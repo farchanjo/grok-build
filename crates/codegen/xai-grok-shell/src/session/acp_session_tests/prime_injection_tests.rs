@@ -558,25 +558,104 @@ async fn hard_prime_failure_leaves_monotonic_index_gap_then_success_primes_disti
                 )),
                 "a hard prime failure must not enqueue a durable UserMessageChunk"
             );
-            assert_eq!(updates_truncate_for_prompt(&updates, 0), updates.len());
+            let real_user = |text: &str, prompt_index: usize| {
+                let mut meta = acp::Meta::new();
+                meta.insert("promptIndex".into(), serde_json::json!(prompt_index));
+                crate::session::storage::SessionUpdate::Acp(Box::new(
+                    acp::SessionNotification::new(
+                        acp::SessionId::new("prime-rail"),
+                        acp::SessionUpdate::UserMessageChunk(
+                            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                                text,
+                            )))
+                            .meta(Some(meta)),
+                        ),
+                    ),
+                ))
+            };
+            let agent_boundary = |text: &str| {
+                crate::session::storage::SessionUpdate::Acp(Box::new(
+                    acp::SessionNotification::new(
+                        acp::SessionId::new("prime-rail"),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new(text)),
+                        )),
+                    ),
+                ))
+            };
+            let prior = real_user("prior real turn", 0);
+            let next = real_user("next real turn", 2);
+            let mut no_phantom = vec![
+                prior.clone(),
+                agent_boundary("prior response"),
+                next.clone(),
+            ];
+            no_phantom.extend(updates.clone());
+            let mut with_phantom = vec![
+                prior,
+                agent_boundary("prior response"),
+                real_user("phantom failed turn", 0),
+                agent_boundary("phantom response"),
+                next,
+            ];
+            with_phantom.extend(updates);
+            assert_eq!(
+                updates_truncate_for_prompt(&no_phantom, 1),
+                no_phantom.len()
+            );
+            assert!(
+                updates_truncate_for_prompt(&with_phantom, 1) < with_phantom.len(),
+                "a persisted phantom must add a truncate-visible user run"
+            );
+
+            let write_updates =
+                |dir: &std::path::Path,
+                 name: &str,
+                 rail: &[crate::session::storage::SessionUpdate]| {
+                    let path = dir.join(name);
+                    let mut jsonl = Vec::new();
+                    for update in rail {
+                        let envelope =
+                            crate::session::storage::SessionUpdateEnvelope::from_update(update)
+                                .unwrap();
+                        let mut line = serde_json::to_vec(&envelope).unwrap();
+                        line.push(b'\n');
+                        jsonl.extend(line);
+                    }
+                    std::fs::write(&path, jsonl).unwrap();
+                    path
+                };
             let replay_dir = tempfile::TempDir::new().unwrap();
-            let updates_path = replay_dir.path().join("updates.jsonl");
-            let mut jsonl = Vec::new();
-            for update in &updates {
-                let envelope =
-                    crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap();
-                let mut line = serde_json::to_vec(&envelope).unwrap();
-                line.push(b'\n');
-                jsonl.extend(line);
-            }
-            std::fs::write(&updates_path, jsonl).unwrap();
-            let replay = crate::session::helpers::replay::replay_to_prompt(
-                &updates_path,
+            let no_phantom_path = write_updates(replay_dir.path(), "no-phantom.jsonl", &no_phantom);
+            let phantom_path =
+                write_updates(replay_dir.path(), "with-phantom.jsonl", &with_phantom);
+            let no_phantom_replay = crate::session::helpers::replay::replay_to_prompt(
+                &no_phantom_path,
                 replay_dir.path(),
-                0,
+                1,
             )
             .unwrap();
-            assert!(replay.conversation.is_empty());
+            let phantom_replay = crate::session::helpers::replay::replay_to_prompt(
+                &phantom_path,
+                replay_dir.path(),
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                no_phantom_replay
+                    .conversation
+                    .iter()
+                    .map(xai_grok_inference_types::ConversationItem::text_content)
+                    .collect::<Vec<_>>(),
+                vec!["prior real turn", "prior response"]
+            );
+            assert!(
+                phantom_replay
+                    .conversation
+                    .iter()
+                    .any(|item| item.text_content().contains("phantom failed turn")),
+                "a persisted phantom must survive replay at target index 1"
+            );
 
             // Turn 2 on the same session: reinstall a healthy registry and
             // drive a real user turn with the next distinct index.
