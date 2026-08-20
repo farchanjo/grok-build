@@ -74,6 +74,29 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks.spawn(run_provider_operation(agent_id, operation, repair, tx));
         }
+        Effect::SaveChatgptContextWindow {
+            agent_id,
+            model_id,
+            tokens,
+        } => {
+            tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    let table = format!("model.{model_id:?}");
+                    match tokens {
+                        Some(tokens) => crate::config_toml_edit::set_table_field(
+                            &table,
+                            "context_window",
+                            tokens as i64,
+                        ),
+                        None => crate::config_toml_edit::remove_table_key(&table, "context_window"),
+                    }
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+                TaskResult::ChatgptContextWindowSaved { agent_id, result }
+            });
+        }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
                 .spawn(async move {
@@ -4665,35 +4688,59 @@ fn display_provider_status(
                 )
             })
     };
+    let chatgpt_models = status
+        .presets
+        .iter()
+        .filter(|preset| preset.id.starts_with("chatgpt-"))
+        .map(|preset| crate::views::providers_modal::ChatgptModel {
+            id: preset.id.clone(),
+            label: preset.label.clone(),
+            context_window: preset.context_window,
+        })
+        .collect::<Vec<_>>();
     let detail = match status.provider {
         ProviderId::Xai => match (
             method_available(ProviderAuthenticationKind::OAuth),
             method_available(ProviderAuthenticationKind::ApiKey),
         ) {
-            (true, true) => Some("OAuth and API key available"),
-            (true, false) => Some("Connected with OAuth"),
-            (false, true) => Some("Connected with API key"),
+            (true, true) => Some("OAuth and API key available".to_owned()),
+            (true, false) => Some("Connected with OAuth".to_owned()),
+            (false, true) => Some("Connected with API key".to_owned()),
             (false, false) => None,
         },
         ProviderId::OpenAi => match (
             method_available(ProviderAuthenticationKind::ChatGpt),
             method_available(ProviderAuthenticationKind::ApiKey),
         ) {
-            (true, true) => Some("ChatGPT OAuth and API key available"),
-            (true, false) => Some("Connected with ChatGPT OAuth"),
-            (false, true) => Some("Connected with API key"),
+            (true, true) => Some("ChatGPT OAuth and API key available".to_owned()),
+            (true, false) => Some("Connected with ChatGPT OAuth".to_owned()),
+            (false, true) => Some("Connected with API key".to_owned()),
             (false, false) => None,
         },
         ProviderId::OpenRouter | ProviderId::Anthropic => None,
     };
+    let chatgpt_account_email = if status.provider == ProviderId::OpenAi
+        && method_available(ProviderAuthenticationKind::ChatGpt)
+    {
+        status
+            .chatgpt_account_email
+            .as_deref()
+            .and_then(crate::views::providers_modal::ChatgptAccountEmail::new)
+    } else {
+        None
+    };
     if let Some(detail) = detail {
         return ProviderStatus::Connected {
-            detail: Some(detail.to_owned()),
+            detail: Some(detail),
+            chatgpt_account_email,
+            chatgpt_models,
         };
     }
     match status.state {
         ProviderConnectionState::Connected => ProviderStatus::Connected {
             detail: Some("Connected".to_owned()),
+            chatgpt_account_email,
+            chatgpt_models,
         },
         ProviderConnectionState::Configured => {
             let detail = match status.credential_source {
@@ -4707,6 +4754,8 @@ fn display_provider_status(
             };
             ProviderStatus::Connected {
                 detail: Some(detail.to_owned()),
+                chatgpt_account_email,
+                chatgpt_models,
             }
         }
         ProviderConnectionState::NotConfigured => ProviderStatus::Missing,
@@ -4805,6 +4854,8 @@ async fn run_provider_operation(
                 };
                 ProviderStatus::Connected {
                     detail: Some(detail),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
                 }
             }
             ProviderConnectionTest::NotConfigured => ProviderStatus::Missing,
@@ -4871,6 +4922,8 @@ async fn run_provider_operation(
                     ) {
                         Ok(Some(_)) => ProviderStatus::Connected {
                             detail: Some("Connected with API key".into()),
+                            chatgpt_account_email: None,
+                            chatgpt_models: Vec::new(),
                         },
                         Ok(None) => ProviderStatus::Missing,
                         Err(error) => ProviderStatus::Error(error.to_string()),
@@ -4911,6 +4964,8 @@ async fn run_provider_operation(
                     ) {
                         Ok(()) => ProviderStatus::Connected {
                             detail: Some("Connected with API key".into()),
+                            chatgpt_account_email: None,
+                            chatgpt_models: Vec::new(),
                         },
                         Err(e) => ProviderStatus::Error(e.to_string()),
                     },
@@ -4936,6 +4991,8 @@ async fn run_provider_operation(
                         "Use `grok openai --provider <id> models list` to probe configured providers"
                             .into(),
                     ),
+                    chatgpt_account_email: None,
+                    chatgpt_models: Vec::new(),
                 }
             };
             (provider, status)
@@ -5008,7 +5065,9 @@ async fn run_provider_operation(
 #[cfg(test)]
 mod provider_status_tests {
     use super::display_provider_status;
-    use crate::views::providers_modal::ProviderStatus as DisplayStatus;
+    use crate::views::providers_modal::{
+        ChatgptAccountEmail, ProviderStatus as DisplayStatus,
+    };
     use xai_grok_shell::agent::providers::{
         ProviderAuthenticationKind, ProviderAuthenticationStatus, ProviderConnectionState,
         ProviderId, ProviderStatus,
@@ -5036,13 +5095,14 @@ mod provider_status_tests {
                     credential_source: None,
                 })
                 .collect(),
+            chatgpt_account_email: None,
             presets: Vec::new(),
         }
     }
 
     fn detail(status: DisplayStatus) -> Option<String> {
         match status {
-            DisplayStatus::Connected { detail } => detail,
+            DisplayStatus::Connected { detail, .. } => detail,
             _ => None,
         }
     }
@@ -5092,6 +5152,46 @@ mod provider_status_tests {
             .as_deref(),
             Some("ChatGPT OAuth and API key available")
         );
+    }
+
+    #[test]
+    fn chatgpt_account_email_is_redacted_from_provider_status_debug() {
+        let mut status = status(
+            ProviderId::OpenAi,
+            &[(
+                ProviderAuthenticationKind::ChatGpt,
+                ProviderConnectionState::Connected,
+            )],
+        );
+        status.chatgpt_account_email = Some("user@example.com".to_owned());
+
+        let display_status = display_provider_status(status);
+        let debug = format!("{display_status:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("user@example.com"));
+
+        let direct_debug = format!("{:?}", ChatgptAccountEmail::new("user@example.com"));
+        assert_eq!(direct_debug, "Some([REDACTED])");
+    }
+
+    #[test]
+    fn invalid_chatgpt_account_email_is_not_in_provider_status() {
+        let mut status = status(
+            ProviderId::OpenAi,
+            &[(
+                ProviderAuthenticationKind::ChatGpt,
+                ProviderConnectionState::Connected,
+            )],
+        );
+        status.chatgpt_account_email = Some("user@example.com\nforged".to_owned());
+
+        match display_provider_status(status) {
+            DisplayStatus::Connected {
+                chatgpt_account_email,
+                ..
+            } => assert!(chatgpt_account_email.is_none()),
+            other => panic!("expected connected status, got {other:?}"),
+        }
     }
 }
 

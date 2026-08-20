@@ -254,6 +254,14 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
         return vec![];
     }
 
+    if let ProviderCommand::SetChatgptContextWindow { model_id, tokens } = command {
+        return vec![Effect::SaveChatgptContextWindow {
+            agent_id,
+            model_id,
+            tokens,
+        }];
+    }
+
     let provider_for_repair: Option<String> = match &command {
         ProviderCommand::Connect(p) | ProviderCommand::ReplaceKey(p) => Some(p.id_str().to_owned()),
         ProviderCommand::LoginCodex => Some("openai".into()),
@@ -288,7 +296,8 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::RefreshStatus(provider) => ProviderOperation::Refresh(provider),
             ProviderCommand::AddConfigured
             | ProviderCommand::RefreshCatalog(_)
-            | ProviderCommand::RefreshCapabilities(_) => {
+            | ProviderCommand::RefreshCapabilities(_)
+            | ProviderCommand::SetChatgptContextWindow { .. } => {
                 // Config editor / capability refresh: no secret path.
                 return vec![];
             }

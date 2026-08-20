@@ -141,7 +141,7 @@ pub enum ProviderConnectionState {
 }
 
 /// Status for one provider. This is safe to render and to send over IPC.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderStatus {
     pub provider: ProviderId,
     pub display_name: String,
@@ -150,7 +150,25 @@ pub struct ProviderStatus {
     pub can_test_connection: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authentication: Vec<ProviderAuthenticationStatus>,
+    /// ChatGPT OAuth account email for the local provider-management UI only.
+    /// This is deliberately excluded from serialization and debug output.
+    #[serde(skip)]
+    pub chatgpt_account_email: Option<String>,
     pub presets: Vec<ProviderModelPreset>,
+}
+
+impl std::fmt::Debug for ProviderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderStatus")
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("state", &self.state)
+            .field("credential_source", &self.credential_source)
+            .field("can_test_connection", &self.can_test_connection)
+            .field("authentication", &self.authentication)
+            .field("presets", &self.presets)
+            .finish()
+    }
 }
 
 /// A built-in model choice. Credentials are never part of a preset.
@@ -743,57 +761,64 @@ impl ProviderManager {
                 ProviderId::OpenRouter => "grok_build_openrouter",
                 ProviderId::Anthropic => "grok_build_anthropic",
             };
-            config_models
-                .entry(preset.id)
-                .or_insert_with(|| ConfigModelOverride {
-                    model: Some(preset.model),
-                    base_url: preset.base_url,
-                    name: Some(preset.label),
-                    description: preset.description,
-                    model_provider: Some(provider.to_owned()),
-                    // Anthropic Messages requires XApiKey; other presets leave default.
-                    auth_scheme: if preset.provider == ProviderId::Anthropic {
-                        Some(xai_grok_inference::AuthScheme::XApiKey)
-                    } else {
-                        None
-                    },
-                    api_backend: if preset.provider == ProviderId::Anthropic {
-                        Some(ApiBackend::Messages)
-                    } else {
-                        None
-                    },
-                    context_window: preset.context_window,
-                    // OpenRouter's `top_provider.max_completion_tokens` is a
-                    // capability ceiling, not a safe per-request default.
-                    // Some models advertise the full context window here
-                    // (for example 131072/131072), so forwarding that value
-                    // makes every non-empty prompt fail context validation.
-                    // Keep the ceiling in the provider cache/status metadata
-                    // and let OpenRouter choose its normal response budget.
-                    max_completion_tokens: if preset.provider == ProviderId::OpenRouter {
-                        None
-                    } else {
-                        preset.max_completion_tokens
-                    },
-                    reasoning_effort: preset
-                        .default_reasoning_effort
-                        .as_deref()
-                        .and_then(|effort| effort.parse().ok()),
-                    supports_reasoning_effort: Some(preset.supports_reasoning_effort),
-                    reasoning_efforts: reasoning_effort_options(
-                        &preset.reasoning_efforts,
-                        preset.default_reasoning_effort.as_deref(),
-                    ),
-                    reasoning_effort_selection: preset.reasoning_effort_selection,
-                    hidden: None,
-                    supports_tools: Some(preset.supports_tools),
-                    supports_native_schema: preset.supports_native_schema,
-                    supports_strict_tools: preset.supports_strict_tools,
-                    supports_image_input: preset.supports_image_input,
-                    supports_audio_input: preset.supports_audio_input,
-                    supports_video_input: preset.supports_video_input,
-                    ..Default::default()
-                });
+            let preset_override = ConfigModelOverride {
+                model: Some(preset.model),
+                base_url: preset.base_url,
+                name: Some(preset.label),
+                description: preset.description,
+                model_provider: Some(provider.to_owned()),
+                // Anthropic Messages requires XApiKey; other presets leave default.
+                auth_scheme: if preset.provider == ProviderId::Anthropic {
+                    Some(xai_grok_inference::AuthScheme::XApiKey)
+                } else {
+                    None
+                },
+                api_backend: if preset.provider == ProviderId::Anthropic {
+                    Some(ApiBackend::Messages)
+                } else {
+                    None
+                },
+                context_window: preset.context_window,
+                // OpenRouter's `top_provider.max_completion_tokens` is a
+                // capability ceiling, not a safe per-request default.
+                // Some models advertise the full context window here
+                // (for example 131072/131072), so forwarding that value
+                // makes every non-empty prompt fail context validation.
+                // Keep the ceiling in the provider cache/status metadata
+                // and let OpenRouter choose its normal response budget.
+                max_completion_tokens: if preset.provider == ProviderId::OpenRouter {
+                    None
+                } else {
+                    preset.max_completion_tokens
+                },
+                reasoning_effort: preset
+                    .default_reasoning_effort
+                    .as_deref()
+                    .and_then(|effort| effort.parse().ok()),
+                supports_reasoning_effort: Some(preset.supports_reasoning_effort),
+                reasoning_efforts: reasoning_effort_options(
+                    &preset.reasoning_efforts,
+                    preset.default_reasoning_effort.as_deref(),
+                ),
+                reasoning_effort_selection: preset.reasoning_effort_selection,
+                hidden: None,
+                supports_tools: Some(preset.supports_tools),
+                supports_native_schema: preset.supports_native_schema,
+                supports_strict_tools: preset.supports_strict_tools,
+                supports_image_input: preset.supports_image_input,
+                supports_audio_input: preset.supports_audio_input,
+                supports_video_input: preset.supports_video_input,
+                ..Default::default()
+            };
+            match config_models.entry(preset.id) {
+                indexmap::map::Entry::Occupied(mut entry) => {
+                    let merged = merge_model_override(entry.get().clone(), preset_override);
+                    entry.insert(merged);
+                }
+                indexmap::map::Entry::Vacant(entry) => {
+                    entry.insert(preset_override);
+                }
+            }
         }
     }
 
@@ -873,6 +898,7 @@ impl ProviderManager {
                             credential_source: api_key_source,
                         },
                     ],
+                    chatgpt_account_email: None,
                     presets,
                 }
             }
@@ -928,6 +954,10 @@ impl ProviderManager {
                             credential_source: api_key_source,
                         },
                     ],
+                    chatgpt_account_email: chatgpt_oauth::read_tokens(&self.grok_home)
+                        .ok()
+                        .flatten()
+                        .and_then(|tokens| tokens.email),
                     presets: openai_presets,
                 }
             }
@@ -943,6 +973,7 @@ impl ProviderManager {
                         state: ProviderConnectionState::Configured,
                         credential_source: Some(source),
                     }],
+                    chatgpt_account_email: None,
                     presets,
                 },
                 Ok(None) => ProviderStatus {
@@ -956,6 +987,7 @@ impl ProviderManager {
                         state: ProviderConnectionState::NotConfigured,
                         credential_source: None,
                     }],
+                    chatgpt_account_email: None,
                     presets,
                 },
                 Err(_) => ProviderStatus {
@@ -965,6 +997,7 @@ impl ProviderManager {
                     credential_source: None,
                     can_test_connection: false,
                     authentication: Vec::new(),
+                    chatgpt_account_email: None,
                     presets,
                 },
             },
@@ -997,6 +1030,10 @@ impl ProviderManager {
                 state,
                 credential_source: connected.then_some(ProviderCredentialSource::SecureStore),
             }],
+            chatgpt_account_email: chatgpt_oauth::read_tokens(&self.grok_home)
+                .ok()
+                .flatten()
+                .and_then(|tokens| tokens.email),
             presets,
         })
     }
@@ -1564,6 +1601,78 @@ impl ProviderManager {
     }
 }
 
+/// Combine a user model table with a built-in preset without discarding preset routing.
+///
+/// Optional user values take precedence. Collections cannot distinguish an explicit empty
+/// value from omission, so an empty user collection inherits the preset collection.
+fn merge_model_override(
+    mut user: super::config::ConfigModelOverride,
+    preset: super::config::ConfigModelOverride,
+) -> super::config::ConfigModelOverride {
+    macro_rules! inherit_option {
+        ($($field:ident),+ $(,)?) => {
+            $(
+                if user.$field.is_none() {
+                    user.$field = preset.$field;
+                }
+            )+
+        };
+    }
+
+    inherit_option!(
+        model,
+        base_url,
+        name,
+        description,
+        api_key,
+        env_key,
+        auth_provider,
+        model_provider,
+        resolved_model_provider,
+        api_base_url,
+        max_completion_tokens,
+        temperature,
+        top_p,
+        api_backend,
+        auth_scheme,
+        openrouter_fallback_models,
+        provider_preferences,
+        plugins,
+        openrouter_pacing,
+        context_window,
+        auto_compact_threshold_percent,
+        system_prompt_label,
+        use_concise,
+        agent_type,
+        inference_idle_timeout_secs,
+        max_retries,
+        hidden,
+        supported_in_api,
+        reasoning_effort,
+        supports_reasoning_effort,
+        supports_backend_search,
+        compactions_remaining,
+        compaction_at_tokens,
+        show_model_fingerprint,
+        stream_tool_calls,
+        supports_tools,
+        supports_native_schema,
+        supports_strict_tools,
+        supports_image_input,
+        supports_audio_input,
+        supports_video_input,
+        reasoning_effort_selection,
+        execution_backend,
+    );
+    if user.reasoning_efforts.is_empty() {
+        user.reasoning_efforts = preset.reasoning_efforts;
+    }
+    if user.extra_headers.is_empty() {
+        user.extra_headers = preset.extra_headers;
+    }
+    user
+}
+
 /// Whether ChatGPT OAuth should use the headless device-code path.
 ///
 /// Device auth when:
@@ -1588,39 +1697,38 @@ fn static_chatgpt_oauth_presets() -> Vec<ProviderModelPreset> {
     //
     // Context windows here are the **product** caps on
     // `chatgpt.com/backend-api/codex`, not the OpenAI Platform API specs.
-    // API models advertise ~1.05M for GPT-5.6 Sol, but the subscription
-    // catalog currently caps Sol/Terra at 372k raw (≈353.4k at 95%
-    // effective) — see openai/codex#31860. OpenCode mirrors that with
-    // limit.input=372_000 / limit.context=500_000 for 5.6 and
-    // limit.input=272_000 / limit.context=400_000 for 5.5.
+    // Around July 18, 2026, Codex reduced the 5.6 family server-side default
+    // from 372k to 272k (openai/codex#31860, #34619). Approximately 1M context
+    // is opt-in through client configuration. For OpenCode parity, both the
+    // 5.5 and 5.6 families use context=400_000 and input=272_000.
     //
     // Grok only has a single `context_window` (drives compaction). Use the
-    // Codex raw catalog window so auto-compact fires before the product
-    // truncates mid-turn.
+    // Codex server-side default so auto-compact fires before the product
+    // truncates mid-turn. The live catalog remains the primary source.
     //
     // Tuple: (api_slug, label, context_window, max_completion_tokens, reasoning_efforts)
     const MODELS: &[(&str, &str, u64, u32, &[&str])] = &[
-        // Codex catalog: context_window / max_context_window = 372_000
+        // Codex server-side default context window: 272_000
         // GPT-5.6 models have full reasoning effort ladder (low/medium/high/xhigh/max)
         // Default: Sol=low, Terra/Luna=medium
         (
             "gpt-5.6-sol",
             "GPT-5.6 Sol",
-            372_000,
+            272_000,
             128_000,
             &["low", "medium", "high", "xhigh", "max"],
         ),
         (
             "gpt-5.6-terra",
             "GPT-5.6 Terra",
-            372_000,
+            272_000,
             128_000,
             &["low", "medium", "high", "xhigh", "max"],
         ),
         (
             "gpt-5.6-luna",
             "GPT-5.6 Luna",
-            372_000,
+            272_000,
             128_000,
             &["low", "medium", "high", "xhigh", "max"],
         ),
@@ -4508,17 +4616,153 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn partial_chatgpt_override_inherits_preset_routing() {
+        let home = tempfile::tempdir().unwrap();
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: None,
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let mut providers = indexmap::IndexMap::new();
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "chatgpt-gpt-5.6-sol".to_owned(),
+            super::super::config::ConfigModelOverride {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        ProviderManager::install_model_presets_into(&mut providers, &mut models);
+
+        let merged = &models["chatgpt-gpt-5.6-sol"];
+        assert_eq!(merged.context_window, Some(1_000_000));
+        assert_eq!(merged.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            merged.base_url.as_deref(),
+            Some(crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL)
+        );
+        assert_eq!(merged.model_provider.as_deref(), Some("grok_build_openai"));
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn chatgpt_preset_without_user_table_matches_preset_defaults() {
+        let home = tempfile::tempdir().unwrap();
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: None,
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let mut providers = indexmap::IndexMap::new();
+        let mut models = indexmap::IndexMap::new();
+        ProviderManager::install_model_presets_into(&mut providers, &mut models);
+
+        let preset = static_chatgpt_oauth_presets()
+            .into_iter()
+            .find(|preset| preset.id == "chatgpt-gpt-5.6-sol")
+            .unwrap();
+        let resolved = &models["chatgpt-gpt-5.6-sol"];
+        assert_eq!(resolved.model.as_deref(), Some(preset.model.as_str()));
+        assert_eq!(resolved.base_url, preset.base_url);
+        assert_eq!(resolved.name.as_deref(), Some(preset.label.as_str()));
+        assert_eq!(resolved.description, preset.description);
+        assert_eq!(resolved.context_window, preset.context_window);
+        assert_eq!(resolved.max_completion_tokens, preset.max_completion_tokens);
+        assert_eq!(
+            resolved.model_provider.as_deref(),
+            Some("grok_build_openai")
+        );
+        assert_eq!(resolved.supports_tools, Some(preset.supports_tools));
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn full_chatgpt_override_wins_over_preset_fields() {
+        let home = tempfile::tempdir().unwrap();
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: None,
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let mut providers = indexmap::IndexMap::new();
+        let mut models = indexmap::IndexMap::new();
+        models.insert(
+            "chatgpt-gpt-5.6-sol".to_owned(),
+            super::super::config::ConfigModelOverride {
+                model: Some("custom-model".to_owned()),
+                base_url: Some("https://example.com/v1".to_owned()),
+                name: Some("Custom model".to_owned()),
+                description: Some("Custom description".to_owned()),
+                model_provider: Some("custom-provider".to_owned()),
+                context_window: Some(123_456),
+                max_completion_tokens: Some(654),
+                supports_tools: Some(false),
+                reasoning_efforts: vec![xai_grok_inference_types::ReasoningEffortOption {
+                    id: "low".to_owned(),
+                    value: xai_grok_inference_types::ReasoningEffort::Low,
+                    label: "Low".to_owned(),
+                    description: None,
+                    default: false,
+                }],
+                extra_headers: indexmap::indexmap! { "X-Custom".to_owned() => "value".to_owned() },
+                ..Default::default()
+            },
+        );
+        ProviderManager::install_model_presets_into(&mut providers, &mut models);
+
+        let merged = &models["chatgpt-gpt-5.6-sol"];
+        assert_eq!(merged.model.as_deref(), Some("custom-model"));
+        assert_eq!(merged.base_url.as_deref(), Some("https://example.com/v1"));
+        assert_eq!(merged.name.as_deref(), Some("Custom model"));
+        assert_eq!(merged.description.as_deref(), Some("Custom description"));
+        assert_eq!(merged.model_provider.as_deref(), Some("custom-provider"));
+        assert_eq!(merged.context_window, Some(123_456));
+        assert_eq!(merged.max_completion_tokens, Some(654));
+        assert_eq!(merged.supports_tools, Some(false));
+        assert_eq!(merged.reasoning_efforts.len(), 1);
+        assert_eq!(merged.extra_headers["X-Custom"], "value");
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
     fn chatgpt_oauth_presets_use_subscription_context_caps() {
         let presets = static_chatgpt_oauth_presets();
         let by_id: std::collections::HashMap<_, _> =
             presets.into_iter().map(|p| (p.id.clone(), p)).collect();
         assert_eq!(
             by_id["chatgpt-gpt-5.6-sol"].context_window,
-            Some(372_000),
-            "Codex product catalog caps GPT-5.6 Sol at 372k (not API 1.05M)"
+            Some(272_000),
+            "Codex product defaults GPT-5.6 Sol to 272k (not API 1.05M)"
         );
-        assert_eq!(by_id["chatgpt-gpt-5.6-terra"].context_window, Some(372_000));
-        assert_eq!(by_id["chatgpt-gpt-5.6-luna"].context_window, Some(372_000));
+        assert_eq!(by_id["chatgpt-gpt-5.6-terra"].context_window, Some(272_000));
+        assert_eq!(by_id["chatgpt-gpt-5.6-luna"].context_window, Some(272_000));
         assert_eq!(by_id["chatgpt-gpt-5.5"].context_window, Some(400_000));
         assert_eq!(by_id["chatgpt-gpt-5.4"].context_window, Some(400_000));
         assert_eq!(by_id["chatgpt-gpt-5.4-mini"].context_window, Some(400_000));

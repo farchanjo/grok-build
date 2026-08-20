@@ -1473,6 +1473,11 @@ pub enum Effect {
         /// must echo the same scope to resume a stashed prompt.
         repair: Option<crate::app::agent::CredentialRepairScope>,
     },
+    SaveChatgptContextWindow {
+        agent_id: AgentId,
+        model_id: String,
+        tokens: Option<u64>,
+    },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
     /// instead of creating a fresh one (`--resume` + `--worktree` combination).
@@ -2470,6 +2475,10 @@ pub enum TaskResult {
     },
     /// Safe display state returned by a native provider operation. No
     /// credential or provider response body is carried back to the reducer.
+    ChatgptContextWindowSaved {
+        agent_id: AgentId,
+        result: Result<(), String>,
+    },
     ProviderOperationComplete {
         agent_id: AgentId,
         provider: crate::views::providers_modal::ProviderKind,

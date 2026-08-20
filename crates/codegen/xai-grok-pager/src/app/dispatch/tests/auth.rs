@@ -897,6 +897,8 @@ fn provider_operation_complete_token_race_safety() {
     fn connected(detail: &str) -> ProviderStatus {
         ProviderStatus::Connected {
             detail: Some(detail.into()),
+            chatgpt_account_email: None,
+            chatgpt_models: Vec::new(),
         }
     }
     fn stash(
@@ -1081,6 +1083,8 @@ fn openai_repair_token_does_not_resume_other_providers() {
             provider: ProviderKind::OpenAi,
             status: ProviderStatus::Connected {
                 detail: Some("ok".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
             },
             claude_cli_status: None,
             repair: Some(openai_scope.clone()),
@@ -1118,6 +1122,8 @@ fn openai_repair_token_does_not_resume_other_providers() {
             provider: ProviderKind::OpenAi,
             status: ProviderStatus::Connected {
                 detail: Some("ok".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
             },
             claude_cli_status: None,
             repair: Some(openai_scope),

@@ -88,12 +88,60 @@ impl ProviderKind {
     }
 }
 
+/// A ChatGPT subscription model available for context-window configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatgptModel {
+    pub id: String,
+    pub label: String,
+    pub context_window: Option<u64>,
+}
+
+/// A display-only ChatGPT account email that is redacted from diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChatgptAccountEmail(String);
+
+impl ChatgptAccountEmail {
+    /// Returns an email that is safe to render in the terminal UI.
+    pub fn new(email: &str) -> Option<Self> {
+        let email = email.trim();
+        let mut parts = email.split('@');
+        let local = parts.next()?;
+        let domain = parts.next()?;
+        if parts.next().is_some()
+            || local.is_empty()
+            || domain.is_empty()
+            || email.len() > 320
+            || !email.is_ascii()
+            || !email.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-' | b'@')
+            })
+        {
+            return None;
+        }
+        Some(Self(email.to_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ChatgptAccountEmail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
 /// The externally observable state of a provider connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderStatus {
     Missing,
     Connecting,
-    Connected { detail: Option<String> },
+    Connected {
+        detail: Option<String>,
+        chatgpt_account_email: Option<ChatgptAccountEmail>,
+        chatgpt_models: Vec<ChatgptModel>,
+    },
     Error(String),
 }
 
@@ -163,6 +211,11 @@ pub enum ProviderCommand {
     RefreshCatalog(ProviderKind),
     /// Refresh capability profile for the selected provider.
     RefreshCapabilities(ProviderKind),
+    /// Persist or clear a ChatGPT subscription model context-window override.
+    SetChatgptContextWindow {
+        model_id: String,
+        tokens: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +238,10 @@ pub(crate) enum ProviderModalMode {
         provider: ProviderKind,
         editor: LineEditor,
     },
+    ChatgptSubscription {
+        selected: usize,
+        editor: Option<LineEditor>,
+    },
 }
 
 impl std::fmt::Debug for ProviderModalMode {
@@ -204,6 +261,11 @@ impl std::fmt::Debug for ProviderModalMode {
                 .debug_struct("EditingKey")
                 .field("provider", provider)
                 .field("editor", &"[REDACTED]")
+                .finish(),
+            Self::ChatgptSubscription { selected, editor } => f
+                .debug_struct("ChatgptSubscription")
+                .field("selected", selected)
+                .field("editing_context_window", &editor.is_some())
                 .finish(),
         }
     }
@@ -250,6 +312,13 @@ impl std::fmt::Debug for ProviderModalState {
                     ProviderModalMode::ChoosingXai { .. } => "choosing_xai_auth",
                     ProviderModalMode::ChoosingOpenAi { .. } => "choosing_openai_auth",
                     ProviderModalMode::EditingKey { .. } => "editing_key_redacted",
+                    ProviderModalMode::ChatgptSubscription { editor, .. } => {
+                        if editor.is_some() {
+                            "editing_chatgpt_context_window"
+                        } else {
+                            "chatgpt_subscription"
+                        }
+                    }
                 },
             )
             .field("focus_provider_id", &self.focus_provider_id)
@@ -469,7 +538,104 @@ fn handle_openai_choice(
     }
 }
 
+fn chatgpt_models(state: &ProviderModalState) -> &[ChatgptModel] {
+    match state.status(&ProviderKind::OpenAi) {
+        ProviderStatus::Connected { chatgpt_models, .. } => chatgpt_models,
+        _ => &[],
+    }
+}
+
+fn handle_chatgpt_subscription(
+    state: &mut ProviderModalState,
+    key: &KeyEvent,
+) -> Option<ProviderModalOutcome> {
+    let ProviderModalMode::ChatgptSubscription { selected, editor } = state.mode.clone() else {
+        return None;
+    };
+    let models = chatgpt_models(state);
+    let len = models.len();
+    if let Some(mut editor) = editor {
+        match key.code {
+            KeyCode::Esc => {
+                state.mode = ProviderModalMode::ChatgptSubscription {
+                    selected,
+                    editor: None,
+                };
+                Some(ProviderModalOutcome::Changed)
+            }
+            KeyCode::Enter => {
+                let Ok(tokens) = editor.text().trim().parse::<u64>() else {
+                    return Some(ProviderModalOutcome::Unchanged);
+                };
+                if !(8_000..=1_050_000).contains(&tokens) {
+                    return Some(ProviderModalOutcome::Unchanged);
+                }
+                let model_id = models.get(selected)?.id.clone();
+                state.mode = ProviderModalMode::ChatgptSubscription {
+                    selected,
+                    editor: None,
+                };
+                Some(ProviderModalOutcome::Command(
+                    ProviderCommand::SetChatgptContextWindow {
+                        model_id,
+                        tokens: Some(tokens),
+                    },
+                ))
+            }
+            _ => {
+                let outcome = line_edit_outcome(editor.handle_key(key));
+                state.mode = ProviderModalMode::ChatgptSubscription {
+                    selected,
+                    editor: Some(editor),
+                };
+                Some(outcome)
+            }
+        }
+    } else {
+        match key.code {
+            KeyCode::Esc => {
+                state.mode = ProviderModalMode::Browse;
+                Some(ProviderModalOutcome::Changed)
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                state.mode = ProviderModalMode::ChatgptSubscription {
+                    selected: selected.saturating_sub(1),
+                    editor: None,
+                };
+                Some(ProviderModalOutcome::Changed)
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                state.mode = ProviderModalMode::ChatgptSubscription {
+                    selected: (selected + 1).min(len.saturating_sub(1)),
+                    editor: None,
+                };
+                Some(ProviderModalOutcome::Changed)
+            }
+            KeyCode::Enter if len > 0 => {
+                state.mode = ProviderModalMode::ChatgptSubscription {
+                    selected,
+                    editor: Some(LineEditor::default()),
+                };
+                Some(ProviderModalOutcome::Changed)
+            }
+            KeyCode::Char('x') if key.modifiers.is_empty() && len > 0 => {
+                let model_id = models.get(selected)?.id.clone();
+                Some(ProviderModalOutcome::Command(
+                    ProviderCommand::SetChatgptContextWindow {
+                        model_id,
+                        tokens: None,
+                    },
+                ))
+            }
+            _ => Some(ProviderModalOutcome::Unchanged),
+        }
+    }
+}
+
 pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderModalOutcome {
+    if let Some(outcome) = handle_chatgpt_subscription(state, key) {
+        return outcome;
+    }
     if let Some(outcome) = handle_xai_choice(state, key) {
         return outcome;
     }
@@ -552,6 +718,17 @@ pub fn handle_key(state: &mut ProviderModalState, key: &KeyEvent) -> ProviderMod
         KeyCode::Char('r') if key.modifiers.is_empty() => {
             ProviderModalOutcome::Command(ProviderCommand::RefreshStatus(state.selected_provider()))
         }
+        KeyCode::Char('s')
+            if key.modifiers.is_empty()
+                && state.selected_provider() == ProviderKind::OpenAi
+                && !chatgpt_models(state).is_empty() =>
+        {
+            state.mode = ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: None,
+            };
+            ProviderModalOutcome::Changed
+        }
         KeyCode::Char('a') if key.modifiers.is_empty() => {
             ProviderModalOutcome::Command(ProviderCommand::AddConfigured)
         }
@@ -595,8 +772,13 @@ fn line_edit_outcome(outcome: LineEditOutcome) -> ProviderModalOutcome {
 }
 
 pub fn handle_paste(state: &mut ProviderModalState, text: &str) -> ProviderModalOutcome {
-    let ProviderModalMode::EditingKey { editor, .. } = &mut state.mode else {
-        return ProviderModalOutcome::Unchanged;
+    let editor = match &mut state.mode {
+        ProviderModalMode::EditingKey { editor, .. } => editor,
+        ProviderModalMode::ChatgptSubscription {
+            editor: Some(editor),
+            ..
+        } => editor,
+        _ => return ProviderModalOutcome::Unchanged,
     };
     line_edit_outcome(editor.insert_paste_with_byte_limit(text, 16_384))
 }
@@ -626,6 +808,11 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         },
         Shortcut {
             label: "r status",
+            clickable: false,
+            id: 0,
+        },
+        Shortcut {
+            label: "s subscription",
             clickable: false,
             id: 0,
         },
@@ -663,6 +850,75 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         "Configure model providers. Keys are masked and are never written to config.toml.",
         Style::default().fg(theme.gray),
     );
+    if let ProviderModalMode::ChatgptSubscription { selected, editor } = &state.mode {
+        put_line(
+            buf,
+            content.content,
+            &mut y,
+            "ChatGPT subscription context windows",
+            Style::default()
+                .fg(theme.text_primary)
+                .add_modifier(Modifier::BOLD),
+        );
+        let models = chatgpt_models(state);
+        for (idx, model) in models.iter().enumerate() {
+            let prefix = if *selected == idx { "› " } else { "  " };
+            let window = model
+                .context_window
+                .map(|tokens| format!("{tokens} tokens"))
+                .unwrap_or_else(|| "unknown".to_owned());
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                &format!("{prefix}{} · {window}", model.label),
+                Style::default().fg(if *selected == idx {
+                    theme.accent_user
+                } else {
+                    theme.gray
+                }),
+            );
+        }
+        if let Some(editor) = editor {
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                &format!("Context window: {}", editor.text()),
+                Style::default().fg(theme.accent_user),
+            );
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                "Enter saves · Esc cancels · 8,000–1,050,000 tokens",
+                Style::default().fg(theme.gray_dim),
+            );
+            if editor
+                .text()
+                .trim()
+                .parse::<u64>()
+                .is_ok_and(|tokens| tokens > 272_000)
+            {
+                put_line(
+                    buf,
+                    content.content,
+                    &mut y,
+                    "OpenAI may apply long-context limits or pricing to this subscription.",
+                    Style::default().fg(theme.warning),
+                );
+            }
+        } else {
+            put_line(
+                buf,
+                content.content,
+                &mut y,
+                "Enter set override · x clear override · Esc back",
+                Style::default().fg(theme.gray_dim),
+            );
+        }
+        return;
+    }
     for (idx, provider) in state.rows.iter().enumerate() {
         let show_claude_cli = provider == &ProviderKind::Anthropic
             && !matches!(
@@ -710,9 +966,18 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         let detail = match status {
             ProviderStatus::Connected {
                 detail: Some(detail),
-            } => detail.as_str(),
-            ProviderStatus::Error(error) => error.as_str(),
-            _ => owned_detail.as_str(),
+                chatgpt_account_email,
+                ..
+            } if provider == &ProviderKind::OpenAi => match chatgpt_account_email {
+                Some(email) => format!("{detail} — {}", email.as_str()),
+                None => detail.clone(),
+            },
+            ProviderStatus::Connected {
+                detail: Some(detail),
+                ..
+            } => detail.clone(),
+            ProviderStatus::Error(error) => error.clone(),
+            _ => owned_detail,
         };
         let detail = if provider == &ProviderKind::Anthropic {
             format!("    Messages API: {detail}")
@@ -969,6 +1234,8 @@ mod tests {
             &ProviderKind::OpenRouter,
             ProviderStatus::Connected {
                 detail: Some("ok".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
             },
         );
         state.selected = 2;
@@ -1016,6 +1283,8 @@ mod tests {
             &ProviderKind::Anthropic,
             ProviderStatus::Connected {
                 detail: Some("Configured by environment variable".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
             },
         );
         state.set_claude_cli_status(ClaudeCliStatus::Ready {
@@ -1114,6 +1383,8 @@ mod tests {
             &ProviderKind::Anthropic,
             ProviderStatus::Connected {
                 detail: Some("ok".into()),
+                chatgpt_account_email: None,
+                chatgpt_models: Vec::new(),
             },
         );
         state.selected = 3;
@@ -1180,5 +1451,112 @@ mod tests {
                 ..
             }
         ));
+    }
+    #[test]
+    fn chatgpt_account_email_renders_but_is_redacted_from_provider_state_debug() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(
+            &ProviderKind::OpenAi,
+            ProviderStatus::Connected {
+                detail: Some("Connected with ChatGPT OAuth".into()),
+                chatgpt_account_email: ChatgptAccountEmail::new("user@example.com"),
+                chatgpt_models: Vec::new(),
+            },
+        );
+
+        let area = Rect::new(0, 0, 110, 32);
+        let mut buf = Buffer::empty(area);
+        render_modal(&mut buf, area, &mut state, false);
+        let mut rendered = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        assert!(rendered.contains("user@example.com"));
+
+        let debug = format!("{state:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("user@example.com"));
+    }
+
+    #[test]
+    fn chatgpt_subscription_keys_set_and_clear_context_window() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(
+            &ProviderKind::OpenAi,
+            ProviderStatus::Connected {
+                detail: Some("Connected with ChatGPT OAuth".into()),
+                chatgpt_account_email: ChatgptAccountEmail::new("user@example.com"),
+                chatgpt_models: vec![ChatgptModel {
+                    id: "chatgpt-gpt-5.6-sol".into(),
+                    label: "GPT-5.6 Sol".into(),
+                    context_window: Some(272_000),
+                }],
+            },
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('s'))),
+            ProviderModalOutcome::Changed
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        for digit in "1000000".chars() {
+            handle_key(&mut state, &key(KeyCode::Char(digit)));
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptContextWindow {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                tokens: Some(1_000_000),
+            })
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('x'))),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptContextWindow {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                tokens: None,
+            })
+        );
+    }
+
+    #[test]
+    fn chatgpt_subscription_render_shows_account_models_and_long_context_note() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(
+            &ProviderKind::OpenAi,
+            ProviderStatus::Connected {
+                detail: Some("Connected with ChatGPT OAuth".into()),
+                chatgpt_account_email: ChatgptAccountEmail::new("user@example.com"),
+                chatgpt_models: vec![ChatgptModel {
+                    id: "chatgpt-gpt-5.6-sol".into(),
+                    label: "GPT-5.6 Sol".into(),
+                    context_window: Some(272_000),
+                }],
+            },
+        );
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        handle_key(&mut state, &key(KeyCode::Enter));
+        for digit in "300000".chars() {
+            handle_key(&mut state, &key(KeyCode::Char(digit)));
+        }
+        let area = Rect::new(0, 0, 110, 32);
+        let mut buf = Buffer::empty(area);
+        render_modal(&mut buf, area, &mut state, false);
+        let mut rendered = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(rendered.contains("ChatGPT subscription context windows"));
+        assert!(rendered.contains("GPT-5.6 Sol"));
+        assert!(rendered.contains("long-context limits or pricing"));
     }
 }

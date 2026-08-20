@@ -1300,6 +1300,22 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             vec![]
         }
+        TaskResult::ChatgptContextWindowSaved { agent_id, result } => {
+            match result {
+                Ok(()) => {
+                    if let Some(agent) = app.agents.get_mut(&agent_id) {
+                        agent.scrollback.push_block(RenderBlock::system(
+                            "ChatGPT context-window override saved. config.toml hot-reload applies it to subsequent turns and new sessions.",
+                        ));
+                        agent.show_toast("ChatGPT context-window override saved");
+                    }
+                }
+                Err(error) => app.show_toast(&format!(
+                    "Could not save ChatGPT context-window override: {error}"
+                )),
+            }
+            vec![]
+        }
         TaskResult::ProviderOperationComplete {
             agent_id,
             provider,
