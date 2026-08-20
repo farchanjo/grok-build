@@ -1537,8 +1537,33 @@ mod tests {
             true,
         );
         let text = buffer_text(&buf, area);
+        // The phase timer renders between the wait label and the queued hint.
+        // Its exact value depends on when the render's internal clock read
+        // lands relative to the start instant: any first-use system work on
+        // the render path (notably the MDM managed-preferences read, whose
+        // CoreFoundation main-bundle lookup scans the executable's directory
+        // and can take seconds when the binary sits in a huge build-output
+        // directory) widens that gap from sub-second to seconds. Assert the
+        // ordering and the timer's shape, not a fixed second count.
+        let label = "Waiting on subagent…";
+        let hint = "· 1 queued — Enter to send now";
+        let label_end = text
+            .find(label)
+            .map(|i| i + label.len())
+            .expect("wait label must render");
+        let hint_start = text.find(hint).expect("queued hint must render");
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
+            hint_start >= label_end,
+            "queued hint must render after the wait label, got: {text:?}"
+        );
+        let timer = text[label_end..hint_start].trim();
+        assert!(
+            timer.ends_with('s')
+                && timer.contains('m')
+                && timer.chars().any(|c| c.is_ascii_digit())
+                && timer
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'm' | 's')),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"
         );
     }
