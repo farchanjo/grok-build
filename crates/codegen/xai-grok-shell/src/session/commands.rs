@@ -821,4 +821,10 @@ pub enum SessionCommand {
     UpdateMediaConfig {
         media: Box<crate::config::MediaConfig>,
     },
+    /// Apply a catalog `context_window` that changed on config/model reload.
+    /// The session adopts it for subsequent auto-compact unless
+    /// `GROK_DEBUG_CONTEXT_WINDOW` locked the window at spawn.
+    RefreshCatalogContextWindow {
+        context_window: std::num::NonZeroU64,
+    },
 }

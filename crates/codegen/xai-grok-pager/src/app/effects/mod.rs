@@ -80,21 +80,20 @@ pub(crate) fn execute(
             tokens,
         } => {
             tasks.spawn(async move {
+                let saved_model_id = model_id.clone();
+                let saved_tokens = tokens;
                 let result = tokio::task::spawn_blocking(move || {
-                    let table = format!("model.{model_id:?}");
-                    match tokens {
-                        Some(tokens) => crate::config_toml_edit::set_table_field(
-                            &table,
-                            "context_window",
-                            tokens as i64,
-                        ),
-                        None => crate::config_toml_edit::remove_table_key(&table, "context_window"),
-                    }
+                    crate::config_toml_edit::write_chatgpt_context_window(&model_id, tokens)
                 })
                 .await
                 .map_err(|error| error.to_string())
-                .and_then(|result| result.map_err(|error| error.to_string()));
-                TaskResult::ChatgptContextWindowSaved { agent_id, result }
+                .and_then(std::convert::identity);
+                TaskResult::ChatgptContextWindowSaved {
+                    agent_id,
+                    model_id: saved_model_id,
+                    tokens: saved_tokens,
+                    result,
+                }
             });
         }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
@@ -4688,15 +4687,17 @@ fn display_provider_status(
                 )
             })
     };
+    let mut seen_chatgpt_ids = std::collections::HashSet::new();
     let chatgpt_models = status
         .presets
         .iter()
-        .filter(|preset| preset.id.starts_with("chatgpt-"))
-        .map(|preset| crate::views::providers_modal::ChatgptModel {
-            id: preset.id.clone(),
-            label: preset.label.clone(),
-            context_window: preset.context_window,
-        })
+        .filter(|preset| crate::config_toml_edit::is_chatgpt_model_id(&preset.id))
+        .filter(|preset| seen_chatgpt_ids.insert(preset.id.clone()))
+        .map(|preset| crate::views::providers_modal::ChatgptModel::from_catalog(
+            preset.id.clone(),
+            preset.label.clone(),
+            preset.context_window,
+        ))
         .collect::<Vec<_>>();
     let detail = match status.provider {
         ProviderId::Xai => match (
@@ -5070,7 +5071,7 @@ mod provider_status_tests {
     };
     use xai_grok_shell::agent::providers::{
         ProviderAuthenticationKind, ProviderAuthenticationStatus, ProviderConnectionState,
-        ProviderId, ProviderStatus,
+        ProviderId, ProviderModelPreset, ProviderStatus,
     };
 
     fn status(
@@ -5192,6 +5193,116 @@ mod provider_status_tests {
             } => assert!(chatgpt_account_email.is_none()),
             other => panic!("expected connected status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chatgpt_account_email_and_models_are_copied_when_chatgpt_oauth_is_connected() {
+        let mut status = status(
+            ProviderId::OpenAi,
+            &[(
+                ProviderAuthenticationKind::ChatGpt,
+                ProviderConnectionState::Connected,
+            )],
+        );
+        status.chatgpt_account_email = Some("user@example.com".to_owned());
+        status.presets = vec![ProviderModelPreset {
+            id: "chatgpt-gpt-5.6-sol".into(),
+            provider: ProviderId::OpenAi,
+            label: "GPT-5.6 Sol via ChatGPT".into(),
+            model: "gpt-5.6-sol".into(),
+            base_url: None,
+            is_agent: false,
+            description: None,
+            context_window: Some(272_000),
+            max_completion_tokens: None,
+            supports_tools: false,
+            supports_reasoning_effort: false,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+            supports_native_schema: None,
+            supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
+            reasoning_effort_selection: None,
+        }];
+
+        match display_provider_status(status) {
+            DisplayStatus::Connected {
+                detail,
+                chatgpt_account_email,
+                chatgpt_models,
+            } => {
+                assert_eq!(detail.as_deref(), Some("Connected with ChatGPT OAuth"));
+                assert_eq!(
+                    chatgpt_account_email.as_ref().map(ChatgptAccountEmail::as_str),
+                    Some("user@example.com")
+                );
+                assert_eq!(chatgpt_models.len(), 1);
+                assert_eq!(chatgpt_models[0].id, "chatgpt-gpt-5.6-sol");
+                assert_eq!(chatgpt_models[0].context_window, Some(272_000));
+            }
+            other => panic!("expected connected status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chatgpt_models_are_deduped_by_id_and_keep_the_first_window() {
+        let mut status = status(
+            ProviderId::OpenAi,
+            &[(
+                ProviderAuthenticationKind::ChatGpt,
+                ProviderConnectionState::Connected,
+            )],
+        );
+        let live = ProviderModelPreset {
+            id: "chatgpt-gpt-5.6-sol".into(),
+            provider: ProviderId::OpenAi,
+            label: "GPT-5.6 Sol via ChatGPT".into(),
+            model: "gpt-5.6-sol".into(),
+            base_url: None,
+            is_agent: false,
+            description: None,
+            context_window: Some(390_000),
+            max_completion_tokens: None,
+            supports_tools: false,
+            supports_reasoning_effort: false,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+            supports_native_schema: None,
+            supports_strict_tools: None,
+            supports_image_input: None,
+            supports_audio_input: None,
+            supports_video_input: None,
+            reasoning_effort_selection: None,
+        };
+        let mut stale = live.clone();
+        stale.context_window = Some(272_000);
+        status.presets = vec![live, stale];
+
+        match display_provider_status(status) {
+            DisplayStatus::Connected { chatgpt_models, .. } => {
+                assert_eq!(chatgpt_models.len(), 1);
+                assert_eq!(chatgpt_models[0].id, "chatgpt-gpt-5.6-sol");
+                assert_eq!(chatgpt_models[0].context_window, Some(390_000));
+            }
+            other => panic!("expected connected status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chatgpt_account_email_is_omitted_from_serialized_shell_status() {
+        let mut status = status(
+            ProviderId::OpenAi,
+            &[(
+                ProviderAuthenticationKind::ChatGpt,
+                ProviderConnectionState::Connected,
+            )],
+        );
+        status.chatgpt_account_email = Some("user@example.com".to_owned());
+        let json = serde_json::to_string(&status).expect("serialize");
+        assert!(!json.contains("user@example.com"));
+        assert!(!json.contains("chatgpt_account_email"));
     }
 }
 

@@ -47,6 +47,14 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
             // it from the shell-authoritative catalog so provider changes are
             // visible without closing and reopening the picker.
             agent.prompt.refresh_slash(&agent.session.models);
+            let catalog = agent.session.models.clone();
+            if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                agent.active_modal.as_mut()
+                && let Some(status) =
+                    state.status_mut(&crate::views::providers_modal::ProviderKind::OpenAi)
+            {
+                status.overlay_chatgpt_windows(|id| catalog.context_window_tokens_for(id));
+            }
         }
         // The shell emits this notification after config/model reload. Refresh
         // the pager-owned media snapshot after the agent loop so `/settings`

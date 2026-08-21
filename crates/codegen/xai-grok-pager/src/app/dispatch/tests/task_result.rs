@@ -2790,3 +2790,139 @@ fn session_list_nonempty_partial_modal_toasts_in_chat_mode_only() {
         "Build-mode modal non-empty degraded list stays silent"
     );
 }
+
+#[test]
+fn chatgpt_context_window_saved_notes_hot_reload() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch_task_result(
+        TaskResult::ChatgptContextWindowSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            tokens: Some(1_000_000),
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    let text = last_system_text(&app, id);
+    assert!(
+        text.contains("config.toml hot-reload"),
+        "status line must mention hot-reload, got {text}"
+    );
+    assert!(
+        text.contains("subsequent turns and new sessions"),
+        "status line must say the override applies later, got {text}"
+    );
+    assert_eq!(
+        app.agents[&id]
+            .toast
+            .as_ref()
+            .map(|(message, _)| message.as_str()),
+        Some("ChatGPT context-window override saved"),
+    );
+}
+
+#[test]
+fn chatgpt_context_window_saved_error_toasts_without_system_block() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = app.agents[&id].scrollback.len();
+    dispatch_task_result(
+        TaskResult::ChatgptContextWindowSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            tokens: Some(1_000_000),
+            result: Err("disk full".into()),
+        },
+        &mut app,
+    );
+    assert_eq!(app.agents[&id].scrollback.len(), before);
+    assert_eq!(
+        app.agents[&id]
+            .toast
+            .as_ref()
+            .map(|(message, _)| message.as_str()),
+        Some("Could not save ChatGPT context-window override: disk full"),
+    );
+}
+
+#[test]
+fn chatgpt_context_window_saved_updates_open_providers_row() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{
+        ChatgptAccountEmail, ChatgptModel, ProviderKind, ProviderModalMode, ProviderModalState,
+        ProviderStatus,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let mut state = ProviderModalState::new();
+    state.selected = 1;
+    state.set_status(
+        &ProviderKind::OpenAi,
+        ProviderStatus::Connected {
+            detail: Some("Connected with ChatGPT OAuth".into()),
+            chatgpt_account_email: ChatgptAccountEmail::new("user@example.com"),
+            chatgpt_models: vec![ChatgptModel::from_catalog(
+                "chatgpt-gpt-5.6-sol".into(),
+                "GPT-5.6 Sol".into(),
+                Some(272_000),
+            )],
+        },
+    );
+    state.mode = ProviderModalMode::ChatgptSubscription {
+        selected: 0,
+        editor: None,
+    };
+    app.agents.get_mut(&id).unwrap().active_modal = Some(ActiveModal::Providers {
+        state: Box::new(state),
+    });
+
+    dispatch_task_result(
+        TaskResult::ChatgptContextWindowSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            tokens: Some(1_000_000),
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    let listed = listed_chatgpt_window(&app, id);
+    assert_eq!(
+        listed,
+        Some(1_000_000),
+        "save must overlay the listed window"
+    );
+
+    dispatch_task_result(
+        TaskResult::ChatgptContextWindowSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            tokens: None,
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    let listed = listed_chatgpt_window(&app, id);
+    assert_eq!(
+        listed,
+        Some(272_000),
+        "clear must restore the catalog default, not None"
+    );
+}
+
+fn listed_chatgpt_window(app: &AppView, id: AgentId) -> Option<u64> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+
+    let ActiveModal::Providers { state } = app.agents[&id].active_modal.as_ref()? else {
+        panic!("providers modal must stay open");
+    };
+    match state.status(&ProviderKind::OpenAi) {
+        ProviderStatus::Connected { chatgpt_models, .. } => chatgpt_models
+            .iter()
+            .find(|model| model.id == "chatgpt-gpt-5.6-sol")
+            .and_then(|model| model.context_window),
+        other => panic!("expected connected OpenAI status, got {other:?}"),
+    }
+}

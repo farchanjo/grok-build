@@ -75,6 +75,68 @@
     }
 
     #[test]
+    fn models_update_overlays_open_chatgpt_subscription_windows() {
+        use crate::views::modal::ActiveModal;
+        use crate::views::providers_modal::{
+            ChatgptAccountEmail, ChatgptModel, ProviderKind, ProviderModalMode, ProviderModalState,
+            ProviderStatus,
+        };
+
+        let mut app = make_app_with_agent("sess-1");
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(
+            &ProviderKind::OpenAi,
+            ProviderStatus::Connected {
+                detail: Some("Connected with ChatGPT OAuth".into()),
+                chatgpt_account_email: ChatgptAccountEmail::new("user@example.com"),
+                chatgpt_models: vec![ChatgptModel::from_catalog(
+                    "chatgpt-gpt-5.6-sol".into(),
+                    "GPT-5.6 Sol".into(),
+                    Some(272_000),
+                )],
+            },
+        );
+        state.mode = ProviderModalMode::ChatgptSubscription {
+            selected: 0,
+            editor: None,
+        };
+        app.agents.get_mut(&AgentId(0)).unwrap().active_modal =
+            Some(ActiveModal::Providers {
+                state: Box::new(state),
+            });
+
+        let mut info = make_model_info("chatgpt-gpt-5.6-sol");
+        info.meta = serde_json::json!({ "totalContextTokens": 1_000_000 })
+            .as_object()
+            .cloned();
+        let state = acp::SessionModelState::new(
+            acp::ModelId::new(std::sync::Arc::from("chatgpt-gpt-5.6-sol")),
+            vec![info],
+        );
+        let raw = serde_json::value::to_raw_value(&state).unwrap();
+        let notif = acp::ExtNotification::new("x.ai/models/update", std::sync::Arc::from(raw));
+        assert!(handle_models_update(&notif, &mut app));
+
+        let ActiveModal::Providers { state } = app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .active_modal
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("providers modal must stay open");
+        };
+        match state.status(&ProviderKind::OpenAi) {
+            ProviderStatus::Connected { chatgpt_models, .. } => {
+                assert_eq!(chatgpt_models[0].context_window, Some(1_000_000));
+            }
+            other => panic!("expected connected OpenAI status, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn models_update_refreshes_open_model_picker_from_authoritative_catalog() {
         let mut app = make_app_with_agent("sess-1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();

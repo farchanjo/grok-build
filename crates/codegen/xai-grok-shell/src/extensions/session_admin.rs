@@ -612,15 +612,26 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     agent.models_manager.apply_config(merged_config);
     agent.sync_process_static_api_key(None);
 
+    let sessions = agent.sessions.borrow();
+    let updated_context_windows = fan_out_catalog_context_windows(
+        sessions
+            .values()
+            .map(|session| (&session.model_id, &session.cmd_tx)),
+        &agent.models_manager,
+    );
+    drop(sessions);
+
     let count = agent.models_manager.models().len();
     tracing::info!(
         count,
         updated_media_sessions,
+        updated_context_windows,
         "model list and media policy reloaded from config.toml"
     );
     ExtMethodResult::success(serde_json::json!({
         "models": count,
         "updated_media_sessions": updated_media_sessions,
+        "updated_context_windows": updated_context_windows,
     }))
     .to_ext_response()
     .map_err(|e| acp::Error::internal_error().data(e.to_string()))
@@ -644,6 +655,28 @@ fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
     ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+fn fan_out_catalog_context_windows<'a>(
+    sessions: impl Iterator<
+        Item = (
+            &'a acp::ModelId,
+            &'a tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+        ),
+    >,
+    models_manager: &crate::agent::models::ModelsManager,
+) -> usize {
+    sessions
+        .filter(|(model_id, sender)| {
+            let Some(context_window) = models_manager.context_window_for(model_id.0.as_ref())
+            else {
+                return false;
+            };
+            sender
+                .send(SessionCommand::RefreshCatalogContextWindow { context_window })
+                .is_ok()
+        })
+        .count()
 }
 
 fn fan_out_compaction_config<'a>(
@@ -812,8 +845,12 @@ async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
 
 #[cfg(test)]
 mod tests {
-    use super::fan_out_compaction_config;
+    use super::{fan_out_catalog_context_windows, fan_out_compaction_config};
+    use crate::agent::config::ModelEntry;
+    use crate::agent::models::ModelsManager;
     use crate::session::SessionCommand;
+    use agent_client_protocol as acp;
+    use std::num::NonZeroU64;
 
     #[test]
     fn compaction_reload_fans_out_to_every_live_session() {
@@ -862,5 +899,51 @@ mod tests {
             live_rx.try_recv(),
             Ok(SessionCommand::UpdateCompactionConfig { .. })
         ));
+    }
+
+    #[test]
+    fn catalog_context_window_reload_fans_out_current_model_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
+            tmp.path(),
+            crate::auth::GrokComConfig::default(),
+        ));
+        let mut catalog = indexmap::IndexMap::new();
+        let mut sol = ModelEntry::fallback(
+            "gpt-5.6-sol",
+            &crate::agent::config::EndpointsConfig::default(),
+        );
+        sol.info.context_window = NonZeroU64::new(1_000_000).unwrap();
+        catalog.insert("chatgpt-gpt-5.6-sol".to_owned(), sol);
+        let mgr = ModelsManager::new(
+            None,
+            catalog,
+            acp::ModelId::new("chatgpt-gpt-5.6-sol"),
+            auth_manager,
+            crate::agent::config::Config::default(),
+        );
+
+        let (matching_tx, mut matching_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (other_tx, mut other_rx) = tokio::sync::mpsc::unbounded_channel();
+        let matching_id = acp::ModelId::new("chatgpt-gpt-5.6-sol");
+        let other_id = acp::ModelId::new("grok-4");
+
+        assert_eq!(
+            fan_out_catalog_context_windows(
+                [(&matching_id, &matching_tx), (&other_id, &other_tx)].into_iter(),
+                &mgr,
+            ),
+            1
+        );
+        let Ok(SessionCommand::RefreshCatalogContextWindow { context_window }) =
+            matching_rx.try_recv()
+        else {
+            panic!("expected context window refresh");
+        };
+        assert_eq!(context_window.get(), 1_000_000);
+        assert!(
+            other_rx.try_recv().is_err(),
+            "sessions whose model is missing from the catalog must not be updated"
+        );
     }
 }

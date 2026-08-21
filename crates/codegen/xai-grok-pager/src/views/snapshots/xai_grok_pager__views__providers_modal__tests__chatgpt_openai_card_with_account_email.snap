@@ -1,0 +1,26 @@
+---
+source: crates/codegen/xai-grok-pager/src/views/providers_modal.rs
+expression: rendered
+---
+               ┌─ Providers ─────────────────────────────────────────────────────────── [✗] ─┐
+               │                                                                             │
+               │  Configure model providers. Keys are masked and are never written to confi  │
+               │    xAI                                               [Key/connect missing]  │
+               │      Grok/xAI account (OAuth) or xAI API key                                │
+               │  › OpenAI                                             [         Connected]  │
+               │      Connected with ChatGPT OAuth — user@example.com                        │
+               │    OpenRouter                                        [Key/connect missing]  │
+               │      Chat Completions · key stored securely                                 │
+               │    Anthropic                                         [Key/connect missing]  │
+               │      Messages API: Native Grok agent loop · x-api-key stored securely       │
+               │  xAI/OpenAI: routes select OAuth or API key. Anthropic: Messages API key o  │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │                                                                             │
+               │    ↵ connect  |  c replace key  |  t test  |  d disconnect  |  r status     │
+               │                        s subscription  |  Esc close                         │
+               └─────────────────────────────────────────────────────────────────────────────┘

@@ -1813,3 +1813,51 @@ fn unbound_auth_complete_preserves_all_stashes_and_ctas() {
         "unbound AuthComplete must preserve OpenRouter CTA"
     );
 }
+
+#[test]
+fn set_chatgpt_context_window_emits_save_effect() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{ProviderCommand, ProviderModalState};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.active_modal = Some(ActiveModal::Providers {
+            state: Box::new(ProviderModalState::new()),
+        });
+    }
+    let effects = dispatch(
+        Action::ProviderCommand(ProviderCommand::SetChatgptContextWindow {
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            tokens: Some(1_000_000),
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::SaveChatgptContextWindow {
+                agent_id,
+                model_id,
+                tokens: Some(1_000_000),
+            }] if *agent_id == id && model_id == "chatgpt-gpt-5.6-sol"
+        ),
+        "unexpected effects: {effects:?}"
+    );
+
+    let clear = dispatch(
+        Action::ProviderCommand(ProviderCommand::SetChatgptContextWindow {
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            tokens: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            clear.as_slice(),
+            [Effect::SaveChatgptContextWindow { tokens: None, .. }]
+        ),
+        "clear must emit tokens: None, got {clear:?}"
+    );
+}

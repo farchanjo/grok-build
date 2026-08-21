@@ -2665,6 +2665,27 @@ pub(super) async fn run_session(
                         SessionCommand::UpdateMediaConfig { media } => {
                             *session.media_config.borrow_mut() = *media;
                         }
+                        SessionCommand::RefreshCatalogContextWindow { context_window } => {
+                            if session.compaction.context_window_override.is_some() {
+                                tracing::debug!(
+                                    session_id = %session.session_info.id.0,
+                                    "skipping catalog context_window refresh; GROK_DEBUG_CONTEXT_WINDOW is set"
+                                );
+                            } else if let Some(mut cfg) =
+                                session.chat_state_handle.get_inference_settings().await
+                            {
+                                if cfg.context_window != context_window {
+                                    tracing::info!(
+                                        session_id = %session.session_info.id.0,
+                                        old_context_window = cfg.context_window.get(),
+                                        new_context_window = context_window.get(),
+                                        "catalog context_window applied to live session"
+                                    );
+                                    cfg.context_window = context_window;
+                                    session.chat_state_handle.update_inference_settings(cfg);
+                                }
+                            }
+                        }
                     }
             }
         }

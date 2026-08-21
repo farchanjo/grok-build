@@ -505,6 +505,15 @@ impl ModelsManager {
         self.inner.current_model_id.read().clone()
     }
 
+    /// Resolved catalog `context_window` for `model_id` (exact catalog key, else
+    /// routing slug). Used to fan a `[model.<id>]` override into live sessions.
+    pub fn context_window_for(&self, model_id: &str) -> Option<std::num::NonZeroU64> {
+        let models = self.inner.models.read();
+        resolve_catalog_key(&models, &acp::ModelId::new(model_id))
+            .and_then(|key| models.get(key.0.as_ref()))
+            .map(|entry| entry.info.context_window)
+    }
+
     pub fn set_current_model_id(&self, id: acp::ModelId) {
         // Only bump the model-switch generation on a real change.
         // The pager's `/model` handler can call this with the
@@ -2975,6 +2984,39 @@ mod tests {
             mgr.current_model_id().0.as_ref(),
             "grok-4",
             "both-None preferred must preserve user's runtime model"
+        );
+    }
+
+    #[test]
+    fn apply_config_updates_catalog_context_window_from_override() {
+        let mgr = test_manager();
+        let initial = config_from_toml(
+            r#"
+            [model.window-model]
+            model = "window-model"
+            context_window = 272000
+            "#,
+        );
+        mgr.apply_config(initial);
+        assert_eq!(
+            mgr.context_window_for("window-model")
+                .map(|window| window.get()),
+            Some(272_000)
+        );
+
+        let updated = config_from_toml(
+            r#"
+            [model.window-model]
+            model = "window-model"
+            context_window = 1000000
+            "#,
+        );
+        mgr.apply_config(updated);
+        assert_eq!(
+            mgr.context_window_for("window-model")
+                .map(|window| window.get()),
+            Some(1_000_000),
+            "apply_config must publish the new [model.<id>] context_window"
         );
     }
 

@@ -2477,6 +2477,8 @@ pub enum TaskResult {
     /// credential or provider response body is carried back to the reducer.
     ChatgptContextWindowSaved {
         agent_id: AgentId,
+        model_id: String,
+        tokens: Option<u64>,
         result: Result<(), String>,
     },
     ProviderOperationComplete {

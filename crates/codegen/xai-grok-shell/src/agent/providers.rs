@@ -853,13 +853,6 @@ impl ProviderManager {
         {
             presets = cached.models;
         }
-        if provider == ProviderId::OpenAi
-            && crate::auth::chatgpt_oauth::status(&self.grok_home)
-                == crate::auth::chatgpt_oauth::ChatGptOAuthStatus::Connected
-            && let Ok(cached) = load_codex_catalog_cache(&self.grok_home)
-        {
-            presets.extend(cached);
-        }
         match provider {
             ProviderId::Xai => {
                 let oauth_connected = self.xai_oauth_configured().unwrap_or(false);
@@ -911,7 +904,13 @@ impl ProviderManager {
                 let api_key_configured = api_key_source.is_some();
                 let mut openai_presets = presets;
                 if oauth_connected {
-                    openai_presets.extend(static_chatgpt_oauth_presets());
+                    // Live Codex cache wins per id; static presets fill any
+                    // allowlisted model the cache does not yet advertise.
+                    let mut chatgpt_presets = static_chatgpt_oauth_presets();
+                    if let Ok(cached) = load_codex_catalog_cache(&self.grok_home) {
+                        fold_presets_by_id(&mut chatgpt_presets, cached);
+                    }
+                    fold_presets_by_id(&mut openai_presets, chatgpt_presets);
                 }
                 ProviderStatus {
                     provider,
@@ -3071,6 +3070,21 @@ fn codex_cache_path(grok_home: &Path) -> PathBuf {
     grok_home.join(CODEX_CACHE_FILE)
 }
 
+/// Overlay `incoming` onto `dest` by `preset.id`. Matching ids keep the
+/// incoming value (live/cache windows win over static fallbacks).
+fn fold_presets_by_id(
+    dest: &mut Vec<ProviderModelPreset>,
+    incoming: impl IntoIterator<Item = ProviderModelPreset>,
+) {
+    for preset in incoming {
+        if let Some(existing) = dest.iter_mut().find(|candidate| candidate.id == preset.id) {
+            *existing = preset;
+        } else {
+            dest.push(preset);
+        }
+    }
+}
+
 fn load_codex_catalog_cache(grok_home: &Path) -> Result<Vec<ProviderModelPreset>, ()> {
     let path = codex_cache_path(grok_home);
     let bytes = std::fs::read(&path).map_err(|_| ())?;
@@ -4651,6 +4665,23 @@ mod tests {
             Some(crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL)
         );
         assert_eq!(merged.model_provider.as_deref(), Some("grok_build_openai"));
+        assert_eq!(merged.name.as_deref(), Some("GPT-5.6 Sol via ChatGPT"));
+        assert!(
+            !merged.reasoning_efforts.is_empty(),
+            "empty user collections inherit the preset list"
+        );
+
+        let applied = merged.apply(
+            "chatgpt-gpt-5.6-sol",
+            None,
+            &super::super::config::EndpointsConfig::default(),
+        );
+        assert_eq!(applied.info.context_window.get(), 1_000_000);
+        assert_eq!(applied.info.model, "gpt-5.6-sol");
+        assert_eq!(
+            applied.info.base_url,
+            crate::auth::chatgpt_oauth::CODEX_RESPONSES_BASE_URL
+        );
         set_stored_key_home_for_tests(None);
     }
 
@@ -4752,6 +4783,76 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn partial_peer_preset_overrides_keep_preset_routing() {
+        let home = tempfile::tempdir().unwrap();
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        let manager = ProviderManager::new(home.path());
+        manager
+            .set_api_key(ProviderId::OpenAi, "sk-test-openai")
+            .unwrap();
+        manager
+            .set_api_key(ProviderId::OpenRouter, "or-key")
+            .unwrap();
+        manager
+            .set_api_key(ProviderId::Anthropic, "sk-ant-test")
+            .unwrap();
+
+        let mut providers = indexmap::IndexMap::new();
+        let mut models = indexmap::IndexMap::new();
+        let partial = super::super::config::ConfigModelOverride {
+            context_window: Some(50_000),
+            ..Default::default()
+        };
+        models.insert("openai-gpt-5.6-sol".to_owned(), partial.clone());
+        models.insert("openrouter-openai-gpt-5.6-sol".to_owned(), partial.clone());
+        models.insert("anthropic-claude-sonnet-5".to_owned(), partial);
+        ProviderManager::install_model_presets_into(&mut providers, &mut models);
+
+        let openai = &models["openai-gpt-5.6-sol"];
+        assert_eq!(openai.context_window, Some(50_000));
+        assert_eq!(openai.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            openai.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(openai.model_provider.as_deref(), Some("grok_build_openai"));
+
+        let openrouter = &models["openrouter-openai-gpt-5.6-sol"];
+        assert_eq!(openrouter.context_window, Some(50_000));
+        assert_eq!(openrouter.model.as_deref(), Some("openai/gpt-5.6-sol"));
+        assert_eq!(
+            openrouter.base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(
+            openrouter.model_provider.as_deref(),
+            Some("grok_build_openrouter")
+        );
+
+        let anthropic = &models["anthropic-claude-sonnet-5"];
+        assert_eq!(anthropic.context_window, Some(50_000));
+        assert_eq!(anthropic.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(
+            anthropic.base_url.as_deref(),
+            Some(ANTHROPIC_INFERENCE_BASE_URL)
+        );
+        assert_eq!(
+            anthropic.model_provider.as_deref(),
+            Some("grok_build_anthropic")
+        );
+        assert_eq!(
+            anthropic.auth_scheme,
+            Some(xai_grok_inference::AuthScheme::XApiKey)
+        );
+        assert_eq!(
+            anthropic.api_backend,
+            Some(crate::inference::ApiBackend::Messages)
+        );
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
     fn chatgpt_oauth_presets_use_subscription_context_caps() {
         let presets = static_chatgpt_oauth_presets();
         let by_id: std::collections::HashMap<_, _> =
@@ -4829,6 +4930,61 @@ mod tests {
         let credentials = super::super::config::resolve_credentials(openai, Some("xai-session"));
         assert_eq!(credentials.api_key, None);
         assert_eq!(credentials.auth_type, xai_chat_state::AuthType::ApiKey);
+        set_stored_key_home_for_tests(None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn oauth_status_dedupes_chatgpt_presets_and_keeps_live_windows() {
+        let home = tempfile::tempdir().unwrap();
+        set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
+        crate::auth::chatgpt_oauth::store_tokens(
+            home.path(),
+            &crate::auth::chatgpt_oauth::ChatGptOAuthTokens {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                account_id: None,
+                email: None,
+            },
+        )
+        .unwrap();
+
+        let mut live = static_chatgpt_oauth_presets();
+        for preset in &mut live {
+            if preset.id == "chatgpt-gpt-5.6-sol" {
+                preset.context_window = Some(390_000);
+            }
+        }
+        save_codex_catalog_cache(home.path(), &live).unwrap();
+
+        let manager = ProviderManager::new(home.path());
+        let status = manager.status(ProviderId::OpenAi);
+        let chatgpt: Vec<_> = status
+            .presets
+            .iter()
+            .filter(|preset| preset.id.starts_with("chatgpt-"))
+            .collect();
+        let mut ids: Vec<_> = chatgpt.iter().map(|preset| preset.id.as_str()).collect();
+        let unique_count = {
+            ids.sort_unstable();
+            ids.dedup();
+            ids.len()
+        };
+        assert_eq!(
+            chatgpt.len(),
+            unique_count,
+            "OAuth status must not list duplicate chatgpt-* ids"
+        );
+        let sol = chatgpt
+            .iter()
+            .find(|preset| preset.id == "chatgpt-gpt-5.6-sol")
+            .expect("sol preset");
+        assert_eq!(
+            sol.context_window,
+            Some(390_000),
+            "live cache context_window must win over the static 272k fallback"
+        );
         set_stored_key_home_for_tests(None);
     }
 

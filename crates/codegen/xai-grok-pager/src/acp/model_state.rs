@@ -82,8 +82,20 @@ impl ModelState {
 
     /// Total context window tokens for the current model (if available).
     fn current_context_window_tokens(&self) -> Option<u64> {
-        let meta = self.available.get(self.current.as_ref()?)?.meta.as_ref()?;
-        meta.get("totalContextTokens")
+        self.context_window_tokens_for(self.current.as_ref()?.0.as_ref())
+    }
+
+    /// Catalog `totalContextTokens` for `model_id`, if the ACP model list
+    /// advertises one.
+    pub(crate) fn context_window_tokens_for(&self, model_id: &str) -> Option<u64> {
+        let info = self
+            .available
+            .iter()
+            .find(|(id, _)| id.0.as_ref() == model_id)?
+            .1;
+        info.meta
+            .as_ref()?
+            .get("totalContextTokens")
             .and_then(|value| match value {
                 serde_json::Value::Number(number) => number.as_u64(),
                 _ => None,

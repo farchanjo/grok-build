@@ -1300,10 +1300,22 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             vec![]
         }
-        TaskResult::ChatgptContextWindowSaved { agent_id, result } => {
+        TaskResult::ChatgptContextWindowSaved {
+            agent_id,
+            model_id,
+            tokens,
+            result,
+        } => {
             match result {
                 Ok(()) => {
                     if let Some(agent) = app.agents.get_mut(&agent_id) {
+                        if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                            agent.active_modal.as_mut()
+                            && let Some(status) = state
+                                .status_mut(&crate::views::providers_modal::ProviderKind::OpenAi)
+                        {
+                            status.apply_chatgpt_context_window(&model_id, tokens);
+                        }
                         agent.scrollback.push_block(RenderBlock::system(
                             "ChatGPT context-window override saved. config.toml hot-reload applies it to subsequent turns and new sessions.",
                         ));
@@ -1333,12 +1345,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 _ => None,
             };
             let connected = matches!(status, ProviderStatus::Connected { .. });
+            let catalog_windows = app.models.clone();
             let applied = app.agents.get_mut(&agent_id).is_some_and(|agent| {
                 let Some(crate::views::modal::ActiveModal::Providers { state }) =
                     agent.active_modal.as_mut()
                 else {
                     return false;
                 };
+                let mut status = status;
+                status.overlay_chatgpt_windows(|id| catalog_windows.context_window_tokens_for(id));
                 state.set_status(&provider, status);
                 if let Some(cli_status) = claude_cli_status {
                     state.set_claude_cli_status(cli_status);

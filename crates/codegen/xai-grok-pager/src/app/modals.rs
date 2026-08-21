@@ -438,12 +438,10 @@ impl AgentView {
         // Providers: credentials are entered only in the modal's ephemeral
         // masked editor. The resulting action contains no secret.
         if let ActiveModal::Providers { state } = modal {
-            // The key editor owns Esc so it cancels input without closing the
-            // provider manager (mirrors Settings' editing sub-modes).
-            if matches!(
-                &state.mode,
-                crate::views::providers_modal::ProviderModalMode::EditingKey { .. }
-            ) {
+            // The key editor and ChatGPT subscription sub-view own Esc so it
+            // cancels input / goes back without closing the provider manager
+            // (mirrors Settings' editing sub-modes).
+            if state.mode.owns_escape() {
                 let outcome = crate::views::providers_modal::handle_key(state, key);
                 return apply_providers_outcome(self, outcome);
             }
