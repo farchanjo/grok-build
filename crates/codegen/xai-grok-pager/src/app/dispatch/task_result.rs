@@ -1328,6 +1328,34 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::ChatgptAutoCompactThresholdSaved {
+            agent_id,
+            model_id,
+            percent,
+            result,
+        } => {
+            match result {
+                Ok(()) => {
+                    if let Some(agent) = app.agents.get_mut(&agent_id) {
+                        if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                            agent.active_modal.as_mut()
+                            && let Some(status) = state
+                                .status_mut(&crate::views::providers_modal::ProviderKind::OpenAi)
+                        {
+                            status.apply_chatgpt_auto_compact_threshold(&model_id, percent);
+                        }
+                        agent.scrollback.push_block(RenderBlock::system(
+                            "ChatGPT auto-compact threshold saved. It applies from the next model switch and new sessions.",
+                        ));
+                        agent.show_toast("ChatGPT auto-compact threshold saved");
+                    }
+                }
+                Err(error) => app.show_toast(&format!(
+                    "Could not save ChatGPT auto-compact threshold: {error}"
+                )),
+            }
+            vec![]
+        }
         TaskResult::ProviderOperationComplete {
             agent_id,
             provider,

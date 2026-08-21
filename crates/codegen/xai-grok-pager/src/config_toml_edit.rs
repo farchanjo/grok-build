@@ -67,6 +67,10 @@ pub(crate) const CHATGPT_CONTEXT_WINDOW_MIN: u64 = 8_000;
 pub(crate) const CHATGPT_CONTEXT_WINDOW_MAX: u64 = 1_050_000;
 /// Values above this may hit OpenAI long-context limits or pricing.
 pub(crate) const CHATGPT_LONG_CONTEXT_THRESHOLD: u64 = 272_000;
+/// Inclusive minimum ChatGPT subscription `auto_compact_threshold_percent`.
+pub(crate) const CHATGPT_AUTO_COMPACT_THRESHOLD_MIN: u8 = 0;
+/// Inclusive maximum ChatGPT subscription `auto_compact_threshold_percent`.
+pub(crate) const CHATGPT_AUTO_COMPACT_THRESHOLD_MAX: u8 = 100;
 
 /// Returns true when `model_id` is a safe `chatgpt-*` catalog id.
 pub(crate) fn is_chatgpt_model_id(model_id: &str) -> bool {
@@ -92,6 +96,10 @@ pub(crate) fn chatgpt_model_table(model_id: &str) -> Option<String> {
 
 pub(crate) fn chatgpt_context_window_in_range(tokens: u64) -> bool {
     (CHATGPT_CONTEXT_WINDOW_MIN..=CHATGPT_CONTEXT_WINDOW_MAX).contains(&tokens)
+}
+
+pub(crate) fn chatgpt_auto_compact_threshold_in_range(percent: u8) -> bool {
+    (CHATGPT_AUTO_COMPACT_THRESHOLD_MIN..=CHATGPT_AUTO_COMPACT_THRESHOLD_MAX).contains(&percent)
 }
 
 /// Persist or clear `[model."<chatgpt-*>"].context_window` in `config.toml`.
@@ -137,6 +145,99 @@ fn write_chatgpt_context_window_with(
         Some(_) => Err("context window must be between 8,000 and 1,050,000 tokens".to_owned()),
         None => remove_key(&table).map_err(|error| error.to_string()),
     }
+}
+
+/// Persist or clear `[model."<chatgpt-*>"].auto_compact_threshold_percent` in
+/// `config.toml`. `None` removes the key; values are clamped to 0..=100.
+pub(crate) fn write_chatgpt_auto_compact_threshold(
+    model_id: &str,
+    percent: Option<u8>,
+) -> Result<(), String> {
+    write_chatgpt_auto_compact_threshold_with(
+        model_id,
+        percent,
+        |table, value| set_table_field(table, "auto_compact_threshold_percent", value),
+        |table| remove_table_key(table, "auto_compact_threshold_percent"),
+    )
+}
+
+#[cfg(test)]
+fn write_chatgpt_auto_compact_threshold_at(
+    path: &Path,
+    model_id: &str,
+    percent: Option<u8>,
+) -> Result<(), String> {
+    write_chatgpt_auto_compact_threshold_with(
+        model_id,
+        percent,
+        |table, value| set_table_field_at(path, table, "auto_compact_threshold_percent", value),
+        |table| remove_table_key_at(path, table, "auto_compact_threshold_percent"),
+    )
+}
+
+fn write_chatgpt_auto_compact_threshold_with(
+    model_id: &str,
+    percent: Option<u8>,
+    set_field: impl FnOnce(&str, i64) -> std::io::Result<()>,
+    remove_key: impl FnOnce(&str) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let table =
+        chatgpt_model_table(model_id).ok_or_else(|| "invalid ChatGPT model id".to_owned())?;
+    match percent {
+        Some(percent) if chatgpt_auto_compact_threshold_in_range(percent) => {
+            set_field(&table, i64::from(percent)).map_err(|error| error.to_string())
+        }
+        Some(_) => Err("auto compact threshold must be between 0 and 100 percent".to_owned()),
+        None => remove_key(&table).map_err(|error| error.to_string()),
+    }
+}
+
+/// Read persisted per-model ChatGPT auto-compact thresholds from
+/// `~/.grok/config.toml`. Returns an empty map when the file is missing or
+/// unparseable; never writes. Non-`chatgpt-*` ids and values outside 0..=100
+/// are skipped. Performs blocking I/O.
+pub(crate) fn read_chatgpt_auto_compact_thresholds() -> std::collections::BTreeMap<String, u8> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    read_chatgpt_auto_compact_thresholds_at(&path)
+}
+
+fn read_chatgpt_auto_compact_thresholds_at(path: &Path) -> std::collections::BTreeMap<String, u8> {
+    let Some(doc) = read_config_document_for_edit(path) else {
+        return std::collections::BTreeMap::new();
+    };
+    let Some(model_table) = doc.get("model").and_then(toml_edit::Item::as_table) else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut thresholds = std::collections::BTreeMap::new();
+    for (model_id, entry) in model_table.iter() {
+        let Some(entry_table) = entry.as_table() else {
+            continue;
+        };
+        if !is_chatgpt_model_id(model_id) {
+            continue;
+        }
+        let Some(value) = entry_table
+            .get("auto_compact_threshold_percent")
+            .and_then(toml_edit::Item::as_value)
+            .and_then(toml_edit::Value::as_integer)
+        else {
+            continue;
+        };
+        if !chatgpt_auto_compact_threshold_in_range_u8(value) {
+            continue;
+        }
+        if let Ok(percent) = u8::try_from(value) {
+            thresholds.insert(model_id.to_owned(), percent);
+        }
+    }
+    thresholds
+}
+
+/// Range check for the i64 that TOML integers arrive as (0..=100 inclusive).
+fn chatgpt_auto_compact_threshold_in_range_u8(value: i64) -> bool {
+    let min = i64::from(CHATGPT_AUTO_COMPACT_THRESHOLD_MIN);
+    let max = i64::from(CHATGPT_AUTO_COMPACT_THRESHOLD_MAX);
+    (min..=max).contains(&value)
 }
 
 fn set_table_field_at(
@@ -564,6 +665,155 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "[hints]\nproject_picker_disabled = true\n"
+        );
+    }
+
+    #[test]
+    fn write_chatgpt_auto_compact_threshold_at_sets_and_clears_override() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[hints]\nproject_picker_disabled = true\n").unwrap();
+
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", Some(70)).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[model.\"chatgpt-gpt-5.6-sol\"]"));
+        assert!(body.contains("auto_compact_threshold_percent = 70"));
+        assert!(body.contains("project_picker_disabled"));
+
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", Some(0)).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("auto_compact_threshold_percent = 0")
+        );
+
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", None).unwrap();
+        let doc = read_config_document_for_edit(&path).expect("reparse");
+        assert!(
+            doc["model"]["chatgpt-gpt-5.6-sol"]
+                .get("auto_compact_threshold_percent")
+                .is_none()
+        );
+        assert_eq!(
+            doc["hints"]["project_picker_disabled"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn write_chatgpt_auto_compact_threshold_at_rejects_invalid_id_and_range() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[hints]\nproject_picker_disabled = true\n").unwrap();
+
+        let invalid_id =
+            write_chatgpt_auto_compact_threshold_at(&path, "openai-gpt-5.6-sol", Some(50))
+                .expect_err("non-chatgpt ids must be rejected");
+        assert!(invalid_id.contains("invalid ChatGPT model id"));
+
+        let too_large =
+            write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", Some(101))
+                .expect_err("above-max percent must be rejected");
+        assert!(too_large.contains("100 percent"));
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[hints]\nproject_picker_disabled = true\n"
+        );
+
+        // Both boundaries are accepted.
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", Some(0)).unwrap();
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", Some(100)).unwrap();
+        let doc = read_config_document_for_edit(&path).expect("reparse");
+        assert_eq!(
+            doc["model"]["chatgpt-gpt-5.6-sol"]["auto_compact_threshold_percent"].as_integer(),
+            Some(100),
+        );
+    }
+
+    #[test]
+    fn write_chatgpt_auto_compact_threshold_at_preserves_sibling_context_window() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        write_chatgpt_context_window_at(&path, "chatgpt-gpt-5.6-sol", Some(350_000)).unwrap();
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", Some(60)).unwrap();
+
+        let doc = read_config_document_for_edit(&path).expect("reparse");
+        assert_eq!(
+            doc["model"]["chatgpt-gpt-5.6-sol"]["context_window"].as_integer(),
+            Some(350_000),
+        );
+        assert_eq!(
+            doc["model"]["chatgpt-gpt-5.6-sol"]["auto_compact_threshold_percent"].as_integer(),
+            Some(60),
+        );
+
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", None).unwrap();
+        let doc = read_config_document_for_edit(&path).expect("reparse");
+        assert!(
+            doc["model"]["chatgpt-gpt-5.6-sol"]
+                .get("auto_compact_threshold_percent")
+                .is_none()
+        );
+        assert_eq!(
+            doc["model"]["chatgpt-gpt-5.6-sol"]["context_window"].as_integer(),
+            Some(350_000),
+            "clearing the threshold must leave context_window intact"
+        );
+    }
+
+    #[test]
+    fn read_chatgpt_auto_compact_thresholds_at_round_trips_with_writer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", Some(85)).unwrap();
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("chatgpt-gpt-5.6-sol".to_owned(), 85u8);
+        assert_eq!(read_chatgpt_auto_compact_thresholds_at(&path), expected);
+
+        write_chatgpt_auto_compact_threshold_at(&path, "chatgpt-gpt-5.6-sol", None).unwrap();
+        assert!(
+            read_chatgpt_auto_compact_thresholds_at(&path).is_empty(),
+            "cleared threshold must read back as no override"
+        );
+    }
+
+    #[test]
+    fn read_chatgpt_auto_compact_thresholds_at_missing_or_unparseable_returns_empty() {
+        let dir = tempdir().unwrap();
+        assert!(
+            read_chatgpt_auto_compact_thresholds_at(&dir.path().join("absent.toml")).is_empty(),
+            "missing file must read as an empty map"
+        );
+
+        let path = dir.path().join("config.toml");
+        let bad = "this is [not valid toml\n";
+        fs::write(&path, bad).unwrap();
+        assert!(
+            read_chatgpt_auto_compact_thresholds_at(&path).is_empty(),
+            "unparseable file must read as an empty map without writing"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), bad);
+    }
+
+    #[test]
+    fn read_chatgpt_auto_compact_thresholds_at_skips_non_chatgpt_and_out_of_range() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[model.\"grok-4.5\"]\nauto_compact_threshold_percent = 70\n\n[model.\"chatgpt-gpt-5.6-sol\"]\nauto_compact_threshold_percent = 150\n\n[model.\"chatgpt-gpt-5.5\"]\nauto_compact_threshold_percent = 40\n",
+        )
+        .unwrap();
+
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("chatgpt-gpt-5.5".to_owned(), 40u8);
+        assert_eq!(
+            read_chatgpt_auto_compact_thresholds_at(&path),
+            expected,
+            "non-chatgpt ids and out-of-range values must be skipped"
         );
     }
 }

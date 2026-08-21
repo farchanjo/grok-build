@@ -2926,3 +2926,137 @@ fn listed_chatgpt_window(app: &AppView, id: AgentId) -> Option<u64> {
         other => panic!("expected connected OpenAI status, got {other:?}"),
     }
 }
+
+#[test]
+fn chatgpt_auto_compact_threshold_saved_notes_next_switch_and_new_sessions() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch_task_result(
+        TaskResult::ChatgptAutoCompactThresholdSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            percent: Some(60),
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    let text = last_system_text(&app, id);
+    assert!(
+        text.contains("next model switch"),
+        "status line must say when the threshold takes effect, got {text}"
+    );
+    assert!(
+        text.contains("new sessions"),
+        "status line must say the threshold applies to new sessions, got {text}"
+    );
+    assert_eq!(
+        app.agents[&id]
+            .toast
+            .as_ref()
+            .map(|(message, _)| message.as_str()),
+        Some("ChatGPT auto-compact threshold saved"),
+    );
+}
+
+#[test]
+fn chatgpt_auto_compact_threshold_saved_error_toasts_without_system_block() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = app.agents[&id].scrollback.len();
+    dispatch_task_result(
+        TaskResult::ChatgptAutoCompactThresholdSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            percent: Some(60),
+            result: Err("disk full".into()),
+        },
+        &mut app,
+    );
+    assert_eq!(app.agents[&id].scrollback.len(), before);
+    assert_eq!(
+        app.agents[&id]
+            .toast
+            .as_ref()
+            .map(|(message, _)| message.as_str()),
+        Some("Could not save ChatGPT auto-compact threshold: disk full"),
+    );
+}
+
+#[test]
+fn chatgpt_auto_compact_threshold_saved_updates_open_providers_row() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{
+        ChatgptAccountEmail, ChatgptModel, ProviderKind, ProviderModalMode, ProviderModalState,
+        ProviderStatus,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let mut state = ProviderModalState::new();
+    state.selected = 1;
+    state.set_status(
+        &ProviderKind::OpenAi,
+        ProviderStatus::Connected {
+            detail: Some("Connected with ChatGPT OAuth".into()),
+            chatgpt_account_email: ChatgptAccountEmail::new("user@example.com"),
+            chatgpt_models: vec![ChatgptModel::from_catalog(
+                "chatgpt-gpt-5.6-sol".into(),
+                "GPT-5.6 Sol".into(),
+                Some(272_000),
+            )],
+        },
+    );
+    state.mode = ProviderModalMode::ChatgptSubscription {
+        selected: 0,
+        editor: None,
+    };
+    app.agents.get_mut(&id).unwrap().active_modal = Some(ActiveModal::Providers {
+        state: Box::new(state),
+    });
+
+    dispatch_task_result(
+        TaskResult::ChatgptAutoCompactThresholdSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            percent: Some(60),
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        listed_chatgpt_threshold(&app, id),
+        Some(60),
+        "save must overlay the listed threshold"
+    );
+
+    dispatch_task_result(
+        TaskResult::ChatgptAutoCompactThresholdSaved {
+            agent_id: id,
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            percent: None,
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        listed_chatgpt_threshold(&app, id),
+        None,
+        "clear must restore the product default display value"
+    );
+}
+
+fn listed_chatgpt_threshold(app: &AppView, id: AgentId) -> Option<u8> {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{ProviderKind, ProviderStatus};
+
+    let ActiveModal::Providers { state } = app.agents[&id].active_modal.as_ref()? else {
+        panic!("providers modal must stay open");
+    };
+    match state.status(&ProviderKind::OpenAi) {
+        ProviderStatus::Connected { chatgpt_models, .. } => chatgpt_models
+            .iter()
+            .find(|model| model.id == "chatgpt-gpt-5.6-sol")
+            .and_then(|model| model.auto_compact_threshold),
+        other => panic!("expected connected OpenAI status, got {other:?}"),
+    }
+}

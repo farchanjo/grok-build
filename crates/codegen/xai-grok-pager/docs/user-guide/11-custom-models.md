@@ -716,6 +716,22 @@ about **353k** at the usual 95% effective budget; GPT-5.5 / 5.4 family around
 auto-compaction fires before the backend truncates. API-key OpenAI models
 keep the larger Platform windows.
 
+**Per-model overrides in `/providers`:** with ChatGPT OAuth connected,
+select **OpenAI** in `/providers` and press `s` to open the ChatGPT
+subscription model overrides. Each row shows the model's context window and
+auto-compact threshold; move between models with `j`/`k`.
+
+- `Enter` edits the context-window override (8,000–1,050,000 tokens),
+  persisted to `[model."chatgpt-*"].context_window`.
+- `a` edits the auto-compact threshold override (an integer percentage from
+  0 to 100; the product default is 85), persisted to
+  `[model."chatgpt-*"].auto_compact_threshold_percent`. A saved threshold
+  applies from the next model switch and new sessions; live sessions keep
+  their current threshold until they switch models.
+- `x` in the model list clears the context-window override for the
+  selected model only; inside an open field editor, `x` clears the field
+  being edited. `Esc` cancels an open editor or leaves the sub-view.
+
 ```toml
 [model_providers.grok_build_openai]
 kind = "openai"

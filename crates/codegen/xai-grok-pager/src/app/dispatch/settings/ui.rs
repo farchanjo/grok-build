@@ -261,6 +261,13 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             tokens,
         }];
     }
+    if let ProviderCommand::SetChatgptAutoCompactThreshold { model_id, percent } = command {
+        return vec![Effect::SaveChatgptAutoCompactThreshold {
+            agent_id,
+            model_id,
+            percent,
+        }];
+    }
 
     let provider_for_repair: Option<String> = match &command {
         ProviderCommand::Connect(p) | ProviderCommand::ReplaceKey(p) => Some(p.id_str().to_owned()),
@@ -297,7 +304,8 @@ pub(in crate::app::dispatch) fn dispatch_provider_command(
             ProviderCommand::AddConfigured
             | ProviderCommand::RefreshCatalog(_)
             | ProviderCommand::RefreshCapabilities(_)
-            | ProviderCommand::SetChatgptContextWindow { .. } => {
+            | ProviderCommand::SetChatgptContextWindow { .. }
+            | ProviderCommand::SetChatgptAutoCompactThreshold { .. } => {
                 // Config editor / capability refresh: no secret path.
                 return vec![];
             }

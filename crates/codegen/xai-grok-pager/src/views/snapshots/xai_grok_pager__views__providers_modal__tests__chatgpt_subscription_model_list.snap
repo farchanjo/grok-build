@@ -5,9 +5,9 @@ expression: list
                ┌─ Providers ─────────────────────────────────────────────────────────── [✗] ─┐
                │                                                                             │
                │  Configure model providers. Keys are masked and are never written to confi  │
-               │  ChatGPT subscription context windows                                       │
-               │  › GPT-5.6 Sol · 272000 tokens                                              │
-               │  Enter set override · x clear override · Esc back                           │
+               │  ChatGPT subscription model overrides                                       │
+               │  › GPT-5.6 Sol · 272000 tokens · compact @ 85%                              │
+               │  Enter context window · a compact threshold · x clear · Esc back            │
                │                                                                             │
                │                                                                             │
                │                                                                             │
@@ -22,5 +22,5 @@ expression: list
                │                                                                             │
                │                                                                             │
                │                                                                             │
-               │                   ↵ set override  |  x clear  |  Esc back                   │
+               │          ↵ context window  |  a threshold  |  x clear  |  Esc back          │
                └─────────────────────────────────────────────────────────────────────────────┘

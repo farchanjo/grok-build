@@ -1861,3 +1861,51 @@ fn set_chatgpt_context_window_emits_save_effect() {
         "clear must emit tokens: None, got {clear:?}"
     );
 }
+
+#[test]
+fn set_chatgpt_auto_compact_threshold_emits_save_effect() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::providers_modal::{ProviderCommand, ProviderModalState};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.active_modal = Some(ActiveModal::Providers {
+            state: Box::new(ProviderModalState::new()),
+        });
+    }
+    let effects = dispatch(
+        Action::ProviderCommand(ProviderCommand::SetChatgptAutoCompactThreshold {
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            percent: Some(60),
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::SaveChatgptAutoCompactThreshold {
+                agent_id,
+                model_id,
+                percent: Some(60),
+            }] if *agent_id == id && model_id == "chatgpt-gpt-5.6-sol"
+        ),
+        "unexpected effects: {effects:?}"
+    );
+
+    let clear = dispatch(
+        Action::ProviderCommand(ProviderCommand::SetChatgptAutoCompactThreshold {
+            model_id: "chatgpt-gpt-5.6-sol".into(),
+            percent: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            clear.as_slice(),
+            [Effect::SaveChatgptAutoCompactThreshold { percent: None, .. }]
+        ),
+        "clear must emit percent: None, got {clear:?}"
+    );
+}

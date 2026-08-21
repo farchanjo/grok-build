@@ -1478,6 +1478,13 @@ pub enum Effect {
         model_id: String,
         tokens: Option<u64>,
     },
+    /// Persist or clear a per-model ChatGPT auto-compact threshold override
+    /// in `config.toml`.
+    SaveChatgptAutoCompactThreshold {
+        agent_id: AgentId,
+        model_id: String,
+        percent: Option<u8>,
+    },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
     /// instead of creating a fresh one (`--resume` + `--worktree` combination).
@@ -2479,6 +2486,14 @@ pub enum TaskResult {
         agent_id: AgentId,
         model_id: String,
         tokens: Option<u64>,
+        result: Result<(), String>,
+    },
+    /// Safe result of persisting or clearing a per-model ChatGPT
+    /// auto-compact threshold override.
+    ChatgptAutoCompactThresholdSaved {
+        agent_id: AgentId,
+        model_id: String,
+        percent: Option<u8>,
         result: Result<(), String>,
     },
     ProviderOperationComplete {

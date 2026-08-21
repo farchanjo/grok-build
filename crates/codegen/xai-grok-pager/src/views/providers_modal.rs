@@ -88,7 +88,8 @@ impl ProviderKind {
     }
 }
 
-/// A ChatGPT subscription model available for context-window configuration.
+/// A ChatGPT subscription model available for per-model overrides
+/// (context window and auto-compact threshold).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatgptModel {
     pub id: String,
@@ -97,6 +98,9 @@ pub struct ChatgptModel {
     /// Catalog/live default before a user override. Restored when the override
     /// is cleared so the list does not fall back to `None`.
     pub catalog_context_window: Option<u64>,
+    /// Per-model auto-compact threshold override (percent of the context
+    /// window, 0..=100). `None` means the product default (85%).
+    pub auto_compact_threshold: Option<u8>,
 }
 
 impl ChatgptModel {
@@ -106,11 +110,16 @@ impl ChatgptModel {
             label,
             context_window,
             catalog_context_window: context_window,
+            auto_compact_threshold: None,
         }
     }
 
     fn apply_override(&mut self, tokens: Option<u64>) {
         self.context_window = tokens.or(self.catalog_context_window);
+    }
+
+    fn apply_auto_compact_override(&mut self, percent: Option<u8>) {
+        self.auto_compact_threshold = percent;
     }
 }
 
@@ -172,11 +181,39 @@ impl ProviderStatus {
         }
     }
 
+    /// Optimistically apply a persisted auto-compact threshold override.
+    /// `None` clears the override so the display falls back to the product
+    /// default (85%).
+    pub(crate) fn apply_chatgpt_auto_compact_threshold(
+        &mut self,
+        model_id: &str,
+        percent: Option<u8>,
+    ) {
+        if let Self::Connected { chatgpt_models, .. } = self
+            && let Some(model) = chatgpt_models.iter_mut().find(|model| model.id == model_id)
+        {
+            model.apply_auto_compact_override(percent);
+        }
+    }
+
     pub(crate) fn overlay_chatgpt_windows(&mut self, lookup: impl Fn(&str) -> Option<u64>) {
         if let Self::Connected { chatgpt_models, .. } = self {
             for model in chatgpt_models {
                 if let Some(tokens) = lookup(&model.id) {
                     model.context_window = Some(tokens);
+                }
+            }
+        }
+    }
+
+    /// Overlay persisted per-model auto-compact thresholds onto the catalog
+    /// defaults. Models without a persisted value keep `None` (the product
+    /// default).
+    pub(crate) fn overlay_chatgpt_thresholds(&mut self, lookup: impl Fn(&str) -> Option<u8>) {
+        if let Self::Connected { chatgpt_models, .. } = self {
+            for model in chatgpt_models {
+                if let Some(percent) = lookup(&model.id) {
+                    model.auto_compact_threshold = Some(percent);
                 }
             }
         }
@@ -252,12 +289,32 @@ pub enum ProviderCommand {
         model_id: String,
         tokens: Option<u64>,
     },
+    /// Persist or clear a ChatGPT subscription model auto-compact threshold.
+    SetChatgptAutoCompactThreshold {
+        model_id: String,
+        percent: Option<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum XaiChoiceAction {
     Connect,
     Disconnect,
+}
+
+/// The ChatGPT subscription field that the open line editor is editing.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum ChatgptFieldEditor {
+    ContextWindow(LineEditor),
+    AutoCompactThreshold(LineEditor),
+}
+
+impl ChatgptFieldEditor {
+    fn editor_mut(&mut self) -> &mut LineEditor {
+        match self {
+            Self::ContextWindow(editor) | Self::AutoCompactThreshold(editor) => editor,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -276,7 +333,7 @@ pub(crate) enum ProviderModalMode {
     },
     ChatgptSubscription {
         selected: usize,
-        editor: Option<LineEditor>,
+        editor: Option<ChatgptFieldEditor>,
     },
 }
 
@@ -301,7 +358,16 @@ impl std::fmt::Debug for ProviderModalMode {
             Self::ChatgptSubscription { selected, editor } => f
                 .debug_struct("ChatgptSubscription")
                 .field("selected", selected)
-                .field("editing_context_window", &editor.is_some())
+                .field(
+                    "editing",
+                    &match editor {
+                        Some(ChatgptFieldEditor::ContextWindow(_)) => Some("context_window"),
+                        Some(ChatgptFieldEditor::AutoCompactThreshold(_)) => {
+                            Some("auto_compact_threshold")
+                        }
+                        None => None,
+                    },
+                )
                 .finish(),
         }
     }
@@ -358,13 +424,15 @@ impl std::fmt::Debug for ProviderModalState {
                     ProviderModalMode::ChoosingXai { .. } => "choosing_xai_auth",
                     ProviderModalMode::ChoosingOpenAi { .. } => "choosing_openai_auth",
                     ProviderModalMode::EditingKey { .. } => "editing_key_redacted",
-                    ProviderModalMode::ChatgptSubscription { editor, .. } => {
-                        if editor.is_some() {
+                    ProviderModalMode::ChatgptSubscription { editor, .. } => match editor {
+                        Some(ChatgptFieldEditor::ContextWindow(_)) => {
                             "editing_chatgpt_context_window"
-                        } else {
-                            "chatgpt_subscription"
                         }
-                    }
+                        Some(ChatgptFieldEditor::AutoCompactThreshold(_)) => {
+                            "editing_chatgpt_auto_compact_threshold"
+                        }
+                        None => "chatgpt_subscription",
+                    },
                 },
             )
             .field("focus_provider_id", &self.focus_provider_id)
@@ -611,6 +679,14 @@ fn chatgpt_models(state: &ProviderModalState) -> &[ChatgptModel] {
     }
 }
 
+/// The id of the selected sub-view model when it is a safe `chatgpt-*` id.
+fn chatgpt_selected_model_id(models: &[ChatgptModel], selected: usize) -> Option<String> {
+    models
+        .get(selected)
+        .filter(|model| crate::config_toml_edit::is_chatgpt_model_id(&model.id))
+        .map(|model| model.id.clone())
+}
+
 fn chatgpt_oauth_connected(state: &ProviderModalState) -> bool {
     matches!(
         state.status(&ProviderKind::OpenAi),
@@ -643,6 +719,30 @@ fn handle_chatgpt_subscription(
     }
     let models = chatgpt_models(state);
     if let Some(mut editor) = editor {
+        // `x` clears the field being edited instead of typing text; the
+        // selected model must be a safe `chatgpt-*` id before the command.
+        if key.code == KeyCode::Char('x') && key.modifiers.is_empty() {
+            let Some(model_id) = chatgpt_selected_model_id(models, selected) else {
+                return Some(ProviderModalOutcome::Unchanged);
+            };
+            let command = match &editor {
+                ChatgptFieldEditor::ContextWindow(_) => ProviderCommand::SetChatgptContextWindow {
+                    model_id,
+                    tokens: None,
+                },
+                ChatgptFieldEditor::AutoCompactThreshold(_) => {
+                    ProviderCommand::SetChatgptAutoCompactThreshold {
+                        model_id,
+                        percent: None,
+                    }
+                }
+            };
+            state.mode = ProviderModalMode::ChatgptSubscription {
+                selected,
+                editor: None,
+            };
+            return Some(ProviderModalOutcome::Command(command));
+        }
         match key.code {
             KeyCode::Esc => {
                 state.mode = ProviderModalMode::ChatgptSubscription {
@@ -651,33 +751,52 @@ fn handle_chatgpt_subscription(
                 };
                 Some(ProviderModalOutcome::Changed)
             }
-            KeyCode::Enter => {
-                let Ok(tokens) = editor.text().trim().parse::<u64>() else {
-                    return Some(ProviderModalOutcome::Unchanged);
-                };
-                if !crate::config_toml_edit::chatgpt_context_window_in_range(tokens) {
-                    return Some(ProviderModalOutcome::Unchanged);
+            KeyCode::Enter => match &mut editor {
+                ChatgptFieldEditor::ContextWindow(line) => {
+                    let Ok(tokens) = line.text().trim().parse::<u64>() else {
+                        return Some(ProviderModalOutcome::Unchanged);
+                    };
+                    if !crate::config_toml_edit::chatgpt_context_window_in_range(tokens) {
+                        return Some(ProviderModalOutcome::Unchanged);
+                    }
+                    let Some(model_id) = chatgpt_selected_model_id(models, selected) else {
+                        return Some(ProviderModalOutcome::Unchanged);
+                    };
+                    state.mode = ProviderModalMode::ChatgptSubscription {
+                        selected,
+                        editor: None,
+                    };
+                    Some(ProviderModalOutcome::Command(
+                        ProviderCommand::SetChatgptContextWindow {
+                            model_id,
+                            tokens: Some(tokens),
+                        },
+                    ))
                 }
-                let Some(model_id) = models
-                    .get(selected)
-                    .filter(|model| crate::config_toml_edit::is_chatgpt_model_id(&model.id))
-                    .map(|model| model.id.clone())
-                else {
-                    return Some(ProviderModalOutcome::Unchanged);
-                };
-                state.mode = ProviderModalMode::ChatgptSubscription {
-                    selected,
-                    editor: None,
-                };
-                Some(ProviderModalOutcome::Command(
-                    ProviderCommand::SetChatgptContextWindow {
-                        model_id,
-                        tokens: Some(tokens),
-                    },
-                ))
-            }
+                ChatgptFieldEditor::AutoCompactThreshold(line) => {
+                    let Ok(percent) = line.text().trim().parse::<u8>() else {
+                        return Some(ProviderModalOutcome::Unchanged);
+                    };
+                    if !crate::config_toml_edit::chatgpt_auto_compact_threshold_in_range(percent) {
+                        return Some(ProviderModalOutcome::Unchanged);
+                    }
+                    let Some(model_id) = chatgpt_selected_model_id(models, selected) else {
+                        return Some(ProviderModalOutcome::Unchanged);
+                    };
+                    state.mode = ProviderModalMode::ChatgptSubscription {
+                        selected,
+                        editor: None,
+                    };
+                    Some(ProviderModalOutcome::Command(
+                        ProviderCommand::SetChatgptAutoCompactThreshold {
+                            model_id,
+                            percent: Some(percent),
+                        },
+                    ))
+                }
+            },
             _ => {
-                let outcome = line_edit_outcome(editor.handle_key(key));
+                let outcome = line_edit_outcome(editor.editor_mut().handle_key(key));
                 state.mode = ProviderModalMode::ChatgptSubscription {
                     selected,
                     editor: Some(editor),
@@ -708,16 +827,24 @@ fn handle_chatgpt_subscription(
             KeyCode::Enter if len > 0 => {
                 state.mode = ProviderModalMode::ChatgptSubscription {
                     selected,
-                    editor: Some(LineEditor::default()),
+                    editor: Some(ChatgptFieldEditor::ContextWindow(LineEditor::default())),
+                };
+                Some(ProviderModalOutcome::Changed)
+            }
+            KeyCode::Char('a') if key.modifiers.is_empty() && len > 0 => {
+                if chatgpt_selected_model_id(models, selected).is_none() {
+                    return Some(ProviderModalOutcome::Unchanged);
+                }
+                state.mode = ProviderModalMode::ChatgptSubscription {
+                    selected,
+                    editor: Some(ChatgptFieldEditor::AutoCompactThreshold(
+                        LineEditor::default(),
+                    )),
                 };
                 Some(ProviderModalOutcome::Changed)
             }
             KeyCode::Char('x') if key.modifiers.is_empty() && len > 0 => {
-                let Some(model_id) = models
-                    .get(selected)
-                    .filter(|model| crate::config_toml_edit::is_chatgpt_model_id(&model.id))
-                    .map(|model| model.id.clone())
-                else {
+                let Some(model_id) = chatgpt_selected_model_id(models, selected) else {
                     return Some(ProviderModalOutcome::Unchanged);
                 };
                 Some(ProviderModalOutcome::Command(
@@ -871,9 +998,9 @@ pub fn handle_paste(state: &mut ProviderModalState, text: &str) -> ProviderModal
     let editor = match &mut state.mode {
         ProviderModalMode::EditingKey { editor, .. } => editor,
         ProviderModalMode::ChatgptSubscription {
-            editor: Some(editor),
+            editor: Some(field),
             ..
-        } => editor,
+        } => field.editor_mut(),
         _ => return ProviderModalOutcome::Unchanged,
     };
     line_edit_outcome(editor.insert_paste_with_byte_limit(text, 16_384))
@@ -891,6 +1018,11 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
                 id: 0,
             },
             Shortcut {
+                label: "x clear",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
                 label: "Esc cancel",
                 clickable: false,
                 id: 0,
@@ -898,7 +1030,12 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
         ],
         ProviderModalMode::ChatgptSubscription { editor: None, .. } => vec![
             Shortcut {
-                label: "↵ set override",
+                label: "↵ context window",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "a threshold",
                 clickable: false,
                 id: 0,
             },
@@ -989,7 +1126,7 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             buf,
             content.content,
             &mut y,
-            "ChatGPT subscription context windows",
+            "ChatGPT subscription model overrides",
             Style::default()
                 .fg(theme.text_primary)
                 .add_modifier(Modifier::BOLD),
@@ -1010,11 +1147,17 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
                 .context_window
                 .map(|tokens| format!("{tokens} tokens"))
                 .unwrap_or_else(|| "unknown".to_owned());
+            let threshold_percent = model
+                .auto_compact_threshold
+                .unwrap_or(xai_grok_shell::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
             put_line(
                 buf,
                 content.content,
                 &mut y,
-                &format!("{prefix}{} · {window}", model.label),
+                &format!(
+                    "{prefix}{} · {window} · compact @ {threshold_percent}%",
+                    model.label
+                ),
                 Style::default().fg(if *selected == idx {
                     theme.accent_user
                 } else {
@@ -1023,37 +1166,57 @@ pub fn render_modal(buf: &mut Buffer, area: Rect, state: &mut ProviderModalState
             );
         }
         if let Some(editor) = editor {
-            put_line(
-                buf,
-                content.content,
-                &mut y,
-                &format!("Context window: {}", editor.text()),
-                Style::default().fg(theme.accent_user),
-            );
-            put_line(
-                buf,
-                content.content,
-                &mut y,
-                "Enter saves · Esc cancels · 8,000–1,050,000 tokens",
-                Style::default().fg(theme.gray_dim),
-            );
-            if editor.text().trim().parse::<u64>().is_ok_and(|tokens| {
-                tokens > crate::config_toml_edit::CHATGPT_LONG_CONTEXT_THRESHOLD
-            }) {
-                put_line(
-                    buf,
-                    content.content,
-                    &mut y,
-                    "OpenAI may apply long-context limits or pricing to this subscription.",
-                    Style::default().fg(theme.warning),
-                );
+            match editor {
+                ChatgptFieldEditor::ContextWindow(line) => {
+                    put_line(
+                        buf,
+                        content.content,
+                        &mut y,
+                        &format!("Context window: {}", line.text()),
+                        Style::default().fg(theme.accent_user),
+                    );
+                    put_line(
+                        buf,
+                        content.content,
+                        &mut y,
+                        "Enter saves · x clear · Esc cancels · 8,000–1,050,000 tokens",
+                        Style::default().fg(theme.gray_dim),
+                    );
+                    if line.text().trim().parse::<u64>().is_ok_and(|tokens| {
+                        tokens > crate::config_toml_edit::CHATGPT_LONG_CONTEXT_THRESHOLD
+                    }) {
+                        put_line(
+                            buf,
+                            content.content,
+                            &mut y,
+                            "OpenAI may apply long-context limits or pricing to this subscription.",
+                            Style::default().fg(theme.warning),
+                        );
+                    }
+                }
+                ChatgptFieldEditor::AutoCompactThreshold(line) => {
+                    put_line(
+                        buf,
+                        content.content,
+                        &mut y,
+                        &format!("Compact threshold: {}", line.text()),
+                        Style::default().fg(theme.accent_user),
+                    );
+                    put_line(
+                        buf,
+                        content.content,
+                        &mut y,
+                        "Enter saves · x clear · Esc cancels · 0–100% of context window",
+                        Style::default().fg(theme.gray_dim),
+                    );
+                }
             }
         } else {
             put_line(
                 buf,
                 content.content,
                 &mut y,
-                "Enter set override · x clear override · Esc back",
+                "Enter context window · a compact threshold · x clear · Esc back",
                 Style::default().fg(theme.gray_dim),
             );
         }
@@ -1729,7 +1892,7 @@ mod tests {
         state.set_status(&ProviderKind::OpenAi, connected_openai(Vec::new()));
         state.mode = ProviderModalMode::ChatgptSubscription {
             selected: 0,
-            editor: Some(LineEditor::default()),
+            editor: Some(ChatgptFieldEditor::ContextWindow(LineEditor::default())),
         };
         for digit in "1000000".chars() {
             handle_key(&mut state, &key(KeyCode::Char(digit)));
@@ -1749,6 +1912,16 @@ mod tests {
         };
         assert_eq!(
             handle_key(&mut state, &key(KeyCode::Char('x'))),
+            ProviderModalOutcome::Unchanged
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription { .. }
+        ));
+
+        // `a` cannot open the threshold editor without a selected model.
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('a'))),
             ProviderModalOutcome::Unchanged
         );
         assert!(matches!(
@@ -1839,10 +2012,11 @@ mod tests {
         state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
         handle_key(&mut state, &key(KeyCode::Char('s')));
         let list = rendered_modal(&mut state);
-        assert!(list.contains("ChatGPT subscription context windows"));
+        assert!(list.contains("ChatGPT subscription model overrides"));
         assert!(list.contains("GPT-5.6 Sol"));
         assert!(list.contains("272000 tokens"));
-        assert!(list.contains("↵ set override"));
+        assert!(list.contains("compact @ 85%"));
+        assert!(list.contains("↵ context window"));
         insta::assert_snapshot!("chatgpt_subscription_model_list", list);
 
         handle_key(&mut state, &key(KeyCode::Enter));
@@ -1852,5 +2026,326 @@ mod tests {
         let editing = rendered_modal(&mut state);
         assert!(editing.contains("long-context limits or pricing"));
         insta::assert_snapshot!("chatgpt_subscription_long_context_note", editing);
+    }
+
+    #[test]
+    fn chatgpt_subscription_a_opens_threshold_editor_and_saves_in_range() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('a'))),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: Some(ChatgptFieldEditor::AutoCompactThreshold(_))
+            }
+        ));
+        for digit in "50".chars() {
+            handle_key(&mut state, &key(KeyCode::Char(digit)));
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptAutoCompactThreshold {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                percent: Some(50),
+            })
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: None
+            }
+        ));
+
+        // The inclusive boundaries 0 and 100 save as well.
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        handle_key(&mut state, &key(KeyCode::Char('0')));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptAutoCompactThreshold {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                percent: Some(0),
+            })
+        );
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        for digit in "100".chars() {
+            handle_key(&mut state, &key(KeyCode::Char(digit)));
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptAutoCompactThreshold {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                percent: Some(100),
+            })
+        );
+    }
+
+    #[test]
+    fn chatgpt_subscription_threshold_editor_rejects_out_of_range_stays_open() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        for digit in "101".chars() {
+            handle_key(&mut state, &key(KeyCode::Char(digit)));
+        }
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Unchanged
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: Some(ChatgptFieldEditor::AutoCompactThreshold(_))
+            }
+        ));
+
+        handle_key(&mut state, &key(KeyCode::Esc));
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        handle_paste(&mut state, "abc");
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Unchanged
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: Some(ChatgptFieldEditor::AutoCompactThreshold(_))
+            }
+        ));
+    }
+
+    #[test]
+    fn chatgpt_subscription_x_inside_editor_clears_field_being_edited() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+
+        // The context-window editor: `x` clears the context window.
+        handle_key(&mut state, &key(KeyCode::Enter));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('x'))),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptContextWindow {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                tokens: None,
+            })
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: None
+            }
+        ));
+
+        // The threshold editor: `x` clears the threshold.
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('x'))),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptAutoCompactThreshold {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                percent: None,
+            })
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: None
+            }
+        ));
+
+        // The list state: `x` still clears the context window.
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Char('x'))),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptContextWindow {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                tokens: None,
+            })
+        );
+    }
+
+    #[test]
+    fn chatgpt_subscription_esc_cancels_threshold_editor() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        handle_key(&mut state, &key(KeyCode::Char('4')));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Esc)),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: None
+            }
+        ));
+    }
+
+    #[test]
+    fn chatgpt_subscription_paste_into_threshold_editor() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        assert_eq!(
+            handle_paste(&mut state, "70"),
+            ProviderModalOutcome::Changed
+        );
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Command(ProviderCommand::SetChatgptAutoCompactThreshold {
+                model_id: "chatgpt-gpt-5.6-sol".into(),
+                percent: Some(70),
+            })
+        );
+    }
+
+    #[test]
+    fn chatgpt_subscription_j_k_do_not_navigate_inside_editors() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(
+            &ProviderKind::OpenAi,
+            connected_openai(vec![
+                sol_model(),
+                ChatgptModel::from_catalog(
+                    "chatgpt-gpt-5.5".into(),
+                    "GPT-5.5".into(),
+                    Some(400_000),
+                ),
+            ]),
+        );
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        handle_key(&mut state, &key(KeyCode::Char('j')));
+        handle_key(&mut state, &key(KeyCode::Char('k')));
+        let rendered = rendered_modal(&mut state);
+        assert!(
+            rendered.contains("Compact threshold: jk"),
+            "j and k type text inside the threshold editor, got:\n{rendered}"
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: Some(ChatgptFieldEditor::AutoCompactThreshold(_))
+            }
+        ));
+    }
+
+    #[test]
+    fn chatgpt_subscription_enter_still_opens_context_window_editor() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        assert_eq!(
+            handle_key(&mut state, &key(KeyCode::Enter)),
+            ProviderModalOutcome::Changed
+        );
+        assert!(matches!(
+            state.mode,
+            ProviderModalMode::ChatgptSubscription {
+                selected: 0,
+                editor: Some(ChatgptFieldEditor::ContextWindow(_))
+            }
+        ));
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        let rendered = rendered_modal(&mut state);
+        assert!(
+            rendered.contains("Context window: a"),
+            "ordinary letters must type into the context-window editor, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn chatgpt_subscription_render_shows_compact_threshold_per_model() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        let mut overridden = sol_model();
+        overridden.auto_compact_threshold = Some(75);
+        let catalog =
+            ChatgptModel::from_catalog("chatgpt-gpt-5.5".into(), "GPT-5.5".into(), Some(400_000));
+        state.set_status(
+            &ProviderKind::OpenAi,
+            connected_openai(vec![overridden, catalog]),
+        );
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        let rendered = rendered_modal(&mut state);
+        assert!(
+            rendered.contains("GPT-5.6 Sol · 272000 tokens · compact @ 75%"),
+            "overridden threshold must render, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("GPT-5.5 · 400000 tokens · compact @ 85%"),
+            "unoverridden threshold must show the product default, got:\n{rendered}"
+        );
+        insta::assert_snapshot!("chatgpt_subscription_compact_threshold_rows", rendered);
+    }
+
+    #[test]
+    fn chatgpt_model_auto_compact_override_applies_and_clears() {
+        let mut status = connected_openai(vec![
+            sol_model(),
+            ChatgptModel::from_catalog("chatgpt-gpt-5.5".into(), "GPT-5.5".into(), Some(400_000)),
+        ]);
+
+        status.apply_chatgpt_auto_compact_threshold("chatgpt-gpt-5.6-sol", Some(60));
+        let ProviderStatus::Connected { chatgpt_models, .. } = &status else {
+            panic!("status must stay connected");
+        };
+        assert_eq!(chatgpt_models[0].auto_compact_threshold, Some(60));
+        assert_eq!(chatgpt_models[1].auto_compact_threshold, None);
+
+        status.apply_chatgpt_auto_compact_threshold("chatgpt-gpt-5.6-sol", None);
+        let ProviderStatus::Connected { chatgpt_models, .. } = &status else {
+            panic!("status must stay connected");
+        };
+        assert_eq!(
+            chatgpt_models[0].auto_compact_threshold, None,
+            "clear must restore the product default display value"
+        );
+
+        // An unknown model id is a no-op.
+        status.apply_chatgpt_auto_compact_threshold("chatgpt-missing", Some(50));
+        let ProviderStatus::Connected { chatgpt_models, .. } = &status else {
+            panic!("status must stay connected");
+        };
+        assert_eq!(chatgpt_models[0].auto_compact_threshold, None);
+    }
+
+    #[test]
+    fn chatgpt_subscription_debug_names_threshold_editor() {
+        let mut state = ProviderModalState::new();
+        state.selected = 1;
+        state.set_status(&ProviderKind::OpenAi, connected_openai(vec![sol_model()]));
+        handle_key(&mut state, &key(KeyCode::Char('s')));
+        handle_key(&mut state, &key(KeyCode::Char('a')));
+        let mode_debug = format!("{:?}", state.mode);
+        assert!(
+            mode_debug.contains("auto_compact_threshold"),
+            "mode debug must name the threshold editor, got {mode_debug}"
+        );
+        let state_debug = format!("{state:?}");
+        assert!(
+            state_debug.contains("editing_chatgpt_auto_compact_threshold"),
+            "state debug must name the threshold editor, got {state_debug}"
+        );
     }
 }

@@ -96,6 +96,31 @@ pub(crate) fn execute(
                 }
             });
         }
+        Effect::SaveChatgptAutoCompactThreshold {
+            agent_id,
+            model_id,
+            percent,
+        } => {
+            tasks.spawn(async move {
+                let saved_model_id = model_id.clone();
+                let saved_percent = percent;
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::config_toml_edit::write_chatgpt_auto_compact_threshold(
+                        &model_id,
+                        percent,
+                    )
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(std::convert::identity);
+                TaskResult::ChatgptAutoCompactThresholdSaved {
+                    agent_id,
+                    model_id: saved_model_id,
+                    percent: saved_percent,
+                    result,
+                }
+            });
+        }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
                 .spawn(async move {
@@ -4667,6 +4692,17 @@ fn build_interject_params(
     params
 }
 
+/// Overlay persisted per-model auto-compact thresholds onto a display
+/// status so the `/providers` ChatGPT sub-view shows the stored override.
+/// Only `Connected` statuses carrying ChatGPT models are affected; models
+/// without a persisted value keep the product default.
+fn apply_chatgpt_threshold_map(
+    status: &mut crate::views::providers_modal::ProviderStatus,
+    thresholds: &std::collections::BTreeMap<String, u8>,
+) {
+    status.overlay_chatgpt_thresholds(|id| thresholds.get(id).copied());
+}
+
 fn display_provider_status(
     status: xai_grok_shell::agent::providers::ProviderStatus,
 ) -> crate::views::providers_modal::ProviderStatus {
@@ -4875,7 +4911,7 @@ async fn run_provider_operation(
 
     let manager = ProviderManager::default();
     let mut claude_cli_status = None;
-    let (provider, status) = match operation {
+    let (provider, mut status) = match operation {
         ProviderOperation::Refresh(provider) => {
             if provider == ProviderKind::Anthropic {
                 // The subscription-backed CLI is independent of the Messages
@@ -5041,6 +5077,16 @@ async fn run_provider_operation(
         }
     };
 
+    // Overlay persisted per-model auto-compact thresholds so the sub-view
+    // shows the stored override next to the catalog window. Best-effort:
+    // an unreadable config keeps the product default display.
+    let thresholds = tokio::task::spawn_blocking(
+        crate::config_toml_edit::read_chatgpt_auto_compact_thresholds,
+    )
+    .await
+    .unwrap_or_default();
+    apply_chatgpt_threshold_map(&mut status, &thresholds);
+
     // `Test` may populate an API-provider cache and `Refresh` may rebuild a
     // provider catalog, so every provider operation is followed by the same
     // shell-authoritative model reload.
@@ -5065,6 +5111,7 @@ async fn run_provider_operation(
 
 #[cfg(test)]
 mod provider_status_tests {
+    use super::apply_chatgpt_threshold_map;
     use super::display_provider_status;
     use crate::views::providers_modal::{
         ChatgptAccountEmail, ProviderStatus as DisplayStatus,
@@ -5303,6 +5350,47 @@ mod provider_status_tests {
         let json = serde_json::to_string(&status).expect("serialize");
         assert!(!json.contains("user@example.com"));
         assert!(!json.contains("chatgpt_account_email"));
+    }
+
+    #[test]
+    fn chatgpt_threshold_map_overlays_connected_models() {
+        use crate::views::providers_modal::ChatgptModel;
+
+        let mut status = DisplayStatus::Connected {
+            detail: Some("Connected with ChatGPT OAuth".to_owned()),
+            chatgpt_account_email: None,
+            chatgpt_models: vec![
+                ChatgptModel::from_catalog(
+                    "chatgpt-gpt-5.6-sol".into(),
+                    "GPT-5.6 Sol".into(),
+                    Some(272_000),
+                ),
+                ChatgptModel::from_catalog(
+                    "chatgpt-gpt-5.5".into(),
+                    "GPT-5.5".into(),
+                    Some(400_000),
+                ),
+            ],
+        };
+        let mut thresholds = std::collections::BTreeMap::new();
+        thresholds.insert("chatgpt-gpt-5.6-sol".to_owned(), 70u8);
+        apply_chatgpt_threshold_map(&mut status, &thresholds);
+        let DisplayStatus::Connected { chatgpt_models, .. } = status else {
+            panic!("status must stay connected");
+        };
+        assert_eq!(chatgpt_models[0].auto_compact_threshold, Some(70));
+        assert_eq!(
+            chatgpt_models[1].auto_compact_threshold,
+            None,
+            "models without a persisted value keep the product default"
+        );
+
+        let mut missing = DisplayStatus::Missing;
+        apply_chatgpt_threshold_map(&mut missing, &thresholds);
+        assert_eq!(missing, DisplayStatus::Missing);
+        let mut error = DisplayStatus::Error("down".to_owned());
+        apply_chatgpt_threshold_map(&mut error, &thresholds);
+        assert_eq!(error, DisplayStatus::Error("down".to_owned()));
     }
 }
 
