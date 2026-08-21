@@ -7263,6 +7263,10 @@ reasoning_effort = "low"
     fn effective_classifier_supports_re_uses_actually_used_model() {
         let mut re_model = test_model_entry("v9", "https://x/v1", None, None, None);
         re_model.info.supports_reasoning_effort = Some(true);
+        // `supports_reasoning_effort_ui` reads the normalized selection state
+        // (since the reasoning-effort normalization change), so the fixture
+        // must set it, not just the legacy bool.
+        re_model.info.reasoning_effort_selection = ReasoningEffortSelection::LegacyFallback;
         let no_re_model = test_model_entry("legacy", "https://x/v1", None, None, None);
         let mut models = IndexMap::new();
         models.insert("v9".to_string(), re_model);
@@ -9786,6 +9790,11 @@ reasoning_effort = "low"
     }
     #[test]
     fn e2e_enterprise_custom_endpoint_skips_xai_defaults() {
+        // Pin an empty home so ambient provider credentials (ChatGPT OAuth,
+        // OpenRouter key + cached catalogs) cannot leak preset entries into
+        // the enterprise catalog under test.
+        let home = tempfile::tempdir().unwrap();
+        crate::agent::providers::set_stored_key_home_for_tests(Some(home.path().to_path_buf()));
         let mut cfg = Config::default();
         cfg.endpoints.models_base_url = Some("https://enterprise.acme.com/v1".to_owned());
         let mut prefetched = IndexMap::new();
@@ -9809,6 +9818,7 @@ reasoning_effort = "low"
             "xAI default must not leak into enterprise model list"
         );
         assert_eq!(resolved.len(), 1, "only the prefetched enterprise model");
+        crate::agent::providers::set_stored_key_home_for_tests(None);
     }
     #[test]
     fn e2e_default_endpoint_still_injects_defaults() {
