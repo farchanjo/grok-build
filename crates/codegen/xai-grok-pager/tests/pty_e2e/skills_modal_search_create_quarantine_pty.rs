@@ -247,6 +247,7 @@ async fn skills_modal_search_create_quarantine_reload_pty() {
             skills_list_idle_for_create(&screen) && !screen.contains("regressing")
         })
         .expect("reload must not start regression");
+    harness.quit().expect("clean quit");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -276,4 +277,5 @@ async fn skills_modal_prime_index_progress_and_failure_fit_footer_pty() {
         !screen.contains("sk-"),
         "progress/failure footer must not leak credentials"
     );
+    harness.quit().expect("clean quit");
 }
